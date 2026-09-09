@@ -362,7 +362,7 @@
                 <!-- B2（建单字段体系优化，OA 截图强制）：填写真实 OA 流程号后必须同步上传截图；留空（信息技术部自发现）免此项，见 toggleOaMode() -->
                 <div class="u-form-group" id="oaProofGroup" style="display:none;">
                     <label>OA 流程截图 <span class="u-req">*</span></label>
-                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('createOaProofPicked')">
+                    <input type="file" id="formOaProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls,.zip,.rar,.7z" onchange="corrPickerOnPick('createOaProofPicked')">
                     <div id="createOaProofPicked"></div>
                     <div class="u-hint">填写了真实 OA 流程号，须随建单同步上传截图留档（建单后不可补传，事后如需变更请联系信息技术部）。</div>
                 </div>
@@ -459,9 +459,9 @@
                 <div class="u-form-group" id="errProofGroup">
                     <label>待修复数据（可选）</label>
                     <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
-                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('createErrProofPicked')">
+                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls,.zip,.rar,.7z" style="margin-top:6px;" onchange="corrPickerOnPick('createErrProofPicked')">
                     <div id="createErrProofPicked"></div>
-                    <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                    <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
             </div>
             <div class="u-modal-footer">
@@ -520,10 +520,10 @@
             <div class="u-modal-header"><h2>标完成</h2><button class="u-drawer-close" onclick="closeModal('completeModal')">&times;</button></div>
             <div class="u-modal-body">
                 <input type="hidden" id="completeCorrId">
-                <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
+                <div id="completeReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明 + 文字说明（≥5 字）均必填，请补充本次实际改了什么。</div>
                 <div class="u-form-group" id="completeSingleGroup">
-                    <label id="completeSingleProofLabel">结果证明截图（选填）</label>
-                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('completeFilesPicked')">
+                    <label id="completeSingleProofLabel">结果证明（选填，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）</label>
+                    <input type="file" id="formCompleteFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.zip,.rar,.7z" onchange="corrPickerOnPick('completeFilesPicked')">
                     <div id="completeFilesPicked"></div>
                     <label style="margin-top:8px;">完成说明 <span class="u-req">*</span>（必填，至少 5 字）</label>
                     <textarea id="formCompleteSingleNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么（避免「1」「完成」等敷衍）"></textarea>
@@ -532,7 +532,7 @@
                     <label>完成说明 <span class="u-req">*</span>（批量数据修正必填，至少 5 字）</label>
                     <textarea id="formBatchNote" rows="3" maxlength="500" placeholder="请说明实际修正了什么，如：已批量更新 183 人社保基数 / 修正 30 条客户编号映射"></textarea>
                     <div style="font-size:11px; color:#9ca3af; margin-top:2px;">批量可选附结果证明（可不传）</div>
-                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('completeBatchFilesPicked')">
+                    <input type="file" id="formCompleteBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.zip,.rar,.7z" style="margin-top:6px;" onchange="corrPickerOnPick('completeBatchFilesPicked')">
                     <div id="completeBatchFilesPicked"></div>
                 </div>
             </div>
@@ -547,10 +547,10 @@
             <div class="u-modal-body">
                 <input type="hidden" id="resubmitCorrId">
                 <div style="font-size:12px; color:#6b7280; margin-bottom:8px;">业务方异议/拉群讨论后重新修正，提交本次新的结果证明。</div>
-                <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明截图 + 本次说明（≥5 字）均必填。</div>
+                <div id="resubmitReworkHint" style="display:none; font-size:12px; color:#6d28d9; background:#f3e8ff; border:1px solid #ddd0f5; border-radius:6px; padding:8px 10px; margin-bottom:10px;">🔄 返工子单：结果证明 + 本次说明（≥5 字）均必填。</div>
                 <div class="u-form-group" id="resubmitSingleGroup">
-                    <label id="resubmitSingleProofLabel">本次新增结果证明（选填）</label>
-                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrPickerOnPick('resubmitFilesPicked')">
+                    <label id="resubmitSingleProofLabel">本次新增结果证明（选填，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）</label>
+                    <input type="file" id="formResubmitFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.zip,.rar,.7z" onchange="corrPickerOnPick('resubmitFilesPicked')">
                     <div id="resubmitFilesPicked"></div>
                     <label style="margin-top:8px;">本次重修说明 <span class="u-req">*</span>（必填）</label>
                     <textarea id="formResubmitSingleNote" rows="3" maxlength="500" placeholder="本次重修做了什么、上次为何没过"></textarea>
@@ -558,7 +558,7 @@
                 <div class="u-form-group" id="resubmitBatchGroup" style="display:none;">
                     <label>本次重修说明 <span class="u-req">*</span>（批量数据修正必填）</label>
                     <textarea id="formResubmitNote" rows="3" maxlength="500" placeholder="本次重修做了什么"></textarea>
-                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" style="margin-top:6px;" onchange="corrPickerOnPick('resubmitBatchFilesPicked')">
+                    <input type="file" id="formResubmitBatchFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.zip,.rar,.7z" style="margin-top:6px;" onchange="corrPickerOnPick('resubmitBatchFilesPicked')">
                     <div id="resubmitBatchFilesPicked"></div>
                 </div>
             </div>
@@ -573,9 +573,9 @@
             <div class="u-modal-body">
                 <input type="hidden" id="attachCorrId">
                 <input type="hidden" id="attachType" value="fix_proof">
-                <div id="attachModalHint" style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。</div>
+                <div id="attachModalHint" style="font-size:12px; color:#6b7280; margin-bottom:8px;">仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件；压缩包 zip/rar/7z 单个≤50MB、其余≤20MB。</div>
                 <!-- 2026-07-23 上传交互优化：裸 input → 追加式选择 + 预览（复刻数据协作 selectedFiles 范式）-->
-                <div class="u-form-group"><label id="attachModalLabel">补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls" onchange="corrAttachFilesChange(event)"></div>
+                <div class="u-form-group"><label id="attachModalLabel">补充附件 <span class="u-req">*</span></label><input type="file" id="formAttachFiles" multiple accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.xlsx,.xls,.zip,.rar,.7z" onchange="corrAttachFilesChange(event)"></div>
                 <div id="corrAttachPreview" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
             </div>
             <div class="u-modal-footer"><button class="u-btn-secondary" onclick="closeModal('attachModal')">取消</button><button class="u-btn-primary" id="btnSubmitAttach" onclick="submitAttachments()">提交</button></div>
@@ -2200,8 +2200,8 @@
             document.getElementById('completeReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（文字始终必填，标签静态）
             document.getElementById('completeSingleProofLabel').innerHTML = isRework
-                ? '结果证明截图 <span class="u-req">*</span>（返工子单必传）'
-                : '结果证明截图（选填）';
+                ? '结果证明 <span class="u-req">*</span>（返工子单必传，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）'
+                : '结果证明（选填，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）';
             document.getElementById('completeModal').dataset.type = type;
             document.getElementById('completeModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('completeModal').classList.add('open');
@@ -2217,14 +2217,14 @@
                 if (Array.from(note).length < 5) return showToast('批量修正完成说明至少 5 字，请说明实际修正内容', 'error');   // 与后端 FIXED 闸门同步 5 字口径（Array.from 按字符数，codex 59 L-1），挡「1」等敷衍
                 fd.append('batch_completion_note', note);
                 const bf = corrPickerFiles('completeBatchFilesPicked');
-                if (isRework && !bf.length) return showToast('返工子单完成须上传结果证明截图（返工双必填）', 'error');   // 返工 batch 额外要截图（普通 batch 截图可选）
+                if (isRework && !bf.length) return showToast('返工子单完成须上传结果证明（返工双必填）', 'error');   // 返工 batch 额外要截图（普通 batch 截图可选）
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = corrPickerFiles('completeFilesPicked');
                 const note = document.getElementById('formCompleteSingleNote').value.trim();
                 if (isRework) {
                     // 返工 single：双必填（截图+文字≥5），前置校验防 persist→rollback 丢上传图
-                    if (!files.length) return showToast('返工子单完成须上传结果证明截图（返工双必填）', 'error');
+                    if (!files.length) return showToast('返工子单完成须上传结果证明（返工双必填）', 'error');
                     if (Array.from(note).length < 5) return showToast('返工子单完成说明至少 5 字（返工双必填）', 'error');
                 } else {
                     // 普通 single（v1.97.1 放开留证）：文字必填≥5，截图可选
@@ -2274,9 +2274,10 @@
             corrPickerReset('resubmitBatchFilesPicked');
             document.getElementById('resubmitReworkHint').style.display = isRework ? 'block' : 'none';   // 返工双必填提示（Commit D §六）
             // 截图要求随返工动态标（v1.97.1）：返工 single 必传 / 普通 single 选填（重修说明始终必填，标签静态）
+            // C5a Playwright 抓出：本函数运行时覆盖 label，两分支须与 openComplete 同样带压缩包句（否则静态模板里的提示永远被覆盖掉）
             document.getElementById('resubmitSingleProofLabel').innerHTML = isRework
-                ? '本次新增结果证明 <span class="u-req">*</span>（返工子单必传）'
-                : '本次新增结果证明（选填）';
+                ? '本次新增结果证明 <span class="u-req">*</span>（返工子单必传，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）'
+                : '本次新增结果证明（选填，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB）';
             document.getElementById('resubmitModal').dataset.type = type;
             document.getElementById('resubmitModal').dataset.rework = isRework ? '1' : '';
             document.getElementById('resubmitModal').classList.add('open');
@@ -2292,14 +2293,14 @@
                 if (isRework && Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
                 fd.append('resubmit_note', note);
                 const bf = corrPickerFiles('resubmitBatchFilesPicked');
-                if (isRework && !bf.length) return showToast('返工子单重修须上传本次结果证明截图（返工双必填）', 'error');
+                if (isRework && !bf.length) return showToast('返工子单重修须上传本次结果证明（返工双必填）', 'error');
                 for (const f of bf) fd.append('files', f);
             } else {
                 const files = corrPickerFiles('resubmitFilesPicked');
                 const note = document.getElementById('formResubmitSingleNote').value.trim();
                 if (isRework) {
                     // 返工 single：双必填（截图+文字≥5），前置防 persist→rollback 丢图
-                    if (!files.length) return showToast('返工子单重修须上传本次结果证明截图（返工双必填）', 'error');
+                    if (!files.length) return showToast('返工子单重修须上传本次结果证明（返工双必填）', 'error');
                     if (Array.from(note).length < 5) return showToast('返工子单重修说明至少 5 字（返工双必填）', 'error');
                 } else {
                     // 普通 single（v1.97.1 放开留证）：重修说明必填(非空)，截图可选
@@ -2355,7 +2356,7 @@
                 ? `重新打开 <b>返工子单 #${targetId}</b>（第 ${Number(tgt.rework_seq) || tipSeq} 次 · 链根原单 #${tgtRoot}）`
                 : `重新打开 <b>原单 #${targetId}</b>`;
             document.getElementById('reopenSummary').innerHTML =
-                `${head}（${escapeHtml(typeLabel)}${doneAt && doneAt !== '-' ? ' · 归档于 ' + escapeHtml(doneAt) : ''}）<br>将在最新归档单下新建返工子单（原单/上一单状态不变）；子单自动指派回原开发，须重新提交结果证明截图+文字说明。`;
+                `${head}（${escapeHtml(typeLabel)}${doneAt && doneAt !== '-' ? ' · 归档于 ' + escapeHtml(doneAt) : ''}）<br>将在最新归档单下新建返工子单（原单/上一单状态不变）；子单自动指派回原开发，须重新提交结果证明+文字说明。`;
             // 第 N 次提示 + 颜色梯度（1黄/2橙/3+红）+ ≥5 强提示（confirmed_excessive checkbox）
             const hint = document.getElementById('reopenSeqHint');
             const excessive = nextSeq >= 5;
@@ -2408,7 +2409,7 @@
         // ================= 补充附件 =================
         // 2026-07-23 上传交互优化（用户实测诉求）：裸 input（选完无预览直接提交）→ 复刻数据协作
         //   selectedFiles 范式——数组持态（input.files 不能增删）+ 追加式选择（可分多次选、可单个移除）
-        //   + 缩略图/占位预览。校验对齐后端 multer limits（corrections.js：files:5 / fileSize:20MB）。
+        //   + 缩略图/占位预览。校验对齐后端（corrections.js：files:5 / multer 顶上限 ARCHIVE_MAX_SIZE+1，非压缩包 20MB 由二次卡收口）。
         //   objectURL 不 revoke 对齐数据协作 codex 27 #7 拍板（弹窗 ≤5 文件小图、关闭刷新自动 GC）。
         let corrAttachFiles = [];
         let corrAttachSession = 0;   // H-1（codex U1 首审）：弹窗会话令牌，openAttach 每次自增；旧响应令牌不符即不碰弹窗状态
@@ -2416,6 +2417,12 @@
         const CORR_ATTACH_MAX_SIZE = 20 * 1024 * 1024;
         const CORR_ATTACH_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls'];
         const CORR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+        // 附件压缩包支持方案 D1/D10：三扩展名与 50MB 上限须与后端 utils/attachment-archive.js 真相源同值——
+        //   本页是静态 HTML 无法 require，字面量由 scripts/verify-correction-attach-archive-static.js 与真相源对拍。
+        //   fix_proof/error_proof 均放开压缩包（方案 D4），故本弹窗（补充附件，两类型共用同一裸 input）扩展名闸
+        //   直接并入 CORR_ATTACH_EXTS，无需按 attachType 分流。
+        const CORR_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
+        const CORR_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
 
         // S4：校验闸门抽成独立函数（原内联在 corrAttachFilesChange 里）——贴图 collect 适配器与文件选择
         //   onchange 现在共用同一份数量上限/白名单/大小/去重逻辑，零漂移风险（对齐 corrAttachCollectFiles
@@ -2427,8 +2434,11 @@
             for (const f of Array.from(fileList || [])) {
                 if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
                 const ext = f.name.split('.').pop().toLowerCase();
-                if (!CORR_ATTACH_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
-                if (f.size > CORR_ATTACH_MAX_SIZE) { showToast(`${f.name} 超过 20MB`, 'error'); continue; }
+                const isArchive = CORR_ARCHIVE_EXTS.includes(ext);
+                if (!isArchive && !CORR_ATTACH_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
+                // 附件压缩包支持方案 D10：大小提示按扩展名分流，压缩包 50MB / 其余按既有 20MB，句式统一。
+                const sizeLimit = isArchive ? CORR_ARCHIVE_MAX_SIZE : CORR_ATTACH_MAX_SIZE;
+                if (f.size > sizeLimit) { showToast(`${f.name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`, 'error'); continue; }
                 if (corrAttachFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
                 }
@@ -2487,8 +2497,8 @@
             document.getElementById('attachType').value = t;
             document.getElementById('attachModalTitle').textContent = isErr ? '上传待修复数据' : '补充附件';
             document.getElementById('attachModalHint').textContent = isErr
-                ? '待修复数据附件（表格清单为主，图片/PDF/xlsx）。单次最多 5 个文件、每个 ≤20MB；仅补充材料，不改变状态。'
-                : '仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件、每个 ≤20MB。';
+                ? '待修复数据附件（表格清单为主，图片/PDF/xlsx/压缩包 zip/rar/7z）。单次最多 5 个文件；压缩包单个≤50MB、其余≤20MB；仅补充材料，不改变状态。'
+                : '仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件；压缩包 zip/rar/7z 单个≤50MB、其余≤20MB。';
             document.getElementById('attachModalLabel').innerHTML = (isErr ? '待修复数据附件' : '补充附件') + ' <span class="u-req">*</span>';
             corrAttachSession++;   // H-1：新会话开始，令旧上传响应的清理逻辑失效
             const fileInput = document.getElementById('formAttachFiles');
@@ -3231,7 +3241,8 @@
                     if (data.already_sent) showToast('已通知过，未重复发送', 'success');
                     // A 类：抽屉内语境的成功 toast 删除（行内 `✅ 已于 X 通知 Y` 就是反馈）；
                     //   弹窗语境（R2 命中）保留，否则抽屉打开前零反馈。
-                    else if (!o.fromDrawer) showToast(data.has_attachment ? '已发送通知（含结果证明）' : '已发送通知', 'success');
+                    // 附件压缩包支持方案 D5：结果证明为压缩包时钉钉只发卡片不带文件（file_skipped_reason='archive'），toast 不能再按 has_attachment 报「含结果证明」
+                    else if (!o.fromDrawer) showToast(data.file_skipped_reason === 'archive' ? '已发送通知（结果证明为压缩包，未随卡片发送，业务方需登录平台下载）' : (data.file_sent ? '已发送通知（含结果证明）' : '已发送通知'), 'success');
                 } else if (data.code === 'REQUESTER_PHONE_EMPTY') {
                     // A'·留（记原因）：toast 含行内没有的处置建议「请用其他方式交付」
                     showToast('业务方未填手机号，请用其他方式交付', 'warning');

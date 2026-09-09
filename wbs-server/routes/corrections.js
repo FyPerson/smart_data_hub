@@ -12,6 +12,7 @@ const fs = require('fs');
 const dingtalkNotify = require('../utils/dingtalk-notify');
 const collabVersioning = require('../utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('../utils/collab-submit-helpers');
+const { ARCHIVE_EXTS, ARCHIVE_MAX_SIZE, ARCHIVE_SIZE_BY_EXT, isArchiveExt } = require('../utils/attachment-archive');   // 附件压缩包支持方案 D1：三模块共用真相源
 
 module.exports = (deps) => {
   // codex M-2：工厂期 deps 校验——漏注入即启动期失败（而非深层端点运行期才 xxx is not a function）。
@@ -1121,6 +1122,9 @@ async function sendDoneDingtalkCard(token, robotCode, userIds, title, cardText, 
     const steps = { media_upload: !hasAtt, file_send: !hasAtt, markdown_send: false };
     const sendOk = (r) => r && typeof r === 'object' && (!r.errcode || r.errcode === 0) && (!Array.isArray(r.invalidStaffIdList) || r.invalidStaffIdList.length === 0);
     let mdResp = null, failedStep = null, failedError = null;
+    // 附件压缩包支持方案 D5：fileSent——本次是否真发了文件（初值 false，仅 sendFileToUser 确认成功后置 true），
+    //   与 allOk 解耦：普通文件发成功而 markdown 失败时 fileSent=true 但 allOk=false。
+    let fileSent = false;
     try {
         if (hasAtt) {
             const buffer = fs.readFileSync(physicalPath);
@@ -1130,6 +1134,7 @@ async function sendDoneDingtalkCard(token, robotCode, userIds, title, cardText, 
             const fileResp = await dingtalkNotify.sendFileToUser(token, robotCode, userIds, mediaId, sendFileName);
             if (!sendOk(fileResp)) throw Object.assign(new Error('文件发送未成功'), { step: 'file_send' });
             steps.file_send = true;
+            fileSent = true;
         }
         mdResp = await dingtalkNotify.sendMarkdownToUser(token, robotCode, userIds, title, cardText);
         if (!sendOk(mdResp) || !mdResp.processQueryKey) throw Object.assign(new Error('markdown 未成功或缺 processQueryKey'), { step: 'markdown_send' });
@@ -1138,7 +1143,7 @@ async function sendDoneDingtalkCard(token, robotCode, userIds, title, cardText, 
         failedStep = e.step || (!steps.media_upload ? 'media_upload' : !steps.file_send ? 'file_send' : 'markdown_send');
         failedError = e && e.message;   // codex LOW-4：保留原始错因摘要供内网人工排障（仅日志用，不外暴露）
     }
-    return { allOk: steps.media_upload && steps.file_send && steps.markdown_send, mdResp, failedStep, failedError };
+    return { allOk: steps.media_upload && steps.file_send && steps.markdown_send, mdResp, failedStep, failedError, fileSent };
 }
 
 // 指派通知开发（共享 helper：assign endpoint + 建单 path A 都调）。读 correction + dev → 发 → 落 notify_*。
@@ -1274,6 +1279,8 @@ router.post('/', authenticateToken, requireCorrectionSchemaReady, requireAdmin, 
                 correctionCleanupPending(req, null);
                 return res.status(400).json({ error: '填写真实 OA 流程号后须同步上传 OA 截图', code: 'OA_PROOF_REQUIRED' });
             }
+            // 附件压缩包支持方案 D12：oa_proof 逐文件二次卡（cleanupRid=null 走 buildKey 清理路径，同上方 400 分支）。
+            if (!correctionValidateFilesOr400(req, res, 'oa_proof', null)) return;
             // L2 多业务方（方案 §6.1 契约 A 入参兼容）：requesters[] 优先，缺失从旧字段 requester_name/phone 生成单业务方。
             //   规范化后第一条=主业务方，写主表 requester_name/phone 作兼容冗余 + 列表显示（§5.1）；全部写子表（§5.2 真相源）。
             const fallbackPrimary = {
@@ -2435,8 +2442,39 @@ const CORRECTION_PENDING_BASE = path.join(CORRECTION_UPLOAD_BASE, '_pending');
 if (!fs.existsSync(CORRECTION_UPLOAD_BASE)) {
     fs.mkdirSync(CORRECTION_UPLOAD_BASE, { recursive: true });
 }
-// §9.26：fix_proof/error_proof 限图片/PDF/xlsx（比 collab union 窄——结果证明截图/示例表场景，不含 sql/txt/docx）
-const CORRECTION_ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf', '.xlsx', '.xls'];
+// §9.26：fix_proof/error_proof/oa_proof 限图片/PDF/xlsx（比 collab union 窄——结果证明截图/示例表场景，不含 sql/txt/docx）
+// 附件压缩包支持方案 D4：三类均放开压缩包（≤50MB 特例，其余类型上限不动）；不新增「可发送集」常量——
+//   钉钉发送判据只用归一化 ext + isArchiveExt（03-M3，见 D5 两处发送点）。
+const CORRECTION_BASE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf', '.xlsx', '.xls'];
+const CORRECTION_ATTACHMENT_RULES = {
+    oa_proof:    { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+    error_proof: { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+    fix_proof:   { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+};
+// 派生联合白名单（符号名保留，供 fileFilter / _internals / probe-correction-symbols 既有消费者不变）。
+const CORRECTION_ALLOWED_EXTS = Array.from(new Set(
+    Object.values(CORRECTION_ATTACHMENT_RULES).flatMap((r) => r.exts)
+));
+// 二次卡（方案 D12，签名/返回结构与 validateSysAttachmentRule 完全一致）：attachment_type 判定后、persist 前逐文件判。
+function validateCorrectionAttachmentRule(attachmentType, originalname, size) {
+    // hasOwnProperty 守：'__proto__' 之类原型键经 _internals 直调会命中 Object.prototype → rule.exts 抛 TypeError；契约恒返回 { ok:false }（同 sys 校验器·Opus 预筛 C1 L3）
+    const rule = Object.prototype.hasOwnProperty.call(CORRECTION_ATTACHMENT_RULES, attachmentType) ? CORRECTION_ATTACHMENT_RULES[attachmentType] : null;
+    if (!rule) {
+        return { ok: false, reason: 'EXT_NOT_ALLOWED', error: `不支持的 attachment_type: ${attachmentType}`, ext: null, sizeLimit: null };
+    }
+    const ext = normalizeAttachmentExt(originalname);
+    if (!ext) {
+        return { ok: false, reason: 'BAD_NAME', error: '文件名为空或包含非法字符', ext: null, sizeLimit: null };
+    }
+    if (!rule.exts.includes(ext)) {
+        return { ok: false, reason: 'EXT_NOT_ALLOWED', error: `${attachmentType} 不支持扩展名 ${ext}，仅允许 ${rule.exts.join('/')}`, ext: null, sizeLimit: null };
+    }
+    const sizeLimit = (rule.sizeByExt && rule.sizeByExt[ext]) || rule.defaultSize;
+    if (typeof size === 'number' && size > sizeLimit) {
+        return { ok: false, reason: 'SIZE_EXCEEDED', error: `${attachmentType} (${ext}) 文件大小超限：${(size / 1024 / 1024).toFixed(1)}MB > ${(sizeLimit / 1024 / 1024).toFixed(0)}MB`, ext, sizeLimit };
+    }
+    return { ok: true, normalizedExt: ext, sizeLimit };
+}
 const correctionStorage = multer.diskStorage({
     destination: function (req, file, cb) {
         // 暂存 _pending/{rid}/：multer 是前置中间件，先落 _pending，handler 校验权限/状态通过后再 rename 正式目录。
@@ -2468,7 +2506,11 @@ const correctionStorage = multer.diskStorage({
 });
 const correctionUpload = multer({
     storage: correctionStorage,
-    limits: { fileSize: 20 * 1024 * 1024, files: 5 },   // 单文件 20MB（截图/示例表），单次最多 5 张
+    // 顶上限抬到 50MB（压缩包特例，方案 D2）；非压缩包 20MB 靠二次卡收口，单次最多 5 张。
+    // ⚠️ busboy 1.6 off-by-one（node_modules/busboy/lib/types/multipart.js:476，同 C1 系统迭代排查结论）：
+    //   累计字节数 fileSize===fileSizeLimit 时即判 truncated——恰好等于上限的文件会被误判超限。方案 §5 V2b
+    //   要求「恰 50MB → 2xx」，limit 设为 ARCHIVE_MAX_SIZE+1 补偿，真实边界=「50MB 通过 / 50MB+1 字节拒绝」。
+    limits: { fileSize: ARCHIVE_MAX_SIZE + 1, files: 5 },
     fileFilter: function (req, file, cb) {
         const ext = normalizeAttachmentExt(file.originalname);
         if (!ext) return cb(new Error('文件名为空或包含非法字符'));
@@ -2542,6 +2584,29 @@ function correctionCleanupPending(req, rid) {
     if (!rid && req && req._correctionBuildPendingKey) {
         try { fs.rmdirSync(path.join(CORRECTION_PENDING_BASE, '_new', req._correctionBuildPendingKey)); } catch (_) {}
     }
+}
+// 附件压缩包支持方案 D12：四挂点共用的逐文件二次卡——校验失败时清理本次 _pending（复用 cleanupRid 语义，
+//   建单 oa_proof 挂点传 null 走 buildKey 清理，其余三挂点传 rid）+ 400 ATTACHMENT_RULE_VIOLATION，并把响应
+//   已发送的事实返回给调用方（false=已发响应，调用方须 return，不得再往下走）。
+function correctionValidateFilesOr400(req, res, attachmentType, cleanupRid) {
+    const files = Array.isArray(req.files) ? req.files : [];
+    for (const f of files) {
+        const check = validateCorrectionAttachmentRule(attachmentType, f.originalname, f.size);
+        if (!check.ok) {
+            correctionCleanupPending(req, cleanupRid);
+            res.status(400).json({
+                error: check.error,
+                code: 'ATTACHMENT_RULE_VIOLATION',
+                attachment_type: attachmentType,
+                file: f.originalname,
+                reason: check.reason,
+                ext: check.ext,
+                limit_mb: check.reason === 'SIZE_EXCEEDED' ? Math.round(check.sizeLimit / 1024 / 1024) : null
+            });
+            return false;
+        }
+    }
+    return true;
 }
 // actor（transition 权限校验 + history operator 留痕）
 function correctionActor(req) {
@@ -2800,6 +2865,8 @@ router.post('/:id/complete', authenticateToken, requireCorrectionSchemaReady, co
             correctionCleanupPending(req, id);
             return res.status(400).json({ error: '返工单标完成必须上传结果证明截图', code: 'FIX_PROOF_REQUIRED' });
         }
+        // 附件压缩包支持方案 D12：fix_proof 逐文件二次卡（persist 前）。
+        if (!correctionValidateFilesOr400(req, res, 'fix_proof', id)) return;
         if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
         const r = await correctionTransition(id, 'IN_PROGRESS', 'FIXED', actor, { batch_completion_note: (req.body && req.body.batch_completion_note) || '' });   // 文字要求由 transition 按 correction_type + rework_parent_id 校验（端点只负责返工截图本次上传前置）；single 复用 batch_completion_note 字段
         return res.json({ ok: true, id, status: r.toStatus, attachments: persisted });
@@ -2829,6 +2896,8 @@ router.post('/:id/resubmit', authenticateToken, requireCorrectionSchemaReady, co
             correctionCleanupPending(req, id);
             return res.status(400).json({ error: '返工单重修提交必须上传本次新增结果证明', code: 'FIX_PROOF_REQUIRED' });
         }
+        // 附件压缩包支持方案 D12：fix_proof 逐文件二次卡（persist 前）。
+        if (!correctionValidateFilesOr400(req, res, 'fix_proof', id)) return;
         if (files.length > 0) persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
         const newIds = persisted.map(a => a.id);   // ⭐RC-M1：只传本次上传 id（保证新增 + created_at>baseline）；空数组=无截图（普通单可选），transition 据 isRework 决定是否必校
         const r = await correctionTransition(id, row.status, 'REFIXED', actor, { new_fix_proof_attachment_ids: newIds, resubmit_note: (req.body && req.body.resubmit_note) || '' });
@@ -2878,6 +2947,8 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
             const ERROR_PROOF_STATES = ['PENDING_ASSIGN', 'ASSIGNED_PENDING_ESTIMATE', 'IN_PROGRESS', 'SUSPENDED', 'FIXED', 'REFIXED'];
             if (!ERROR_PROOF_STATES.includes(row.status)) { correctionCleanupPending(req, id); return res.status(409).json({ error: `当前状态「${row.status}」不可补充错误证明`, code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
             if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
+            // 附件压缩包支持方案 D12：error_proof 逐文件二次卡（persist 前）。
+            if (!correctionValidateFilesOr400(req, res, 'error_proof', id)) return;
             persisted = await correctionPersistAttachments(id, files, 'error_proof', actor);
             // 旁路双 WHERE 守卫：persist 后重读状态仍属可补传态（闭 TOCTOU：校验→INSERT 间被作废/拒绝/归档则回滚）
             const recheckE = await dbGetAsync('SELECT status FROM correction_requests WHERE id = ?', [id]);
@@ -2893,6 +2964,8 @@ router.post('/:id/attachments', authenticateToken, requireCorrectionSchemaReady,
         if (!isAdmin && !isAssignee && !isCreator) { correctionCleanupPending(req, id); return res.status(403).json({ error: '无权补充附件（仅建单人 / 被指派开发 / admin）', code: 'NOT_AUTHORIZED_FOR_ATTACHMENT' }); }
         if (row.status !== 'FIXED' && row.status !== 'REFIXED') { correctionCleanupPending(req, id); return res.status(409).json({ error: '仅已完成（FIXED/REFIXED）的修正单可补充附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
         if (files.length === 0) { correctionCleanupPending(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
+        // 附件压缩包支持方案 D12：fix_proof 逐文件二次卡（persist 前）。
+        if (!correctionValidateFilesOr400(req, res, 'fix_proof', id)) return;
         persisted = await correctionPersistAttachments(id, files, 'fix_proof', actor);
         // M-1（codex 11）：旁路无 transition 的双 WHERE 守卫——persist 后重读状态闭合 TOCTOU 窗口
         //   （校验→INSERT 间该单若被归档/作废，补充附件会 append 到非法态）。状态已变 → 回滚本次附件 + 409。
@@ -3109,15 +3182,19 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
             if (!phone) { await persistRework('no_phone', null, 'no_phone'); return res.status(400).json({ success: false, code: 'REQUESTER_PHONE_EMPTY', message: '主业务方未填手机号，请用其他方式交付', status: 'no_phone' }); }
             // fix_proof：返工子单【自身】最新结果证明（att 查询用 id=返工子单，天然取自身二次修复证明）
             const att = await dbGetAsync(`SELECT id, file_name, original_name FROM correction_attachments WHERE correction_request_id = ? AND attachment_type = 'fix_proof' ORDER BY id DESC LIMIT 1`, [id]);
-            let physicalPath = null, sendFileName = null;
+            let physicalPath = null, sendFileName = null, isArchiveR = false;
             if (att) {
                 const ext = normalizeAttachmentExt(att.original_name || att.file_name || '');
                 if (!CORRECTION_ALLOWED_EXTS.includes(ext)) return res.status(409).json({ error: `结果证明扩展名 ${ext} 非法，无法作为文件发送`, code: 'FIX_PROOF_NOT_SENDABLE' });
-                physicalPath = path.join(UPLOAD_DIR, att.file_name);
-                const rootCheck = collabVersioning._internal.ensureInsideRoot(physicalPath, UPLOAD_DIR);
+                const rawPath = path.join(UPLOAD_DIR, att.file_name);
+                const rootCheck = collabVersioning._internal.ensureInsideRoot(rawPath, UPLOAD_DIR);
                 if (!rootCheck.ok) return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
-                if (!fs.existsSync(physicalPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
+                if (!fs.existsSync(rawPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
                 sendFileName = att.original_name || path.basename(att.file_name);
+                // 附件压缩包支持方案 D5：压缩包不走钉钉文件发送（fileSendable=false → physicalPath 传 null，
+                //   sendDoneDingtalkCard 内 hasAtt 判 false，只发 markdown），existsSync 仍照常校验（缺失仍 409）。
+                isArchiveR = isArchiveExt(ext);
+                physicalPath = isArchiveR ? null : rawPath;
             }
             const [appKey, appSecret, robotCode] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
             if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
@@ -3131,22 +3208,28 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
                 return res.status(502).json({ success: false, code: 'REQUESTER_LOOKUP_FAILED', message: '业务方钉钉号查询失败，请稍后重试', status: 'failed', reason: resolvedR.reason });
             }
             const escR = dingtalkNotify.escapeMarkdown;
+            // 三态互斥文案（附件压缩包支持方案 D5）：无证明 / 普通文件 / 压缩包。
+            const evidenceLineR = !att ? '- 已二次修复，请自主查看。'
+                : (isArchiveR ? '- 二次修复结果证明为压缩包（≤50MB），请登录平台下载。' : '- 二次修复结果证明见随附文件。');
             const cardTextR = [
                 `您反馈的**数据修正已二次修复完成**（第 ${seqN} 次返工）：`, '',
                 `- 所属系统：${escR(selfRow.source_system)}`,
                 `- 修正方式：${escR(selfRow.location_info)}`,
-                att ? '- 二次修复结果证明见随附文件。' : '- 已二次修复，请自主查看。'
+                evidenceLineR
             ].join('\n');
             const r1 = await sendDoneDingtalkCard(tokenR, robotCode, [resolvedR.userid], '📋 数据修正·二次修复完成', cardTextR, physicalPath, sendFileName);
             if (r1.allOk) {
                 try { await dbRunAsync(`UPDATE correction_requests SET completion_notify_status='sent', completion_notified_at=datetime('now','localtime'), completion_notify_message_key=?, completion_notify_error=NULL, completion_read_at=NULL WHERE id=?`, [r1.mdResp.processQueryKey, id]); }
-                catch (dbErr) { logger.error(`[correction-notify-done-rework] 返工子单 #${id} 钉钉已发但落库失败：${dbErr.message}（key=${r1.mdResp.processQueryKey}）`); return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed' }); }
-                logger.info(`[correction-notify-done-rework] 返工子单 #${id}（第 ${seqN} 次）二次修复完成通知已发主业务方 ${primary.requester_name}(${resolvedR.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
-                return res.json({ success: true, status: 'sent', has_attachment: !!att, rework_seq: seqN });
+                catch (dbErr) {
+                    logger.error(`[correction-notify-done-rework] 返工子单 #${id} 钉钉已发但落库失败：${dbErr.message}（key=${r1.mdResp.processQueryKey}）`);
+                    return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed', file_sent: r1.fileSent, ...(isArchiveR ? { file_skipped_reason: 'archive' } : {}) });
+                }
+                logger.info(`[correction-notify-done-rework] 返工子单 #${id}（第 ${seqN} 次）二次修复完成通知已发主业务方 ${primary.requester_name}(${resolvedR.userid}) by ${userName}（${att ? (isArchiveR ? '有证明·压缩包未随发' : '含附件') : '无附件'}, file_sent=${r1.fileSent}）`);
+                return res.json({ success: true, status: 'sent', has_attachment: !!att, rework_seq: seqN, file_sent: r1.fileSent, ...(isArchiveR ? { file_skipped_reason: 'archive' } : {}) });
             }
             await persistRework('failed', null, r1.failedStep || 'failed');
             logger.warn(`[correction-notify-done-rework] 返工子单 #${id} 二次修复完成通知部分失败 failed_step=${r1.failedStep} err=${r1.failedError || '-'} by ${userName}`);
-            return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: r1.failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed' });
+            return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: r1.failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed', file_sent: r1.fileSent });
         }
         // ── L2b 多业务方（§6.3）：先解析锚点，（非返工）子单 → 409 引导主单 ──
         const anchor = await resolveCorrectionGroupAnchor(id);
@@ -3223,17 +3306,20 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
         const att = await dbGetAsync(
             `SELECT id, file_name, original_name FROM correction_attachments
               WHERE correction_request_id = ? AND attachment_type = 'fix_proof' ORDER BY id DESC LIMIT 1`, [id]);
-        let physicalPath = null, sendFileName = null;
+        let physicalPath = null, sendFileName = null, isArchive = false;
         if (att) {
             const ext = normalizeAttachmentExt(att.original_name || att.file_name || '');
             if (!CORRECTION_ALLOWED_EXTS.includes(ext)) {
                 return res.status(409).json({ error: `结果证明扩展名 ${ext} 非法，无法作为文件发送`, code: 'FIX_PROOF_NOT_SENDABLE' });
             }
-            physicalPath = path.join(UPLOAD_DIR, att.file_name);
-            const rootCheck = collabVersioning._internal.ensureInsideRoot(physicalPath, UPLOAD_DIR);
+            const rawPath = path.join(UPLOAD_DIR, att.file_name);
+            const rootCheck = collabVersioning._internal.ensureInsideRoot(rawPath, UPLOAD_DIR);
             if (!rootCheck.ok) return res.status(400).json({ error: '附件路径校验失败', code: 'PATH_VIOLATION' });
-            if (!fs.existsSync(physicalPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
+            if (!fs.existsSync(rawPath)) return res.status(409).json({ error: '结果证明文件物理缺失', code: 'FIX_PROOF_FILE_MISSING' });
             sendFileName = att.original_name || path.basename(att.file_name);
+            // 附件压缩包支持方案 D5：压缩包不走钉钉文件发送（fileSendable=false → physicalPath 传 null）。
+            isArchive = isArchiveExt(ext);
+            physicalPath = isArchive ? null : rawPath;
         }
         // 取凭证 + token（config→500/token→502 均不落库；真正"发起后失败"才落 failed）
         const [appKey, appSecret, robotCode] = await Promise.all(
@@ -3251,14 +3337,17 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
         }
         const userIds = [resolved.userid];
         const esc = dingtalkNotify.escapeMarkdown;
+        // 三态互斥文案（附件压缩包支持方案 D5）：无证明 / 普通文件 / 压缩包。
+        const evidenceLine = !att ? '- 已完成，请自主查看。'
+            : (isArchive ? '- 结果证明为压缩包（≤50MB），请登录平台下载。' : '- 结果证明见随附文件。');
         const cardText = [
             '您反馈的**数据修正需求已完成**：', '',
             `- 所属系统：${esc(c.source_system)}`,
             `- 修正方式：${esc(c.location_info)}`,
-            att ? '- 结果证明见随附文件。' : '- 已完成，请自主查看。'
+            evidenceLine
         ].join('\n');
         // 发送序列抽到 sendDoneDingtalkCard helper（normal/rework done 两路共用，Commit E）
-        const { allOk, mdResp, failedStep, failedError } = await sendDoneDingtalkCard(token, robotCode, userIds, '📋 数据修正·已完成', cardText, physicalPath, sendFileName);
+        const { allOk, mdResp, failedStep, failedError, fileSent } = await sendDoneDingtalkCard(token, robotCode, userIds, '📋 数据修正·已完成', cardText, physicalPath, sendFileName);
         if (allOk) {
             // 子表是真相源——子表落库失败才报 NOTIFY_SENT_BUT_DB_UPDATE_FAILED；主表回写在 persistNotify 内 best-effort
             try {
@@ -3275,7 +3364,7 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
                 //   恢复路径：日志已含 requester_id + processQueryKey（key=），运维可据此手工补写该子表行 completion_*。
                 //   极罕见竞态（生产 2 单），不引独立审计表 / 不暴露 key 给前端（内部钉钉标识无业务价值 + 扩攻击面）。
                 logger.error(`[correction-notify-done] #${id} 业务方#${requesterId} 钉钉已发但子表落库失败：${dbErr.message}（key=${mdResp.processQueryKey}）`);
-                return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed', requester_id: requesterId });
+                return res.status(200).json({ success: false, code: 'NOTIFY_SENT_BUT_DB_UPDATE_FAILED', message: '通知已发送但状态保存失败，请勿重发', delivery_status: 'sent', persist_status: 'failed', requester_id: requesterId, file_sent: fileSent, ...(isArchive ? { file_skipped_reason: 'archive' } : {}) });
             }
             // 主表兼容列镜像（三审 MED）：锚 EXISTS 子表仍持有本次 sent+key（同 persistNotify 注释——不锁主表 phone
             //   防 F3 存量不同步误挡；子表写→镜像写之间被 E3 PUT 重置则 EXISTS 失败跳过，两表恒一致）。
@@ -3286,12 +3375,12 @@ router.post('/:id/notify-done', authenticateToken, requireCorrectionSchemaReady,
                         [mdResp.processQueryKey, id, target.id, mdResp.processQueryKey]);
                 } catch (e) { logger.warn(`[correction-notify-done] #${id} 主表兼容列回写失败（子表已更新，真相源正确）：${e.message}`); }
             }
-            logger.info(`[correction-notify-done] #${id} 完成通知已发业务方#${requesterId}(${resolved.userid}) by ${userName}（${att ? '含附件' : '无附件'}）`);
-            return res.json({ success: true, status: 'sent', requester_id: requesterId, has_attachment: !!att });
+            logger.info(`[correction-notify-done] #${id} 完成通知已发业务方#${requesterId}(${resolved.userid}) by ${userName}（${att ? (isArchive ? '有证明·压缩包未随发' : '含附件') : '无附件'}, file_sent=${fileSent}）`);
+            return res.json({ success: true, status: 'sent', requester_id: requesterId, has_attachment: !!att, file_sent: fileSent, ...(isArchive ? { file_skipped_reason: 'archive' } : {}) });
         }
         await persistNotify('failed', null, failedStep || 'failed');
         logger.warn(`[correction-notify-done] #${id} 业务方#${requesterId} 完成通知部分失败 failed_step=${failedStep} err=${failedError || '-'} by ${userName}`);
-        return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed', requester_id: requesterId });
+        return res.status(200).json({ success: false, code: 'NOTIFY_PARTIAL_FAILURE', failed_step: failedStep, message: '通知发送未完成，请重试或线下联系业务方', status: 'failed', requester_id: requesterId, file_sent: fileSent });
     } catch (e) {
         logger.error(`[correction-notify-done] 修正单 #${id} 异常：${e.message}`, e);
         return res.status(500).json({ success: false, error: '发送完成通知失败', code: 'NOTIFY_DONE_FAILED' });
@@ -3966,6 +4055,6 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
   return {
     initSchema,
     router,
-    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection, validateInputOaNumber },
+    _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_ATTACHMENT_RULES, validateCorrectionAttachmentRule, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection, validateInputOaNumber },
   };
 };

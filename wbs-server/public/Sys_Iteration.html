@@ -6981,7 +6981,7 @@
         siPickerReset(key);
         siModal('重启 ' + siIssueDisplayNoById(iss.id), [
             fTextarea('reason', '重启原因', '', true, '必填，trim 后非空'),
-            { k: null, html: `<div class="u-form-group"><label>补充证据材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
+            { k: null, html: `<div class="u-form-group"><label>补充证据材料（选填，图片/PDF/Excel/Word/csv/txt/md 单个≤20MB，压缩包 zip/rar/7z 单个≤50MB，最多5个）</label>
                 ${siFilePickerHtml(key, '选择文件')}
                 <div class="u-hint">证据非强制：两步链下上传失败不影响重启本身生效，失败会提示到详情页补传。</div></div>`
             },
@@ -7865,7 +7865,7 @@
             <div class="u-form-group">
                 <label>佐证附件（选填·交付物）</label>
                 ${siFilePickerHtml('submit-delivery', '选择文件')}
-                <div class="u-hint">选填，图片/PDF/Excel/Word 等，单个≤20MB，最多5个；随本次提交作为交付物上传。</div>
+                <div class="u-hint">选填，图片/PDF/Excel/Word 等单个≤20MB，压缩包 zip/rar/7z 单个≤50MB，最多5个；随本次提交作为交付物上传。</div>
             </div>
             <div class="u-form-group">
                 <label>提交前确认 <span class="u-req">*</span></label>
@@ -8436,7 +8436,7 @@
             // 默认恒勾选（2026-08-28 拍板）：本行第三参 true 是唯一默认来源——不分 type、不看需求方
             //   三字段（原 C3b/improvement 覆盖两代联动已拆，详见 siRequesterDeptFieldHtml 上方注释）。
             fCheckbox('oa_exempt', '本单无需 OA 号（内部自发/未走 OA 立项流程）', true),
-            { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md，单个≤20MB，最多5个）</label>
+            { k: null, html: `<div class="u-form-group"><label>需求材料（选填，图片/PDF/Excel/Word/csv/txt/md 单个≤20MB，压缩包 zip/rar/7z 单个≤50MB，最多5个）</label>
                 ${siFilePickerHtml('create-spec', '选择文件')}</div>` },
             // ⭐ 角色权限重构 v2.1（C2.5 撤销）：建单落态已全类型归一「待受理」——C2.5（v1.9）时期曾按 type
             //   分流出「待商议」预沟通段，方案 v2.1 撤销后按 type 分流的文案随之作废，恢复 C0-C2 时代的
@@ -8529,8 +8529,12 @@
     function siOpenUploadModal(issueId, type, typeLabel) {
         const key = 'modal-' + type;
         siPickerReset(key);
+        // 附件压缩包支持方案 D10：标签文案与 siPickerAllowedExts(key) 同源分流（spec/delivery 含压缩包句，screenshot 不含），不手写第二份判据。
+        const sizeLabel = SI_PICKER_ARCHIVE_KEYS.has(key)
+            ? '图片/PDF/Excel/Word 等单个≤20MB，压缩包 zip/rar/7z 单个≤50MB，最多5个'
+            : '图片/PDF/Excel/Word 等，单个≤20MB，最多5个';
         siModal('上传' + typeLabel, [{
-            k: null, html: `<div class="u-form-group"><label>选择文件（图片/PDF/Excel/Word 等，单个≤20MB，最多5个）</label>
+            k: null, html: `<div class="u-form-group"><label>选择文件（${sizeLabel}）</label>
                 ${siFilePickerHtml(key, '选择文件')}
                 <div class="u-hint">可多选、预览、删除、追加；确认后上传为「${esc(typeLabel)}」。</div></div>`
         }], async () => {
@@ -10468,9 +10472,20 @@
     const siFilePickers = {};                   // key → File[]（各实例独立持有）
     let siCreateModalOpen = false;              // 标记当前打开的是否为建单弹窗（M1：供 siCloseModal 判定是否清理组件）
     const SI_SPEC_MAX_FILES = 5;
-    const SI_SPEC_MAX_SIZE = 20 * 1024 * 1024;  // 单个 ≤20MB（对齐提示 + 后端）
+    const SI_SPEC_MAX_SIZE = 20 * 1024 * 1024;  // 单个 ≤20MB（非压缩包，对齐提示 + 后端）
     const SI_SPEC_ALLOWED_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls', 'docx', 'doc', 'csv', 'txt', 'md'];
     // SI_IMG_EXTS 已在附件融入区（siRenderAttGrid 上方）声明并复用于此（原此处重复声明，附件融入改造时合并）。
+    // 附件压缩包支持方案 D1/D10：三扩展名与 50MB 上限须与后端 utils/attachment-archive.js 真相源同值——
+    //   本页是静态 HTML 无法 require，字面量由 scripts/verify-sys-attach-archive-static.js 与真相源对拍。
+    const SI_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
+    const SI_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
+    // picker key → 是否放开压缩包（方案 §2.1 放开面矩阵）：spec/delivery 放开，screenshot（验收凭证）不放。
+    //   create-spec/resume-spec/modal-spec 归 spec；submit-delivery/modal-delivery 归 delivery；
+    //   modal-screenshot/accept-evidence/return-evidence 归 screenshot（对应 fd.append('attachment_type', ...) 调用点）。
+    const SI_PICKER_ARCHIVE_KEYS = new Set(['create-spec', 'submit-delivery', 'modal-spec', 'modal-delivery', 'resume-spec']);
+    function siPickerAllowedExts(key) {
+        return SI_PICKER_ARCHIVE_KEYS.has(key) ? SI_SPEC_ALLOWED_EXTS.concat(SI_ARCHIVE_EXTS) : SI_SPEC_ALLOWED_EXTS;
+    }
     // S3：粘贴截图文件名序号状态已随共享层 assets/js/u-paste.js 抽走（原 siPasteSeqByKey，见该文件
     // resetSeq）——本页只需在 siPickerReset 里转调 UPaste.resetSeq(key)，语义不变（每次组件重新打开
     // 视为新一轮，序号从 1 起，不跨会话累积）。
@@ -10489,12 +10504,16 @@
     //   返回值原样透传给共享层，见下方 UPaste.register 的 collect）。
     function siPickerCollect(key, fileList) {
         const arr = siPickerFiles(key);
+        const allowedExts = siPickerAllowedExts(key);
         let accepted = 0;
         for (const f of Array.from(fileList || [])) {
             if (arr.length >= SI_SPEC_MAX_FILES) { showToast(`最多 ${SI_SPEC_MAX_FILES} 个文件`, 'error'); break; }
             const ext = (f.name.split('.').pop() || '').toLowerCase();
-            if (!SI_SPEC_ALLOWED_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
-            if (f.size > SI_SPEC_MAX_SIZE) { showToast(`${f.name} 超过 20MB`, 'error'); continue; }
+            if (!allowedExts.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
+            // 附件压缩包支持方案 D10：大小提示按扩展名分流，压缩包 50MB / 其余按既有 20MB，句式统一。
+            const isArchive = SI_ARCHIVE_EXTS.includes(ext);
+            const sizeLimit = isArchive ? SI_ARCHIVE_MAX_SIZE : SI_SPEC_MAX_SIZE;
+            if (f.size > sizeLimit) { showToast(`${f.name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`, 'error'); continue; }
             if (arr.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
                 showToast(`该文件已选：${f.name}`, 'info'); continue;
             }
@@ -10557,8 +10576,9 @@
     function siFilePickerHtml(key, btnLabel) {
         const k = siEscapeHtmlAttr(key);
         // P2·codex MED：补 accept 属性（浏览器文件选择器过滤·恢复 C1 建单原 accept 体验·通用化时遗漏）——
-        //   从 SI_SPEC_ALLOWED_EXTS 派生，与 siPickerCollect 真闸同源（accept 仅体验层过滤，collect 才是拒非法真闸）。
-        const accept = SI_SPEC_ALLOWED_EXTS.map(e => '.' + e).join(',');
+        //   从 siPickerAllowedExts(key) 派生（附件压缩包支持方案 D10 起按 key 分流），与 siPickerCollect
+        //   真闸同源（accept 仅体验层过滤，collect 才是拒非法真闸）。
+        const accept = siPickerAllowedExts(key).map(e => '.' + e).join(',');
         return `<input type="file" id="siPickerInput_${k}" multiple accept="${accept}" style="display:none" onchange="siPickerOnChange('${k}', event)">
             <button type="button" class="u-btn-secondary u-btn-sm" onclick="document.getElementById('siPickerInput_${k}').click()">＋ ${esc(btnLabel || '选择文件')}</button>
             <div id="siPreview_${k}" class="si-file-preview"></div>`;

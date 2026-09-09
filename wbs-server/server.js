@@ -17,6 +17,7 @@ const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟�
 const issueLiteNotify = require('./utils/issue-lite-notify');  // 数据开发换壳 C2：极简台账通知 markdown builder（薄编排，复用 issueNotify 无状态部件）
 const collabVersioning = require('./utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('./utils/collab-submit-helpers');
+const { ARCHIVE_EXTS, ARCHIVE_SIZE_BY_EXT, ARCHIVE_MAX_SIZE, isArchiveExt } = require('./utils/attachment-archive');   // 附件压缩包支持方案 D1：三模块共用真相源（C4 规则表 result_extra 用 ARCHIVE_MAX_SIZE——首版漏解构致 server 起不来，静态守卫/分类器单测均抓不到这一层）
 // C1（数据协作接入外部源 G1）：sql_validation_status 唯一枚举源 + 写入前置断言
 const { assertSqlValidationStatus, VALIDATION_MODES } = require('./utils/collab-validation-status');
 // C2a（数据协作接入外部源）：外部源判定 + type 过滤片段生成（/submit 两阶段查询 + 三处放行复用）
@@ -14291,12 +14292,22 @@ if (!fs.existsSync(COLLAB_UPLOAD_BASE)) {
 //   result_data_screenshot）共享本规则但业务语义=屏幕截图，已在该入口单独排除 .pdf，改本规则时同步审视
 // v1.77.0：新增 data_scope（数据范围说明，如"A部门,B部门…"）——独立类型，
 //   不复用 example_xlsx：质量校验列对齐按 attachment_type='example_xlsx' 取模板，data_scope 天然不参与比对
+// 附件压缩包支持方案 D6/D11（2026-09-09）：screenshot（原始单据）/ data_scope（数据范围说明）两类型放开
+//   压缩包（≤50MB 特例，exts 追加 ARCHIVE_EXTS + sizeByExt 改用 ARCHIVE_SIZE_BY_EXT）——建单时的需求材料
+//   场景，用户可能打包上传多份佐证材料。example_xlsx（模板输入）/ result_data / result_script（交付物，
+//   C4 范围）本次不动。安全口径同 D11：不做 magic-bytes/不解压/不嗅探。⚠️ 协作附件下载走 `/uploads` 静态服务
+//   （UPLOADS_PROTECTED_DIRS 不含 collab/，无登录门、无 attachment 头，靠不可猜文件名），与既有 pdf/xlsx
+//   同口径、非本次新引入的暴露面；是否收口为鉴权下载见方案 R1b / 待追认 P3（Opus 预筛 C3 M1 订正原「鉴权下载」误述）。
 const COLLAB_ATTACHMENT_RULES = {
-    screenshot:     { exts: ['.png','.jpg','.jpeg','.gif','.webp','.pdf'],                                sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
+    screenshot:     { exts: ['.png','.jpg','.jpeg','.gif','.webp','.pdf'].concat(ARCHIVE_EXTS),           sizeByExt: ARCHIVE_SIZE_BY_EXT,                defaultSize: 10  * 1024 * 1024 },
     example_xlsx:   { exts: ['.xlsx','.xls','.pdf','.docx','.png','.jpg','.jpeg','.gif','.webp'],         sizeByExt: { '.xlsx': 100*1024*1024, '.xls': 100*1024*1024 }, defaultSize: 10  * 1024 * 1024 },
-    data_scope:     { exts: ['.xlsx','.xls','.txt'],                                                      sizeByExt: null,                              defaultSize: 10  * 1024 * 1024 },
+    data_scope:     { exts: ['.xlsx','.xls','.txt'].concat(ARCHIVE_EXTS),                                  sizeByExt: ARCHIVE_SIZE_BY_EXT,                defaultSize: 10  * 1024 * 1024 },
     result_data:    { exts: ['.xlsx','.xls'],                                                             sizeByExt: null,                              defaultSize: 100 * 1024 * 1024 },
-    result_script:  { exts: ['.sql','.txt'],                                                              sizeByExt: null,                              defaultSize: 1   * 1024 * 1024 }
+    result_script:  { exts: ['.sql','.txt'],                                                              sizeByExt: null,                              defaultSize: 1   * 1024 * 1024 },
+    // 附件压缩包支持方案 D7（2026-09-09）：result_extra——协作交付新类型，补充材料压缩包，仅 zip/rar/7z，
+    // 每个 ≤50MB（ARCHIVE_MAX_SIZE），0..5 个，非必备快照成员（约束在 groupUploadedDeliveryFiles /
+    // activateNewVersion 两处各自校验，见 utils/collab-submit-helpers.js §4 与 utils/collab-attachment-versioning.js §3.1）。
+    result_extra:   { exts: ARCHIVE_EXTS,                                                                  sizeByExt: null,                              defaultSize: ARCHIVE_MAX_SIZE }
 };
 
 // 全部允许的扩展名（联合白名单，multer fileFilter 用）
@@ -14315,7 +14326,9 @@ function normalizeAttachmentExt(filename) {
 // 判断给定文件 (扩展名 + size) 是否符合 attachment_type 规则
 // 返回 { ok: true } 或 { ok: false, error: '...' }
 function validateCollabAttachmentRule(attachmentType, originalname, size) {
-    const rule = COLLAB_ATTACHMENT_RULES[attachmentType];
+    // 附件压缩包支持方案（C1b 同款）：hasOwnProperty 原型键守——防 attachmentType='__proto__'/'constructor'
+    // 等原型链键名绕过 `!rule` 判定误命中 Object.prototype 上的非规则值。
+    const rule = Object.prototype.hasOwnProperty.call(COLLAB_ATTACHMENT_RULES, attachmentType) ? COLLAB_ATTACHMENT_RULES[attachmentType] : undefined;
     if (!rule) {
         return { ok: false, error: `不支持的 attachment_type: ${attachmentType}` };
     }
@@ -14378,13 +14391,14 @@ const collabUpload = multer({
 
 // 数据协作·开发完成交付提交专用 multer（多文件上传 M2，方案 §B/§五.1）
 //   独立实例与全局 collabUpload（files:5）物理隔离，避免改一处影响其余 3 个 collabUpload 入口（M-3/M-5）。
-//   files:10 = result_data ≤5 + result_script ≤5（D3 上限合计）；per-type ≤5 与 1MB/100MB 在 groupUploadedDeliveryFiles
-//   内逐文件二次卡（RC-M3）。storage/fileSize/fileFilter 复用 collab 既有规则。
+//   files:15 = result_data ≤5 + result_script ≤5 + result_extra ≤5（附件压缩包支持方案 D7，原 10 上限
+//   随 result_extra 新增 +5）；per-type ≤5 与各自大小上限在 groupUploadedDeliveryFiles 内逐文件二次卡
+//   （RC-M3）。storage/fileSize/fileFilter 复用 collab 既有规则。
 const submitUpload = multer({
     storage: collabStorage,
     limits: {
         fileSize: 100 * 1024 * 1024,
-        files: 10
+        files: 15
     },
     fileFilter: collabFileFilter
 });
@@ -14431,6 +14445,11 @@ const issueStorage = multer.diskStorage({
     }
 });
 
+// 附件压缩包支持方案 D9：COLLAB_ALLOWED_EXTS_UNION 本次因 screenshot/data_scope 放开压缩包而连带扩容，
+//   但问题跟踪录入不放开压缩包（已决边界）——派生「有效白名单」= 联合白名单剔除压缩包三扩展名，
+//   fileFilter 的拒绝消息与显式压缩包拦截均用它，不手写字面量。
+const ISSUE_EFFECTIVE_EXTS = COLLAB_ALLOWED_EXTS_UNION.filter(e => !isArchiveExt(e));
+
 const issueUpload = multer({
     storage: issueStorage,
     limits: {
@@ -14444,7 +14463,11 @@ const issueUpload = multer({
             return cb(new Error('文件名为空或包含非法字符'));
         }
         if (!COLLAB_ALLOWED_EXTS_UNION.includes(ext)) {
-            return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${COLLAB_ALLOWED_EXTS_UNION.join('/')}`));
+            return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${ISSUE_EFFECTIVE_EXTS.join('/')}`));
+        }
+        // 附件压缩包支持方案 D9：联合白名单判定之后追加压缩包显式拦截（问题跟踪录入不放开压缩包）。
+        if (isArchiveExt(ext)) {
+            return cb(new Error('问题跟踪录入不支持压缩包，仅允许 ' + ISSUE_EFFECTIVE_EXTS.join('/')));
         }
         cb(null, true);
     }
@@ -16412,8 +16435,9 @@ app.post('/api/collab/requests/:id/submit',
     // 它抛的 MulterError（超数量/大小/类型）会走 Express error flow，
     // endpoint 内 try/catch 接不到，所以这里手动调 upload(req, res, cb)
     (req, res, next) => {
-        // 多文件上传 M2（方案 §B）：交付提交走独立 submitUpload（files:10 = rd≤5 + rs≤5），与 collabUpload(files:5) 隔离
-        submitUpload.array('files', 10)(req, res, (err) => {
+        // 多文件上传 M2（方案 §B）：交付提交走独立 submitUpload（files:15 = rd≤5 + rs≤5 + re≤5，附件压缩包
+        //   支持方案 D7 起 +5），与 collabUpload(files:5) 隔离
+        submitUpload.array('files', 15)(req, res, (err) => {
             if (!err) return next();
             // multer 错误统一转 JSON（codex L1 决策落地）
             const isMulterErr = err && err.name === 'MulterError';
@@ -16498,9 +16522,11 @@ app.post('/api/collab/requests/:id/submit',
                 });
             }
 
-            // === 前置校验：文件分组（多文件上传 M2：≥1 result_data + ≥1 result_script，各 ≤5；per-type 大小卡）===
-            //   validateCollabAttachmentRule 注入做 per-type 大小校验（RC-M3：脚本 ≤1MB 不被 100MB 粗上限绕过）
-            const grouped = collabSubmitHelpers.groupUploadedDeliveryFiles(req.files, validateCollabAttachmentRule);
+            // === 前置校验：文件分组（多文件上传 M2：≥1 result_data + ≥1 result_script，各 ≤5；per-type 大小卡；
+            //   附件压缩包支持方案 D7：0..5 个 result_extra 补充材料压缩包）===
+            //   validateCollabAttachmentRule 注入做 per-type 大小校验（RC-M3：脚本 ≤1MB 不被 100MB 粗上限绕过）；
+            //   normalizeAttachmentExt 注入做扩展名归一化（D7：分类器不再自行 path.extname().toLowerCase()）
+            const grouped = collabSubmitHelpers.groupUploadedDeliveryFiles(req.files, validateCollabAttachmentRule, normalizeAttachmentExt);
             if (!grouped.ok) {
                 cleanupPending();
                 return res.status(400).json({ error: grouped.reason, code: grouped.code });
@@ -18224,16 +18250,22 @@ app.post('/api/collab/requests/:id/admin-direct-fallback', authenticateToken, re
                 });
             }
 
-            // 2. 历史附件标 superseded（仅 result_data / result_script 主交付物，沿用 v1.71.0 撞墙附件保留模式）
-            await dbRunAsync(
-                `UPDATE collab_attachments
-                    SET status = 'superseded',
-                        superseded_at = datetime('now','localtime')
-                  WHERE collab_request_id = ?
-                    AND status = 'active'
-                    AND attachment_type IN ('result_data', 'result_script')`,
-                [id]
-            );
+            // 2. 历史附件标 superseded（可版本化开发交付物，沿用 v1.71.0 撞墙附件保留模式）
+            // 附件压缩包支持方案 D7/F3（:18234 消费点，含 extra）：手写 IN 列表改引
+            //   collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES（现含 result_data/result_script/
+            //   result_extra），否则重传后旧压缩包永远 active（同 :20380/:605-613 同法）。
+            {
+                const versionedTypePlaceholders = collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES.map(() => '?').join(',');
+                await dbRunAsync(
+                    `UPDATE collab_attachments
+                        SET status = 'superseded',
+                            superseded_at = datetime('now','localtime')
+                      WHERE collab_request_id = ?
+                        AND status = 'active'
+                        AND attachment_type IN (${versionedTypePlaceholders})`,
+                    [id, ...collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES]
+                );
+            }
 
             // 3. 操作日志
             const reasonText = fallbackReason
@@ -18829,6 +18861,12 @@ app.post('/api/collab/requests/:id/submit-export',
             if (shotExt === '.pdf') {
                 cleanupPending();
                 return res.status(400).json({ error: '导出数据截图仅支持图片格式（PNG/JPG/GIF/WEBP），不支持 PDF', code: 'INVALID_SCREENSHOT' });
+            }
+            // 附件压缩包支持方案 D6：screenshot 规则本次放开压缩包（建单原始单据场景），但导出截图
+            //   业务语义=屏幕截图，同法单独排除压缩包（与上方排除 .pdf 同一入口、同一错误路径）。
+            if (isArchiveExt(shotExt)) {
+                cleanupPending();
+                return res.status(400).json({ error: '导出数据截图仅支持图片格式（PNG/JPG/GIF/WEBP），不支持压缩包', code: 'INVALID_SCREENSHOT' });
             }
             const shotCheck = validateCollabAttachmentRule('screenshot', screenshotFile.originalname, screenshotFile.size);
             if (!shotCheck.ok) {
@@ -20184,7 +20222,8 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
     (req, res, next) => {
         const handler = collabUpload.fields([
             { name: 'result_script', maxCount: 1 },
-            { name: 'result_data', maxCount: 1 }
+            { name: 'result_data', maxCount: 1 },
+            { name: 'result_extra', maxCount: 5 }   // 附件压缩包支持方案 D8：补充材料压缩包，可选，≤5 个
         ]);
         handler(req, res, (err) => {
             if (!err) return next();
@@ -20262,7 +20301,9 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
         const userId = req.user.id;
         const userName = req.user.display_name || req.user.username;
 
-        // v1.70.5 收集本次 admin 上传的可选附件（0/1/2 个）
+        // v1.70.5 收集本次 admin 上传的可选附件（result_script/result_data 各 0/1 个）
+        // 附件压缩包支持方案 D8：新增 result_extra，0..5 个，按字段内上传顺序赋 typeOrdinal（N≥2 时；
+        //   N=1 省略，与 rd/rs 单文件同口径——buildFinalAttachmentName 对 typeOrdinal=undefined 产出无编号旧名）。
         const adminUploadedFiles = [];
         if (req.files) {
             if (req.files.result_script && req.files.result_script.length > 0) {
@@ -20271,8 +20312,56 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             if (req.files.result_data && req.files.result_data.length > 0) {
                 adminUploadedFiles.push({ attachment_type: 'result_data', file: req.files.result_data[0] });
             }
+            if (Array.isArray(req.files.result_extra) && req.files.result_extra.length > 0) {
+                const extraFiles = req.files.result_extra;
+                extraFiles.forEach((file, idx) => {
+                    adminUploadedFiles.push({
+                        attachment_type: 'result_extra',
+                        file,
+                        typeOrdinal: extraFiles.length > 1 ? (idx + 1) : undefined,
+                    });
+                });
+            }
+        }
+        // 附件压缩包支持方案 D8（Opus 预筛 C3 H2 前移到 C3）：collabUpload 的 fileFilter 只认联合白名单，
+        //   screenshot/data_scope 放开压缩包后联合白名单派生出 .zip/.rar/.7z，而本端点两个旧字段从不走
+        //   per-type 二次卡 → admin 可把 payload.zip 落成 result_data/result_script 进 smoke/列对齐/导出发钉钉链。
+        //   旧字段契约不收紧（沿用联合白名单 + 100MB 粗上限），只显式拒压缩包。**不含 result_extra**——
+        //   压缩包正是 result_extra 的合法内容，下方另起独立 per-type 校验（C4 新增）。
+        for (const item of adminUploadedFiles) {
+            if (item.attachment_type === 'result_extra') continue;
+            const adminExt = normalizeAttachmentExt(item.file.originalname);
+            if (isArchiveExt(adminExt)) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: `${item.attachment_type} 不接受压缩包（${adminExt}），压缩包请放到「补充材料」字段（result_extra）上传`,
+                    code: 'ADMIN_FIELD_ARCHIVE_NOT_ALLOWED',
+                    attachment_type: item.attachment_type,
+                    file: item.file.originalname
+                });
+            }
+        }
+        // 附件压缩包支持方案 D8：只对 result_extra 逐文件走 validateCollabAttachmentRule 二次卡
+        //   （扩展名 + 50MB 大小）；result_script/result_data 两旧字段保持既有契约，不加 per-type 卡（上方已处理）。
+        for (const item of adminUploadedFiles) {
+            if (item.attachment_type !== 'result_extra') continue;
+            const extraCheck = validateCollabAttachmentRule('result_extra', item.file.originalname, item.file.size);
+            if (!extraCheck.ok) {
+                cleanupPending();
+                return res.status(400).json({
+                    error: extraCheck.error,
+                    code: 'ATTACHMENT_RULE_VIOLATION',
+                    attachment_type: 'result_extra',
+                    file: item.file.originalname
+                });
+            }
         }
         const hasAdminUpload = adminUploadedFiles.length > 0;
+        // 附件压缩包支持方案 D8/F3（:20623 消费点专用）：hasAdminUpload 语义="本次有任何附件"不改（六个既有
+        //   消费点一字不动）；本次仅 extra 代提时，done_at 实际来自开发侧 rd/rs 的 MAX(created_at)，却会被
+        //   hasAdminUpload=true 误标成 'admin_supplemental_attachment'——新增独立变量只表达"本次有正式交付物
+        //   （result_data/result_script）"，只喂 doneAtSource 反推那一处判据，不替换 hasAdminUpload 本身。
+        const adminHasFormalDelivery = adminUploadedFiles.some(x => x.attachment_type === 'result_data' || x.attachment_type === 'result_script');
 
         // v1.120.0 Commit B codex 02-B 审 HIGH 采纳（并发实测暴露）：admin-submit-on-behalf 事务段
         //   原本无 mutex——单全局 sqlite 连接下，并发两次 BEGIN IMMEDIATE 会「cannot start a transaction
@@ -20407,23 +20496,43 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                     fs.mkdirSync(targetDir, { recursive: true });
                 }
 
-                // ③rename 文件到正式目录（v1.72.0 新规则文件名，rd/rs 用 submission_version 作 seq）
-                //   admin-fix 不递增 submission_version → rd/rs 复用 collab.submission_version（默认 0 → 1）
+                // ③rename 文件到正式目录（v1.72.0 新规则文件名，rd/rs/re 用 submission_version 作 seq）
+                //   admin-fix 不递增 submission_version → rd/rs/re 复用 collab.submission_version（默认 0 → 1）
                 const adminSeq = collab.submission_version || 1;
-                try {
-                    for (const item of adminUploadedFiles) {
-                        const ext = path.extname(item.file.originalname || '');
-                        const finalName = collabVersioning.buildFinalAttachmentName({
-                            oaRequestNo: collab.oa_request_no,
-                            createdAt: collab.created_at,
-                            seq: adminSeq,
-                            attachmentType: item.attachment_type,
-                            isFailed: false,
-                            displayName: userName,
-                            username: userName,
-                            ext,
+                // 附件压缩包支持方案 D8：批内撞名保护——先算全部 finalPath（不 rename），Set 查重；命中 →
+                //   400 ATTACHMENT_NAME_COLLISION（此时尚未 rename 任何文件，无需回滚）。跨请求同名沿用
+                //   现状覆盖（同 admin、同 seq、同类型再补档会覆盖上一版已 superseded 记录指向的物理文件——
+                //   既有 rd/rs 行为，extra 与之同口径，本次不改，方案 R7 登记）。
+                const plannedRenames = [];
+                const finalPathSeen = new Set();
+                for (const item of adminUploadedFiles) {
+                    const ext = path.extname(item.file.originalname || '');
+                    const finalName = collabVersioning.buildFinalAttachmentName({
+                        oaRequestNo: collab.oa_request_no,
+                        createdAt: collab.created_at,
+                        seq: adminSeq,
+                        attachmentType: item.attachment_type,
+                        isFailed: false,
+                        displayName: userName,
+                        username: userName,
+                        ext,
+                        typeOrdinal: item.typeOrdinal,
+                    });
+                    const finalPath = path.join(targetDir, finalName);
+                    if (finalPathSeen.has(finalPath)) {
+                        cleanupPending();
+                        return res.status(400).json({
+                            error: '本批上传的附件文件名重复（同一批次内不可撞名）',
+                            code: 'ATTACHMENT_NAME_COLLISION',
+                            attachment_type: item.attachment_type,
+                            file: item.file.originalname
                         });
-                        const finalPath = path.join(targetDir, finalName);
+                    }
+                    finalPathSeen.add(finalPath);
+                    plannedRenames.push({ item, finalName, finalPath });
+                }
+                try {
+                    for (const { item, finalPath } of plannedRenames) {
                         fs.renameSync(item.file.path, finalPath);
                         movedAdminFiles.push({
                             attachment_type: item.attachment_type,
@@ -20455,17 +20564,22 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
             try {
                 await dbRunAsync('BEGIN IMMEDIATE TRANSACTION');
 
-                // ④ INSERT 新 admin active 行 + supersede 同 type 旧 active
-                for (const mf of movedAdminFiles) {
-                    // INSERT 前先 supersede 该 type 的所有旧 active 行（避免一对多 active）
+                // ④ supersede 同 type 旧 active（按去重后的类型各做一次）→ 再逐文件 INSERT 新 admin active 行
+                //   ⚠️ 附件压缩包支持 C4c（Opus 预筛 C4 H1）：原「逐文件先 supersede 再 INSERT」隐含「每类型每批最多 1 个文件」
+                //   （fields maxCount 1 时成立）；result_extra maxCount 5 后，第 2 个 extra 的 UPDATE 会把本批刚插的第 1 个
+                //   extra 置 superseded，3 个 extra 只剩最后一个 active——[[feedback_check_homogeneity_before_adding_member]]。
+                //   改为 supersede 提到循环外、按类型集合各做一次，循环内只 INSERT。
+                for (const t of new Set(movedAdminFiles.map(f => f.attachment_type))) {
                     await dbRunAsync(
                         `UPDATE collab_attachments
                             SET status='superseded', superseded_at=datetime('now','localtime')
                           WHERE collab_request_id=?
                             AND attachment_type=?
                             AND status='active'`,
-                        [id, mf.attachment_type]
+                        [id, t]
                     );
+                }
+                for (const mf of movedAdminFiles) {
                     // INSERT 新 admin active 行（v1.72.0 写入 attachment_seq）
                     // file_name 路径计算与 versioning §3.6 完全一致：relative(dirname(collabRoot), final_path) replace \ → /
                     const relPath = path.relative(path.dirname(COLLAB_UPLOAD_BASE), mf.final_path).replace(/\\/g, '/');
@@ -20625,7 +20739,7 @@ app.post('/api/collab/requests/:id/admin-submit-on-behalf',
                 );
                 if (lastActive && lastActive.last_at === finalDoneAt) {
                     // 区分 admin 上传 vs dev 上传作为来源（仅用作日志/前端展示语义）
-                    doneAtSource = hasAdminUpload ? 'admin_supplemental_attachment' : 'dev_last_active_attachment';
+                    doneAtSource = adminHasFormalDelivery ? 'admin_supplemental_attachment' : 'dev_last_active_attachment';
                 } else if (collab.status === 'SUBMITTED' && collab.deadline === finalDoneAt) {
                     // v1.120.0 Commit B codex 02-B 复审 LOW 采纳：deadline 推断仅对 SUBMITTED 路径成立
                     //   （只有 SUBMITTED→DONE 的 done_at 表达式含 deadline 兜底）。EXPORTING→DONE 已不回退 deadline，
@@ -20783,7 +20897,8 @@ app.post('/api/collab/requests/:id/attachments',
             // 权限校验（按"是否开发交付物"分组）
             // 开发交付物：result_data / result_script → 本单 developer 或 admin/publisher
             // 录入物 / 截图 / 示例 / PDF：admin/publisher
-            const isDeveloperUpload = ['result_data', 'result_script'].includes(attachment_type);
+            // C4c：交付物三类（含 result_extra）同组——开发传 extra 到本端点应得到下方 409「请走 /submit」而非 403，与 rd/rs 一致
+            const isDeveloperUpload = collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES.includes(attachment_type);
             if (isDeveloperUpload) {
                 const isOwnDev = request.developer_id === userId;
                 if (!isOwnDev && !isPrivileged) {
@@ -20800,9 +20915,12 @@ app.post('/api/collab/requests/:id/attachments',
             // 状态约束
             // v2.0：交付物（result_data/result_script）只能在 SUBMITTED 后由 POST /:id/submit 走（Deploy 3）；
             //       此通用 endpoint 不再接受 v2.0 交付物类型 — 留给 Deploy 3 的提交 endpoint
-            if (['result_data', 'result_script'].includes(attachment_type)) {
+            // 附件压缩包支持 C4c（Opus 预筛 C4 M1）：validAttachmentTypes 由 Object.keys(COLLAB_ATTACHMENT_RULES) 派生，加 result_extra 规则后
+            //   它自动成为本端点合法类型，但下方 seq 通道只有 sc/ex/ds → allocateAttachmentSeq 抛 INVALID_ALLOC_TYPE → 500 外泄。
+            //   判据改引 VERSIONED_DELIVERY_ATTACHMENT_TYPES（含 extra），交付物三类一律 409 引导到 /submit 或 admin 代提。
+            if (collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES.includes(attachment_type)) {
                 cleanupTempFiles();
-                return res.status(409).json({ error: '交付物（result_data/result_script）请通过 POST /:id/submit 提交（Deploy 3 上线）' });
+                return res.status(409).json({ error: `交付物（${collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES.join('/')}）请通过 POST /:id/submit 或 admin 代提提交（Deploy 3 上线）`, code: 'DELIVERY_TYPE_NOT_ALLOWED_HERE' });
             }
             // v1.67.1 改造：ARCHIVED 归档锁定后仅 admin 可上传（publisher 也拒绝）
             // 与 v1.66.2 archived_at 软删除独立：归档锁定是已交付的历史归档，软删除是未提交前的撤销
@@ -20857,7 +20975,7 @@ app.post('/api/collab/requests/:id/attachments',
             }
 
             // v1.72.0：预分配 attachment_seq（sc/ex/ds 走 attachment_seq 通道）
-            //   通用 upload 仅处理 screenshot / example_xlsx / data_scope（rd/rs 已在前面拦截）
+            //   通用 upload 仅处理 screenshot / example_xlsx / data_scope（rd/rs/re 三类交付物已在前面按 VERSIONED_DELIVERY_ATTACHMENT_TYPES 拦截）
             //   多文件批量上传：每个文件按提交顺序分配 +1 (从 MAX+1 开始)
             const baseSeq = await collabVersioning.allocateAttachmentSeq(
                 { getAsync: dbGetAsync }, id, attachment_type
@@ -21056,7 +21174,8 @@ app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer
         } else if (parent.status === 'DONE') {
             // DONE 状态：开发本人可改自己单的 result_* 交付物（用于修改后重走 smoke test）
             // 截图/example_xlsx 是 admin 创建产物，仅 admin 可改
-            const isResultType = att.attachment_type === 'result_data' || att.attachment_type === 'result_script';
+            // 附件压缩包支持 C6（用户 2026-09-09 裁定 P4「接删除入口」）：result_extra 与 rd/rs 同组——DONE 下当前开发或 admin 可删；不套用「最后一个」警示（补充材料非必备）
+            const isResultType = collabVersioning.VERSIONED_DELIVERY_ATTACHMENT_TYPES.includes(att.attachment_type);
             const isCurrentDeveloper = Number(parent.developer_id) === Number(userId) && Number(parent.developer_id) !== 0;
             if (isResultType) {
                 if (!isCurrentDeveloper && !isAdmin) {

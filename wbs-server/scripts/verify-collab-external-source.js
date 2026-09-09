@@ -319,7 +319,7 @@ async function apiCall(method, urlPath, token, body) {
     return { status: r.status, body: j };
 }
 
-// files: [{ name, content }]，字段名统一 'files'（submitUpload.array('files', 10)）
+// files: [{ name, content }]，字段名统一 'files'（submitUpload.array('files', 15)——附件压缩包支持 C4 起 10→15）
 async function postSubmit(reqId, token, files) {
     const fd = new FormData();
     for (const { name, content } of files) {

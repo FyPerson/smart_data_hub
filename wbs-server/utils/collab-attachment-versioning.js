@@ -54,7 +54,9 @@ const { assertSqlValidationStatus, VALIDATION_MODES } = require('./collab-valida
 //     的导出结果若 admin 也参与）→ 不应入此白名单，由"创建时上传"路径单独管理
 //   - failed 路径目前不 supersede 旧 active（v1.70.0 Step 1 设计），如未来 failed 改造同样需
 //     调用此白名单守卫，防止误伤 admin 附件
-const VERSIONED_DELIVERY_ATTACHMENT_TYPES = ['result_data', 'result_script'];
+// 附件压缩包支持方案 D7（2026-09-09）：result_extra（补充材料压缩包，交付端新类型）同属"开发交付物 +
+//   每次提交可替换"语义，加入白名单——不加则重传后旧压缩包永远 active（04-M1）。
+const VERSIONED_DELIVERY_ATTACHMENT_TYPES = ['result_data', 'result_script', 'result_extra'];
 
 // ---------------------------------------------------------------------------
 // §1 placeholderSmokeTest（codex C2：fail-closed，比 codex 建议更严）
@@ -165,7 +167,8 @@ const ATTACHMENT_TYPE_TO_ABBR = {
     result_script: 'rs',
     screenshot: 'sc',
     example_xlsx: 'ex',
-    data_scope: 'ds'        // v1.77.0 数据范围说明（如"A部门,B部门…"），走 sc/ex 同款 attachment_seq 通道
+    data_scope: 'ds',       // v1.77.0 数据范围说明（如"A部门,B部门…"），走 sc/ex 同款 attachment_seq 通道
+    result_extra: 're'      // 附件压缩包支持方案 D7（2026-09-09）：补充材料压缩包，走 rd/rs 同款 typeOrdinal 通道
 };
 
 /**
@@ -377,22 +380,24 @@ async function activateNewVersion(params) {
     //   failed 行靠 insertFailedAttachments 逐文件 failed_attempt_seq 自增防撞 DB 唯一索引 idx_collab_att_failed_seq_unique。
     //   跨重试 failed 防覆盖（M-C，codex/ultracode 审）：smoke 连续失败重试时 submission_version 不晋升 → newVer/typeOrdinal 重复，
     //      failed rename 已加 existence _rN 去重（见 §3.5 failed 分支），保住每一轮 failed 物理留证不被覆盖。
-    //   仅允许 result_data / result_script 两类（防上游误传第三类绕过计数）。
+    //   允许 result_data / result_script / result_extra 三类（附件压缩包支持方案 D7：result_extra 为可选
+    //   补充材料压缩包，0..5 个，非必备快照成员——防上游误传第四类绕过计数）。
     const countByType = uploadedFiles.reduce((acc, f) => {
         acc[f.attachment_type] = (acc[f.attachment_type] || 0) + 1;
         return acc;
     }, {});
     const dataCount = countByType.result_data || 0;
     const scriptCount = countByType.result_script || 0;
-    const otherTypes = Object.keys(countByType).filter(t => t !== 'result_data' && t !== 'result_script');
-    if (dataCount < 1 || dataCount > 5 || scriptCount < 1 || scriptCount > 5 || otherTypes.length > 0) {
+    const extraCount = countByType.result_extra || 0;
+    const otherTypes = Object.keys(countByType).filter(t => t !== 'result_data' && t !== 'result_script' && t !== 'result_extra');
+    if (dataCount < 1 || dataCount > 5 || scriptCount < 1 || scriptCount > 5 || extraCount > 5 || otherTypes.length > 0) {
         const err = new Error(
-            `完整快照不规范：每次提交必须包含 1..5 个 result_data + 1..5 个 result_script（仅此两类），` +
-            `实际 result_data=${dataCount}, result_script=${scriptCount}` +
+            `完整快照不规范：每次提交必须包含 1..5 个 result_data + 1..5 个 result_script（可选 0..5 个 result_extra），` +
+            `实际 result_data=${dataCount}, result_script=${scriptCount}, result_extra=${extraCount}` +
             (otherTypes.length ? `, 非法类型=${otherTypes.join(',')}` : '')
         );
         err.code = 'INCOMPLETE_SNAPSHOT';
-        err.detail = { dataCount, scriptCount, countByType };
+        err.detail = { dataCount, scriptCount, extraCount, countByType };
         throw err;
     }
 
@@ -452,6 +457,14 @@ async function activateNewVersion(params) {
             }
             fs.renameSync(f.source_path, finalPath);
             movedFiles.push({ ...f, final_path: finalPath, final_name: finalName });
+            // 附件压缩包支持方案 C4（V10 回滚测试挂点）：仅测试注入，生产路径 params.__afterFirstRenameHook
+            // 恒 undefined，本行为零回归。首个 rename 成功后调用一次，供测试构造"首文件已物理落盘、
+            // DB 记录尚未写入"的中间态断言；测试注入的 hook 内可自行 throw 触发本函数既有回滚路径——
+            // 本 try/catch（§3.4）已有"把已 rename 的文件挪回 source_path + 透传错误"的处理，钩子异常
+            // 无需新增专门分支，天然复用。
+            if (movedFiles.length === 1 && typeof params.__afterFirstRenameHook === 'function') {
+                await params.__afterFirstRenameHook({ finalPath, finalName, requestId, newVer, attachmentType: f.attachment_type });
+            }
             // M-4/RC-M2：smoke 跑「第一份」上传脚本（orderedFiles 保序 = 上传序），取首个 result_script 后不再覆盖（原逻辑取最后一个）
             if (f.attachment_type === 'result_script' && scriptFinalPath === null) {
                 scriptFinalPath = finalPath;

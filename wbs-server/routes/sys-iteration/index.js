@@ -28,6 +28,7 @@ const dingtalkNotify = require('../../utils/dingtalk-notify');   // ③ 真钉�
 const sysDeriveNumbering = require('../../utils/sys-derive-numbering');   // [S12-a·§15.2] 派生单子编号唯一权威判定实现——
   // 启动迁移链存量回填 + 独立回填脚本 backfill-sys-derive-root-seq.js + verify-sys-derive-numbering.js 三处同源
   // require（同规则禁双实现，模块头部有完整说明），stateless util 直接 require，对齐 issueNotify/dingtalkNotify 先例。
+const { ARCHIVE_EXTS, ARCHIVE_MAX_SIZE, ARCHIVE_SIZE_BY_EXT } = require('../../utils/attachment-archive');   // 附件压缩包支持方案 D1：三模块共用真相源，stateless util 直接 require
 
 // sysIssueTransition 抛的业务/并发错误（endpoint catch 转 HTTP，对齐 corrections CorrectionTransitionError）。
 class SysTransitionError extends Error {
@@ -14283,10 +14284,45 @@ module.exports = (deps) => {
   const SYS_UPLOAD_BASE = path.join(UPLOAD_DIR, 'sys-iteration');
   const SYS_PENDING_BASE = path.join(SYS_UPLOAD_BASE, '_pending');
   try { if (!fs.existsSync(SYS_UPLOAD_BASE)) fs.mkdirSync(SYS_UPLOAD_BASE, { recursive: true }); } catch (_) { /* 启动期 best-effort */ }
-  // 扩展名白名单（spec=文档/表格/图片 + delivery 交付物 union；不含 zip/exe/可执行脚本/sql，避免任意落盘执行面）。
-  const SYS_ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf',
+  // 附件压缩包支持方案 D3/D11：spec/delivery 放开压缩包（≤50MB 特例），screenshot（验收凭证）不放——
+  //   不做 magic-bytes/不解压/不嗅探（登记接受）：平台只落盘，下载全走鉴权端点 res.download attachment
+  //   disposition，平台侧不内联执行（不等于用户下载后打开安全，这与既有 docx/xls 同口径）；既有类型
+  //   同样只认扩展名，压缩包不额外增加攻击面。
+  const SYS_BASE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf',
     '.xlsx', '.xls', '.docx', '.doc', '.csv', '.txt', '.md'];
+  const SYS_ATTACHMENT_RULES = {
+    spec:       { exts: SYS_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+    delivery:   { exts: SYS_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+    screenshot: { exts: SYS_BASE_EXTS,                      sizeByExt: null,                defaultSize: 20 * 1024 * 1024 }
+  };
+  // 派生联合白名单（符号名保留，供 fileFilter / _internals 既有消费者不变）。
+  const SYS_ALLOWED_EXTS = Array.from(new Set(
+    Object.values(SYS_ATTACHMENT_RULES).flatMap((r) => r.exts)
+  ));
   const SYS_ATTACH_TYPES = ['delivery', 'screenshot', 'spec'];
+  // 二次卡（方案 D12，签名与 validateCollabAttachmentRule 同构）：attachment_type 判定后、persist 前逐文件判。
+  //   返回 { ok:true, normalizedExt, sizeLimit } 或 { ok:false, reason, error, ext, sizeLimit }
+  //   （ext/sizeLimit 在 EXT_NOT_ALLOWED / BAD_NAME 时为 null）。
+  function validateSysAttachmentRule(attachmentType, originalname, size) {
+    // hasOwnProperty 守：'__proto__' 之类原型键经 _internals 直调会命中 Object.prototype（truthy）→ rule.exts 抛 TypeError；
+    //   契约要求恒返回 { ok:false }（Opus 预筛 L3）。
+    const rule = Object.prototype.hasOwnProperty.call(SYS_ATTACHMENT_RULES, attachmentType) ? SYS_ATTACHMENT_RULES[attachmentType] : null;
+    if (!rule) {
+      return { ok: false, reason: 'EXT_NOT_ALLOWED', error: `不支持的 attachment_type: ${attachmentType}`, ext: null, sizeLimit: null };
+    }
+    const ext = normalizeAttachmentExt(originalname);
+    if (!ext) {
+      return { ok: false, reason: 'BAD_NAME', error: '文件名为空或包含非法字符', ext: null, sizeLimit: null };
+    }
+    if (!rule.exts.includes(ext)) {
+      return { ok: false, reason: 'EXT_NOT_ALLOWED', error: `${attachmentType} 不支持扩展名 ${ext}，仅允许 ${rule.exts.join('/')}`, ext: null, sizeLimit: null };
+    }
+    const sizeLimit = (rule.sizeByExt && rule.sizeByExt[ext]) || rule.defaultSize;
+    if (typeof size === 'number' && size > sizeLimit) {
+      return { ok: false, reason: 'SIZE_EXCEEDED', error: `${attachmentType} (${ext}) 文件大小超限：${(size / 1024 / 1024).toFixed(1)}MB > ${(sizeLimit / 1024 / 1024).toFixed(0)}MB`, ext, sizeLimit };
+    }
+    return { ok: true, normalizedExt: ext, sizeLimit };
+  }
   // A3（codex C-M3）：原始文件名规范化——去 C0 控制字符/换行 + trim + 截长（保扩展名）+ 空回退；
   //   入库 original_name + 下载名都用规范化值，杜绝响应头兼容/日志污染/前端展示风险。
   function sanitizeSysOriginalName(raw) {
@@ -14315,11 +14351,18 @@ module.exports = (deps) => {
   });
   const sysUpload = multer({
     storage: sysStorage,
-    limits: { fileSize: 20 * 1024 * 1024, files: 5 },   // 单文件 20MB，单次最多 5 个
+    // 顶上限抬到 50MB（压缩包特例，方案 D2）；非压缩包 20MB 靠二次卡收口，单次最多 5 个。
+    // ⚠️ busboy 1.6 off-by-one（node_modules/busboy/lib/types/multipart.js:476）：累计字节数
+    //   `fileSize === fileSizeLimit` 时即判 truncated——恰好等于上限的文件会被误判超限。方案 §5 V2b
+    //   要求「恰 50MB → 2xx」（诉求原话"不大于 50MB"，50MB 本身应放行），故 limit 设为 ARCHIVE_MAX_SIZE+1，
+    //   使真实边界落在"50MB 通过 / 50MB+1 字节拒绝"（V2b 断言即按此核实）。
+    limits: { fileSize: ARCHIVE_MAX_SIZE + 1, files: 5 },
     fileFilter: function (req, file, cb) {
       const ext = normalizeAttachmentExt(file.originalname);
       if (!ext) return cb(new Error('文件名为空或包含非法字符'));
-      if (!SYS_ALLOWED_EXTS.includes(ext)) return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${SYS_ALLOWED_EXTS.join('/')}`));
+      // fileFilter 早于 attachment_type 解析（multipart 字段顺序不保证），拿不到类型；消息按 BASE + 压缩包限定说准，
+      //   不把「仅允许 …/.zip」原样吐给 screenshot 上传者（Opus 预筛 L2·与方案 D9 issueUpload 同一原则）。
+      if (!SYS_ALLOWED_EXTS.includes(ext)) return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${SYS_BASE_EXTS.join('/')}；压缩包 ${ARCHIVE_EXTS.join('/')} 仅需求材料/交付物可用`));
       cb(null, true);
     }
   });
@@ -14478,6 +14521,30 @@ module.exports = (deps) => {
       //   与其指派权同批收窄口径一致）。SELECT 补 intake_liaison_id 供判据（isBoundLiaisonEligibleOrAdmin 读 row 该列）。
       const isCoordinator = await isBoundLiaisonEligibleOrAdmin(actor, row);
       const files = Array.isArray(req.files) ? req.files : [];
+
+      // 附件压缩包支持方案 D12：attachment_type 合法性判定之后、sysPersistAttachments 之前，逐文件二次卡
+      //   （multer fileFilter 已挡联合白名单外扩展名 + 顶上限 50MB；这里补 screenshot 不放压缩包 + 非压缩包
+      //   仍 20MB 的精确口径）。任一文件不合规 → 清理本请求已落盘文件 → 400 ATTACHMENT_RULE_VIOLATION。
+      //   位置刻意早于授权门（spec/delivery 两分支的 403 在下方）：与 multer fileFilter 同层级（fileFilter 更早就把联合白名单
+      //   吐给了任何已登录用户），泄漏面不大于既有。⚠️ 这是本模块**有意的例外**：协作 admin 代提（server.js :20874 一带）与
+      //   修正三挂点（corrections.js /complete /resubmit /attachments）都是 403 先于二次卡 400，本处刻意反过来
+      //   （Opus 预筛 C2 M6 订正：原注释误把本处例外写成三模块共识）。
+      //   既有 403/409/NO_FILE 六条拒绝路径与 catch/finally 均调 sysCleanupOrphanFiles，插入本卡不改变清理覆盖面（Opus 预筛 L1 逐路径核）。
+      for (const f of files) {
+        const check = validateSysAttachmentRule(attachmentType, f.originalname, f.size);
+        if (!check.ok) {
+          sysCleanupOrphanFiles(req, id);
+          return res.status(400).json({
+            error: check.error,
+            code: 'ATTACHMENT_RULE_VIOLATION',
+            attachment_type: attachmentType,
+            file: f.originalname,
+            reason: check.reason,
+            ext: check.ext,
+            limit_mb: check.reason === 'SIZE_EXCEEDED' ? Math.round(check.sizeLimit / 1024 / 1024) : null
+          });
+        }
+      }
 
       if (attachmentType === 'spec') {
         // C5（§5.4）：需求材料上传 = 协调人（对接人∨admin）∧ 状态∉SYS_TERMINAL——原仅 admin+非作废两处均按
@@ -20397,6 +20464,8 @@ module.exports = (deps) => {
     SYS_PENDING_BASE,
     SYS_ALLOWED_EXTS,
     SYS_ATTACH_TYPES,
+    SYS_ATTACHMENT_RULES,
+    validateSysAttachmentRule,
     // C4：上线批次（verify-sys-release require 真实逻辑）
     publishReleaseTransition,
     // [组 B·B1] 内核直调导出——同 publishReleaseTransition 先例（该函数自己的定义处注释："仅供 verify

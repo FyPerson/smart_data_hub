@@ -1038,8 +1038,8 @@
                 </div>
                 <div class="u-form-group" id="formRow_files">
                     <label>原始单据截图 <span class="u-hint">（选传）</span></label>
-                    <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,image/*" multiple>
-                    <div class="u-hint">最多 5 个文件 / 单文件 ≤ 10MB / 支持 PNG·JPG·GIF·WEBP·PDF。OA 截图、对话截图、邮件截图、OA 导出 PDF 单据均可（选传）。</div>
+                    <input type="file" id="f_files" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.rar,.7z,image/*" multiple>
+                    <div class="u-hint">最多 5 个文件 / 单文件 ≤ 10MB（压缩包 zip/rar/7z 单个≤50MB）/ 支持 PNG·JPG·GIF·WEBP·PDF·ZIP·RAR·7Z。OA 截图、对话截图、邮件截图、OA 导出 PDF 单据、打包佐证材料均可（选传）。</div>
                     <div id="filePreview" class="file-preview"></div>
                 </div>
                 <div class="u-form-group" id="formRow_template">
@@ -1050,8 +1050,8 @@
                 </div>
                 <div class="u-form-group" id="formRow_dataScope">
                     <label>数据范围说明 <span class="u-hint">（选传）</span></label>
-                    <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt" multiple>
-                    <div class="u-hint">可多个文件（.xlsx / .xls / .txt），每个 ≤ 10MB，最多 5 个。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
+                    <input type="file" id="f_data_scope" accept=".xlsx,.xls,.txt,.zip,.rar,.7z" multiple>
+                    <div class="u-hint">可多个文件（.xlsx / .xls / .txt / 压缩包 zip/rar/7z），每个 ≤ 10MB（压缩包 zip/rar/7z 单个≤50MB），最多 5 个。需求方圈定取数范围（如"A部门、B部门…"），供开发按范围取数；不参与列对齐校验。</div>
                     <div id="dataScopePreview" class="file-preview"></div>
                 </div>
             </div>
@@ -1111,6 +1111,13 @@
                     <label>补传结果数据 <span class="u-hint">（可选，.xlsx / .xls 文件 ≤ 100MB）</span></label>
                     <input type="file" id="f_admin_submit_data" accept=".xlsx,.xls">
                     <div class="u-hint">如开发未上传过结果数据 / 需要 admin 替开发补全，可在此选传。同 attachment_type 旧版本会被自动归档。</div>
+                </div>
+                <!-- 附件压缩包支持方案 D8：admin 代提补充材料（压缩包），多选 ≤5 个 -->
+                <div class="u-form-group">
+                    <label>补传补充材料 <span class="u-hint">（可选，压缩包 zip/rar/7z 单个≤50MB，最多 5 个）</span></label>
+                    <input type="file" id="f_admin_submit_extra" accept=".zip,.rar,.7z" multiple>
+                    <div class="u-hint">如需补传大文件/多文件打包的佐证材料，可在此选传压缩包，不做内容校验、不跑 smoke test。压缩包 zip/rar/7z 单个≤50MB，最多 5 个（与 SQL 脚本、结果数据合计不超过 5 个）。</div>
+                    <div id="adminSubmitExtraPreview" class="file-preview"></div>
                 </div>
             </div>
             <div class="u-modal-footer">
@@ -1247,6 +1254,14 @@
                     <div class="u-hint">扩展名 .xlsx / .xls，每个 ≤ 100MB，最多 5 个。本地跑出的取数结果供业务方验收对照；第一份参与列对齐校验，其余为附带交付物。</div>
                     <div id="deliveryDataPreview" class="file-preview"></div>
                 </div>
+                <!-- 附件压缩包支持方案 D7：交付新类型 result_extra（补充材料压缩包），多选 ≤5 个，与 SQL/结果数据合计不超过 15 个 -->
+                <div class="u-form-group">
+                    <label>补充材料 <span class="u-hint">（选填，压缩包 zip/rar/7z 单个≤50MB，最多 5 个）</span></label>
+                    <input type="file" id="f_delivery_extra" accept=".zip,.rar,.7z" multiple>
+                    <div class="u-hint">补充证据/大文件打包等非结构化材料，选填，不参与列对齐校验、不影响 smoke test。</div>
+                    <div id="deliveryExtraPreview" class="file-preview"></div>
+                </div>
+                <div class="u-hint" id="deliveryUnionCountHint" style="margin-top:4px;color:#6b7280;">SQL 脚本 + 结果数据 + 补充材料三类合计不超过 15 个。</div>
                 <div class="u-hint" style="margin-top:8px;color:#6b7280;" id="submitGeneralSmokeHint">
                     提交后系统会对 SQL 脚本做 4 层防御 smoke test（语法解析 / 黑名单 / 只读校验 / 真连业务库试跑）。验收通过协作单进入 DONE，否则停留 SUBMITTED 状态并显示错误，可继续重提。
                 </div>
@@ -3000,6 +3015,19 @@
                         <div class="screenshot-meta">${safeDisplay}</div>
                     </div>`;
                 }
+                // 附件压缩包支持方案 D10：非 PDF 且非图片扩展名（压缩包及其他未知扩展名统一）→ 通用分支，
+                //   📦 图标 + 文件名 + 点击走 buildAttachmentDownloadUrl（/uploads 静态服务链接，非鉴权端点；同 PDF 分支，见方案 R1b/P3）。
+                const isImg = /\.(png|jpe?g|gif|webp)$/i.test(displayName) || /\.(png|jpe?g|gif|webp)$/i.test(String(f.file_name || ''));
+                if (!isImg) {
+                    return `<div class="screenshot-item">
+                        <a href="${urlAttr}" target="_blank" rel="noopener" title="${safeDisplay}（点击下载）"
+                           style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-decoration:none;color:#374151;background:#f3f4f6;">
+                            <span style="font-size:28px;line-height:1;">📦</span>
+                            <span style="font-size:10px;margin-top:4px;">${escapeHtml((displayName.split('.').pop() || '文件').toUpperCase())}</span>
+                        </a>
+                        <div class="screenshot-meta">${safeDisplay}</div>
+                    </div>`;
+                }
                 return `<div class="screenshot-item">
                     <img class="clickable-thumbnail" src="${urlAttr}" alt="${safeDisplay}" title="${safeDisplay}（点击放大）" data-lightbox-url="${urlAttr}" data-lightbox-caption="${safeDisplay}">
                     <div class="screenshot-meta">${safeDisplay}</div>
@@ -3494,6 +3522,37 @@
                 a => (a.attachment_type === 'result_data' || a.attachment_type === 'result_script')
                   && (a.status === 'active' || !a.status)  // 兼容 status 字段未填的旧数据
             ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));  // M3：按 id 升序=上传序，"第一份"视觉居首对齐取首语义（codex 缺失 id 排末）
+            // 附件压缩包支持方案 D7/D10：补充材料（result_extra，压缩包），独立于 result_data/result_script
+            //   的必备交付物计数，只读展示 + 既有 buildAttachmentDownloadUrl 静态下载链接（/uploads 静态服务非鉴权端点，见方案 D11/R1b、待追认 P3；本批不接删除入口）。
+            const extraFiles = (d.attachments || []).filter(
+                a => a.attachment_type === 'result_extra' && (a.status === 'active' || !a.status)
+            ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
+            const renderExtraSectionHtml = () => {
+                if (extraFiles.length === 0) return '';
+                const extraItems = extraFiles.map(f => {
+                    const built = buildAttachmentDownloadUrl(f.file_name);
+                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '附件');
+                    const linkHtml = built.ok
+                        ? `<a class="delivery-link" href="${escapeHtmlAttr(built.url)}" target="_blank" rel="noopener" download="${escapeHtml(displayName)}">${escapeHtml(displayName)}</a>`
+                        : `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
+                    // C6（用户裁定 P4）：接删除入口，与 rd/rs 行同一 canModifyDelivery 门（DONE 且当前开发或 admin）；不套用「最后一个」警示
+                    const extraDeleteBtn = canModifyDelivery
+                        ? `<button class="btn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;padding:2px 8px;font-size:12px;margin-left:8px;" onclick="deleteDeliveryAttachment(${f.id}, ${d.id}, 'result_extra', 0)">删除</button>`
+                        : '';
+                    return `
+                        <div class="delivery-item">
+                            <span class="delivery-type">📦 补充材料</span>
+                            ${linkHtml}
+                            <span class="delivery-meta">${escapeHtml(f.uploaded_by_name || '—')} · ${fmtDate(f.created_at)}</span>
+                            ${extraDeleteBtn}
+                        </div>`;
+                }).join('');
+                return `
+                    <div class="u-detail-section">
+                        <div class="detail-section-title">补充材料（压缩包）</div>
+                        <div class="detail-section-body">${extraItems}</div>
+                    </div>`;
+            };
             // v1.67.1：判断当前用户是否为本单 developer，DONE 且非 ARCHIVED 允许删/重传交付物
             const myId = Number(getCurrentUserId());
             const isCurrentDeveloper = d.developer_id && Number(d.developer_id) === myId && Number(d.developer_id) !== 0;
@@ -3513,7 +3572,9 @@
                 //   从未提交过交付物的单不会是 DONE，用 status==='DONE' 区分「从未提交」vs「删光」；
                 //   作废/归档终态（collabTerminalKind!=='active'）无重传语义，维持不渲染。
                 if (d.status !== 'DONE' || collabTerminalKind(d) !== 'active') {
-                    return ''; // 未提交过交付物（或终态单），不显示区块
+                    // C4c（Opus 预筛 C4 L1）：无 active rd/rs 但有 result_extra（仅 extra 代提后作废/归档）时压缩包仍应可见——
+                    //   三个 return 分支都拼补充材料区块，不让 active 的压缩包在页面消失。
+                    return renderExtraSectionHtml(); // 未提交过正式交付物（或终态单）不显示交付区块，只显示补充材料（若有）
                 }
                 const emptyReuploadBtn = canModifyDelivery
                     ? `<div style="margin-top:12px;">
@@ -3533,7 +3594,7 @@
                             </div>
                             ${emptyReuploadBtn}
                         </div>
-                    </div>`;
+                    </div>${renderExtraSectionHtml()}`;
             }
 
             // M3 透明度计数（上移到 map 前：#11 删除警示需按类型计数判断"最后一个数据文件"）
@@ -3575,7 +3636,7 @@
                 <div class="u-detail-section">
                     <div class="detail-section-title">交付内容</div>
                     <div class="detail-section-body">${items}${multiNote}${reuploadBtn}</div>
-                </div>`;
+                </div>${renderExtraSectionHtml()}`;
         }
 
         // v1.70.0 方案 §1.2.6 失败提交历史区块
@@ -3680,7 +3741,9 @@
             const isLastData = attType === 'result_data' && Number(activeDataCnt) === 1;
             const confirmMsg = isLastData
                 ? '⚠️ 这是本单最后一个数据文件！\n\n删除后本单将没有可发送的数据，无法给业务方发送完成通知；需重新上传交付物并重走 smoke test 验收后才能恢复。\n\n确定删除？'
-                : '确定删除此交付物？删除后请重新上传，将自动重走 smoke test 验收。';
+                : (attType === 'result_extra'
+                    ? '确定删除此补充材料（压缩包）？补充材料不参与校验，删除不影响验收状态，不会重走 smoke test。'   // C6（用户裁定 P4）
+                    : '确定删除此交付物？删除后请重新上传，将自动重走 smoke test 验收。');
             if (!confirm(confirmMsg)) return;
             try {
                 const res = await authFetch(`/api/collab/attachments/${attId}`, { method: 'DELETE' });
@@ -4584,11 +4647,16 @@
             document.getElementById('submitDeliveryTitle').textContent = `上传交付物 · 协作单 #${id}`;
             document.getElementById('f_delivery_script').value = '';
             document.getElementById('f_delivery_data').value = '';
-            // M3 多文件：重置交付数组 + 预览
+            const dlExtraInput = document.getElementById('f_delivery_extra');
+            if (dlExtraInput) dlExtraInput.value = '';
+            // M3 多文件：重置交付数组 + 预览（附件压缩包支持方案 D7：selectedDeliveryExtra 生命周期与
+            //   selectedDeliveryScript/Data 同源——弹窗打开清空）
             selectedDeliveryScript = [];
             selectedDeliveryData = [];
+            selectedDeliveryExtra = [];
             renderDeliveryScriptPreview();
             renderDeliveryDataPreview();
+            renderDeliveryExtraPreview();
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = false;
             btn.textContent = '提交';
@@ -4628,12 +4696,22 @@
             if (selectedDeliveryScript.length > MULTI_FILE_MAX || selectedDeliveryData.length > MULTI_FILE_MAX) {
                 showToast(`SQL 脚本与结果数据各最多 ${MULTI_FILE_MAX} 个`, 'error'); return;
             }
+            // 附件压缩包支持方案 D7：补充材料（result_extra）0..5 个，非必备；三类合计不超过 submitUpload 15 上限
+            //   （前端体验层提示，后端各类型各自 ≤5 是真闸）。
+            if (selectedDeliveryExtra.length > MULTI_FILE_MAX) {
+                showToast(`补充材料最多 ${MULTI_FILE_MAX} 个`, 'error'); return;
+            }
+            // C5a Playwright 实测：三类各 ≤5（上方逐类先拦）⇒ 合计恒 ≤15=DELIVERY_UNION_MAX，「合计 >15」分支数学不可达，删除死代码；
+            //   DELIVERY_UNION_MAX 保留为后端 submitUpload files:15 的前端同值声明（静态守卫对拍 + hint 文案用）。
 
             const fd = new FormData();
-            // 后端按扩展名自动分类（xlsx/xls=result_data，sql/txt=result_script），全用 files 字段。
-            // 顺序：脚本在前→第一份脚本即上传序首个，对齐后端 smoke「取第一份脚本」（M-4）；数据在后第一份参与列校验。
+            // 后端按扩展名自动分类（xlsx/xls=result_data，sql/txt=result_script，zip/rar/7z=result_extra），全用 files 字段。
+            // 顺序：脚本在前→第一份脚本即上传序首个，对齐后端 smoke「取第一份脚本」（M-4）；数据在后第一份参与列校验；
+            // 补充材料在最后追加（附件压缩包支持方案 D7：script → data → extra 只是前端 FormData 追加顺序，
+            // 后端 orderedFiles 保持 req.files 原序不重排，各类型内按出现顺序计 typeOrdinal）。
             selectedDeliveryScript.forEach(f => fd.append('files', f));
             selectedDeliveryData.forEach(f => fd.append('files', f));
+            selectedDeliveryExtra.forEach(f => fd.append('files', f));
 
             const btn = document.getElementById('btnSubmitDelivery');
             btn.disabled = true;
@@ -5899,7 +5977,12 @@
         const MAX_FILE_SIZE = 10 * 1024 * 1024;
         // 录入弹窗 attachment_type=screenshot：图片 + PDF（v1.77.0 放开 PDF——原始单据常为 OA 导出 PDF；
         // 导出截图入口 result_data_screenshot 仍仅图片，后端单独排除）
-        const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'];
+        // 附件压缩包支持方案 D6：screenshot（原始单据）放开压缩包（≤50MB 特例）。
+        const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'zip', 'rar', '7z'];
+        // 附件压缩包支持方案 D1/D10：三扩展名与 50MB 上限须与后端 utils/attachment-archive.js 真相源同值——
+        //   本页是静态 HTML 无法 require，字面量由 scripts/verify-collab-attach-archive-static.js 与真相源对拍。
+        const COLLAB_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
+        const COLLAB_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
 
         // v1.67.0 数据模板：单文件 .xlsx/.xls，attachment_type=example_xlsx（后端 D2 已预留，本次接通前端入口）
         // 前端限定仅 .xlsx/.xls，后端 example_xlsx 允许范围更宽（含 pdf/docx/img），UI 层拦截避免 admin 误用
@@ -5909,9 +5992,10 @@
 
         // v1.77.0 数据范围说明：attachment_type=data_scope（多文件上传 M3：单文件→数组，各≤5）
         // 质量校验列对齐只取 example_xlsx，data_scope 不参与比对（独立类型隔离）
+        // 附件压缩包支持方案 D6：data_scope 放开压缩包（≤50MB 特例）。
         let selectedDataScope = [];
         const DATA_SCOPE_MAX_SIZE = 10 * 1024 * 1024;
-        const DATA_SCOPE_ALLOWED_EXTS = ['xlsx', 'xls', 'txt'];
+        const DATA_SCOPE_ALLOWED_EXTS = ['xlsx', 'xls', 'txt', 'zip', 'rar', '7z'];
 
         // 多文件上传 M3：开发完成·交付结果（result_data + result_script）单文件→数组，各≤5
         let selectedDeliveryScript = [];
@@ -5921,6 +6005,15 @@
         const DELIVERY_DATA_EXTS = ['xlsx', 'xls'];
         const DELIVERY_DATA_MAX = 100 * 1024 * 1024;
         const MULTI_FILE_MAX = 5;
+        // 附件压缩包支持方案 D7：交付新类型 result_extra（补充材料压缩包），单文件→数组，≤5，与 script/data
+        //   合计不超过 submitUpload 的 15 上限（联合计数提示，非独立后端约束——后端各类型各自 ≤5）。
+        //   常量与 admin 代提弹窗的 selectedAdminSubmitExtra 共用同一份大小/扩展名口径。
+        let selectedDeliveryExtra = [];
+        const DELIVERY_EXTRA_EXTS = COLLAB_ARCHIVE_EXTS;
+        const DELIVERY_EXTRA_MAX = COLLAB_ARCHIVE_MAX_SIZE;
+        const DELIVERY_UNION_MAX = 15;
+        // admin 代提弹窗补充材料（压缩包），同一套常量/收集函数复用
+        let selectedAdminSubmitExtra = [];
 
         // 多文件通用收集：去重(name+size+lastModified) + ≤5 + 扩展名/大小校验（RC2-L2）
         function collectFilesInto(targetArr, fileList, allowedExts, maxSize, label) {
@@ -5928,7 +6021,11 @@
                 if (targetArr.length >= MULTI_FILE_MAX) { showToast(`${label}最多 ${MULTI_FILE_MAX} 个文件`, 'error'); break; }
                 const ext = f.name.split('.').pop().toLowerCase();
                 if (!allowedExts.includes(ext)) { showToast(`${label}不支持的格式：${f.name}`, 'error'); continue; }
-                if (f.size > maxSize) { showToast(`${f.name} 超过 ${(maxSize / 1024 / 1024).toFixed(0)}MB`, 'error'); continue; }
+                // 附件压缩包支持方案 D10：大小判定按扩展名分流——仅当调用方 allowedExts 本身放开了压缩包
+                //   （目前只有 DATA_SCOPE_ALLOWED_EXTS）时，压缩包按 50MB；其余扩展名沿用调用方 maxSize。
+                const isArchive = COLLAB_ARCHIVE_EXTS.includes(ext) && allowedExts.includes(ext);
+                const sizeLimit = isArchive ? COLLAB_ARCHIVE_MAX_SIZE : maxSize;
+                if (f.size > sizeLimit) { showToast(`${f.name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`, 'error'); continue; }
                 if (targetArr.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
                 }
@@ -5975,8 +6072,11 @@
                     showToast(`不支持的文件类型: ${f.name}`, 'error');
                     continue;
                 }
-                if (f.size > MAX_FILE_SIZE) {
-                    showToast(`${f.name} 超过 10MB`, 'error');
+                // 附件压缩包支持方案 D10：大小判定按扩展名分流，压缩包 50MB / 其余沿用既有 10MB。
+                const isArchive = COLLAB_ARCHIVE_EXTS.includes(ext);
+                const sizeLimit = isArchive ? COLLAB_ARCHIVE_MAX_SIZE : MAX_FILE_SIZE;
+                if (f.size > sizeLimit) {
+                    showToast(`${f.name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`, 'error');
                     continue;
                 }
                 selectedFiles.push(f);
@@ -6000,7 +6100,7 @@
         //     ① f_files（原始单据截图，newModal 内，selectedFiles 数组范式）
         //     ② f_export_screenshot（导出界面截图，exportUploadModal 内，单文件裸 input，无预览容器）
         //   目标容器：① 用兄弟预览 div #filePreview（复用既有校验闸门 collectIntoSelectedFiles +
-        //   renderFilePreview，去重/数量上限(5)/白名单/大小(10MB) 全部同源）；② 该字段是必填单文件，
+        //   renderFilePreview，去重/数量上限(5)/白名单/大小（图片·PDF 10MB、压缩包 50MB）全部同源）；② 该字段是必填单文件，
         //   贴图产生新文件时"替换"而非"追加"——单文件槽位本就只能容纳一个文件，与该字段"重选即替换"的
         //   原生语义一致（不同于 f_files 的多文件"追加"）。
         //   scopeResolver：newModal / exportUploadModal 两个弹窗互斥，同 Data_Correction corrPasteScopeResolver
@@ -6239,6 +6339,7 @@
             //   - 事件委托：单击 img 触发 lightbox（remove-btn stopPropagation 避免误触）
             // codex 27 审 #7 拍板：object URL 不 revoke 不采纳收敛（创建弹窗 ≤5 文件 × ≤10MB；
             // 弹窗关闭整页刷新会自动 GC；codex 自承"内网小图数量少时影响有限"。未来若放开数量/体积上限再补 revoke）
+            //   2026-09-09 附件压缩包：体积上限只对压缩包放到 50MB，压缩包走下方非图片分支不调 createObjectURL，本条前提（图片 ≤10MB）不变（Opus 预筛 C3 M4）。
             wrap.innerHTML = selectedFiles.map((f, idx) => {
                 const safeName = escapeHtml(f.name);
                 const isPdf = /\.pdf$/i.test(f.name);
@@ -6246,6 +6347,18 @@
                     return `<div class="file-item" title="${safeName}">
                         <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:90px;background:#fef3c7;color:#92400e;border-radius:4px;">
                             <span style="font-size:26px;line-height:1;">📄</span>
+                            <span style="font-size:10px;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
+                        </div>
+                        <button class="remove-btn" onclick="event.stopPropagation();removeFile(${idx})" title="移除">×</button>
+                    </div>`;
+                }
+                // 附件压缩包支持方案 D10：非 PDF 且非图片扩展名（压缩包及其他未知扩展名统一）→ 通用分支，
+                //   文件名占位（不做 blob 预览，弹窗选择阶段无需真的读取压缩包内容）。
+                const isImg = /\.(png|jpe?g|gif|webp)$/i.test(f.name);
+                if (!isImg) {
+                    return `<div class="file-item" title="${safeName}">
+                        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:90px;background:#f3f4f6;color:#374151;border-radius:4px;">
+                            <span style="font-size:26px;line-height:1;">📦</span>
                             <span style="font-size:10px;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${safeName}</span>
                         </div>
                         <button class="remove-btn" onclick="event.stopPropagation();removeFile(${idx})" title="移除">×</button>
@@ -6357,6 +6470,33 @@
         }
         function renderDeliveryDataPreview() {
             renderSimpleFileList(selectedDeliveryData, 'deliveryDataPreview', 'removeDeliveryData', '📊');
+        }
+        // 附件压缩包支持方案 D7/D10：交付弹窗补充材料（result_extra，压缩包），复用既有 collectFilesInto +
+        //   renderSimpleFileList 范式（同 selectedDeliveryScript/Data 同款三件套：change 收集 / remove / render）。
+        function onDeliveryExtraChange(e) {
+            collectFilesInto(selectedDeliveryExtra, e.target.files, DELIVERY_EXTRA_EXTS, DELIVERY_EXTRA_MAX, '补充材料');
+            renderDeliveryExtraPreview();
+            e.target.value = '';
+        }
+        function removeDeliveryExtra(idx) {
+            selectedDeliveryExtra.splice(idx, 1);
+            renderDeliveryExtraPreview();
+        }
+        function renderDeliveryExtraPreview() {
+            renderSimpleFileList(selectedDeliveryExtra, 'deliveryExtraPreview', 'removeDeliveryExtra', '📦');
+        }
+        // admin 代提弹窗补充材料（同一套常量/收集函数复用，独立数组与预览容器）
+        function onAdminSubmitExtraChange(e) {
+            collectFilesInto(selectedAdminSubmitExtra, e.target.files, DELIVERY_EXTRA_EXTS, DELIVERY_EXTRA_MAX, '补充材料');
+            renderAdminSubmitExtraPreview();
+            e.target.value = '';
+        }
+        function removeAdminSubmitExtra(idx) {
+            selectedAdminSubmitExtra.splice(idx, 1);
+            renderAdminSubmitExtraPreview();
+        }
+        function renderAdminSubmitExtraPreview() {
+            renderSimpleFileList(selectedAdminSubmitExtra, 'adminSubmitExtraPreview', 'removeAdminSubmitExtra', '📦');
         }
 
         // v1.66.2 新建/编辑共享 modal 状态
@@ -6860,6 +7000,12 @@
             const dataInput = document.getElementById('f_admin_submit_data');
             if (scriptInput) scriptInput.value = '';
             if (dataInput) dataInput.value = '';
+            // 附件压缩包支持方案 D8：补充材料（result_extra）重置——数组 + 裸 input 双清空（弹窗打开清空，
+            //   生命周期与 selectedDeliveryScript 同源）
+            const adminExtraInputReset = document.getElementById('f_admin_submit_extra');
+            if (adminExtraInputReset) adminExtraInputReset.value = '';
+            selectedAdminSubmitExtra = [];
+            renderAdminSubmitExtraPreview();
             const btn = document.getElementById('btnAdminSubmit');
             btn.disabled = false;
             btn.textContent = '确认闭环';
@@ -6890,6 +7036,13 @@
             const dataFile = dataInput && dataInput.files && dataInput.files[0];
             if (scriptFile) fd.append('result_script', scriptFile);
             if (dataFile) fd.append('result_data', dataFile);
+            // 附件压缩包支持方案 D8：补充材料（result_extra），多文件同字段名重复 append（multer.fields maxCount:5）
+            if (selectedAdminSubmitExtra.length > MULTI_FILE_MAX) { showToast(`补充材料最多 ${MULTI_FILE_MAX} 个`, 'error'); return; }
+            // C4c（Opus 预筛 C4 M2）：代提走 collabUpload（limits.files:5，整批上限），不是 /submit 的 15；三类合计超 5 后端会以全局文案 400，
+            //   前端先拦并说清合计口径。
+            const adminTotal = selectedAdminSubmitExtra.length + (scriptFile ? 1 : 0) + (dataFile ? 1 : 0);
+            if (adminTotal > 5) { showToast(`本次代提三类文件合计最多 5 个（当前 ${adminTotal} 个）`, 'error'); return; }
+            selectedAdminSubmitExtra.forEach(f => fd.append('result_extra', f));
 
             const btn = document.getElementById('btnAdminSubmit');
             btn.disabled = true;
@@ -7068,6 +7221,11 @@
             if (dlScript) dlScript.addEventListener('change', onDeliveryScriptChange);
             const dlData = document.getElementById('f_delivery_data');
             if (dlData) dlData.addEventListener('change', onDeliveryDataChange);
+            // 附件压缩包支持方案 D7：交付弹窗/admin 代提弹窗补充材料 input change 绑定
+            const dlExtra = document.getElementById('f_delivery_extra');
+            if (dlExtra) dlExtra.addEventListener('change', onDeliveryExtraChange);
+            const adminExtraInput = document.getElementById('f_admin_submit_extra');
+            if (adminExtraInput) adminExtraInput.addEventListener('change', onAdminSubmitExtraChange);
 
             // 等 app.js 把用户信息加载好后再加载列表
             await loadActiveUsers();
