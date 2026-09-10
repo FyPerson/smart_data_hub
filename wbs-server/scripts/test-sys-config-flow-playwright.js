@@ -3,7 +3,10 @@
  *
  * 方案：docs/local/系统迭代/config流激活_方案_20260907_v1.0.md（§3/§4/§6）
  * 派单 spec：E:/tmp/lt0907-s1c-spec.md
- * 后端契约：S1a `59325ccf`（状态机/端点/execModes）+ S1b `25eececc`（sys_issues 受控重建，config 可带 release_id）
+ * 后端契约：S1a `59325ccf`（状态机/端点）+ S1b `25eececc`（sys_issues 受控重建，config 可带 release_id）。
+ * [#56·2026-09-10] D1/D13 引入的「执行方式（exec_mode）/乙方名称（vendor_name）」指派契约已随用户拍板
+ * 整组下线（assign/reassign 不再要求/读取/校验/写入该二字段，GET meta 不再下发 execModes）——本文件
+ * 原覆盖该契约的 T3/T3v/T4（执行方式部分）/T13/AJ3/AI5/MUT5/MUT6 已整组删除，详见下方覆盖表标注。
  *
  * 骨架抄 test-sys-accept-evidence-playwright.js（JWT 注入登录 + login.html 中继跳转 + 直查库断言范式）。
  * 前端改动是静态文件即时生效，不需重启本地 server（本文件只读/只走真实 HTTP+DB，不重启/不 kill 任何进程）。
@@ -12,8 +15,9 @@
  *   T1  admin：建单弹层类型下拉含「配置变更」+ 对接人必填校验 + UI 建单成功
  *   T2  admin：受理弹层 config 显示风险等级选择并必填（发现于本批的阻断性缺口修复，见 Sys_Iteration.html
  *       siModalIntakeAccept riskApplicable 处注释——原 isChange 判据漏 config，会导致整条受理链路 400）
- *   T3  admin：指派弹层执行方式三选 + 乙方名称联动（vendor 必填/非 vendor 隐藏清空）
- *   T4  详情 kv 显示执行方式 + 乙方名称
+ *   [T3 已删除·#56] 原：指派弹层执行方式三选 + 乙方名称联动——UI 已不渲染该单选组，无对应行为可测。
+ *   T4  详情 kv 显示风险等级；负向断言 kv 不再出现「执行方式/乙方名称」两行（#56 契约已下线，原还
+ *       断言这两行内容，已随契约整组删除）
  *   T5  普通开发账号：处理中 estimate/submit 按钮可见；提交弹层只见「无代码交付」单选（无「提交 commit」
  *       选项）；配置说明 <10 码点被前端拦、≥10 码点提交成功 → 直查库 dev_status='no_code'
  *   T6  admin 验收弹层：config 显示 online_mode 单选且**默认 release 已勾选**（DOM 级断言，非仅端到端结果——
@@ -27,22 +31,32 @@
  *       「待受理」可见、admin 在「待验证」可见（S1c spec 10b 项：type-agnostic 状态门验证，非新增代码）
  *   T11（补丁 AC·AC1）hotfixBtn 应急上线按钮含 config——待上线可见、处理中不可见、improvement 对照
  *   T12（补丁 AC·AC2）通知面板顶层分派含 config——走「变更流」布局（标题/底部文案），bug 对照仍走「独立」布局
- *   T13（补丁 AD·AD5，补丁 AE·AE10 加固请求体捕获）改派 exec_mode/vendor_name 四种变化组合：
- *       ①只改成员值不变（请求体断言不含 exec_mode/vendor_name 两键） ②只改名称 mode 不变（请求体断言
- *       exec_mode='vendor'∧vendor_name=新名称 + 时间线新旧名称展示） ③vendor→self 清空名称（时间线
- *       "乙方执行→本人执行"+名称清空展示） ④vendor 单清空名称前端拦截（toast+弹层不关+库值不变+改派
- *       请求数为零）
- *   T3v（补丁 AE·AE8）首次指派 UI 走 vendor 成功路径——断请求体/库值 exec_mode='vendor'∧vendor_name=
- *       输入名称；另一夹具 vendor 填名后切「指派执行」——断请求不带 vendor_name 键、落库 NULL
+ *   [T13 已删除·#56] 原：改派 exec_mode/vendor_name 四种变化组合——execOnlyChange 分支已随契约整组
+ *       撤销，reassign 不再读取/校验/写入该二字段，无对应行为可测；其复用场景函数
+ *       runVendorReassignZeroRequestScenario 依赖 #si-reassign-vendor-name 输入框（已从 UI 删除），
+ *       连带删除。
+ *   [T3v 已删除·#56] 原：首次指派 UI 走 vendor 成功路径——依赖 #si-assign-vendor-name 输入框（已从
+ *       UI 删除），无对应行为可测。
+ *   [AJ3/AI5 已删除·#56] 两组均直接复用 T13 定义的 runVendorReassignZeroRequestScenario（清空乙方
+ *       名称触发前端校验这一场景），该场景随 T13 一并消失，AJ3/AI5 连带删除；AI5 原本证明的是
+ *       watchIssueRequests 通用监听生命周期（与 config 类型/执行方式本身无关的基础设施正确性），该
+ *       能力仍由 T5c 的 watchIssueRequests 调用点覆盖，非独立能力真空。
  *   T5b/T5c（补丁 AE·AE9）预计完成入口可见 + 提交码点边界（9 个补充平面字符拒/10 个接受/501 拒）+
  *       两个确认框分别漏勾（提示 + 提交请求数为零）
  *   T12b（补丁 AE·AE7）通知区通道操作权限——绑定受理人(LIAISON_ID)在待验证/处理中两态可见建单人/
  *       业务方/开发三通道操作按钮，在册开发(DEV_ID·非绑定受理人非 admin)看不到；并断言 config 通知区
  *       结构性不出现 relay/对接测试/上线执行三类专属行
- *   T14（补丁 AD·AD1）OA 补填号入口——config 可见 + 文案不含必填措辞（后端豁免必填但允许可填窗口，
- *       前端此前 SI_OA_ALLOWED_STATUSES 漏 config 键，入口永不渲染）；improvement 对照仍必填
- *   AE2（补丁 AE·AE2·511-B H2）故意让指派失败（缺 exec_mode）——验证建单+受理成功的夹具已在建单阶段
- *       立即登记进 createdIds（不依赖后续指派是否成功），且清理后主表+五张子表专项核验零残留
+ *   T14（原补丁 AD·AD1，**2026-09-09 方案 v1.5 D1 全面订正**）config 纳入 OA 守卫——config 待处理态
+ *       exempt=0 无号：kv「OA 流程号」显示琥珀"指派开发前必填"告警（与 feature/improvement 同款）+
+ *       补号弹层文案含"config 单指派前需 OA 号（免 OA 单除外）"定向措辞 + 输入框带必填星号（此前
+ *       "文案不含必填措辞/不带星号"的旧断言已随 D1 反转）+ 打开「指派」弹层提交 409，页面展示
+ *       siModalAssign 新增的定向引导 toast（非仅后端原文）+ admin 补号后再指派 200；improvement 正向
+ *       对照（同向必填，行为不变）；**新增 bug 反向对照**（结构性豁免不变，仍可选文案+无星号，D2）
+ *   AE2（补丁 AE·AE2·511-B H2，触发点 [#56·2026-09-10] 由「缺 exec_mode」改为「缺 assigned_to」——
+ *       原触发码 EXEC_MODE_REQUIRED 已随契约下线失效，改用 assign 端点仍然存在的最早必填字段
+ *       assigned_to／ASSIGN_TARGET_REQUIRED，本组验证目标不变）故意让指派失败——验证建单+受理成功的
+ *       夹具已在建单阶段立即登记进 createdIds（不依赖后续指派是否成功），且清理后主表+五张子表专项
+ *       核验零残留
  *
  *   八轮变异（MUT1-5 沿自 S1c/AC/AD 各批，MUT6-8 为补丁 AE·§4 三个 codex 511-B 预测"删这行仍全绿"的
  *   候选，已固化为永久性活体变异测试）：
@@ -51,14 +65,13 @@
  *   MUT2（S1c，补丁 AE 同上加固）撤销 siIsDevAction 的 config → T5 的"处理中态 submit 按钮可见"断言
  *       应判红（健康检查排除本变异自身触发的 [siIsDevAction] 防御性 console.error 日志，非放宽标准）
  *   MUT3（补丁 AC·AC1，补丁 AE 加固）撤去 hotfixBtn 条件的 config → T11 的"待上线可见"断言应判红
- *   MUT4（补丁 AD·AD1，补丁 AE 加固）撤去 SI_OA_ALLOWED_STATUSES 的 config 键 → T14 第一条断言应判红
- *   MUT5（补丁 AD·AD5，补丁 AE·AE5 重做判红归因）撤去改派 vendorChanged 判据 → T13②④应判红：
- *       ②要求行存在∧名称仍为正向对照后的基线值（不再只断"不等于新值"，防查不到行也误判成功杀死变异）；
- *       ④改为捕获实际改派请求与后端响应（请求确实发出∧后端 409 VALIDATION"开发集合与执行方式均无
- *       变更，无需改派"），不再只靠 toast 缺席某句前端专属文案这种间接信号
- *   MUT6（补丁 AE·§4 候选①）撤去首次指派 siModalAssign 的 body.vendor_name = vn（:7116）→ T3v 的
- *       vendor 成功路径应判红（请求体缺 vendor_name 键∧后端 400 VENDOR_NAME_REQUIRED——该码文案与前端
- *       自身校验文案逐字相同，故判红须看请求体/状态码，不能看 toast）
+ *   MUT4（原补丁 AD·AD1，**2026-09-09 方案 v1.5 D1 订正**）撤去 siModalSetOaNumber 的 oaRequired 里
+ *       config 分支 → T14 的"必填措辞/必填星号"断言应判红（原变异目标 SI_OA_ALLOWED_STATUSES.config 键
+ *       只管入口**可见性**，D1 后核心风险改在"是否必填"这条判据本身，故变异目标随之改为 oaRequired）
+ *   [MUT5 已删除·#56] 原：撤去改派 vendorChanged 判据 → T13②④应判红——vendorChanged 判据本身随
+ *       execOnlyChange 分支整组撤销，T13②④已删除，判别对象双双消失。
+ *   [MUT6 已删除·#56] 原：撤去首次指派 siModalAssign 的 body.vendor_name = vn → T3v 的 vendor 成功
+ *       路径应判红——T3v 已删除，判别对象消失。
  *   MUT7（补丁 AE·§4 候选②）撤去 siNotifyStatusesFor 的 config 分支（:1459）→ T12b 绑定受理人在
  *       「处理中」态应看不到开发通知按钮
  *   MUT8（补丁 AE·§4 候选③）撤去 siRenderTimeline 的 online_mode 展示分支（:4550）→ T6r 时间线不再
@@ -500,9 +513,16 @@ async function apiIntakeAccept(adminTok, id, riskLevel) {
     const r = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ risk_level: riskLevel }) });
     if (r.status !== 200) throw new Error(`[夹具-受理] 应 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
 }
-async function apiAssignConfig(adminTok, id, execMode, vendorName) {
-    const body = { assigned_to: DEV_ID, exec_mode: execMode };
-    if (vendorName) body.vendor_name = vendorName;
+// [2026-09-09 方案 v1.5 D1] config 纳入 assertSysDevCommitmentOaGuard——指派前须先补 OA 号，否则 assign
+//   （API 或 UI 均同）409 ASSIGN_REQUIRES_OA_NUMBER。与 mkImprovementVerify（:589）既有范式同源。
+async function apiSetOaNumber(adminTok, id, oaNumber) {
+    const r = await fetch(`${BASE_URL}/api/sys-issues/${id}/set-oa-number`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ oa_number: oaNumber }) });
+    if (r.status !== 200) throw new Error(`[夹具-config OA号] 应 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
+}
+// [#56·2026-09-10] exec_mode/vendor_name 参数已删除——D1/D13 引入的执行方式/乙方名称契约已随用户
+// 拍板整组下线，assign 不再要求/读取这两个字段，故本 helper 不再接受、不再发送。
+async function apiAssignConfig(adminTok, id) {
+    const body = { assigned_to: DEV_ID };
     const r = await fetch(`${BASE_URL}/api/sys-issues/${id}/assign`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify(body) });
     if (r.status !== 200) throw new Error(`[夹具-指派] 应 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
 }
@@ -519,21 +539,33 @@ async function apiSubmitNoCode(devTok, id, reason) {
 async function mkConfigPending(adminTok, suffix) {
     return apiCreateConfig(adminTok, suffix);
 }
-// config 单：待处理 态（已受理，风险等级已判）
+// config 单：待处理 态（已受理，风险等级已判，OA 号已补）——[2026-09-09 方案 v1.5 D1] config 纳入指派前
+//   OA 守卫后，本函数是绝大多数下游夹具（mkConfigProcessing 及 T4/AE2 等直调点，原 T3/T3v/MUT6 直调点
+//   已随 [#56·2026-09-10] 执行方式契约下线一并删除）唯一的"待处理"起点，故在此单点补号，使下游无论走
+//   API 指派（apiAssignConfig）还是 UI 指派都不会被 409 拦下（同 mkImprovementVerify :589 既有范式）。
+//   **T14 专测"OA 未补"这条守卫本身，改走下方 mkConfigToPending2NoOa，不复用本函数**。
 async function mkConfigToPending2(adminTok, suffix, riskLevel) {
+    const id = await apiCreateConfig(adminTok, suffix);
+    await apiIntakeAccept(adminTok, id, riskLevel || '二级');
+    await apiSetOaNumber(adminTok, id, String(20260909300 + seq));
+    return id;
+}
+// config 单：待处理 态，**故意不补 OA 号**——仅供 T14 使用，用于测试"指派前须先补 OA 号"这条 D1 新守卫
+//   本身（弹层文案/kv 告警/assign 409 定向文案）；其余全部调用点一律走上面自动补号的 mkConfigToPending2。
+async function mkConfigToPending2NoOa(adminTok, suffix, riskLevel) {
     const id = await apiCreateConfig(adminTok, suffix);
     await apiIntakeAccept(adminTok, id, riskLevel || '二级');
     return id;
 }
-// config 单：处理中 态（已指派，exec_mode 可指定）
-async function mkConfigProcessing(adminTok, suffix, execMode, vendorName) {
+// config 单：处理中 态（已指派）——[#56·2026-09-10] execMode/vendorName 参数已删除，指派不再需要该二字段。
+async function mkConfigProcessing(adminTok, suffix) {
     const id = await mkConfigToPending2(adminTok, suffix, '二级');
-    await apiAssignConfig(adminTok, id, execMode || 'assigned', vendorName);
+    await apiAssignConfig(adminTok, id);
     return id;
 }
 // config 单：待验证 态（已提交 no_code）
 async function mkConfigVerify(adminTok, devTok, suffix) {
-    const id = await mkConfigProcessing(adminTok, suffix, 'self');
+    const id = await mkConfigProcessing(adminTok, suffix);
     const body = await apiSubmitNoCode(devTok, id, 'API 夹具：配置内容与验证结果说明，长度已过 10 码点');
     if (body.main_status !== '待验证') throw new Error(`[夹具-提交] main_status 应为「待验证」，实得 ${body.main_status}`);
     return id;
@@ -827,148 +859,30 @@ async function main() {
         await page2.close();
 
         // ═══════════════════════════════════════════════════════════════
-        // T3：admin 指派弹层——执行方式三选 + 乙方名称联动
+        // [#56·2026-09-10] T3（指派弹层执行方式三选+乙方名称联动）与 T3v（首次指派 UI 走 vendor 成功
+        // 路径）已整组退役——D1/D13 引入的「执行方式（exec_mode）/乙方名称（vendor_name）」契约随用户
+        // 拍板整组下线：指派弹层不再渲染该单选组，assign 端点不再要求/校验/写入这两个字段。原 T3/T3v
+        // 的全部断言点（三选项 DOM/乙方名称框联动/前端必填校验 toast/请求体字段/库值）已随 UI 与后端一并
+        // 消失，无对应行为可测，整组删除（非漏做，是随契约退役而失去测试对象）。
+        // T4：详情 kv 显示风险等级——原 T4 还断言「执行方式/乙方名称」两行展示，随上述契约退役一并撤销，
+        // 风险等级这条断言与执行方式契约无关，保留并新建独立夹具（原依赖 T3 产出的 id3，T3 已删除）。
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T3：指派弹层执行方式三选 + 乙方名称联动 ──');
-        const id3 = await mkConfigToPending2(adminTok, 't3', '二级');
-        registerCreatedId(id3);
-        const page3 = await loginPage(browser, adminTok);
-        await page3.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3}`);
-        await page3.waitForLoadState('networkidle');
-        await page3.waitForTimeout(600);
-        await page3.click('#siDActions button:has-text("指派")');
-        await page3.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page3.waitForTimeout(200);
-        const execRadioCount = await page3.locator('input[name="si-assign-exec-mode"]').count();
-        await shotOnFail(page3, execRadioCount === 3, 't3-exec-mode-three-options', `指派弹层执行方式恰 3 个单选项（实得 ${execRadioCount}）`);
-        const execLabelsText = await page3.locator('input[name="si-assign-exec-mode"] + span, label.si-radio-opt:has(input[name="si-assign-exec-mode"])').allTextContents().catch(() => []);
-        const execRowText = await page3.locator('#siMBody').innerText().catch(() => '');
-        await shotOnFail(page3, /本人执行/.test(execRowText) && /指派执行/.test(execRowText) && /乙方执行/.test(execRowText), 't3-exec-mode-labels', `执行方式三选项文案含"本人执行/指派执行/乙方执行"（实得片段="${execRowText.slice(0, 200)}"）`);
-        // 乙方名称框默认隐藏
-        const vendorBoxDisplay1 = await page3.locator('#si-assign-vendor-name-box').evaluate(el => getComputedStyle(el).display).catch(() => 'none');
-        await shotOnFail(page3, vendorBoxDisplay1 === 'none', 't3-vendor-box-hidden-default', `乙方名称框默认隐藏（实得 display=${vendorBoxDisplay1}）`);
-        // 勾选开发成员（至少 1 个，否则后续提交会被"请至少勾选 1 名开发"拦下）
-        const devChk = page3.locator('.si-collab-chk').first();
-        await devChk.check();
-        // 未选执行方式直接提交 → 前端拦
-        await page3.click('#siMConfirm');
-        await page3.waitForTimeout(400);
-        const toastNoExecMode = await page3.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page3, /请选择执行方式/.test(toastNoExecMode || ''), 't3-exec-mode-required-toast', `未选执行方式提交应报"请选择执行方式"（实得="${toastNoExecMode}"）`);
-        // 选 vendor → 乙方名称框出现
-        await page3.locator('input[name="si-assign-exec-mode"][value="vendor"]').check();
-        await page3.waitForTimeout(150);
-        const vendorBoxDisplay2 = await page3.locator('#si-assign-vendor-name-box').evaluate(el => getComputedStyle(el).display).catch(() => 'none');
-        await shotOnFail(page3, vendorBoxDisplay2 !== 'none', 't3-vendor-box-shown', `选中「乙方执行」后乙方名称框应可见（实得 display=${vendorBoxDisplay2}）`);
-        // vendor 未填名称提交 → 前端拦
-        await page3.click('#siMConfirm');
-        await page3.waitForTimeout(400);
-        const toastNoVendorName = await page3.locator('#toast-container').textContent().catch(() => '');
-        await shotOnFail(page3, /请填写乙方名称/.test(toastNoVendorName || ''), 't3-vendor-name-required-toast', `vendor 模式未填名称提交应报"请填写乙方名称"（实得="${toastNoVendorName}"）`);
-        // 切回非 vendor → 名称框隐藏（清空联动，不强制断言输入框值被清——只断言 UI 已收起）
-        await page3.locator('input[name="si-assign-exec-mode"][value="assigned"]').check();
-        await page3.waitForTimeout(150);
-        const vendorBoxDisplay3 = await page3.locator('#si-assign-vendor-name-box').evaluate(el => getComputedStyle(el).display).catch(() => 'none');
-        await shotOnFail(page3, vendorBoxDisplay3 === 'none', 't3-vendor-box-hidden-after-switch', `切回「指派执行」后乙方名称框应重新隐藏（实得 display=${vendorBoxDisplay3}）`);
-        // 提交成功
-        await page3.click('#siMConfirm');
-        await page3.waitForTimeout(800);
-        const modalClosedT3 = await page3.locator('#siModalOverlay.open').count();
-        await shotOnFail(page3, modalClosedT3 === 0, 't3-modal-closed', '选定执行方式=指派执行后提交成功，弹窗关闭');
-        const row3 = await dbGet('SELECT status, exec_mode, vendor_name FROM sys_issues WHERE id=?', [id3]);
-        await shotOnFail(page3, !!row3 && row3.status === '处理中' && row3.exec_mode === 'assigned' && row3.vendor_name === null, 't3-db-assigned', `库内 status=处理中 ∧ exec_mode=assigned ∧ vendor_name=NULL（实得=${JSON.stringify(row3)}）`);
-        const t3Errors = filterExpectedConsoleErrors(page3._consoleErrors);
-        await shotOnFail(page3, t3Errors.length === 0, 't3-console-clean', `T3 全程无非预期 console error（实得 ${t3Errors.length} 个）${t3Errors.length ? '：' + JSON.stringify(t3Errors) : ''}`);
-        await page3.close();
-
-        // ═══════════════════════════════════════════════════════════════
-        // T3v（补丁 AE·AE8·511-B M5）：首次指派 UI 走 vendor 成功路径——断请求体与库值
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T3v：首次指派 UI 选择「乙方执行」成功路径 ──');
-        const id3vUi = await mkConfigToPending2(adminTok, 't3vui', '二级');
-        registerCreatedId(id3vUi);
-        const page3v = await loginPage(browser, adminTok);
-        await page3v.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3vUi}`);
-        await page3v.waitForLoadState('networkidle');
-        await page3v.waitForTimeout(600);
-        await page3v.click('#siDActions button:has-text("指派")');
-        await page3v.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page3v.waitForTimeout(200);
-        await page3v.locator('.si-collab-chk').first().check();
-        await page3v.locator('input[name="si-assign-exec-mode"][value="vendor"]').check();
-        await page3v.waitForTimeout(150);
-        await page3v.fill('#si-assign-vendor-name', 'AE8乙方公司');
-        const assignRespPromise3v = page3v.waitForResponse(r => /\/api\/sys-issues\/\d+\/assign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
-        await page3v.click('#siMConfirm');
-        const assignResp3v = await assignRespPromise3v;
-        let assignReqBody3v = {};
-        try { assignReqBody3v = JSON.parse(assignResp3v.request().postData() || '{}'); } catch (_) { /* 解析失败按空对象处理，下方断言会判红 */ }
-        await shotOnFail(page3v, assignResp3v.status() === 200, 't3v-assign-response-status', `首次指派 vendor 请求响应 200（实得 ${assignResp3v.status()}）`);
-        await shotOnFail(page3v, assignReqBody3v.exec_mode === 'vendor' && assignReqBody3v.vendor_name === 'AE8乙方公司', 't3v-assign-request-body', `首次指派请求体 exec_mode='vendor' ∧ vendor_name='AE8乙方公司'（实得=${JSON.stringify(assignReqBody3v)}）`);
-        await page3v.waitForTimeout(600);
-        const row3vUi = await dbGet('SELECT status, exec_mode, vendor_name FROM sys_issues WHERE id=?', [id3vUi]);
-        await shotOnFail(page3v, !!row3vUi && row3vUi.status === '处理中' && row3vUi.exec_mode === 'vendor' && row3vUi.vendor_name === 'AE8乙方公司', 't3v-db-vendor', `库内 status=处理中 ∧ exec_mode=vendor ∧ vendor_name=AE8乙方公司（实得=${JSON.stringify(row3vUi)}）`);
-        const t3vErrors = filterExpectedConsoleErrors(page3v._consoleErrors);
-        await shotOnFail(page3v, t3vErrors.length === 0, 't3v-console-clean', `T3v 全程无非预期 console error（实得 ${t3vErrors.length} 个）`);
-        await page3v.close();
-
-        // 另一夹具：vendor 填名后切回「指派执行」——断请求不带 vendor_name 键、落库 NULL
-        const id3vSwitch = await mkConfigToPending2(adminTok, 't3vswitch', '二级');
-        registerCreatedId(id3vSwitch);
-        const page3vs = await loginPage(browser, adminTok);
-        await page3vs.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3vSwitch}`);
-        await page3vs.waitForLoadState('networkidle');
-        await page3vs.waitForTimeout(600);
-        await page3vs.click('#siDActions button:has-text("指派")');
-        await page3vs.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page3vs.waitForTimeout(200);
-        await page3vs.locator('.si-collab-chk').first().check();
-        await page3vs.locator('input[name="si-assign-exec-mode"][value="vendor"]').check();
-        await page3vs.waitForTimeout(150);
-        await page3vs.fill('#si-assign-vendor-name', '残留名称不该提交');
-        await page3vs.locator('input[name="si-assign-exec-mode"][value="assigned"]').check();
-        await page3vs.waitForTimeout(150);
-        const assignRespPromise3vs = page3vs.waitForResponse(r => /\/api\/sys-issues\/\d+\/assign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
-        await page3vs.click('#siMConfirm');
-        const assignResp3vs = await assignRespPromise3vs;
-        // [补丁 AF·AF7-c·512 收紧建议] 解析失败不能回退空对象——`!('vendor_name' in {})` 恒真，会让
-        // "缺键"断言在请求体根本没解析出来时也判成"通过"，这是假阳性。显式跟踪解析是否成功，断言里
-        // 要求解析成功 ∧ 确实缺键，两者缺一都不算过。
-        let assignReqBody3vs = null, assignReqBody3vsParseOk = false;
-        // [S1d·513 附带建议] parseOk 改用 isPlainObjectJson——不再只判 `!== null`，避免合法 JSON 原始值
-        // （数字/字符串/布尔）让下方 `in` 运算抛异常。
-        try { assignReqBody3vs = JSON.parse(assignResp3vs.request().postData() || 'null'); assignReqBody3vsParseOk = isPlainObjectJson(assignReqBody3vs); } catch (_) { /* 解析失败留 null，下方按 parseOk=false 判红 */ }
-        await shotOnFail(page3vs, assignReqBody3vsParseOk && !('vendor_name' in assignReqBody3vs), 't3v-switch-no-vendor-name-key', `切回「指派执行」后请求体解析成功 ∧ 不含 vendor_name 键（解析成功=${assignReqBody3vsParseOk}，实得=${JSON.stringify(assignReqBody3vs)}）`);
-        await page3vs.waitForTimeout(600);
-        const row3vSwitch = await dbGet('SELECT exec_mode, vendor_name FROM sys_issues WHERE id=?', [id3vSwitch]);
-        await shotOnFail(page3vs, !!row3vSwitch && row3vSwitch.exec_mode === 'assigned' && row3vSwitch.vendor_name === null, 't3v-switch-db-null', `库内 exec_mode=assigned ∧ vendor_name IS NULL（实得=${JSON.stringify(row3vSwitch)}）`);
-        const t3vsErrors = filterExpectedConsoleErrors(page3vs._consoleErrors);
-        await shotOnFail(page3vs, t3vsErrors.length === 0, 't3v-switch-console-clean', `T3v 切换分支全程无非预期 console error（实得 ${t3vsErrors.length} 个）`);
-        await page3vs.close();
-
-        // 单独构造一张 vendor 终态单（供 T4 详情 kv 验证乙方名称展示）
-        const id3v = await mkConfigProcessing(adminTok, 't3v', 'vendor', '某乙方公司');
-        registerCreatedId(id3v);
-
-        // ═══════════════════════════════════════════════════════════════
-        // T4：详情 kv 显示执行方式 + 乙方名称
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T4：详情 kv 显示执行方式/乙方名称 ──');
+        console.log('\n── T4：详情 kv 显示风险等级；不再渲染执行方式/乙方名称（#56 契约已下线） ──');
+        const id4 = await mkConfigToPending2(adminTok, 't4', '二级');
+        registerCreatedId(id4);
         const page4 = await loginPage(browser, adminTok);
-        await page4.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3}`);
+        await page4.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id4}`);
         await page4.waitForLoadState('networkidle');
         await page4.waitForTimeout(700);
-        const kvText3 = await page4.locator('.u-kv-grid').first().innerText().catch(() => '');
-        await shotOnFail(page4, /执行方式/.test(kvText3) && /指派执行/.test(kvText3), 't4-kv-exec-mode-assigned', `详情 kv 显示「执行方式：指派执行」（实得片段含="${/执行方式[\s\S]{0,20}/.exec(kvText3)}"）`);
+        const kvText4 = await page4.locator('.u-kv-grid').first().innerText().catch(() => '');
         // [补丁 AD·AD6·预筛 M4] 详情 kv 风险等级断言——此前零覆盖，把 :3802 一带的 `|| iss.type ===
-        // 'config'` 删掉套件仍全绿；id3 建单时 risk_level 已判定为「二级」（mkConfigToPending2 默认值）。
-        await shotOnFail(page4, /风险等级/.test(kvText3), 't4-kv-risk-level-label', 'config 单详情 kv 显示「风险等级」行');
-        await page4.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3v}`);
-        await page4.waitForLoadState('networkidle');
-        await page4.waitForTimeout(700);
-        const kvText3v = await page4.locator('.u-kv-grid').first().innerText().catch(() => '');
-        await shotOnFail(page4, /执行方式/.test(kvText3v) && /乙方执行/.test(kvText3v), 't4-kv-exec-mode-vendor', 'vendor 单详情 kv 显示「执行方式：乙方执行」');
-        await shotOnFail(page4, /乙方名称/.test(kvText3v) && /某乙方公司/.test(kvText3v), 't4-kv-vendor-name', 'vendor 单详情 kv 显示「乙方名称：某乙方公司」');
+        // 'config'` 删掉套件仍全绿；id4 建单时 risk_level 已判定为「二级」（mkConfigToPending2 默认值）。
+        await shotOnFail(page4, /风险等级/.test(kvText4), 't4-kv-risk-level-label', 'config 单详情 kv 显示「风险等级」行');
+        // [#56·2026-09-10] 负向断言：详情 kv 不应再出现「执行方式」/「乙方名称」两行（契约已整组下线，
+        // 渲染分支已从 Sys_Iteration.html 删除）——「实现坏成什么样这条会红」：若渲染分支被误加回来，
+        // 这两条会从 pass 变 fail。
+        await shotOnFail(page4, !/执行方式/.test(kvText4), 't4-kv-no-exec-mode', '详情 kv 不再显示「执行方式」行（#56 契约已下线）');
+        await shotOnFail(page4, !/乙方名称/.test(kvText4), 't4-kv-no-vendor-name', '详情 kv 不再显示「乙方名称」行（#56 契约已下线）');
         const t4Errors = filterExpectedConsoleErrors(page4._consoleErrors);
         await shotOnFail(page4, t4Errors.length === 0, 't4-console-clean', `T4 全程无非预期 console error（实得 ${t4Errors.length} 个）`);
         await page4.close();
@@ -977,7 +891,7 @@ async function main() {
         // T5：普通开发账号——处理中 estimate/submit 按钮可见；提交弹层只见 no_code
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T5：开发账号处理中态 submit 按钮 + 提交弹层只见 no_code ──');
-        const id5 = await mkConfigProcessing(adminTok, 't5', 'self');
+        const id5 = await mkConfigProcessing(adminTok, 't5');
         registerCreatedId(id5);
         const page5 = await loginPage(browser, devTok);
         await page5.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5}`);
@@ -1028,7 +942,7 @@ async function main() {
         // T5b（补丁 AE·AE9）：预计完成入口可见 + 码点边界（9 补充平面字符拒/10 接受）
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T5b：预计完成入口可见 + 提交码点边界（9 emoji 拒/10 emoji 接受） ──');
-        const id5b = await mkConfigProcessing(adminTok, 't5b', 'self');
+        const id5b = await mkConfigProcessing(adminTok, 't5b');
         registerCreatedId(id5b);
         const page5b = await loginPage(browser, devTok);
         await page5b.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5b}`);
@@ -1071,7 +985,7 @@ async function main() {
         // T5c（补丁 AE·AE9）：501 码点拒绝 + 两个确认框分别漏勾——提示 + 提交请求数为零
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T5c：501 码点拒绝 + 双勾漏选（提示+请求数为零，补丁 AF·AF7-b 独立弹层+toast 隔离） ──');
-        const id5c = await mkConfigProcessing(adminTok, 't5c', 'self');
+        const id5c = await mkConfigProcessing(adminTok, 't5c');
         registerCreatedId(id5c);
         const page5c = await loginPage(browser, devTok);
         await page5c.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5c}`);
@@ -1258,7 +1172,7 @@ async function main() {
         // [补丁 AD·AD6·预筛 M4] 正向对照夹具——config 单风险等级='二级'（mkConfigProcessing 链路默认值），
         // 用于证明"列表行不含 .si-risk-na 且风险段显示已判定等级"这条正向断言，与 bug 负例成对（此前
         // 只测了 bug 侧"有 -"，把 riskApplicable 和详情 kv 的 `|| i.type==='config'` 整块删掉套件仍全绿）。
-        const idConfigRisk = await mkConfigProcessing(adminTok, 't7cfgrisk', 'self');
+        const idConfigRisk = await mkConfigProcessing(adminTok, 't7cfgrisk');
         registerCreatedId(idConfigRisk);
         const page7 = await loginPage(browser, adminTok);
         await page7.goto(`${BASE_URL}/Sys_Iteration.html`);
@@ -1340,7 +1254,7 @@ async function main() {
         console.log('\n── T10：「待我处理」谓词含 config 各态（开发/受理人/admin） ──');
         const idPendingLiaison = await mkConfigPending(adminTok, 't10liaison');   // 待受理，绑定 liaison 13
         registerCreatedId(idPendingLiaison);
-        const idProcessingDev = await mkConfigProcessing(adminTok, 't10dev', 'assigned');   // 处理中，指派给 DEV_ID
+        const idProcessingDev = await mkConfigProcessing(adminTok, 't10dev');   // 处理中，指派给 DEV_ID
         registerCreatedId(idProcessingDev);
         const idVerifyAdmin = await mkConfigVerify(adminTok, devTok, 't10admin');   // 待验证
         registerCreatedId(idVerifyAdmin);
@@ -1394,7 +1308,7 @@ async function main() {
         console.log('\n── T11：应急上线按钮 config 待上线可见 / 处理中不可见（AC1） ──');
         const id11PreRelease = await mkConfigPreRelease(adminTok, devTok, 't11pre');
         registerCreatedId(id11PreRelease);
-        const id11Processing = await mkConfigProcessing(adminTok, 't11proc', 'self');
+        const id11Processing = await mkConfigProcessing(adminTok, 't11proc');
         registerCreatedId(id11Processing);
         const page11 = await loginPage(browser, adminTok);
         await page11.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id11PreRelease}`);
@@ -1516,7 +1430,7 @@ async function main() {
         await page12Dev.close();
 
         // [补丁 AE·AE7] 处理中态——开发通知按钮可见性（sendable=['处理中','待验证']，与上面待验证态互补）
-        const id12ConfigProcessing = await mkConfigProcessing(adminTok, 't12cfgproc', 'self');
+        const id12ConfigProcessing = await mkConfigProcessing(adminTok, 't12cfgproc');
         registerCreatedId(id12ConfigProcessing);
         const page12Proc = await loginPage(browser, liaisonTok);
         await page12Proc.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id12ConfigProcessing}`);
@@ -1543,260 +1457,27 @@ async function main() {
         await page12b.close();
 
         // ═══════════════════════════════════════════════════════════════
-        // T13（补丁 AD·AD5）：改派 exec_mode/vendor_name 全链路四条用例——此前零覆盖
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T13：改派 exec_mode/vendor_name 四种变化组合 ──');
-        // ①vendor 单只改成员 → exec_mode/vendor_name 逐字不变
-        const id13a = await mkConfigProcessing(adminTok, 't13a', 'vendor', '原乙方公司');
-        registerCreatedId(id13a);
-        const page13a = await loginPage(browser, adminTok);
-        await page13a.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13a}`);
-        await page13a.waitForLoadState('networkidle');
-        await page13a.waitForTimeout(700);
-        await page13a.click('#siDActions button:has-text("改派")');
-        await page13a.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page13a.waitForTimeout(200);
-        await page13a.locator(`.si-member-chk[value="${SECOND_DEV_ID}"]`).check();
-        await page13a.fill('#f_reason', '补丁 AD T13① 探针：只加一名成员，不动执行方式');
-        // [补丁 AE·AE10·511-B M7] 捕获请求体——直查库只能证明"最终值不变"，"始终发送原值"也能通过该
-        // 断言；须直接断请求体不含 exec_mode/vendor_name 两键，才能证明前端真的没有携带这两个字段。
-        const reassignRespPromise13a = page13a.waitForResponse(r => /\/api\/sys-issues\/\d+\/reassign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
-        await page13a.click('#siMConfirm');
-        const reassignResp13a = await reassignRespPromise13a;
-        // [补丁 AF·AF7-c·512 收紧建议] 同 T3v 切换分支——解析失败不能回退空对象（`!('k' in {})` 恒真会
-        // 让"缺键"断言在解析失败时也假通过），显式跟踪解析是否成功并纳入判据。
-        let reassignBody13a = null, reassignBody13aParseOk = false;
-        // [S1d·513 附带建议] 同 T3v 切换分支——parseOk 改用 isPlainObjectJson。
-        try { reassignBody13a = JSON.parse(reassignResp13a.request().postData() || 'null'); reassignBody13aParseOk = isPlainObjectJson(reassignBody13a); } catch (_) { /* 解析失败留 null，下方按 parseOk=false 判红 */ }
-        await shotOnFail(page13a, reassignBody13aParseOk && !('exec_mode' in reassignBody13a) && !('vendor_name' in reassignBody13a), 't13a-request-no-exec-keys', `①只改成员时请求体解析成功 ∧ 不含 exec_mode/vendor_name 两键（解析成功=${reassignBody13aParseOk}，实得=${JSON.stringify(reassignBody13a)}）`);
-        await page13a.waitForTimeout(800);
-        const modalClosed13a = await page13a.locator('#siModalOverlay.open').count();
-        await shotOnFail(page13a, modalClosed13a === 0, 't13a-modal-closed', '①只改成员提交成功，弹窗关闭');
-        const row13a = await dbGet('SELECT exec_mode, vendor_name FROM sys_issues WHERE id=?', [id13a]);
-        await shotOnFail(page13a, !!row13a && row13a.exec_mode === 'vendor' && row13a.vendor_name === '原乙方公司', 't13a-db-unchanged', `①只改成员时 exec_mode/vendor_name 逐字不变（实得=${JSON.stringify(row13a)}）`);
-        const memberRows13a = await dbAll('SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [id13a]);
-        const memberIds13a = memberRows13a.map(r => Number(r.user_id)).sort();
-        await shotOnFail(page13a, JSON.stringify(memberIds13a) === JSON.stringify([DEV_ID, SECOND_DEV_ID].sort()), 't13a-db-members', `①成员集合含两人（实得=${JSON.stringify(memberIds13a)}）`);
-        const t13aErrors = filterExpectedConsoleErrors(page13a._consoleErrors);
-        await shotOnFail(page13a, t13aErrors.length === 0, 't13a-console-clean', `T13① 全程无非预期 console error（实得 ${t13aErrors.length} 个）`);
-        await page13a.close();
-
-        // ②只改名称 → 库里名称变、mode 不变
-        const id13b = await mkConfigProcessing(adminTok, 't13b', 'vendor', '原乙方公司');
-        registerCreatedId(id13b);
-        const page13b = await loginPage(browser, adminTok);
-        await page13b.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13b}`);
-        await page13b.waitForLoadState('networkidle');
-        await page13b.waitForTimeout(700);
-        await page13b.click('#siDActions button:has-text("改派")');
-        await page13b.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page13b.waitForTimeout(200);
-        await page13b.fill('#si-reassign-vendor-name', '新乙方公司');
-        await page13b.fill('#f_reason', '补丁 AD T13② 探针：只改乙方名称');
-        // [补丁 AE·AE10] 捕获请求体——断发送 vendor + 新名称，且成员集合不变（仅 DEV_ID 一人）。
-        const reassignRespPromise13b = page13b.waitForResponse(r => /\/api\/sys-issues\/\d+\/reassign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
-        await page13b.click('#siMConfirm');
-        const reassignResp13b = await reassignRespPromise13b;
-        let reassignBody13b = {};
-        try { reassignBody13b = JSON.parse(reassignResp13b.request().postData() || '{}'); } catch (_) { /* 解析失败按空对象处理 */ }
-        await shotOnFail(page13b, reassignBody13b.exec_mode === 'vendor' && reassignBody13b.vendor_name === '新乙方公司', 't13b-request-vendor-name', `②请求体 exec_mode='vendor' ∧ vendor_name='新乙方公司'（实得=${JSON.stringify(reassignBody13b)}）`);
-        await shotOnFail(page13b, Array.isArray(reassignBody13b.member_ids) && JSON.stringify(reassignBody13b.member_ids.map(Number).sort()) === JSON.stringify([DEV_ID].sort()), 't13b-request-members-unchanged', `②请求体 member_ids 仅含原成员 DEV_ID（实得=${JSON.stringify(reassignBody13b.member_ids)}）`);
-        await page13b.waitForTimeout(800);
-        const modalClosed13b = await page13b.locator('#siModalOverlay.open').count();
-        await shotOnFail(page13b, modalClosed13b === 0, 't13b-modal-closed', '②只改名称提交成功，弹窗关闭');
-        const row13b = await dbGet('SELECT exec_mode, vendor_name FROM sys_issues WHERE id=?', [id13b]);
-        await shotOnFail(page13b, !!row13b && row13b.exec_mode === 'vendor' && row13b.vendor_name === '新乙方公司', 't13b-db-name-changed', `②exec_mode 不变=vendor ∧ vendor_name 变为「新乙方公司」（实得=${JSON.stringify(row13b)}）`);
-        // [补丁 AE·AE6] 时间线断言——旧/新乙方名称。
-        await page13b.reload();
-        await page13b.waitForLoadState('networkidle');
-        await page13b.waitForTimeout(500);
-        const timeline13b = await page13b.locator('.si-timeline').innerText().catch(() => '');
-        await shotOnFail(page13b, /乙方名称：原乙方公司\s*→\s*新乙方公司/.test(timeline13b), 't13b-timeline-vendor-name-change', `②时间线显示乙方名称变更"原乙方公司 → 新乙方公司"（实得片段=${timeline13b.slice(-200)}）`);
-        const t13bErrors = filterExpectedConsoleErrors(page13b._consoleErrors);
-        await shotOnFail(page13b, t13bErrors.length === 0, 't13b-console-clean', `T13② 全程无非预期 console error（实得 ${t13bErrors.length} 个）`);
-        await page13b.close();
-
-        // ③vendor→self → vendor_name IS NULL
-        const id13c = await mkConfigProcessing(adminTok, 't13c', 'vendor', '原乙方公司');
-        registerCreatedId(id13c);
-        const page13c = await loginPage(browser, adminTok);
-        await page13c.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13c}`);
-        await page13c.waitForLoadState('networkidle');
-        await page13c.waitForTimeout(700);
-        await page13c.click('#siDActions button:has-text("改派")');
-        await page13c.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page13c.waitForTimeout(200);
-        await page13c.locator('input[name="si-reassign-exec-mode"][value="self"]').check();
-        await page13c.fill('#f_reason', '补丁 AD T13③ 探针：vendor 切回 self');
-        await page13c.click('#siMConfirm');
-        await page13c.waitForTimeout(800);
-        const modalClosed13c = await page13c.locator('#siModalOverlay.open').count();
-        await shotOnFail(page13c, modalClosed13c === 0, 't13c-modal-closed', '③vendor→self 提交成功，弹窗关闭');
-        const row13c = await dbGet('SELECT exec_mode, vendor_name FROM sys_issues WHERE id=?', [id13c]);
-        await shotOnFail(page13c, !!row13c && row13c.exec_mode === 'self' && row13c.vendor_name === null, 't13c-db-vendor-cleared', `③exec_mode=self ∧ vendor_name IS NULL（实得=${JSON.stringify(row13c)}）`);
-        // [补丁 AE·AE6] 时间线断言——「乙方执行 → 本人执行」+ 名称清空展示（钉住 AD3 成果）。
-        await page13c.reload();
-        await page13c.waitForLoadState('networkidle');
-        await page13c.waitForTimeout(500);
-        const timeline13c = await page13c.locator('.si-timeline').innerText().catch(() => '');
-        await shotOnFail(page13c, /执行方式：乙方执行\s*→\s*本人执行/.test(timeline13c), 't13c-timeline-exec-mode', `③时间线显示"执行方式：乙方执行 → 本人执行"（实得片段=${timeline13c.slice(-200)}）`);
-        await shotOnFail(page13c, /乙方名称：原乙方公司\s*→\s*（无）/.test(timeline13c), 't13c-timeline-vendor-cleared', `③时间线显示乙方名称清空"原乙方公司 → （无）"（实得片段=${timeline13c.slice(-200)}）`);
-        const t13cErrors = filterExpectedConsoleErrors(page13c._consoleErrors);
-        await shotOnFail(page13c, t13cErrors.length === 0, 't13c-console-clean', `T13③ 全程无非预期 console error（实得 ${t13cErrors.length} 个）`);
-        await page13c.close();
-
-        // ④vendor 单清空名称提交 → 前端拦截（toast + 弹层不关 + 库值不变）
-        // [S1d·补丁AJ·AJ3 根治·codex 515-M3] 场景逻辑抽成可复用函数——T13④正常路径与下方 AJ3 变异
-        // 路径共用同一段"点击→有限观察期限（600ms，已知异步任务的等待窗口）结束后才读弹层/库值/
-        // 计数"逻辑与同一条 reqCount===0 判据。原实现库值/弹层读取发生在收尾等待**之前**（"库值读取
-        // 早于等待结束"），本次订正为等待先完成、读取一律排在等待之后。变异路径注入一个"仍在观察
-        // 窗口内才发出"的裸 fetch，要求**这段共用逻辑本身**判红——不是另起一套独立场景断言"窗口
-        // 够宽"（AI5 是那种），而是证明"如果这类场景真的存在『延迟发出多余请求』的回归，它会被这段
-        // 判据本身抓到"。
-        async function runVendorReassignZeroRequestScenario(page, issueId, opts = {}) {
-            const { injectDelayedRequestMs = null } = opts;
-            const watch = watchIssueRequests(page, issueId, 'reassign');
-            let reqCount, toastAppeared, toastText, modalStillOpen, row;
-            try {
-                if (injectDelayedRequestMs != null) {
-                    await page.evaluate((args) => {
-                        setTimeout(() => {
-                            fetch(`/api/sys-issues/${args.issueId}/reassign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => { /* 注入探针不关心响应 */ });
-                        }, args.delayMs);
-                    }, { issueId, delayMs: injectDelayedRequestMs });
-                }
-                ({ toastAppeared, toastText } = await clickAndAwaitNewToast(page, '#siMConfirm'));
-                // 有限观察期限（600ms，明确声明为有界窗口，非自适应到"真正完成"）——已知异步任务
-                // （提示/可能迟发的请求）的等待窗口结束后，才读弹层/库值/计数，顺序不再颠倒。
-                await page.waitForTimeout(600);
-                modalStillOpen = await page.locator('#siModalOverlay.open').count();
-                row = await dbGet('SELECT exec_mode, vendor_name FROM sys_issues WHERE id=?', [issueId]);
-            } finally {
-                reqCount = watch.count;
-                watch.stop();
-            }
-            return { reqCount, toastAppeared, toastText, modalStillOpen, row };
-        }
-        const id13d = await mkConfigProcessing(adminTok, 't13d', 'vendor', '原乙方公司');
-        registerCreatedId(id13d);
-        const page13d = await loginPage(browser, adminTok);
-        await page13d.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13d}`);
-        await page13d.waitForLoadState('networkidle');
-        await page13d.waitForTimeout(700);
-        await page13d.click('#siDActions button:has-text("改派")');
-        await page13d.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await page13d.waitForTimeout(200);
-        await page13d.fill('#si-reassign-vendor-name', '');
-        await page13d.fill('#f_reason', '补丁 AD T13④ 探针：清空乙方名称');
-        // [补丁 AE·AE10，补丁 AF·AF7-b，S1d·513-M3，补丁 AI·AI5，补丁 AJ·AJ3 根治] 断言改派请求数为
-        // 零——证明前端校验确实在发起请求之前拦下，不是"发了请求、后端拒绝、toast 恰好文案相同"这种
-        // 更弱的等价现象。请求匹配精确绑定 id13d（不再用裸 \d+ 通配符）；场景逻辑走上方共用函数。
-        const result13d = await runVendorReassignZeroRequestScenario(page13d, id13d);
-        await shotOnFail(page13d, result13d.reqCount === 0, 't13d-request-count-zero', `④清空乙方名称提交时改派请求数为零（实得=${result13d.reqCount}）`);
-        await shotOnFail(page13d, result13d.toastAppeared && /请填写乙方名称/.test(result13d.toastText || ''), 't13d-toast', `④清空乙方名称提交应报"请填写乙方名称"（toast 已出现=${result13d.toastAppeared}，实得="${result13d.toastText}"）`);
-        await shotOnFail(page13d, result13d.modalStillOpen === 1, 't13d-modal-stays-open', '④清空名称提交后弹窗仍打开（未提交成功）');
-        await shotOnFail(page13d, !!result13d.row && result13d.row.exec_mode === 'vendor' && result13d.row.vendor_name === '原乙方公司', 't13d-db-unchanged', `④库值不变（实得=${JSON.stringify(result13d.row)}）`);
-        const t13dErrors = filterExpectedConsoleErrors(page13d._consoleErrors);
-        await shotOnFail(page13d, t13dErrors.length === 0, 't13d-console-clean', `T13④ 全程无非预期 console error（实得 ${t13dErrors.length} 个）`);
-        await page13d.close();
-
-        // ═══════════════════════════════════════════════════════════════
-        // AJ3（补丁 AJ·codex 515-M3）：把「延迟请求」变异注入 T13④ 复用的真实场景执行路径——要求
-        // **原场景判据本身**判红，而不是另起一套独立断言证明"窗口够宽"（AI5 组是那种，二者互补：
-        // AI5 证"watch 本身能等到"，AJ3 证"这段场景判据真的会被这类回归抓到"）。
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── AJ3：把「延迟请求」变异注入 T13④ 复用的真实场景执行路径——要求原场景判据判红 ──');
-        {
-            const id3jVendor = await mkConfigProcessing(adminTok, 'aj3', 'vendor', '待清空乙方公司AJ3');
-            registerCreatedId(id3jVendor);
-            const page3j = await loginPage(browser, adminTok);
-            await page3j.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3jVendor}`);
-            await page3j.waitForLoadState('networkidle');
-            await page3j.waitForTimeout(700);
-            await page3j.click('#siDActions button:has-text("改派")');
-            await page3j.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            await page3j.waitForTimeout(200);
-            await page3j.fill('#si-reassign-vendor-name', '');
-            await page3j.fill('#f_reason', 'AJ3 变异探针：验证零请求判据能捕获注入的延迟请求');
-
-            // 注入一个 400ms 后才发出的、匹配本单 reassign 端点的裸 fetch——落在 runVendorReassign
-            // ZeroRequestScenario 的 600ms 观察窗口之内。走的是**与 T13④ 完全同一份函数**，不是独立
-            // 复刻的简化版。
-            const resultAj3 = await runVendorReassignZeroRequestScenario(page3j, id3jVendor, { injectDelayedRequestMs: 400 });
-            // [实现坏成什么样这条会红] 若真实场景（T13④）里前端真的存在"延迟发出多余 reassign 请求"
-            // 这类回归，reqCount 判据会命中大于零——这正是本条要证明的：T13④ 复用的这段判据对"延迟
-            // 请求"类回归有真实判别力，不是仅"更长窗口能等到"这一独立、与场景本身判据脱节的结论。
-            must(resultAj3.reqCount > 0, `AJ3：注入「400ms 后发出一个额外 reassign 请求」（落在场景的 600ms 观察窗口内）后，原场景复用的零请求判据应能捕获（实得 reqCount=${resultAj3.reqCount}）——证明 T13④ 复用的这段判据对"延迟请求"类回归有真实判别力`);
-            await page3j.close();
-        }
-
-        // ═══════════════════════════════════════════════════════════════
-        // AI5（补丁 AI·codex 514-M2，补丁AJ·AJ3/AJ4 订正措辞）：注入「晚于旧 600ms 固定窗口才发出
-        // 的请求」——验证 watch 生命周期已真正交给场景（不再是"toast 一出现就停"这一更短窗口）。
-        // 观察窗口本身仍是明确声明的**有限常量**（600ms），不是自适应的"直到真正完成"——本组只证明
-        // "watch 对象能不能等到延迟请求"这一狭义命题；"场景自身的判据是否真会被这类回归判红"由 AJ3
-        // 组用同一份场景函数证明，二者互补，不重复。构造反证输入：点击前于页面上下文注入一个 900ms
-        // 后才发出的、匹配本单 reassign 端点的裸 fetch（不依赖真实前端代码路径是否真的会这样晚发——
-        // 这是主动构造用来验证"watch 本身能不能等到"，与验证前端校验逻辑正确性的 T13④ 是两回事）。
-        // 不关心该注入请求最终服务端如何响应（大概率因缺少合法鉴权而 401，watch 只关心"请求确实被
-        // 浏览器发出"这一网络层事件，与响应结果无关）。
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── AI5：注入「晚于旧 600ms 固定窗口才发出的请求」——验证 watch 生命周期已交给场景 ──');
-        {
-            const id5eVendor = await mkConfigProcessing(adminTok, 'ai5', 'vendor', '待清空乙方公司AI5');
-            registerCreatedId(id5eVendor);
-            const page5e = await loginPage(browser, adminTok);
-            await page5e.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5eVendor}`);
-            await page5e.waitForLoadState('networkidle');
-            await page5e.waitForTimeout(700);
-            await page5e.click('#siDActions button:has-text("改派")');
-            await page5e.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            await page5e.waitForTimeout(200);
-            await page5e.fill('#si-reassign-vendor-name', '');
-            await page5e.fill('#f_reason', 'AI5 探针：验证 watch 生命周期覆盖延迟请求');
-
-            const watch5e = watchIssueRequests(page5e, id5eVendor, 'reassign');
-            let ai5ReqCount, toastAppearedAi5;
-            try {
-                await page5e.evaluate((issueId) => {
-                    setTimeout(() => {
-                        fetch(`/api/sys-issues/${issueId}/reassign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => { /* 注入探针不关心响应，只关心请求确实被发出 */ });
-                    }, 900);
-                }, id5eVendor);
-                ({ toastAppeared: toastAppearedAi5 } = await clickAndAwaitNewToast(page5e, '#siMConfirm'));
-                // 注入延迟为 900ms（晚于旧实现"toast 后固定等 600ms 便 stop()"的窗口）——额外再等
-                // 一段确保 900ms 已经过去，才读取 watch 计数并停止监听。
-                await page5e.waitForTimeout(1000);
-            } finally {
-                ai5ReqCount = watch5e.count;
-                watch5e.stop();
-            }
-            must(toastAppearedAi5, 'AI5：清空乙方名称仍应先触发前端校验提示（与 T13④ 同一前置条件，确认本用例场景搭建正确）');
-            // [实现坏成什么样这条会红] 若把 watch 生命周期又改回"clickAndCaptureNewToast 内部 toast
-            // 出现后固定等 600ms 便 stop()"，900ms 才发出的这次注入请求会发生在 stop() 之后，不会被
-            // 计入，ai5ReqCount 将为 0，本条判红。
-            must(ai5ReqCount === 1, `AI5：晚于旧 600ms 固定窗口（900ms）才发出的请求仍被 watch 捕获（实得计数=${ai5ReqCount}）——证明监听生命周期已真正交给场景（不再是"toast 一出现就停"），watch 本身能等到；场景自身判据是否真会被此类回归判红见 AJ3 组`);
-            await page5e.close();
-        }
-
-        // ═══════════════════════════════════════════════════════════════
         // AE2（补丁 AE·AE2·511-B H2）：故意让指派失败——验证多阶段夹具失败路径不漏登记、不漏清理
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── AE2：故意指派失败（缺 exec_mode）——验证失败路径已登记且可清理 ──');
+        console.log('\n── AE2：故意指派失败（缺 assigned_to）——验证失败路径已登记且可清理 ──');
         // 建单+受理成功（apiCreateConfig 内部已立即登记进 createdIds，不依赖后续指派是否成功）。
         idAe2 = await mkConfigToPending2(adminTok, 'ae2failassign', '二级');
         must(createdIds.includes(idAe2), `AE2：建单+受理成功的 config 单 #${idAe2} 已登记进 createdIds（登记发生在建单阶段，不依赖后续指派是否成功——511-B H2 修复点）`);
-        // 故意漏传 exec_mode（config 必填，后端 EXEC_MODE_REQUIRED 400）——模拟"多阶段夹具链路中途失败"。
+        // [#56·2026-09-10] 原触发点「缺 exec_mode」（EXEC_MODE_REQUIRED）已随契约整组下线失效——assign
+        // 不再要求该字段，缺省不再报错。改用 assign 端点自身仍然存在、且判定顺序在最前的必填字段
+        // assigned_to（index.js 首行 `parsePositiveId(assigned_to)` 缺失即 400 ASSIGN_TARGET_REQUIRED）
+        // 作为新的"多阶段夹具链路中途失败"触发点，本组要验证的核心（失败路径不漏登记/可清理）与具体
+        // 用哪个必填字段触发无关。
         const ae2AssignFailR = await fetch(`${BASE_URL}/api/sys-issues/${idAe2}/assign`, {
             method: 'POST', headers: jsonHeaders(adminTok),
-            body: JSON.stringify({ assigned_to: DEV_ID }),   // 缺 exec_mode
+            body: JSON.stringify({}),   // 缺 assigned_to
         });
         const ae2AssignFailBody = await ae2AssignFailR.json().catch(() => null);
-        must(ae2AssignFailR.status !== 200, `AE2：缺 exec_mode 的指派请求应失败（非 200，实得 ${ae2AssignFailR.status} ${JSON.stringify(ae2AssignFailBody)}）`);
-        must(ae2AssignFailBody && ae2AssignFailBody.code === 'EXEC_MODE_REQUIRED', `AE2：失败原因码为 EXEC_MODE_REQUIRED（实得=${JSON.stringify(ae2AssignFailBody)}）`);
-        // 指派失败后单据仍应停留在「待处理」态、exec_mode 未落库——先确认确有夹具残留证据存在（非假阳性空跑）。
-        const ae2RowBeforeCleanup = await dbGet('SELECT id, status, exec_mode FROM sys_issues WHERE id=?', [idAe2]);
-        must(!!ae2RowBeforeCleanup && ae2RowBeforeCleanup.status === '待处理' && ae2RowBeforeCleanup.exec_mode === null, `AE2：指派失败后单据仍停留在「待处理」∧ exec_mode 未落库（实得=${JSON.stringify(ae2RowBeforeCleanup)}）——证明确有夹具存在，非空跑一遍`);
+        must(ae2AssignFailR.status !== 200, `AE2：缺 assigned_to 的指派请求应失败（非 200，实得 ${ae2AssignFailR.status} ${JSON.stringify(ae2AssignFailBody)}）`);
+        must(ae2AssignFailBody && ae2AssignFailBody.code === 'ASSIGN_TARGET_REQUIRED', `AE2：失败原因码为 ASSIGN_TARGET_REQUIRED（实得=${JSON.stringify(ae2AssignFailBody)}）`);
+        // 指派失败后单据仍应停留在「待处理」态——先确认确有夹具残留证据存在（非假阳性空跑）。
+        const ae2RowBeforeCleanup = await dbGet('SELECT id, status FROM sys_issues WHERE id=?', [idAe2]);
+        must(!!ae2RowBeforeCleanup && ae2RowBeforeCleanup.status === '待处理', `AE2：指派失败后单据仍停留在「待处理」（实得=${JSON.stringify(ae2RowBeforeCleanup)}）——证明确有夹具存在，非空跑一遍`);
 
         // ═══════════════════════════════════════════════════════════════
         // AH2（补丁 AH·Opus 预筛 H2）：注入「响应丢失」（fetch 直接 reject）——验证
@@ -2123,36 +1804,103 @@ async function main() {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // T14（补丁 AD·AD1）：OA 补填号入口——config 可见 + 文案不含必填措辞；improvement/bug 对照
+        // T14（2026-09-09 方案 v1.5 D1 全面订正）：config 纳入 OA 守卫——kv 告警 + 补号弹层必填措辞
+        //   + 指派 409 定向文案 + 补号后指派成功；improvement 正向对照 + bug 反向对照（新增）
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── T14：OA 补填号入口 config 可见（AD1） ──');
-        const id14 = await mkConfigProcessing(adminTok, 't14', 'self');
+        console.log('\n── T14：config 纳入 OA 守卫（方案 v1.5 D1）——kv 告警 + 弹层必填 + assign 定向文案 + 补号后放行 ──');
+        const id14 = await mkConfigToPending2NoOa(adminTok, 't14', '二级');   // 待处理，故意不补 OA（被测对象本身）
         registerCreatedId(id14);
+
+        // kv：待处理态 exempt=0 无号 → 琥珀"尚未补填 OA 号，指派开发前必填"（方案 D4①，与 feature/improvement 同款）
+        const page14kv = await loginPage(browser, adminTok);
+        await page14kv.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
+        await page14kv.waitForLoadState('networkidle');
+        await page14kv.waitForTimeout(700);
+        const kvOaText14 = await page14kv.locator('.u-kv-item:has(label:has-text("OA 流程号")) .v').innerText().catch(() => '');
+        await shotOnFail(page14kv, /尚未补填 OA 号，指派开发前必填/.test(kvOaText14), 't14-kv-warning', `config 待处理态 kv「OA 流程号」显示琥珀必填告警（实得="${kvOaText14}"）`);
+        const t14kvErrors = filterExpectedConsoleErrors(page14kv._consoleErrors);
+        await shotOnFail(page14kv, t14kvErrors.length === 0, 't14-kv-console-clean', `T14 kv 检查全程无非预期 console error（实得 ${t14kvErrors.length} 个）`);
+        await page14kv.close();
+
+        // 补号弹层：config 现与 feature/improvement 同受必填（D1 订正，此前"文案不含必填/不带星号"旧断言已废）
         const page14 = await loginPage(browser, adminTok);
         await page14.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
         await page14.waitForLoadState('networkidle');
         await page14.waitForTimeout(700);
         const oaBtnCount14 = await page14.locator('#siDActions button:has-text("补填 OA 号")').count();
-        await shotOnFail(page14, oaBtnCount14 === 1, 't14-oa-btn-visible', `config「处理中」态 admin 可见「补填 OA 号」入口（实得按钮数=${oaBtnCount14}）`);
+        await shotOnFail(page14, oaBtnCount14 === 1, 't14-oa-btn-visible', `config「待处理」态 admin 可见「补填 OA 号」入口（实得按钮数=${oaBtnCount14}）`);
         await page14.click('#siDActions button:has-text("补填 OA 号")');
         await page14.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
         await page14.waitForTimeout(200);
         const oaModalText14 = await page14.locator('#siMBody').innerText().catch(() => '');
-        await shotOnFail(page14, !/必填/.test(oaModalText14) && !/否则.*指派.*拒绝/.test(oaModalText14), 't14-no-required-wording', `config OA 弹层文案不含"必填/否则指派会被拒绝"类措辞（实得片段="${oaModalText14.slice(0, 120)}"）`);
+        await shotOnFail(page14, /config 单指派前需 OA 号（免 OA 单除外）/.test(oaModalText14), 't14-required-wording', `config OA 弹层文案含定向必填措辞（实得片段="${oaModalText14.slice(0, 150)}"）`);
         const oaRequiredMark14 = await page14.locator('#siMBody label:has-text("OA 流程号") .u-req').count();
-        await shotOnFail(page14, oaRequiredMark14 === 0, 't14-no-required-asterisk', 'config OA 号输入框不应带必填星号');
-        await page14.fill('#f_oa_number', '20260908001');
+        await shotOnFail(page14, oaRequiredMark14 === 1, 't14-required-asterisk', 'config OA 号输入框现应带必填星号（同 feature/improvement，D1 订正）');
+        // 不填直接提交 → 前端拦（同 feature/improvement 既有必填拦截，config 专属文案）
         await page14.click('#siMConfirm');
-        await page14.waitForTimeout(800);
-        const modalClosed14 = await page14.locator('#siModalOverlay.open').count();
-        await shotOnFail(page14, modalClosed14 === 0, 't14-modal-closed', '填号提交成功，弹窗关闭');
-        const row14 = await dbGet('SELECT oa_number FROM sys_issues WHERE id=?', [id14]);
-        await shotOnFail(page14, !!row14 && row14.oa_number === '20260908001', 't14-db-oa-number', `直查库 oa_number 已落库（实得=${JSON.stringify(row14)}）`);
-        const t14Errors = filterExpectedConsoleErrors(page14._consoleErrors);
-        await shotOnFail(page14, t14Errors.length === 0, 't14-console-clean', `T14 全程无非预期 console error（实得 ${t14Errors.length} 个）`);
+        await page14.waitForTimeout(300);
+        const toastOaRequired14 = await page14.locator('#toast-container').textContent().catch(() => '');
+        await shotOnFail(page14, /config 单 OA 流程号必填/.test(toastOaRequired14 || ''), 't14-oa-required-toast', `未填 OA 号提交应报 config 专属必填提示（实得="${toastOaRequired14}"）`);
+        const modalStillOpen14 = await page14.locator('#siModalOverlay.open').count();
+        await shotOnFail(page14, modalStillOpen14 === 1, 't14-modal-still-open', '未填 OA 号提交时弹窗仍打开（未误判成功）');
         await page14.close();
 
-        // improvement 对照——仍显示必填文案（只需推进到「待指派」，OA 入口已可见，无需走完整验证链路）
+        // ①（方案 v1.5 D4③）无号单打开「指派」弹层直接提交 → 409 + 页面展示定向引导文案（断言 DOM 文本，非仅 toast 存在）
+        const page14assign = await loginPage(browser, adminTok);
+        await page14assign.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
+        await page14assign.waitForLoadState('networkidle');
+        await page14assign.waitForTimeout(700);
+        await page14assign.click('#siDActions button:has-text("指派")');
+        await page14assign.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+        await page14assign.waitForTimeout(200);
+        await page14assign.locator('.si-collab-chk').first().check();
+        // [#56·2026-09-10] 原此处还需勾选 exec_mode 单选（否则前端自身必填校验会先于本组要测的 OA 409
+        // 拦下提交）——该单选组已随契约整组下线，指派弹层不再渲染，勾选开发成员后可直接提交。
+        await page14assign.waitForTimeout(150);
+        const assign409RespPromise14 = page14assign.waitForResponse(r => /\/api\/sys-issues\/\d+\/assign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
+        await page14assign.click('#siMConfirm');
+        const assign409Resp14 = await assign409RespPromise14;
+        await shotOnFail(page14assign, assign409Resp14.status() === 409, 't14-assign-409-status', `无 OA 号指派响应 409（实得 ${assign409Resp14.status()}）`);
+        // [C4·538方案 §8·预筛 C2 遗留] 状态码之外补确切错误码断言——409 本身不区分"哪一条守卫拒的"，
+        // 只断状态码会漏掉"是不是这条 OA 守卫在拒绝"这一具体归因（可能是别的 409 分支撞上巧合状态码）。
+        const assign409Body14 = await assign409Resp14.json().catch(() => null);
+        await shotOnFail(page14assign, !!assign409Body14 && assign409Body14.code === 'ASSIGN_REQUIRES_OA_NUMBER', 't14-assign-409-code', `无 OA 号指派响应确切错误码 ASSIGN_REQUIRES_OA_NUMBER（实得=${JSON.stringify(assign409Body14)}）`);
+        await page14assign.waitForTimeout(400);
+        const toastAssign409Text14 = await page14assign.locator('#toast-container').textContent().catch(() => '');
+        await shotOnFail(page14assign, (toastAssign409Text14 || '').includes('本单需先补填 OA 号（admin 在详情页「补填 OA 号」），或建单时勾选免 OA'), 't14-assign-toast-directed', `指派 409 时页面展示 siModalAssign 新增的定向引导文案（实得="${toastAssign409Text14}"）`);
+        const modalStillOpenAssign14 = await page14assign.locator('#siModalOverlay.open').count();
+        await shotOnFail(page14assign, modalStillOpenAssign14 === 1, 't14-assign-modal-still-open', '指派 409 后弹窗仍打开（未误判成功关闭）');
+        // 排除本单 assign 409 的浏览器内建网络日志（判红证据本身，非页面渲染损坏；此范式原与已随
+        // #56·2026-09-10 删除的 MUT5②④/MUT6 共用，删除后本处独立沿用，不再有同款可引用）。
+        const t14AssignErrors = filterExpectedConsoleErrors(page14assign._consoleErrors)
+            .filter(e => !(/409/.test(e.text) && new RegExp(`/api/sys-issues/${id14}/assign`).test(e.url)));
+        await shotOnFail(page14assign, t14AssignErrors.length === 0, 't14-assign-console-clean', `T14 指派 409 检查全程无非预期 console error（实得 ${t14AssignErrors.length} 个，已排除本单 assign 409 网络日志）${t14AssignErrors.length ? '：' + JSON.stringify(t14AssignErrors) : ''}`);
+        await page14assign.close();
+
+        // ③（方案 v1.5 D4③）admin 补号后再指派 → 200（号与豁免正交，D1 不改可填窗口）
+        await apiSetOaNumber(adminTok, id14, '20260909401');
+        const page14ok = await loginPage(browser, adminTok);
+        await page14ok.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
+        await page14ok.waitForLoadState('networkidle');
+        await page14ok.waitForTimeout(700);
+        await page14ok.click('#siDActions button:has-text("指派")');
+        await page14ok.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+        await page14ok.waitForTimeout(200);
+        await page14ok.locator('.si-collab-chk').first().check();
+        // [#56·2026-09-10] 同上——exec_mode 单选组已随契约整组下线，无需勾选。
+        await page14ok.waitForTimeout(150);
+        const assignOkRespPromise14 = page14ok.waitForResponse(r => /\/api\/sys-issues\/\d+\/assign$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST');
+        await page14ok.click('#siMConfirm');
+        const assignOkResp14 = await assignOkRespPromise14;
+        await shotOnFail(page14ok, assignOkResp14.status() === 200, 't14-assign-after-oa-status', `补号后指派响应 200（实得 ${assignOkResp14.status()}）`);
+        await page14ok.waitForTimeout(600);
+        const row14ok = await dbGet('SELECT status, oa_number FROM sys_issues WHERE id=?', [id14]);
+        await shotOnFail(page14ok, !!row14ok && row14ok.status === '处理中' && row14ok.oa_number === '20260909401', 't14-assign-after-oa-db', `补号后指派：库内 status=处理中 ∧ oa_number 已落库（实得=${JSON.stringify(row14ok)}）`);
+        const t14OkErrors = filterExpectedConsoleErrors(page14ok._consoleErrors);
+        await shotOnFail(page14ok, t14OkErrors.length === 0, 't14-ok-console-clean', `T14 补号后指派检查全程无非预期 console error（实得 ${t14OkErrors.length} 个）`);
+        await page14ok.close();
+
+        // improvement 正向对照——仍显示必填文案（D1 未改变 feature/improvement 行为，只需推进到「待指派」）
         // [S1d·513-M1] 建单步骤改走 createIssueWithRecovery（与其余三处 API 建单同款响应异常恢复）。
         seq++;
         const fixtureMarkerT14Imp = nextFixtureMarker();
@@ -2160,6 +1908,7 @@ async function main() {
             intake_contract_version: 2, type: 'improvement', title: `${TITLE_PREFIX}-t14imp-${RUN_TAG}-${seq}`,
             system_name: 'BMS', source: '内部', description: `T14 improvement 对照组夹具 ${RUN_TAG_MARKER}${fixtureMarkerT14Imp}`, intake_liaison_id: LIAISON_ID,
         }, fixtureMarkerT14Imp, 'T14 improvement建单');
+        registerCreatedId(id14Imp);
         const intakeAcceptR14 = await fetch(`${BASE_URL}/api/sys-issues/${id14Imp}/intake-accept`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ risk_level: '二级' }) });
         if (intakeAcceptR14.status !== 200) throw new Error(`[夹具-T14 improvement受理] 应 200，实得 ${intakeAcceptR14.status} ${JSON.stringify(await intakeAcceptR14.json().catch(() => null))}`);
         const page14b = await loginPage(browser, adminTok);
@@ -2176,6 +1925,33 @@ async function main() {
         const t14bErrors = filterExpectedConsoleErrors(page14b._consoleErrors);
         await shotOnFail(page14b, t14bErrors.length === 0, 't14b-console-clean', `T14 improvement 对照组全程无非预期 console error（实得 ${t14bErrors.length} 个）`);
         await page14b.close();
+
+        // bug 反向对照（新增）——结构性豁免不变：OA 号仍可选、文案仍含"可选"、输入框仍无必填星号（D2）
+        seq++;
+        const fixtureMarkerT14Bug = nextFixtureMarker();
+        const id14Bug = await createIssueWithRecovery(adminTok, 'bug', {
+            intake_contract_version: 2, type: 'bug', title: `${TITLE_PREFIX}-t14bug-${RUN_TAG}-${seq}`,
+            system_name: 'BMS', source: '内部', description: `T14 bug 对照组夹具 ${RUN_TAG_MARKER}${fixtureMarkerT14Bug}`, intake_liaison_id: LIAISON_ID,
+        }, fixtureMarkerT14Bug, 'T14 bug建单');
+        registerCreatedId(id14Bug);
+        const intakeAcceptR14Bug = await fetch(`${BASE_URL}/api/sys-issues/${id14Bug}/intake-accept`, { method: 'POST', headers: jsonHeaders(adminTok), body: '{}' });
+        if (intakeAcceptR14Bug.status !== 200) throw new Error(`[夹具-T14 bug受理] 应 200，实得 ${intakeAcceptR14Bug.status} ${JSON.stringify(await intakeAcceptR14Bug.json().catch(() => null))}`);
+        const page14c = await loginPage(browser, adminTok);
+        await page14c.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14Bug}`);
+        await page14c.waitForLoadState('networkidle');
+        await page14c.waitForTimeout(700);
+        const oaBtnCount14c = await page14c.locator('#siDActions button:has-text("补填 OA 号")').count();
+        await shotOnFail(page14c, oaBtnCount14c === 1, 't14-bug-oa-btn-visible', `对照组：bug「待处理」态仍可见「补填 OA 号」入口（实得按钮数=${oaBtnCount14c}）`);
+        await page14c.click('#siDActions button:has-text("补填 OA 号")');
+        await page14c.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+        await page14c.waitForTimeout(200);
+        const oaModalText14c = await page14c.locator('#siMBody').innerText().catch(() => '');
+        await shotOnFail(page14c, /可选/.test(oaModalText14c) && !/必填/.test(oaModalText14c), 't14-bug-optional-wording', `对照组：bug OA 弹层文案仍为"可选"、不含"必填"（实得片段="${oaModalText14c.slice(0, 120)}"）`);
+        const oaRequiredMark14c = await page14c.locator('#siMBody label:has-text("OA 流程号") .u-req').count();
+        await shotOnFail(page14c, oaRequiredMark14c === 0, 't14-bug-no-required-asterisk', '对照组：bug OA 号输入框不应带必填星号（结构性豁免不变，D2）');
+        const t14cErrors = filterExpectedConsoleErrors(page14c._consoleErrors);
+        await shotOnFail(page14c, t14cErrors.length === 0, 't14c-console-clean', `T14 bug 对照组全程无非预期 console error（实得 ${t14cErrors.length} 个）`);
+        await page14c.close();
 
         // ═══════════════════════════════════════════════════════════════
         // T15：上线单「加单」候选列表能看到 config 待上线单
@@ -2411,248 +2187,51 @@ async function main() {
         await pageMut3.close();
 
         // ═══════════════════════════════════════════════════════════════
-        // MUT4（补丁 AD·AD1）：撤去 SI_OA_ALLOWED_STATUSES 的 config 键 → T14 第一条应判红
+        // MUT4（2026-09-09 方案 v1.5 D1 订正）：撤去 siModalSetOaNumber 的 oaRequired 里 config 分支
+        //   → T14「必填星号」断言应判红（原变异目标 SI_OA_ALLOWED_STATUSES.config 只管入口**可见性**，
+        //   D1 后核心风险改在"是否必填"这条判据本身，故变异目标随之改为 oaRequired）
         // ═══════════════════════════════════════════════════════════════
-        console.log('\n── MUT4：撤去 SI_OA_ALLOWED_STATUSES 的 config 键 → 「补填 OA 号」入口应不可见 ──');
-        const mut4Marker = "config: ['待处理', '处理中', '待验证', '待上线', '已上线', '已暂缓'],";
-        const mut4Replacement = "/* MUTATION-TEST-TEMP-REMOVE-config: ['待处理','处理中','待验证','待上线','已上线','已暂缓'], */";
-        // [补丁 AF·AF4·512-M2 ②] T14 的正向操作已经把 id14 的 oa_number 改过（提交过一次「补填 OA 号」），
-        // 变异前先重新开一个新页面确认「当前」夹具入口仍可见（siOaFillable 只按 type+status 判定，不
-        // 看 oa_number 是否已有值，理论上不受影响，但按 512 要求在变异注入前就地重新确认，不复用早前
-        // T14 阶段的旧断言结果）。
+        console.log('\n── MUT4：撤去 siModalSetOaNumber 的 oaRequired 里 config 分支 → 必填星号应判红 ──');
+        const mut4Marker = "const oaRequired = iss.type === 'feature' || iss.type === 'improvement' || iss.type === 'config';";
+        const mut4Replacement = "const oaRequired = iss.type === 'feature' || iss.type === 'improvement';";
+        // T14 已把 id14 推进到「处理中」且已补号（提交过一次「补填/修改 OA 号」）——变异前先重新开一个新
+        // 页面就地重新确认「当前」夹具的必填星号仍在（不复用早前 T14 阶段的旧断言结果，同 512 要求）。
         const pageMut4Ctrl = await loginPage(browser, adminTok);
         await pageMut4Ctrl.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
         await pageMut4Ctrl.waitForLoadState('networkidle');
         await pageMut4Ctrl.waitForTimeout(700);
         // [实测发现] T14 早前已提交过一次 OA 号，按钮文案已从「补填」变为「修改」（siOaFillable 渲染点：
-        // `${iss.oa_number ? '修改' : '补填'} OA 号`，:5747）——用「OA 号」子串匹配两种文案，不锁死某一态。
-        const oaBtnCountCtrl4 = await pageMut4Ctrl.locator('#siDActions button:has-text("OA 号")').count();
-        must(oaBtnCountCtrl4 === 1, `[MUT4 正向对照] 变异前：id14 当前仍可见「补填/修改 OA 号」入口（实得按钮数=${oaBtnCountCtrl4}，证明该组正常态下绿——T14 早前的 OA 号提交只改了按钮文案，未影响入口可见性）`);
+        // `${iss.oa_number ? '修改' : '补填'} OA 号`）——用「OA 号」子串匹配两种文案，不锁死某一态。
+        await pageMut4Ctrl.click('#siDActions button:has-text("OA 号")');
+        await pageMut4Ctrl.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+        await pageMut4Ctrl.waitForTimeout(200);
+        const oaRequiredMarkCtrl4 = await pageMut4Ctrl.locator('#siMBody label:has-text("OA 流程号") .u-req').count();
+        must(oaRequiredMarkCtrl4 === 1, `[MUT4 正向对照] 变异前：id14 当前仍带必填星号（实得=${oaRequiredMarkCtrl4}，证明该组正常态下绿）`);
         await pageMut4Ctrl.close();
 
-        // [补丁 AF·AF2] 改用 page.route 内存拦截。
+        // [补丁 AF·AF2] page.route 内存拦截；functionName 限定锚点只在 siModalSetOaNumber 函数体内计数，
+        // 防止别处巧合出现同款字面量（如 :3824 一带的注释文字）造成锚点计数漂移。
         const pageMut4 = await loginPage(browser, adminTok);
-        const mut4State = await routeMutatedIterationPage(pageMut4, mut4Marker, mut4Replacement);
+        const mut4State = await routeMutatedIterationPage(pageMut4, mut4Marker, mut4Replacement, { functionName: 'siModalSetOaNumber' });
         await pageMut4.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id14}`);
         await pageMut4.waitForLoadState('networkidle');
         await pageMut4.waitForTimeout(700);
-        if (!mut4State.anchorFound) {
-            must(false, `MUT4 锚点未命中恰一处（SI_OA_ALLOWED_STATUSES.config 字面量已漂移或出现多处巧合匹配，需人工核实后更新锚点；实得命中次数=${mut4State.occurrences}）`);
+        if (!mut4State.anchorFound || !mut4State.functionScopeFound) {
+            must(false, `MUT4 锚点未命中恰一处（siModalSetOaNumber 函数体内 oaRequired 字面量已漂移或函数体定位失败；functionScopeFound=${mut4State.functionScopeFound}，occurrences=${mut4State.occurrences}）`);
         } else {
-            const oaBtnCountMut4 = await pageMut4.locator('#siDActions button:has-text("OA 号")').count();
-            const mut4JudgedRed = oaBtnCountMut4 === 0;
-            console.log(`  ${mut4JudgedRed ? '✅' : '❌'} [MUT4] 撤去 config 键后「补填 OA 号」入口应不可见（实得按钮数=${oaBtnCountMut4}，${mut4JudgedRed ? '判红符合预期' : '未判红——变异未生效或测试判别力不足'}）`);
-            if (!mut4JudgedRed) { fail++; failDetails.push('[MUT4] 变异后未观察到判红——需人工核实'); }
+            await pageMut4.click('#siDActions button:has-text("OA 号")');
+            await pageMut4.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await pageMut4.waitForTimeout(200);
+            const oaRequiredMarkMut4 = await pageMut4.locator('#siMBody label:has-text("OA 流程号") .u-req').count();
+            const mut4JudgedRed = oaRequiredMarkMut4 === 0;
+            console.log(`  ${mut4JudgedRed ? '✅' : '❌'} [MUT4] 撤去 oaRequired 的 config 分支后必填星号应消失（实得星号数=${oaRequiredMarkMut4}，${mut4JudgedRed ? '判红符合预期' : '未判红——变异未生效或测试判别力不足'}）`);
+            if (mut4JudgedRed) { pass++; } else { fail++; failDetails.push('[MUT4] 变异后未观察到判红——需人工核实'); }
             const mut4DetailInfo = await pageMut4.evaluate(() => (siDetail && siDetail.issue) ? { id: siDetail.issue.id, status: siDetail.issue.status, type: siDetail.issue.type } : null);
             must(!!mut4DetailInfo && Number(mut4DetailInfo.id) === id14 && mut4DetailInfo.type === 'config', `[MUT4 健康检查] 详情确实加载了目标单据（预期 id=${id14}∧type=config，实得=${JSON.stringify(mut4DetailInfo)}）`);
             const mut4PageErrors = filterExpectedConsoleErrors(pageMut4._consoleErrors);
             must(mut4PageErrors.length === 0, `[MUT4 健康检查] 变异后无非预期 console error（实得 ${mut4PageErrors.length} 个）`);
         }
         await pageMut4.close();
-
-        // ═══════════════════════════════════════════════════════════════
-        // MUT5（补丁 AD·AD5）：撤去改派 vendorChanged 判据 → T13②④ 用例应判红
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── MUT5：撤去改派 vendorChanged 判据 → T13②④ 用例应判红 ──');
-        const id13bMut = await mkConfigProcessing(adminTok, 't13bmut', 'vendor', '原乙方公司');
-        registerCreatedId(id13bMut);
-        const id13dMut = await mkConfigProcessing(adminTok, 't13dmut', 'vendor', '原乙方公司');
-        registerCreatedId(id13dMut);
-
-        // [补丁 AE·AE5·511-B M2] 正向对照——两个夹具此前从未在未变异态下走过 UI，先各验证一次正常行为。
-        const pageMut5bCtrl = await loginPage(browser, adminTok);
-        await pageMut5bCtrl.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13bMut}`);
-        await pageMut5bCtrl.waitForLoadState('networkidle');
-        await pageMut5bCtrl.waitForTimeout(700);
-        await pageMut5bCtrl.click('#siDActions button:has-text("改派")');
-        await pageMut5bCtrl.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await pageMut5bCtrl.waitForTimeout(200);
-        await pageMut5bCtrl.fill('#si-reassign-vendor-name', '正向对照名称');
-        await pageMut5bCtrl.fill('#f_reason', 'MUT5 正向对照②：变异前只改名称应生效');
-        await pageMut5bCtrl.click('#siMConfirm');
-        await pageMut5bCtrl.waitForTimeout(800);
-        const row5bCtrl = await dbGet('SELECT vendor_name FROM sys_issues WHERE id=?', [id13bMut]);
-        must(!!row5bCtrl && row5bCtrl.vendor_name === '正向对照名称', `[MUT5② 正向对照] 变异前：只改名称提交后库里名称确实变为「正向对照名称」（实得=${JSON.stringify(row5bCtrl)}，证明该组正常态下绿）`);
-        await pageMut5bCtrl.close();
-        const mut5bBaselineName = (row5bCtrl && row5bCtrl.vendor_name) || '正向对照名称';   // 后续变异判红对拍的基线值
-
-        const pageMut5dCtrl = await loginPage(browser, adminTok);
-        await pageMut5dCtrl.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13dMut}`);
-        await pageMut5dCtrl.waitForLoadState('networkidle');
-        await pageMut5dCtrl.waitForTimeout(700);
-        await pageMut5dCtrl.click('#siDActions button:has-text("改派")');
-        await pageMut5dCtrl.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-        await pageMut5dCtrl.waitForTimeout(200);
-        await pageMut5dCtrl.fill('#si-reassign-vendor-name', '');
-        await pageMut5dCtrl.fill('#f_reason', 'MUT5 正向对照④：变异前清空名称应被前端拦截');
-        let reassignReqCountCtrl5d = 0;
-        const onReassignReqCtrl5d = req => { if (/\/api\/sys-issues\/\d+\/reassign$/.test(new URL(req.url()).pathname) && req.method() === 'POST') reassignReqCountCtrl5d++; };
-        pageMut5dCtrl.on('request', onReassignReqCtrl5d);
-        await pageMut5dCtrl.click('#siMConfirm');
-        await pageMut5dCtrl.waitForTimeout(500);
-        pageMut5dCtrl.off('request', onReassignReqCtrl5d);
-        const toastCtrl5d = await pageMut5dCtrl.locator('#toast-container').textContent().catch(() => '');
-        must(/请填写乙方名称/.test(toastCtrl5d || '') && reassignReqCountCtrl5d === 0, `[MUT5④ 正向对照] 变异前：清空名称提交被前端拦截（请求数=0 ∧ toast="${toastCtrl5d}"，证明该组正常态下绿）`);
-        await pageMut5dCtrl.close();
-
-        const mut5Marker = "const vendorChanged = curMode === 'vendor' && curVendorName !== initialVendorName.trim();";
-        const mut5Replacement = "const vendorChanged = false; /* MUTATION-TEST-TEMP-REMOVE-vendorChanged */";
-        // [补丁 AF·AF2] 改用 page.route 内存拦截——②④各自独立开页、独立注册路由。
-        const pageMut5b = await loginPage(browser, adminTok);
-        const mut5bState = await routeMutatedIterationPage(pageMut5b, mut5Marker, mut5Replacement);
-        await pageMut5b.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13bMut}`);
-        await pageMut5b.waitForLoadState('networkidle');
-        await pageMut5b.waitForTimeout(700);
-        const pageMut5d = await loginPage(browser, adminTok);
-        const mut5dState = await routeMutatedIterationPage(pageMut5d, mut5Marker, mut5Replacement);
-        await pageMut5d.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id13dMut}`);
-        await pageMut5d.waitForLoadState('networkidle');
-        await pageMut5d.waitForTimeout(700);
-        if (!mut5bState.anchorFound || !mut5dState.anchorFound) {
-            must(false, `MUT5 锚点未命中恰一处（vendorChanged 判据字面量已漂移或出现多处巧合匹配，需人工核实后更新锚点；②命中次数=${mut5bState.occurrences}，④命中次数=${mut5dState.occurrences}）`);
-        } else {
-            // ②只改名称场景：mutation 后 modeChanged/vendorChanged 均为 false，整段判定块被跳过，body
-            // 不再携带 exec_mode/vendor_name，请求仍会发到后端，后端 no-op 三元判据在"成员未变+两键
-            // 均缺失"这一组合上独立以 409 拒绝（index.js:7788-7794，与④同一拒绝码）。
-            // [补丁 AF·AF4·512-M2 ③] 判红改为**捕获本单实际请求 + 断言缺失字段 + 断言预期拒绝响应**，
-            // 不再只看 DB 值不变——那本身可能由请求失败/处理器异常等无关原因造成，不能证明是
-            // vendorChanged 判据被跳过导致的。
-            await pageMut5b.click('#siDActions button:has-text("改派")');
-            await pageMut5b.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            await pageMut5b.waitForTimeout(200);
-            await pageMut5b.fill('#si-reassign-vendor-name', '变异测试新名称');
-            await pageMut5b.fill('#f_reason', 'MUT5 探针②：撤去 vendorChanged 后只改名称');
-            // [S1d·513-M2] 响应匹配精确绑定 id13bMut——此前裸 `\d+` 通配符会接受任意单据的 reassign
-            // 响应，与代码注释"捕获本单实际请求"的表述不符（本文件各 page 顺序执行，实际不会真的
-            // 捕获到别的单据，但精确绑定后代码行为与注释所述一致，不留纵深防御空隙）。
-            const reassignRespPromiseMut5b = pageMut5b.waitForResponse(
-                r => new RegExp(`/api/sys-issues/${id13bMut}/reassign$`).test(new URL(r.url()).pathname) && r.request().method() === 'POST',
-                { timeout: 5000 }
-            ).catch(() => null);
-            await pageMut5b.click('#siMConfirm');
-            const reassignRespMut5b = await reassignRespPromiseMut5b;
-            await pageMut5b.waitForTimeout(500);
-            let mut5bReqBody = null, mut5bReqParseOk = false;
-            // [S1d·513 附带建议] parseOk 改用 isPlainObjectJson。
-            if (reassignRespMut5b) { try { mut5bReqBody = JSON.parse(reassignRespMut5b.request().postData() || 'null'); mut5bReqParseOk = isPlainObjectJson(mut5bReqBody); } catch (_) { /* 解析失败留 null，下方按 !! 判红 */ } }
-            let mut5bRespBody = null;
-            if (reassignRespMut5b) { try { mut5bRespBody = await reassignRespMut5b.json(); } catch (_) { /* 解析失败留 null */ } }
-            const mut5bRequestSent = !!reassignRespMut5b;
-            const mut5bReqMissingKeys = mut5bReqParseOk && !('exec_mode' in mut5bReqBody) && !('vendor_name' in mut5bReqBody);
-            const mut5bBackendRejected = !!reassignRespMut5b && reassignRespMut5b.status() === 409 && !!mut5bRespBody && mut5bRespBody.error === '开发集合与执行方式均无变更，无需改派';
-            const mut5bJudgedRed = mut5bRequestSent && mut5bReqMissingKeys && mut5bBackendRejected;
-            console.log(`  ${mut5bJudgedRed ? '✅' : '❌'} [MUT5②] 撤去 vendorChanged 后"只改名称"用例应判红（请求已发出=${mut5bRequestSent}，请求体缺 exec_mode/vendor_name=${mut5bReqMissingKeys}，后端 409 拒绝=${mut5bBackendRejected}，实得请求体=${JSON.stringify(mut5bReqBody)}，实得响应=${JSON.stringify(mut5bRespBody)}，${mut5bJudgedRed ? '判红符合预期' : '未判红——变异未生效或测试判别力不足'}）`);
-            if (!mut5bJudgedRed) { fail++; failDetails.push('[MUT5②] 变异后未观察到判红——需人工核实'); }
-            // 库值兜底核对——与请求/响应证据一致，行存在 ∧ 名称仍为正向对照后的基线值（不单独作为判红依据）。
-            const row5bAfter = await dbGet('SELECT vendor_name FROM sys_issues WHERE id=?', [id13bMut]);
-            must(!!row5bAfter && row5bAfter.vendor_name === mut5bBaselineName, `[MUT5②] 库值兜底核对：行存在 ∧ 名称仍为基线值「${mut5bBaselineName}」（实得=${JSON.stringify(row5bAfter)}）`);
-            // [S1d·513-M2] 健康检查——MUT5②此前未检查页面错误（512 指出的缺口），补齐同 MUT1-4/6-8 同款
-            // 检查：变异只应改变 vendorChanged 判据，不应引出非预期 console error。
-            // [实测踩坑修复] 本变异让前端校验被绕过、请求真的发到后端并被 409 拒绝——Chromium 对
-            // fetch/XHR 收到非 2xx 响应会自动打一条 "Failed to load resource" console error（浏览器
-            // 内建行为，非 JS 显式 console.error()，与页面是否正确处理错误无关）。这是本变异**预期、
-            // 无害的副作用**（正是判红证据本身——mut5bBackendRejected 已经断言了同一个 409），故精确
-            // 排除"本单 reassign 端点 409"这一条，不放宽到吞掉其它无关错误（同 MUT2 排除自身
-            // [siIsDevAction] 防御日志的收窄范式）。
-            const mut5bPageErrors = filterExpectedConsoleErrors(pageMut5b._consoleErrors)
-                .filter(e => !(/409/.test(e.text) && new RegExp(`/api/sys-issues/${id13bMut}/reassign`).test(e.url)));
-            must(mut5bPageErrors.length === 0, `[MUT5② 健康检查] 变异后无非预期 console error（实得 ${mut5bPageErrors.length} 个，已排除本变异自身触发的本单 reassign 409 网络日志）${mut5bPageErrors.length ? '：' + JSON.stringify(mut5bPageErrors) : ''}`);
-
-            // ④清空名称场景：同②，mutation 后前端整段判定块被跳过，请求直接发到后端，后端 no-op 判据
-            // 独立以 409 拒绝（同一拒绝码）。
-            await pageMut5d.click('#siDActions button:has-text("改派")');
-            await pageMut5d.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            await pageMut5d.waitForTimeout(200);
-            await pageMut5d.fill('#si-reassign-vendor-name', '');
-            await pageMut5d.fill('#f_reason', 'MUT5 探针④：撤去 vendorChanged 后清空名称');
-            // [S1d·513-M2] 响应匹配精确绑定 id13dMut，同 MUT5②。
-            const reassignRespPromiseMut5d = pageMut5d.waitForResponse(
-                r => new RegExp(`/api/sys-issues/${id13dMut}/reassign$`).test(new URL(r.url()).pathname) && r.request().method() === 'POST',
-                { timeout: 5000 }
-            ).catch(() => null);
-            await pageMut5d.click('#siMConfirm');
-            const reassignRespMut5d = await reassignRespPromiseMut5d;
-            await pageMut5d.waitForTimeout(500);
-            const toastMut5d = await pageMut5d.locator('#toast-container').textContent().catch(() => '');
-            let mut5dReqBody = null, mut5dReqParseOk = false;
-            // [S1d·513 附带建议] parseOk 改用 isPlainObjectJson。
-            if (reassignRespMut5d) { try { mut5dReqBody = JSON.parse(reassignRespMut5d.request().postData() || 'null'); mut5dReqParseOk = isPlainObjectJson(mut5dReqBody); } catch (_) { /* 解析失败留 null */ } }
-            let mut5dRespBody = null;
-            if (reassignRespMut5d) { try { mut5dRespBody = await reassignRespMut5d.json(); } catch (_) { /* 解析失败留 null，下方按 !! 判红 */ } }
-            const mut5dRequestSent = !!reassignRespMut5d;
-            const mut5dReqMissingKeys = mut5dReqParseOk && !('exec_mode' in mut5dReqBody) && !('vendor_name' in mut5dReqBody);
-            const mut5dBackendRejected = !!reassignRespMut5d && reassignRespMut5d.status() === 409 && !!mut5dRespBody && mut5dRespBody.error === '开发集合与执行方式均无变更，无需改派';
-            const mut5dJudgedRed = mut5dRequestSent && mut5dReqMissingKeys && mut5dBackendRejected;
-            console.log(`  ${mut5dJudgedRed ? '✅' : '❌'} [MUT5④] 撤去 vendorChanged 后"清空名称应拦截"用例应判红（请求已发出=${mut5dRequestSent}，请求体缺 exec_mode/vendor_name=${mut5dReqMissingKeys}，后端 409 拒绝=${mut5dBackendRejected}，实得请求体=${JSON.stringify(mut5dReqBody)}，实得响应=${JSON.stringify(mut5dRespBody)}，toast="${toastMut5d}"，${mut5dJudgedRed ? '判红符合预期（请求绕过前端校验直达后端，后端独立拒绝）' : '未判红——变异未生效或测试判别力不足'}）`);
-            if (!mut5dJudgedRed) { fail++; failDetails.push('[MUT5④] 变异后未观察到判红——需人工核实'); }
-            // [S1d·513-M2] 健康检查——MUT5④同样此前未检查页面错误；同②排除本单 reassign 409 的
-            // 浏览器内建网络日志（判红证据本身，非页面渲染损坏）。
-            const mut5dPageErrors = filterExpectedConsoleErrors(pageMut5d._consoleErrors)
-                .filter(e => !(/409/.test(e.text) && new RegExp(`/api/sys-issues/${id13dMut}/reassign`).test(e.url)));
-            must(mut5dPageErrors.length === 0, `[MUT5④ 健康检查] 变异后无非预期 console error（实得 ${mut5dPageErrors.length} 个，已排除本变异自身触发的本单 reassign 409 网络日志）${mut5dPageErrors.length ? '：' + JSON.stringify(mut5dPageErrors) : ''}`);
-        }
-        await pageMut5b.close();
-        await pageMut5d.close();
-
-        // ═══════════════════════════════════════════════════════════════
-        // MUT6（补丁 AE·§4 候选①）：撤去首次指派 body.vendor_name = vn → T3v 成功路径应判红
-        // ═══════════════════════════════════════════════════════════════
-        console.log('\n── MUT6：撤去首次指派 body.vendor_name = vn → T3v vendor 成功路径应判红 ──');
-        // [补丁 AE·AE5] 正向对照已由上方 T3v（id3vUi，见 t3v-assign-request-body/t3v-db-vendor）钉住
-        // 同一段代码在未变异态下的行为——此处不重复开页，改用新夹具复现变异后行为。
-        const idMut6 = await mkConfigToPending2(adminTok, 'mut6', '二级');
-        registerCreatedId(idMut6);
-        const mut6Marker = 'body.vendor_name = vn;';
-        const mut6Replacement = '/* MUTATION-TEST-TEMP-REMOVE-body-vendor-name-assign: body.vendor_name = vn; */';
-        // [补丁 AF·AF2] 改用 page.route 内存拦截。
-        const pageMut6 = await loginPage(browser, adminTok);
-        const mut6State = await routeMutatedIterationPage(pageMut6, mut6Marker, mut6Replacement);
-        await pageMut6.goto(`${BASE_URL}/Sys_Iteration.html?issue=${idMut6}`);
-        await pageMut6.waitForLoadState('networkidle');
-        await pageMut6.waitForTimeout(700);
-        if (!mut6State.anchorFound) {
-            must(false, `MUT6 锚点未命中恰一处（siModalAssign 的 body.vendor_name = vn 字面量已漂移或出现多处巧合匹配，需人工核实后更新锚点；实得命中次数=${mut6State.occurrences}）`);
-        } else {
-            await pageMut6.click('#siDActions button:has-text("指派")');
-            await pageMut6.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            await pageMut6.waitForTimeout(200);
-            await pageMut6.locator('.si-collab-chk').first().check();
-            await pageMut6.locator('input[name="si-assign-exec-mode"][value="vendor"]').check();
-            await pageMut6.waitForTimeout(150);
-            await pageMut6.fill('#si-assign-vendor-name', 'MUT6乙方公司');
-            // [511-B M2，补丁 AF·AF4·512-M2 ④] 判红需捕获实际请求体与响应——后端 VENDOR_NAME_REQUIRED
-            // 的文案与前端自身校验文案逐字相同，toast 无判别力；且不能只要求"非 200"（那样任何原因
-            // 的失败都会误判成功杀死变异），须精确核对 400 + code==='VENDOR_NAME_REQUIRED'，并核对
-            // 请求体其余字段（assigned_to/exec_mode）齐全合法，证明这是一个"本该成功、只差 vendor_name
-            // 一个键"的合法请求，不是被别的原因搞坏的畸形请求。
-            // [S1d·513-M2] 响应匹配精确绑定 idMut6，同 MUT5②④。
-            const assignRespPromiseMut6 = pageMut6.waitForResponse(
-                r => new RegExp(`/api/sys-issues/${idMut6}/assign$`).test(new URL(r.url()).pathname) && r.request().method() === 'POST',
-                { timeout: 5000 }
-            ).catch(() => null);
-            await pageMut6.click('#siMConfirm');
-            const assignRespMut6 = await assignRespPromiseMut6;
-            await pageMut6.waitForTimeout(500);
-            let mut6ReqBody = null, mut6ReqParseOk = false;
-            // [S1d·513 附带建议] parseOk 改用 isPlainObjectJson。
-            if (assignRespMut6) { try { mut6ReqBody = JSON.parse(assignRespMut6.request().postData() || 'null'); mut6ReqParseOk = isPlainObjectJson(mut6ReqBody); } catch (_) { /* 解析失败留 null，下方按 !! 判红 */ } }
-            let mut6RespBody = null;
-            if (assignRespMut6) { try { mut6RespBody = await assignRespMut6.json(); } catch (_) { /* 解析失败留 null */ } }
-            const mut6ReqOtherFieldsIntact = mut6ReqParseOk && Number.isInteger(mut6ReqBody.assigned_to) && mut6ReqBody.assigned_to > 0 && mut6ReqBody.exec_mode === 'vendor';
-            const mut6RequestMissingKey = mut6ReqParseOk && !('vendor_name' in mut6ReqBody);
-            const mut6BackendRejected = !!assignRespMut6 && assignRespMut6.status() === 400 && !!mut6RespBody && mut6RespBody.code === 'VENDOR_NAME_REQUIRED';
-            const mut6JudgedRed = mut6ReqOtherFieldsIntact && mut6RequestMissingKey && mut6BackendRejected;
-            console.log(`  ${mut6JudgedRed ? '✅' : '❌'} [MUT6] 撤去 body.vendor_name = vn 后首次指派 vendor 成功路径应判红（请求其余字段齐全=${mut6ReqOtherFieldsIntact}，缺 vendor_name 键=${mut6RequestMissingKey}，后端 400/VENDOR_NAME_REQUIRED=${mut6BackendRejected}，实得请求体=${JSON.stringify(mut6ReqBody)}，实得响应=${JSON.stringify(mut6RespBody)}，${mut6JudgedRed ? '判红符合预期' : '未判红——变异未生效或测试判别力不足'}）`);
-            if (!mut6JudgedRed) { fail++; failDetails.push('[MUT6] 变异后未观察到判红——需人工核实'); }
-            const mut6DetailInfo = await pageMut6.evaluate(() => (siDetail && siDetail.issue) ? { id: siDetail.issue.id, type: siDetail.issue.type } : null);
-            must(!!mut6DetailInfo && Number(mut6DetailInfo.id) === idMut6 && mut6DetailInfo.type === 'config', `[MUT6 健康检查] 详情确实加载了目标单据（预期 id=${idMut6}∧type=config，实得=${JSON.stringify(mut6DetailInfo)}）`);
-            // [S1d·513-M2] MUT6 此前也未检查页面错误——补齐同 MUT1-4/7/8 同款检查；同 MUT5②④排除
-            // 本单 assign 400 的浏览器内建网络日志（判红证据本身，非页面渲染损坏）。
-            const mut6PageErrors = filterExpectedConsoleErrors(pageMut6._consoleErrors)
-                .filter(e => !(/400/.test(e.text) && new RegExp(`/api/sys-issues/${idMut6}/assign`).test(e.url)));
-            must(mut6PageErrors.length === 0, `[MUT6 健康检查] 变异后无非预期 console error（实得 ${mut6PageErrors.length} 个，已排除本变异自身触发的本单 assign 400 网络日志）${mut6PageErrors.length ? '：' + JSON.stringify(mut6PageErrors) : ''}`);
-        }
-        await pageMut6.close();
 
         // ═══════════════════════════════════════════════════════════════
         // MUT7（补丁 AE·§4 候选②）：撤去 siNotifyStatusesFor 的 config 分支 → T12b 开发通知按钮应判红

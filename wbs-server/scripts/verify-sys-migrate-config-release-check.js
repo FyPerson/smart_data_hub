@@ -1553,7 +1553,16 @@ async function main() {
     assert.strictEqual(cfgSeed.status, 201, `[MIGRATED-LIVE] 历史夹具：config 建单应 201, got ${cfgSeed.status} ${JSON.stringify(cfgSeed.body)}`);
     const cfgId = cfgSeed.body.id;
     await app0.call('POST', `/sys-issues/${cfgId}/intake-accept`, ADMIN0, { risk_level: '二级' });
-    await app0.call('POST', `/sys-issues/${cfgId}/assign`, ADMIN0, { assigned_to: 5, exec_mode: 'self' });
+    // [2026-09-05 C1·config 单指派前 OA 号守卫] assertSysDevCommitmentOaGuard 起 config 与 feature/
+    // improvement 同受"指派前须有 OA 号"约束（oa_exempt=1 放行同规则）——本夹具建单时未传 oa_exempt，
+    // 缺省 0，指派前必须先补号，否则 assign 409 ASSIGN_REQUIRES_OA_NUMBER，dev 从未真正入册，后续
+    // estimate/submit 全部 403 NOT_ROSTERED（本组真正 SUT 是"迁移后 CHECK 约束/release_id 流转"，与
+    // OA 守卫无关，故走"受理后补号"这条最贴近真实业务操作顺序的路径，不改用 oa_exempt:1 建单——那会让
+    // 本夹具结构性绕开 OA 必填面，若未来 OA 守卫本身出现回归，本组也测不出来）。
+    const oaSeedR = await app0.call('POST', `/sys-issues/${cfgId}/set-oa-number`, ADMIN0, { oa_number: '20260910800001' });
+    assert.strictEqual(oaSeedR.status, 200, `[MIGRATED-LIVE] 历史夹具：config 补 OA 号应 200, got ${oaSeedR.status} ${JSON.stringify(oaSeedR.body)}`);
+    const assignSeedR = await app0.call('POST', `/sys-issues/${cfgId}/assign`, ADMIN0, { assigned_to: 5 });
+    assert.strictEqual(assignSeedR.status, 200, `[MIGRATED-LIVE] 历史夹具：config 指派应 200（补号后应放行）, got ${assignSeedR.status} ${JSON.stringify(assignSeedR.body)}`);
     await app0.call('POST', `/sys-issues/${cfgId}/estimate`, DEV0, { dev_estimated_at: (() => { const d = new Date(Date.now() + 20 * 86400000); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; })() });
     const cfgSubmit = await app0.call('POST', `/sys-issues/${cfgId}/submit`, DEV0, { mode: 'no_code', no_code_reason: 'AG 历史夹具：配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     assert.strictEqual(cfgSubmit.status, 200, `[MIGRATED-LIVE] 历史夹具：config no_code 提交应 200, got ${cfgSubmit.status} ${JSON.stringify(cfgSubmit.body)}`);

@@ -387,7 +387,78 @@ async function p15(H) {
   return result('P15', bad.length === 0, bad.length === 0 ? '所有发布控制态(SYS_RELEASE)issue 在册≥1 且无 pending 在册' : `${bad.length} 单主状态∈SYS_RELEASE 但零在册或含 pending：issue_id=${bad.map(r => r.id).join(',')}`);
 }
 
-const PROBE_FNS = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15];
+// ── P16（2026-09-09 方案 v1.5 §B.4/§B.8 P8 → C3c·M4·538 回卷收紧）：修正链恒真 ── 按「同一实例
+//   （dev_assignee_id）内 submit/no_code 事件 id 升序」逐条遍历，维护 prevId/prevAmendNo 两个游标：
+//   · 普通提交（无 amend_of 且无 amend_no）：视为链归零——本行之后 prevAmendNo 重置为 0，prevId=本行 id。
+//   · 出现 amend_of 或 amend_no 任一键：两键必须**齐全且合法**（缺一即 400 级畸形，非"跳过"），且
+//       amend_of 必须**恰好等于**本实例上一条 submit/no_code 事件 id（不是"更早任意一条"——旧实现的
+//       `< r.id` 判据放过了跳号/断链/跨普通提交回指三类错位），
+//       amend_no 必须**恰好等于** prevAmendNo + 1（普通提交或首条记为 0）。
+//   旧实现（P16 v1）只查"amend_of 指向更早同实例事件+amend_no 更大"，未按链序逐一核对相邻性——538
+//   回卷 M4 指出会放过：①跳号（1→3）②断链（回指非上一条）③漏键（有 amend_no 无 amend_of 或反之）
+//   ④跨普通提交回指（第二条普通提交后的修正仍指向第一条提交）。四类均已在本实现中显式判定。
+//   ⚠️ 命名口径：方案原文写作"探针 P8"——该文档编号是在 P1-P15 既有清单已固定为"探针全表"的前提下另起
+//   炉灶，与本文件真实的 P8（commit 自然键+trim）撞号；本实现按本文件既有累加序列续为 **P16**，方案编号
+//   与本注释互为交叉引用（此为撞号发现后的订正结果，交付报告已登记）。
+async function p16(H) {
+  // ⚠️ 过滤条件放在 JS 侧（safeParseJson 逐行 try/catch），不用 SQL 层 `json_extract` 做 WHERE 谓词——
+  // 后者遇到本表已知会出现的畸形 payload_json（如 P11 反例注入的 `'{not valid json'`）会让 SQLite 直接
+  // 抛 `SQLITE_ERROR: malformed JSON` 炸穿整条查询，而不是把该行当"不匹配"跳过；本探针职责只是"amend
+  // 相关行是否自洽"，不该因为**另一条无关行**的畸形 JSON（P11 已单独覆盖该不变量）而让自己整体报错退出。
+  // 全表按 dev_assignee_id, id 升序取——链序核对必须逐实例、逐事件严格按时间顺序进行，不能只查目标行。
+  const rows = await H.all(`
+    SELECT id, issue_id, dev_assignee_id, action, payload_json FROM sys_issue_dev_events
+     WHERE action IN ('submit','no_code')
+     ORDER BY dev_assignee_id ASC, id ASC
+  `);
+  const bad = [];
+  const cursor = new Map();   // dev_assignee_id -> { prevId, prevAmendNo }
+  for (const r of rows) {
+    // [C4b·Opus 预筛 L-3] dev_assignee_id 为 NULL 的历史行显式跳过——Map.get(null)/Map.set(null,...)
+    // 会把所有这类行的游标合并进同一个键，把互不相关的历史孤儿事件串成一条假链（既非漏报也非误报，
+    // 是链归属张冠李戴）。本探针职责是"同一实例内的修正链自洽"，dev_assignee_id 缺失时结构上已经
+    // 没有"实例"这个锚点，不在职责范围内，不计入游标推进也不计入 bad。
+    if (r.dev_assignee_id === null || r.dev_assignee_id === undefined) continue;
+    const parsed = r.payload_json === null ? { ok: true, value: {} } : safeParseJson(r.payload_json);
+    // 非法/非对象 payload——非本探针职责（P11 覆盖）；仍需推进游标（该行本身在链中占位，按"无 amend 键"
+    //   的普通提交对待，否则后续合法修正行会拿一个被跳过的游标核对，产生本探针职责外的误报）。
+    const value = (parsed.ok && typeof parsed.value === 'object' && parsed.value !== null) ? parsed.value : {};
+    // [C4c·codex 538 M2] 键存在性判据改用 hasOwnProperty——原写法 `!== undefined && !== null` 把
+    // "键存在但值为 null"（如 `{amend_of:null,amend_no:null}`）与"键根本不存在"混为一谈，都判 false，
+    // 于是这类畸形 payload 会被当成"无 amend 键"的普通提交放行，双 null 这种明显不完整的修正标记
+    // 反而查不出来。键是否存在与值是否合法（正整数）现在是两道独立判断——先看键在不在，键存在时
+    // 无论值是什么（null/字符串/0 等）都进入下面的合法性校验，不再有"值为 null 就当没写"的隐式豁免。
+    const hasAmendOf = Object.prototype.hasOwnProperty.call(value, 'amend_of');
+    const hasAmendNo = Object.prototype.hasOwnProperty.call(value, 'amend_no');
+    const prev = cursor.get(r.dev_assignee_id) || { prevId: null, prevAmendNo: 0 };
+
+    if (!hasAmendOf && !hasAmendNo) {
+      // 普通提交——链归零。
+      cursor.set(r.dev_assignee_id, { prevId: r.id, prevAmendNo: 0 });
+      continue;
+    }
+    if (hasAmendOf !== hasAmendNo) {
+      bad.push(`事件id=${r.id}：修正标记漏键（amend_of=${JSON.stringify(value.amend_of)}，amend_no=${JSON.stringify(value.amend_no)}，须同时齐全）`);
+      cursor.set(r.dev_assignee_id, { prevId: r.id, prevAmendNo: prev.prevAmendNo });
+      continue;
+    }
+    const amendOf = value.amend_of;
+    const amendNo = value.amend_no;
+    if (!isPositiveInt(amendOf)) { bad.push(`事件id=${r.id}：amend_of 非正整数（实得=${JSON.stringify(amendOf)}）`); cursor.set(r.dev_assignee_id, { prevId: r.id, prevAmendNo: prev.prevAmendNo }); continue; }
+    if (!Number.isInteger(amendNo) || amendNo < 1) { bad.push(`事件id=${r.id}：amend_no 应为≥1 整数（实得=${JSON.stringify(amendNo)}）`); cursor.set(r.dev_assignee_id, { prevId: r.id, prevAmendNo: prev.prevAmendNo }); continue; }
+    if (prev.prevId === null) {
+      bad.push(`事件id=${r.id}：amend_of=${amendOf} 指向不存在的「本实例上一条」事件（本行是该实例首条 submit/no_code）`);
+    } else if (Number(amendOf) !== Number(prev.prevId)) {
+      bad.push(`事件id=${r.id}：amend_of=${amendOf} 未指向本实例上一条 submit/no_code 事件（应为 ${prev.prevId}）——断链/跳号/跨提交回指`);
+    } else if (Number(amendNo) !== prev.prevAmendNo + 1) {
+      bad.push(`事件id=${r.id}：amend_no=${amendNo} 未紧接上一条 amend_no=${prev.prevAmendNo} 递增 1`);
+    }
+    cursor.set(r.dev_assignee_id, { prevId: r.id, prevAmendNo: amendNo });
+  }
+  return result('P16', bad.length === 0, bad.length === 0 ? '全部修正链按实例逐事件严格相邻（amend_of=上一条 id，amend_no=上一条+1）' : bad.join('；'));
+}
+
+const PROBE_FNS = [p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16];
 
 // 依次跑 P1-P15，返回 [{id,pass,detail}, ...]（顺序固定 P1→P15）。
 //   纯 SELECT——db 若已在事务内（BEGIN IMMEDIATE 已开），本函数不额外开/提交/回滚事务，调用方自行控制。

@@ -119,7 +119,11 @@ async function seed(type, { status, ir = 1, createdBy = null } = {}) {
 const TYPES = ['feature', 'improvement', 'bug'];
 const INTAKE_STATES = ['待受理', '待修改'];
 // 成员动作精确契约（codex 145 HIGH-1）：固定集合·不从被测矩阵反射·删/增动作须显式改此处 → 覆盖不随实现缩水。
-const EXPECTED_MEMBER_ACTIONS = ['add', 'commit', 'excuse', 'reassign', 'remove', 'supersede'];
+// [2026-09-09 提交修正与config指派OA守卫 方案 v1.5 §D7] +'amend'——开发提交原地修正
+// （POST /sys-issues/:id/submit/amend）新增成员动作族键，D7 拍板 DEV/VERIFY 两族放行、
+// LIAISON_TEST/D_PRE/FROZEN 409（族门天然排除，见 routes/sys-iteration/index.js
+// assertMemberActionFamilyAllowed('amend', type, status) 调用点注释）。
+const EXPECTED_MEMBER_ACTIONS = ['add', 'amend', 'commit', 'excuse', 'reassign', 'remove', 'supersede'];
 
 async function main() {
   mod.initSchema();

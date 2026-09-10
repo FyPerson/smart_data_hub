@@ -15,6 +15,10 @@
 //   [⑨] 衍生入口 oa_exempt 默认继承原单（2026-08-27 契约反转·原「恒 0」两次生产卡死后废除）
 //   [⑩] exempt 单仍可正常 set-oa-number 填号（200，填号不清 exempt 标志，号与豁免正交）
 //   [⑪] timeline 免 OA 标注：exempt 单 assign 成功 summary 含"（免 OA 单）"；非 exempt 单不含
+//   [⑯-⑳] 2026-09-09 方案 v1.5 D1：config 纳入 OA 守卫（此前"config 不受限"口径已废）——
+//        config exempt=0 无号 assign 409／exempt=1 无号 assign 200／待处理补号后 assign 200／
+//        已暂缓 config 无号 dev-assignees 加成员 409（D_PRE 族含已暂缓）／bug exempt=0 无号
+//        assign+加成员 200（对照组，证 bug 结构性豁免未被带走）
 //
 // 断言纪律：钉确切 HTTP 码 + code；固化正例断言三字段精确值（非仅非空）。
 'use strict';
@@ -98,7 +102,9 @@ async function createAndAccept(actorTok, overrides = {}) {
   const id = r.body.id;
   // [工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5，⭐ 用户拍板批1改造B后订正] feature/improvement 受理必带 risk_level，bug 不带（原"仅 feature 必带、improvement/bug 均不带"口径已随改造B废止）；
   // createBody 默认 type='feature'，overrides 可覆盖，故按最终合并后的 body.type 判定。
-  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, (body.type === 'feature' || body.type === 'improvement') ? { risk_level: '二级' } : {});
+  // [S1a·D15] config 受理同样必带 risk_level（与 feature/improvement 同必填，与 verify-sys-config-flow.js /
+  //   verify-sys-role-perm-c1.js 既有范式一致）。
+  const acc = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, (body.type === 'feature' || body.type === 'improvement' || body.type === 'config') ? { risk_level: '二级' } : {});
   assert.strictEqual(acc.status, 200, `受理通过 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   return id;
 }
@@ -323,9 +329,113 @@ async function main() {
     ok('[⑮] 恒勾选默认静态守卫（codex 486 MED-3）：siWireOaExemptLinkage 零残留 + f_oa_exempt.checked 零写点（剥注释后）');
   }
 
+  // ═══ [⑯-⑳] 2026-09-09 方案 v1.5 D1：config 纳入 OA 守卫（此前"config 不受限"口径已废）═══
+  //   config 与 feature/improvement 同受「指派前须有 OA 号（oa_exempt=1 放行）」，唯 bug 结构性豁免不变。
+
+  // ═══ [⑯] config exempt=0 无号 assign（待处理态）→ 409 ═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config' });   // oa_exempt 未传 → 默认 0
+    const row0 = await issueRow(id);
+    assert.strictEqual(row0.oa_exempt, 0, '[⑯] 夹具确认 config oa_exempt 默认落 0');
+    assert.strictEqual(row0.status, '待处理', '[⑯] 夹具确认 config 受理后落待处理');
+    const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 409, `[⑯] config exempt=0 无号 assign 期望 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[⑯] 确切码 ASSIGN_REQUIRES_OA_NUMBER');
+    assert.strictEqual(await issueRow(id).then(x => x.status), '待处理', '[⑯] 409 后状态零变动');
+    ok('[⑯] config exempt=0（默认）无号 assign：409 ASSIGN_REQUIRES_OA_NUMBER（2026-09-09 方案 v1.5 D1 起纳入，此前"config 不受限"已废）');
+  }
+
+  // ═══ [⑰] config exempt=1 无号 assign → 200 且状态=处理中 ═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config', oa_exempt: 1 });
+    const row0 = await issueRow(id);
+    assert.strictEqual(row0.oa_exempt, 1, '[⑰] 落库 oa_exempt=1');
+    assert.strictEqual(row0.oa_number, null, '[⑰] 夹具确认无号');
+    const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 200, `[⑰] config exempt=1 无号 assign 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    const row1 = await issueRow(id);
+    assert.strictEqual(row1.status, '处理中', '[⑰] assign 后状态=处理中');
+    // [C1b·L2] 放行时没顺手写号——豁免格式校验≠悄悄补了个号，oa_number 应仍为 NULL、oa_exempt 标志不变。
+    assert.strictEqual(row1.oa_number, null, '[⑰] assign 后 oa_number 仍为 NULL（豁免格式校验，非静默补号）');
+    assert.strictEqual(row1.oa_exempt, 1, '[⑰] assign 后 oa_exempt 仍为 1（未被清除/翻转）');
+    ok('[⑰] config exempt=1 无号 assign：放行（200）且真落「处理中」，OA 守卫豁免格式校验（与 feature/improvement 同规则）；库值回读证放行时没顺手写号（oa_number 仍 NULL ∧ oa_exempt 仍 1）');
+  }
+
+  // ═══ [⑱] config exempt=0 先 set-oa-number（admin，待处理态）再 assign → 200 ═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config' });
+    const oa = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026090301' });
+    assert.strictEqual(oa.status, 200, `[⑱] 待处理态 set-oa-number 期望 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
+    const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 200, `[⑱] config 补号后 assign 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(await issueRow(id).then(x => x.status), '处理中', '[⑱] assign 后状态=处理中');
+    ok('[⑱] config exempt=0：待处理态先 set-oa-number 补号（200）再 assign（200，落处理中）——号与豁免正交（A6 可填窗口含待处理）');
+  }
+
+  // ═══ [⑲] 已暂缓 config exempt=0 无号 dev-assignees 加成员 → 409（D_PRE 族=['待处理','已暂缓']覆盖已暂缓态）═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config' });   // → 待处理，oa_exempt=0，未指派
+    const hold = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '[⑲] 已暂缓无号加成员夹具' });
+    assert.strictEqual(hold.status, 200, `[⑲] 待处理→已暂缓 hold 期望 200, got ${hold.status} ${JSON.stringify(hold.body)}`);
+    assert.strictEqual(await issueRow(id).then(x => x.status), '已暂缓', '[⑲] 夹具确认 config 已到已暂缓');
+    const r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r.status, 409, `[⑲] 已暂缓 config 无号加成员期望 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[⑲] 确切码 ASSIGN_REQUIRES_OA_NUMBER');
+    const roster = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [id]);
+    assert.strictEqual(roster.length, 0, '[⑲] 409 后 sys_issue_dev_assignees 零行（拒绝发生在任何写之前）');
+    ok('[⑲] config 已暂缓态（D_PRE 族含"已暂缓"）exempt=0 无号 dev-assignees 加成员：409 ASSIGN_REQUIRES_OA_NUMBER（A.1 补充：dev-assignees 端点在 D_PRE 族调用守卫，已暂缓 config 单加成员同样命中）');
+  }
+
+  // ═══ [⑳] bug exempt=0 无号 assign 与加成员：200（对照组，证 bug 结构性豁免未被本次改动带走）═══
+  {
+    const idAssign = await createAndAccept(adminTok, { type: 'bug' });   // → 待处理，oa_exempt=0（bug 无 risk_level 前置）
+    const rAssign = await call('POST', `/api/sys-issues/${idAssign}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(rAssign.status, 200, `[⑳/assign] bug exempt=0 无号 assign 期望 200, got ${rAssign.status} ${JSON.stringify(rAssign.body)}`);
+    assert.strictEqual(await issueRow(idAssign).then(x => x.status), '处理中', '[⑳/assign] assign 后状态=处理中');
+
+    const idAdd = await createAndAccept(adminTok, { type: 'bug' });   // → 待处理，未指派（D_PRE 族）
+    const rAdd = await call('POST', `/api/sys-issues/${idAdd}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(rAdd.status, 200, `[⑳/加成员] bug exempt=0 无号加成员期望 200, got ${rAdd.status} ${JSON.stringify(rAdd.body)}`);
+    ok('[⑳] bug exempt=0 无号：assign 200 + 待处理态 dev-assignees 加成员 200（对照组，type guard 优先于 exempt/config 判定，bug 豁免未被本次 config 纳入带走）');
+  }
+
+  // [C4·538方案 §8c·codex 535 rec2] ═══ [㉑] 待处理 config exempt=0 无号 dev-assignees 加成员 → 409
+  //   （⑲ 只覆盖 D_PRE 族里的"已暂缓"一半，本条补"待处理"另一半——两态同属 D_PRE 族，守卫谓词理应
+  //   对两态一视同仁，不能只验证过其中一态就宣称"D_PRE 族覆盖"）═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config' });   // → 待处理，oa_exempt=0，未指派
+    assert.strictEqual(await issueRow(id).then(x => x.status), '待处理', '[㉑] 夹具确认 config 停在待处理（未 hold，与 ⑲ 的已暂缓夹具区分）');
+    const r = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r.status, 409, `[㉑] 待处理 config 无号加成员期望 409, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[㉑] 确切码 ASSIGN_REQUIRES_OA_NUMBER');
+    const roster = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [id]);
+    assert.strictEqual(roster.length, 0, '[㉑] 409 后 sys_issue_dev_assignees 零行（拒绝发生在任何写之前）');
+    ok('[㉑] config 待处理态（D_PRE 族，与 ⑲ 已暂缓态互为姊妹用例）exempt=0 无号 dev-assignees 加成员：409 ASSIGN_REQUIRES_OA_NUMBER');
+  }
+
+  // [C4·538方案 §8c·codex 535 rec2] ═══ [㉒] 已暂缓拒绝后 set-oa-number 补号 → 再加成员 200
+  //   （D3 恢复路径：409 不是死胡同，SYS_OA_ALLOWED_STATUSES.config 含"已暂缓"，暂缓期本就是可填号
+  //   的合法窗口，补号后加成员应立即放行，不需要先恢复主状态）═══
+  {
+    const id = await createAndAccept(adminTok, { type: 'config' });   // → 待处理，oa_exempt=0，未指派
+    const hold = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '[㉒] 恢复路径夹具' });
+    assert.strictEqual(hold.status, 200, `[㉒] 待处理→已暂缓 hold 期望 200, got ${hold.status} ${JSON.stringify(hold.body)}`);
+    const r1 = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r1.status, 409, `[㉒] 补号前加成员期望 409, got ${r1.status} ${JSON.stringify(r1.body)}`);
+    assert.strictEqual(r1.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[㉒] 补号前确切码 ASSIGN_REQUIRES_OA_NUMBER');
+    const oaR = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: String(2026091090000 + id) });
+    assert.strictEqual(oaR.status, 200, `[㉒] 已暂缓态 set-oa-number 期望 200（SYS_OA_ALLOWED_STATUSES.config 含"已暂缓"）, got ${oaR.status} ${JSON.stringify(oaR.body)}`);
+    assert.strictEqual(await issueRow(id).then(x => x.status), '已暂缓', '[㉒] 补号不改变主状态（仍已暂缓，set-oa-number 不联动状态机）');
+    const r2 = await call('POST', `/api/sys-issues/${id}/dev-assignees`, adminTok, { user_ids: [5] });
+    assert.strictEqual(r2.status, 200, `[㉒] 补号后加成员期望 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
+    const roster = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [id]);
+    assert.strictEqual(roster.length, 1, '[㉒] 补号后加成员成功落 1 行在册');
+    ok('[㉒] 已暂缓拒绝（409）后 set-oa-number 补号（200）→ 再加成员（200）——D3 恢复路径：拒绝不是死胡同，补号即解锁');
+  }
+
   server.close();
   console.log(`\n✅ verify-sys-oa-exempt 全绿：${passed} 组断言通过`);
-  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口默认继承原单(2026-08-27契约反转) + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0 + 恒勾选默认前端静态守卫(联动零残留/checked零写点)');
+  console.log('  覆盖：三类建单缺省固化 + 任一有值整组按提交 + 提供值优先 + 无电话不造假值 + exempt=1放行/exempt=0仍409 + bug恒过 + 非法值400(含字符串true) + 衍生入口默认继承原单(2026-08-27契约反转) + exempt单set-oa-number仍200 + timeline免OA标注(出现/不出现) + requester字段类型白名单400 + oa_exempt全库脏值扫描=0 + 恒勾选默认前端静态守卫(联动零残留/checked零写点) + config纳入OA守卫(2026-09-09方案v1.5 D1：exempt=0无号409/exempt=1放行/补号后200/已暂缓加成员409/bug对照组仍200)');
 }
 
 main().catch(e => { console.error('❌ verify-sys-oa-exempt 失败:', e && e.stack || e); process.exit(1); });

@@ -32,6 +32,13 @@
  *   [LT-D2] 281 号对抗审 N1+R8 采纳：ns='sent'+message_key 以 'dryrun-' 开头 → 行内出现「（演练）」标记
  *   [LT-D3] 281 号对抗审 N1 采纳：ns='sending' 但单据已离开「待对接测试」→ 出现「发送结果未知（单据
  *           已离开测试段）」提示，纯展示不加按钮
+ *   [LT-T10] D-L1·2026-09-10 决策记录：对接测试通过版本锁两步采用——对接人弹层打开 → 开发经 API
+ *            直调 amend 修正交付内容 → 点「确定」撞真实 409 DELIVERY_CHANGED → 不关弹层、阻断横幅
+ *            可见、确认键 disabled → 点「加载最新交付」→ 候选区块含修正后内容 → 点「已查看以上交付，
+ *            采用此版本」→ 确认键恢复可点、横幅隐藏 → 再点一次「确定」200 成功，落「待验证」
+ *   [LT-T11] codex 542·M1：详情响应缺 delivery_rev（route 拦截删掉该字段）→ 打开「对接测试通过」
+ *            弹层点「确定」→ fail-closed 拦截，不发起 liaison-test-pass 请求 + toast「详情版本信息
+ *            缺失，请刷新详情后重试」，弹层不关闭
  */
 'use strict';
 
@@ -60,7 +67,9 @@ function must(cond, msg) {
 const RUN_TAG = Date.now();
 const TITLE_A = `LT-对接测试冒烟A-${RUN_TAG}`;   // 示例对接人非在册（常规场景）
 const TITLE_B = `LT-对接测试冒烟B-自指-${RUN_TAG}`;   // 示例对接人同时在册（自指隐藏场景）
-let idA = null, idB = null;
+const TITLE_C = `LT-对接测试冒烟C-版本锁-${RUN_TAG}`;   // [LT-T10·D-L1] 版本锁两步采用专用
+const TITLE_D = `LT-对接测试冒烟D-基准缺失-${RUN_TAG}`;   // [LT-T11·codex 542 M1] 基准 delivery_rev 缺失专用
+let idA = null, idB = null, idC = null, idD = null;
 
 // 落态「待对接测试」的最小夹具——直接 SQL 造（同 test-sys-effort-days-playwright.js 惯例，不经过
 // 完整 GATE 决策树链路，聚焦本次改动本身：前端徽章/按钮/弹窗）。
@@ -92,6 +101,33 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
   return id;
 }
 
+// [LT-T10·D-L1·2026-09-10 决策记录] seedLiaisonTestIssue 造的花名册行是直连 SQL 插入（无真实 submit
+// 事件）——amend 端点的"三源读取"写前不变量要求 dev_status=code_submitted 时必有一条真实 submit/
+// no_code 事件行支撑（否则 500「查无 submit/no_code 事件」）。本 helper 在 seedLiaisonTestIssue 基础
+// 上额外补一条真实 sys_issue_dev_commits 行 + 一条真实 sys_issue_dev_events(action='submit') 行，仅供
+// LT-T10 版本锁两步采用场景使用（该场景需要真调 POST /submit/amend）。
+async function seedLiaisonTestIssueWithSubmitEvent(title, devUserId, devUserName) {
+  const id = await seedLiaisonTestIssue(title, devUserId, devUserName);
+  const daRow = await get(`SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND user_id=? AND removed_at IS NULL`, [id, devUserId]);
+  const commitIns = await run(
+    `INSERT INTO sys_issue_dev_commits (issue_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at)
+     VALUES (?, ?, ?, 'backend', ?, datetime('now','localtime'))`,
+    [id, daRow.id, devUserId, `lt-fixture-${id}`]
+  );
+  await run(
+    `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, to_status, operator_id, payload_json, created_at)
+     VALUES (?, ?, 'submit', '待对接测试', ?, ?, datetime('now','localtime'))`,
+    [id, daRow.id, devUserId, JSON.stringify({ mode: 'commits', commits: [{ commit_id: commitIns.lastID, component: 'backend', commit_ref: `lt-fixture-${id}` }], dev_assignee_id: daRow.id, self_tested: true, test_env_deployed: true })]
+  );
+  // liaison_test_pass 的①b复查会重新核 isGateEligibleForVerify——除 dev_estimated_at 非空 + needs_
+  // feasibility 不为 1 外，feature/improvement 两类型还必须 estimated_effort_days 通过
+  // normalizeSysEffortDays 校验（C7 工时评估补全，index.js isGateEligibleForVerify 末段）。
+  // seedLiaisonTestIssue 的原始 INSERT 三列全不带，直接调用 liaison-test-pass 会撞 409
+  // LIAISON_TEST_PASS_INVARIANT（工期资格未过），故本 helper 额外补齐，仅供 LT-T10 使用。
+  await run(`UPDATE sys_issues SET dev_estimated_at = datetime('now','localtime','+7 day'), needs_feasibility = 0, estimated_effort_days = 3 WHERE id = ?`, [id]);
+  return { id, daId: daRow.id };
+}
+
 (async () => {
   let browser;
   try {
@@ -109,6 +145,8 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
 
     idA = await seedLiaisonTestIssue(TITLE_A, devUser.id, devUser.display_name);
     idB = await seedLiaisonTestIssue(TITLE_B, devUser.id, devUser.display_name, [{ id: liaisonUser.id, name: liaisonUser.display_name }]);
+    idC = (await seedLiaisonTestIssueWithSubmitEvent(TITLE_C, devUser.id, devUser.display_name)).id;
+    idD = (await seedLiaisonTestIssueWithSubmitEvent(TITLE_D, devUser.id, devUser.display_name)).id;
 
     browser = await chromium.launch({ headless: true });
 
@@ -137,7 +175,14 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
         return statuses.length > 0 && statuses.every(s => s === 403);
       }
       // label：仅用于断言文案区分身份；allow403：该身份是否预期会撞 intake-liaisons 的 403（admin 不会，dev/liaison 会）。
-      function assertNoUnexpectedConsoleErrors(label, allow403) {
+      // extraIgnoreSpec：[codex 542·M3] { text, maxCount }——旧写法按文本子串豁免整段追踪期内**任意
+      //   次数**的匹配项，会连带盖住"别的端点也撞了 409"这种真实异常（浏览器"Failed to load
+      //   resource...409"这条 console 提示本身不含 URL，无法按端点精确区分）。改为**次数上限豁免**：
+      //   只豁免至多 maxCount 次匹配，超出次数的同一文本、或任何不匹配该文本的条目一律不豁免、正常
+      //   报错——既不放宽为"允许任意 409"，也不要求逐条按 URL 精确匹配（该文本本身做不到）。调用方
+      //   须自行用 page.on('response') 独立核实"这一次 409 确实来自预期的那个端点、且恰好 1 次"
+      //   （见 LT-T10 内 acceptStatusesT10/acceptReqCountT10 的独立核验），本函数只管 console 噪音过滤。
+      function assertNoUnexpectedConsoleErrors(label, allow403, extraIgnoreSpec) {
         if (allow403) {
           // [codex 276 号审 L-1] some→every：statusesByUrl 按**完整 URL**（含查询串）分组，isExpected403Url
           //   只判 pathname——若该 pathname 曾以多个不同查询串出现（多条不同的完整 URL key），some() 只要
@@ -147,12 +192,24 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
           const expected403Occurred = expectedUrlsSeen.length === 0 || expectedUrlsSeen.every(urlAllResponsesAre403);
           must(expected403Occurred, `[LT-T7 前置·${label}] intake-liaisons 豁免前提自洽（未出现或全部匹配 URL 逐一均为403），实得=${JSON.stringify(expectedUrlsSeen.map(u => ({ url: u, statuses: statusesByUrl.get(u), allAre403: urlAllResponsesAre403(u) })))}`);
         }
-        const consoleErrors = consoleErrorsRaw
+        const consoleErrorsAfter403 = consoleErrorsRaw
           .filter(e => !(allow403 && isExpected403Url(e.url) && urlAllResponsesAre403(e.url)))
           .map(e => e.text);
+        let consoleErrors = consoleErrorsAfter403;
+        if (extraIgnoreSpec && extraIgnoreSpec.text) {
+          let remaining = extraIgnoreSpec.maxCount || 0;
+          consoleErrors = [];
+          for (const t of consoleErrorsAfter403) {
+            if (remaining > 0 && t.includes(extraIgnoreSpec.text)) { remaining--; continue; }
+            consoleErrors.push(t);
+          }
+        }
         must(consoleErrors.length === 0, `[LT-T7·${label}] 全程无非预期 console error，实得：${JSON.stringify(consoleErrors)}`);
       }
-      return { assertNoUnexpectedConsoleErrors };
+      // [codex 542·M3] 供调用方独立核实"某端点的某次 409 确实是预期的那一次"——按完整 URL 从
+      //   statusesByUrl 取该 URL 全部响应状态码（不限于 409，暴露真相供调用方自行断言次数/其余状态）。
+      function statusesOf(url) { return statusesByUrl.get(url) || []; }
+      return { assertNoUnexpectedConsoleErrors, statusesOf };
     }
 
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -417,8 +474,146 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
     must(d3.hasSendBtn === false, `[LT-D3] 前置：已离开待对接测试，本就不出现发送/重发按钮（sendable 门未变），实得 hasSendBtn=${d3.hasSendBtn}`);
     must(!!d3.hintText && d3.hintText.includes('发送结果未知（单据已离开测试段）'), `[LT-D3] ⭐ N1 采纳：离态限定提示正确渲染，实得="${d3.hintText}"`);
 
-    // ── [LT-T7] 全程无非预期 console error（liaison 段，含 idB 自指切换）──────
-    trackLiaison.assertNoUnexpectedConsoleErrors('liaison', true);   // 示例对接人非 admin，同样会背景触发 intake-liaisons 403
+    // ── [LT-T10·D-L1·2026-09-10 决策记录] 版本锁两步采用 ─────────────────────────────────────
+    //   对接人打开「对接测试通过」弹层 → 开发经 API 直调 amend 修正交付内容（顶高 delivery_rev）→
+    //   点「确定」撞真实 409 DELIVERY_CHANGED → 不关弹层，阻断横幅可见 + 确认键 disabled → 点「加载
+    //   最新交付」→ 候选区块含修正后内容 → 点「已查看以上交付，采用此版本」→ 确认键恢复可点、横幅
+    //   隐藏 → 再点一次「确定」应 200 成功，落「待验证」。用独立夹具 idC（seedLiaisonTestIssueWithSubmitEvent，
+    //   带真实 submit 事件，满足 amend 端点写前不变量）。
+    await pageLiaison.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), idC);
+    await pageLiaison.waitForTimeout(600);
+    await pageLiaison.click('#siDActions button:has-text("对接测试通过")');
+    await pageLiaison.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+    const testNoteSelectorT10 = await pageLiaison.evaluate(() => {
+      const ta = document.querySelector('#siModalOverlay.open textarea');
+      return ta ? '#' + ta.id : null;
+    });
+    if (testNoteSelectorT10) await pageLiaison.fill(testNoteSelectorT10, 'LT-T10：手工验证通过，测试说明');
+
+    let acceptReqCountT10 = 0;
+    const acceptStatusesT10 = [];
+    // [codex 542·M3] 独立核实该路径的每次响应体 code——供下方精确断言"409 恰 1 次且 code=DELIVERY_CHANGED"，
+    //   不依赖 console error 文本反推。
+    const acceptCodesT10 = [];
+    const onReqT10 = (req) => { if (req.method() === 'POST' && /\/liaison-test-pass$/.test(new URL(req.url()).pathname)) acceptReqCountT10++; };
+    const onRespT10 = (resp) => {
+      if (resp.request().method() !== 'POST' || !/\/liaison-test-pass$/.test(new URL(resp.url()).pathname)) return;
+      acceptStatusesT10.push(resp.status());
+      resp.json().then(j => acceptCodesT10.push(j && j.code)).catch(() => acceptCodesT10.push(undefined));
+    };
+    pageLiaison.on('request', onReqT10);
+    pageLiaison.on('response', onRespT10);
+
+    // 点「确定」前，用 route 拦第一次 liaison-test-pass 请求：放行前让开发本人（devTok）完成一次修正，
+    // 制造真实 409（同 accept 侧 T4 手法，仅拦第一次）。
+    let routeHitCountT10 = 0, amendBeforePassStatus = null;
+    await pageLiaison.route(`**/api/sys-issues/${idC}/liaison-test-pass`, async route => {
+      routeHitCountT10++;
+      if (routeHitCountT10 === 1) {
+        const amendR = await fetch(`${BASE_URL}/api/sys-issues/${idC}/submit/amend`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${devTok}` },
+          body: JSON.stringify({ mode: 'no_code', no_code_reason: 'LT-T10：开发在对接人弹层打开期间完成的修正说明' }),
+        });
+        amendBeforePassStatus = amendR.status;
+      }
+      await route.continue();
+      if (routeHitCountT10 === 1) await pageLiaison.unroute(`**/api/sys-issues/${idC}/liaison-test-pass`);
+    });
+
+    await pageLiaison.click('#siMConfirm');   // 首次点击——命中真实 409
+    await pageLiaison.waitForTimeout(800);   // 留够时间让 onRespT10 内 resp.json() 异步解析完成
+
+    must(amendBeforePassStatus === 200, `[LT-T10] 竞态注入：开发 amend 在真实 liaison-test-pass 请求放行前应 200 成功，实得=${amendBeforePassStatus}`);
+    must(acceptReqCountT10 === 1, `[LT-T10] 首次点击应恰发出 1 次 liaison-test-pass 请求，实得 ${acceptReqCountT10}`);
+    must(acceptStatusesT10[0] === 409, `[LT-T10] 首次 liaison-test-pass 应 409 DELIVERY_CHANGED，实得=${acceptStatusesT10[0]}`);
+    // [codex 542·M3] 精确核实：这一次 409 确实是预期的那一个（code=DELIVERY_CHANGED），且该路径
+    //   目前为止恰好只响应过 1 次——console error 的文本豁免上限（maxCount:1）与这里的事实核验对齐，
+    //   不是"凭感觉给个上限"。
+    must(acceptCodesT10[0] === 'DELIVERY_CHANGED', `[LT-T10] 首次 409 响应体 code 应为 DELIVERY_CHANGED，实得=${acceptCodesT10[0]}`);
+    const liaisonPassUrlT10 = `${BASE_URL}/api/sys-issues/${idC}/liaison-test-pass`;
+    const liaisonPassStatusesSoFarT10 = trackLiaison.statusesOf(liaisonPassUrlT10);
+    must(liaisonPassStatusesSoFarT10.length === 1 && liaisonPassStatusesSoFarT10[0] === 409, `[LT-T10] 该路径（独立 statusesByUrl 追踪）目前应恰有 1 次响应且为 409，实得=${JSON.stringify(liaisonPassStatusesSoFarT10)}`);
+
+    const overlayStillOpenT10 = await pageLiaison.locator('#siModalOverlay.open').count();
+    must(overlayStillOpenT10 === 1, '[LT-T10] 409 后弹层不应关闭');
+    const bannerVisibleT10 = await pageLiaison.locator('#siAcceptConflictBanner').isVisible().catch(() => false);
+    must(bannerVisibleT10, '[LT-T10] 409 后阻断横幅应可见');
+    const confirmDisabledT10 = await pageLiaison.locator('#siMConfirm').isDisabled().catch(() => false);
+    must(confirmDisabledT10, '[LT-T10] 冲突态下确认按钮 disabled');
+
+    // 步骤①「加载最新交付」——候选区块应含开发刚修正的内容。
+    await pageLiaison.click('#siAcceptLoadLatestBtn');
+    await pageLiaison.waitForTimeout(700);
+    const candidateTextT10 = await pageLiaison.locator('#siAcceptCandidateBox').innerText().catch(() => '');
+    must(candidateTextT10.includes('LT-T10：开发在对接人弹层打开期间完成的修正说明'), `[LT-T10]「加载最新交付」候选区块应含修正后内容，实得片段="${candidateTextT10.slice(0, 200)}"`);
+    const confirmStillDisabledT10 = await pageLiaison.locator('#siMConfirm').isDisabled().catch(() => false);
+    must(confirmStillDisabledT10, '[LT-T10] 加载完成、尚未点「采用」时确认按钮仍 disabled');
+
+    // 步骤②「已查看以上交付，采用此版本」——确认键恢复可点、横幅隐藏。
+    await pageLiaison.click('#siAcceptAdoptBtn');
+    await pageLiaison.waitForTimeout(200);
+    const confirmEnabledAfterAdoptT10 = await pageLiaison.locator('#siMConfirm').isDisabled().catch(() => true);
+    must(confirmEnabledAfterAdoptT10 === false, '[LT-T10] 点「采用此版本」后确认按钮恢复可点');
+    const bannerHiddenAfterAdoptT10 = await pageLiaison.locator('#siAcceptConflictBanner').isVisible().catch(() => true);
+    must(bannerHiddenAfterAdoptT10 === false, '[LT-T10] 采用后阻断横幅隐藏');
+
+    // 再点一次「确定」——baseline 已被采用为候选 rev，本次应真正成功（200），落「待验证」。
+    await pageLiaison.click('#siMConfirm');
+    await pageLiaison.waitForTimeout(800);
+    must(acceptReqCountT10 === 2, `[LT-T10] 采用后再次点击应发出第 2 次 liaison-test-pass 请求，实得 ${acceptReqCountT10}`);
+    must(acceptStatusesT10[1] === 200, `[LT-T10] 第二次 liaison-test-pass 应 200（baseline 已随采用更新），实得=${acceptStatusesT10[1]}`);
+    const finalRowT10 = await get('SELECT status FROM sys_issues WHERE id = ?', [idC]);
+    must(!!finalRowT10 && finalRowT10.status === '待验证', `[LT-T10] 最终应落「待验证」，实得="${finalRowT10 && finalRowT10.status}"`);
+
+    pageLiaison.off('request', onReqT10);
+    pageLiaison.off('response', onRespT10);
+
+    // ── [LT-T11·codex 542 M1] 详情响应缺 delivery_rev → 打开「对接测试通过」弹层点「确定」──────
+    //   fail-closed 拦截，不发起 liaison-test-pass 请求 + toast「详情版本信息缺失，请刷新详情后重试」，
+    //   弹层不关闭。用独立夹具 idD（同 idC 一样带真实 submit 事件，但本用例根本不会真的提交）。
+    await pageLiaison.route(`**/api/sys-issues/${idD}`, async (route) => {
+      const resp = await route.fetch();
+      const json = await resp.json().catch(() => null);
+      if (json && json.issue) delete json.issue.delivery_rev;
+      await route.fulfill({ response: resp, json: json || {} });
+    });
+    await pageLiaison.evaluate((id) => window.siOpenDrawer && window.siOpenDrawer(id), idD);
+    await pageLiaison.waitForTimeout(600);
+
+    let passReqCountT11 = 0;
+    const onReqT11 = (req) => { if (req.method() === 'POST' && /\/liaison-test-pass$/.test(new URL(req.url()).pathname)) passReqCountT11++; };
+    pageLiaison.on('request', onReqT11);
+
+    await pageLiaison.click('#siDActions button:has-text("对接测试通过")');
+    await pageLiaison.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+    const testNoteSelectorT11 = await pageLiaison.evaluate(() => {
+      const ta = document.querySelector('#siModalOverlay.open textarea');
+      return ta ? '#' + ta.id : null;
+    });
+    if (testNoteSelectorT11) await pageLiaison.fill(testNoteSelectorT11, 'LT-T11：应被 fail-closed 拦截');
+    await pageLiaison.evaluate(() => { document.querySelectorAll('#toast-container > *').forEach(el => { el.dataset.pwSeen = '1'; }); });
+    await pageLiaison.click('#siMConfirm');
+    await pageLiaison.waitForTimeout(500);
+
+    must(passReqCountT11 === 0, `[LT-T11] 详情缺 delivery_rev 时点确定不应发起 liaison-test-pass 请求，实得请求数=${passReqCountT11}`);
+    const toastTextT11 = await pageLiaison.evaluate(() => {
+      const el = Array.from(document.querySelectorAll('#toast-container > *')).find(n => !n.dataset.pwSeen);
+      return el ? el.textContent : '';
+    }).catch(() => '');
+    must((toastTextT11 || '').includes('详情版本信息缺失，请刷新详情后重试'), `[LT-T11] 应提示"详情版本信息缺失，请刷新详情后重试"，实得="${toastTextT11}"`);
+    const overlayStillOpenT11 = await pageLiaison.locator('#siModalOverlay.open').count();
+    must(overlayStillOpenT11 === 1, '[LT-T11] 拦截后弹层不应关闭（留给用户刷新详情后重试）');
+
+    pageLiaison.off('request', onReqT11);
+    await pageLiaison.unroute(`**/api/sys-issues/${idD}`);
+    await pageLiaison.click('#siModalOverlay button:has-text("取消")');
+
+    // ── [LT-T7] 全程无非预期 console error（liaison 段，含 idB 自指切换 + idC 版本锁场景 + idD 基准缺失场景）──
+    // [codex 542·M3] 首次 liaison-test-pass 故意撞 409 DELIVERY_CHANGED（被测行为本身，上方已独立核实
+    //   code=DELIVERY_CHANGED 且该路径恰响应 1 次）——豁免其网络层 console error 时改按**次数上限 1**
+    //   过滤，不再是"这段文本永远不算错"：若追踪期内还有第二条同文本 console error（无论来自哪个
+    //   端点），会因超出上限而正常报错，不再被这条豁免连带盖住。
+    trackLiaison.assertNoUnexpectedConsoleErrors('liaison', true, { text: 'Failed to load resource: the server responded with a status of 409', maxCount: 1 });   // 示例对接人非 admin，同样会背景触发 intake-liaisons 403
     await ctxLiaison.close();
 
   } catch (e) {
@@ -431,14 +626,19 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
     const safeDelete = async (sql, params, step) => {
       try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
     };
-    for (const id of [idA, idB]) {
+    for (const id of [idA, idB, idC, idD]) {
       if (!id) continue;
+      // [LT-T10] idC 额外带真实 dev_commits/dev_events 行（seedLiaisonTestIssueWithSubmitEvent 所插），
+      //   两表均无 issue_id 级联外键（同 index.js dev_commits/dev_events 表定义），须显式清理，否则
+      //   残留孤儿行——idA/idB 从未写过这两张表，多出的两条 DELETE 对它们是零命中的安全 no-op。
+      await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], 'dev_commits#' + id);
+      await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], 'dev_events#' + id);
       await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], 'dev_assignees#' + id);
       await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], 'timeline#' + id);
       await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], 'issues#' + id);
     }
-    const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title IN (?, ?)`, [TITLE_A, TITLE_B]);
-    console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条，应为 0：#${idA}, #${idB}）`);
+    const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title IN (?, ?, ?, ?)`, [TITLE_A, TITLE_B, TITLE_C, TITLE_D]);
+    console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条，应为 0：#${idA}, #${idB}, #${idC}, #${idD}）`);
     must(cleanupErrs.length === 0, `夹具清理 SQL 全部无错误，实得 errs=${JSON.stringify(cleanupErrs)}`);
     must(!!left && left.c === 0, `夹具清理后 sys_issues 残留应为 0，实得 ${left ? left.c : '(查询失败)'}`);
     db.close();

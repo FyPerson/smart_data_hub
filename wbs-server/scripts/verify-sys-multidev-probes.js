@@ -159,12 +159,12 @@ async function main() {
   const baselineResults = await runProbes(base.db);
   const allPass = baselineResults.every(r => r.pass);
   if (!allPass) {
-    console.error('[基线自检失败] 全绿基线本应 15 条全过，实际：');
+    console.error('[基线自检失败] 全绿基线本应 16 条全过，实际：');
     for (const r of baselineResults) console.error(`  ${r.pass ? '✓' : '✗'} ${r.id}: ${r.detail}`);
   }
-  assert.ok(allPass, '全绿基线应 15 条探针全过（若失败见上方逐条 detail）');
-  assert.strictEqual(baselineResults.length, 15, '探针结果集应恰好 15 条（P1-P15，H1·2026-07-17 新增 P15）');
-  ok('全绿基线：P1-P15 全部通过（15/15），基线数据本身零违规（基线无 RELEASE 族 issue，P15 天然 pass）');
+  assert.ok(allPass, '全绿基线应 16 条探针全过（若失败见上方逐条 detail）');
+  assert.strictEqual(baselineResults.length, 16, '探针结果集应恰好 16 条（P1-P15 + 2026-09-09 方案 v1.5 新增 P16「修正链恒真」，本文件真实 P8 已被 commit 自然键占用，新探针续号为 P16 非方案文档原写的"P8"，撞号订正见 lib/sys-multidev-probes.js P16 注释）');
+  ok('全绿基线：P1-P16 全部通过（16/16），基线数据本身零违规（基线无 RELEASE 族 issue、无 amend_of 事件，P15/P16 天然 pass）');
   base.db.close();
 
   // ── 阶段二：每条探针至少一个反例，验证能亮红 ──────────
@@ -477,7 +477,163 @@ async function main() {
     s.db.close();
   }
 
-  console.log(`\n[全部通过] ${passed}/${passed} ✓ 探针 P1-P15 独立跑器：基线全绿 + 每条探针至少一个反例能正确亮红`);
+  // P16（2026-09-09 方案 v1.5 §B.4/§B.8 → C3c·M4·538 回卷收紧）：修正链恒真——按实例逐事件严格相邻
+  //   （amend_of 必须恰为本实例上一条 submit/no_code 事件 id，amend_no 必须恰为上一条 amend_no+1）。
+  //   正例：daB 基线已有一条 submit 事件（无 amend_of，视同"链头"），补一条合法 amend 事件（amend_of 指向
+  //   该事件 id、amend_no=1）应仍全绿。反例四组见下（538 回卷 M4 逐条对应）：
+  //     ①断链——amend_of 指向更早但非「上一条」的事件（越过中间一条合法 amend 直接回指链头）
+  //     ②跳号——amend_of 正确指向上一条，但 amend_no 跳过一号（1→3）
+  //     ③漏键——只带 amend_no 不带 amend_of（键不齐全）
+  //     ④跨普通提交回指——同实例发生第二次「普通提交」（链归零）后，修正事件仍指向第一次提交
+  {
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const headEvent = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    assert.ok(headEvent, 'P16 夹具前置：daB 基线 submit 事件应存在');
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r1' }], dev_assignee_id: ids.daB, amend_of: headEvent.id, amend_no: 1, changed: ['work_note'] })]
+    );
+    const afterValidAmend = await runProbes(s.db);
+    const p16Valid = afterValidAmend.find(r => r.id === 'P16');
+    assert.strictEqual(p16Valid.pass, true, `P16 正例（合法修正链）应仍为绿，实际 detail=${p16Valid.detail}`);
+    assert.ok(afterValidAmend.every(r => r.pass), 'P16 正例注入后其余探针也应全绿（未破坏任何既有不变量）');
+    ok('P16 正例：合法 amend 事件（amend_of 指向更早同实例事件∧amend_no 严格递增）不触发任何探针亮红');
+    s.db.close();
+  }
+  {
+    // 反例①断链：先插一条合法 amend（amend_of=head，amend_no=1，链正确前进到该行），再插第二条 amend——
+    //   amend_of 却越过刚才那条合法 amend、直接回指最初的 head 事件（更早但非"上一条"）。amend_no=2 本身
+    //   与真正上一条（第一条 amend，amend_no=1）相邻，若探针只查"更早+递增"会误判为合法，538 回卷前的
+    //   旧实现即漏放这种断链。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const headEvent = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r1' }], dev_assignee_id: ids.daB, amend_of: headEvent.id, amend_no: 1, changed: ['work_note'] })]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r2' }], dev_assignee_id: ids.daB, amend_of: headEvent.id, amend_no: 2, changed: ['work_note'] })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例①正确亮红：断链——amend_of 越过上一条 amend 直接回指更早的链头');
+    s.db.close();
+  }
+  {
+    // 反例②跳号：amend_of 正确指向本实例上一条事件（head，视同 amend_no=0），但 amend_no 跳过 1 直接写 3。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const headEvent = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r1' }], dev_assignee_id: ids.daB, amend_of: headEvent.id, amend_no: 3, changed: ['work_note'] })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例②正确亮红：跳号——amend_no 应为 1 却写 3');
+    s.db.close();
+  }
+  {
+    // 反例③漏键：只带 amend_no，不带 amend_of（键不齐全——旧实现只在 amend_of 存在时才进入判定分支，
+    //   会把这种"半个标记"当成"无 amend_of 键"直接放过，视同普通提交）。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r1' }], dev_assignee_id: ids.daB, amend_no: 1, changed: ['work_note'] })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例③正确亮红：漏键——有 amend_no 无 amend_of');
+    s.db.close();
+  }
+  {
+    // 反例④跨普通提交回指：daB 基线已有第一条 submit（head1）。先插入第二条**普通提交**（无 amend 标记，
+    //   链归零，prevId 更新为 head2）。随后插入一条修正事件——amend_of 却指向第一条 submit（head1，已被
+    //   第二次普通提交盖过，不再是"上一条"）。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const head1 = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r2' }], dev_assignee_id: ids.daB })]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r3' }], dev_assignee_id: ids.daB, amend_of: head1.id, amend_no: 1, changed: ['work_note'] })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例④正确亮红：跨普通提交回指——第二次普通提交后，修正事件仍指向第一次提交');
+    s.db.close();
+  }
+  {
+    // [C4c·codex 538 M2] 反例⑤双 null：{amend_of:null, amend_no:null}——键都存在但值都是 null。
+    //   旧判据 `!== undefined && !== null` 会把这种行当"无 amend 键"的普通提交静默放行（P16 全绿，
+    //   探针查不出这条明显不完整的修正标记）；改用 hasOwnProperty 后键存在即进入合法性校验，
+    //   isPositiveInt(null) 判非正整数，正确判红——这正是本条反例要钉住的"双 null 不得被当普通
+    //   提交通过"。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const headEvent = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    assert.ok(headEvent, 'P16 反例⑤夹具前置：daB 基线 submit 事件应存在');
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r5' }], dev_assignee_id: ids.daB, amend_of: null, amend_no: null })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例⑤正确亮红：双 null（amend_of/amend_no 键都存在但值都是 null）不得被当普通提交放行');
+    s.db.close();
+  }
+  {
+    // 反例⑥单键 null（amend_of 合法∧amend_no=null）：键都存在，amend_of 指向正确的上一条事件，
+    //   但 amend_no 值是 null——hasOwnProperty 判两键都"存在"，进入合法性校验时 amend_no 未过
+    //   Number.isInteger 判定，正确判红（不会因 amend_of 那半合法就被放过）。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    const headEvent = await s.get(
+      `SELECT id FROM sys_issue_dev_events WHERE dev_assignee_id = ? AND action = 'submit' ORDER BY id DESC LIMIT 1`,
+      [ids.daB]
+    );
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r6' }], dev_assignee_id: ids.daB, amend_of: headEvent.id, amend_no: null })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例⑥正确亮红：单键 null——amend_of 合法但 amend_no=null，不因另一半合法而被放过');
+    s.db.close();
+  }
+  {
+    // 反例⑦null 与合法值混合的另一方向（amend_of=null∧amend_no 合法=1）——与反例⑥互补，覆盖
+    // 两个字段各自单独持 null 的两种排列，防止判定逻辑只对其中一个字段做了校验。
+    const s = await freshDb(); const ids = await buildBaseline(s);
+    await s.run(
+      `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
+       VALUES (?, ?, 'submit', 1, ?, datetime('now'))`,
+      [ids.issue1, ids.daB, JSON.stringify({ mode: 'commits', commits: [{ commit_id: ids.commitB, component: 'frontend', commit_ref: 'feat/r7' }], dev_assignee_id: ids.daB, amend_of: null, amend_no: 1 })]
+    );
+    await assertOnlyTargetFails(s, 'P16', baselineResults);
+    ok('P16 反例⑦正确亮红：单键 null——amend_of=null 但 amend_no 合法，不因另一半合法而被放过');
+    s.db.close();
+  }
+
+  console.log(`\n[全部通过] ${passed}/${passed} ✓ 探针 P1-P16 独立跑器：基线全绿 + 每条探针至少一个反例能正确亮红`);
 }
 
 main().catch(e => { console.error('\n[失败]', e.message, e.stack); process.exit(1); });

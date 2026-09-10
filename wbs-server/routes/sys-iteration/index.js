@@ -235,9 +235,9 @@ module.exports = (deps) => {
     //   原子写入单元，同 fast_release_* 六列/eta_overrun_* 四列先例整组入锚（mid-migration 崩溃会让取号
     //   UPDATE 或 INSERT 撞 no such column → 派生端点 500）。
     'derive_root_id', 'derive_seq', 'derive_seq_alloc',
-    // ← [S1a·config 流激活] exec_mode/vendor_name：**被消费的热路径列**——assign/reassign 端点写、
-    //   详情/列表读，mid-migration 崩溃（key 列已补本组未补）会让这些语句撞 no such column → 500
-    //   （同 release_assignee_id/gate_deferred_at 先例），须整组入锚点。
+    // ← [S1a·config 流激活] exec_mode/vendor_name：两列保留（**[#56·2026-09-10] 已随「执行方式」整组
+    //   下线**，assign/reassign 不再写、详情/timeline 不再读，存量值不动）——本条目继续锚定纯粹是防御
+    //   性：schema readiness 模型对已知列不区分"活跃写点"与"仅保留兼容"，撤锚无收益反增遗漏风险。
     'exec_mode', 'vendor_name',
   ];
   const SYS_RELEASES_KEY_COLS = ['release_no', 'status', 'is_hotfix', 'release_note', 'version_tag',
@@ -457,15 +457,10 @@ module.exports = (deps) => {
   // ⚠️ DDL CHECK（sys_issues.source 列，:658 一带）是静态 SQL 文本，无法引用本 JS 常量——两处仍需人工
   // 保持同步，verify 补一条断言解析 DDL CHECK 文本与本常量比对集合相等，漂移会直接报红（非纯人工自律）。
   const SYS_SOURCES = ['业务方', '内部', '生产故障'];
-  // [S1a·config 流激活 方案 v1.0 §4·D1] 执行方式枚举——单据级字段，仅 config 可写：self=绑定受理人本人
-  //   执行、assigned=平台成员执行、vendor=受理人跟踪乙方（需配 vendor_name）。沿 SYS_SOURCES 范式
-  //   （常量 + meta 下发 execModes，见 GET /sys-issues/meta），前端读 meta 渲染选项，不硬编码字面量。
-  const SYS_EXEC_MODES = ['self', 'assigned', 'vendor'];
-  // [S1a 补丁 V·V5·codex 505-A H2 反驳落注释（不改逻辑）] 语义=单据级协调方式描述（方案 v1.0 §4：
-  //   self=绑定受理人本人执行／assigned=平台成员执行／vendor=受理人跟踪乙方；**多人成员时仍是单据级
-  //   描述**）——刻意不与 assigned_to/成员集合建立约束（如 exec_mode='self' 时校验 assigned_to 必须
-  //   等于某个固定人）。若将来要把 exec_mode 与具体成员强绑定，须改方案 D1，非本批范围。同源反驳见
-  //   补丁 W·B1-H2（[C] 组 assigned_to=5 的正例保持不变，本条只补文档说明）。
+  // [S1a·config 流激活 方案 v1.0 §4·D1] 执行方式枚举——**[#56·2026-09-10] 已随「执行方式」整组下线**
+  //   （用户拍板；D1/D13 引入的 SYS_EXEC_MODES 常量、GET meta 的 execModes 下发、assign/reassign 的
+  //   exec_mode/vendor_name 必填与校验均已移除，sys_issues.exec_mode/vendor_name 两列保留不删、存量值
+  //   不动，仅不再有新写入）。
   const SYS_INTAKE_LIAISON_IDS = [13];   // 示例对接人：受理动作（intake_accept/intake_return/request_tech_consult）授权
   const SYS_TECH_LEAD_IDS = [7];         // 示例发布者：技术负责人（被通知·下拉候选·tech_lead_id ∈ 此名单·§6/§8.1）
   //   单一真相点（对齐 isSysBugLiaison 范式）：uid 是否在受理人 / 技术负责人白名单。
@@ -2092,9 +2087,10 @@ module.exports = (deps) => {
       ];
       await alterAddMissingCols('sys_issues', SYS_DERIVE_NUMBERING_ISSUE_COLS, '方案§15·派生单子编号「#根_序」20260813 v1.8（S12-a）');
 
-      // [S1a·config 流激活 方案 v1.0 §4] 执行方式契约两列——仅 config 可写：exec_mode（self/assigned/
-      //   vendor，服务层白名单 SYS_EXEC_MODES）+ vendor_name（vendor 时必填 1..100，否则清空）。无 DDL
-      //   CHECK（同 completion_overrun_reason_* 先例：值域仅服务层强校验，ALTER 路径不补约束）。
+      // [S1a·config 流激活 方案 v1.0 §4] 执行方式契约两列——原仅 config 可写：exec_mode（self/assigned/
+      //   vendor）+ vendor_name（vendor 时必填 1..100，否则清空）。**[#56·2026-09-10] 该契约已由用户拍板
+      //   整组下线**（assign/reassign 不再要求、不再校验、不再写入）——两列本身保留（存量值不动，仅不再
+      //   有新写入），故 ALTER 仍需存在以保证既有数据库已建列（幂等，无 DDL CHECK）。
       const SYS_CONFIG_FLOW_ISSUE_COLS = [
         ['exec_mode', 'TEXT'],
         ['vendor_name', 'TEXT'],
@@ -3166,6 +3162,30 @@ module.exports = (deps) => {
     return { acquire };
   })();
 
+  // [B·B.8·2026-09-09 方案 v1.5] 测试钩子——仅 process.env.SYS_TEST_HOOKS==='1' 时生效（生产路径零开销：
+  //   判据是模块加载时求值一次的布尔常量，`&&` 短路后连属性访问都不发生）。通过 _internals.__testHooks
+  //   注入函数，供 verify-sys-submit-amend.js 的回滚三注入点 + 详情锁可释放屏障使用；不影响任何既有端点。
+  const SYS_TEST_HOOKS_ENABLED = process.env.SYS_TEST_HOOKS === '1';
+  const __testHooks = {
+    afterCommitRowsDeletedHook: null,   // amend commits→no_code：commit 行已 DELETE、delete-commit 事件未写
+    afterDeleteEventsHook: null,        // amend commits→no_code：delete-commit 事件已写、最终 no_code 事件未写
+    beforeFinalEventHook: null,         // amend 任意方向：最终 submit/no_code 事件写入前
+    detailHoldHook: null,               // 详情端 sysTxnMutex 临界区内、读取交付字段前——可释放屏障（Promise）
+    // [C3b·H2] amend 事务真实获锁时刻打点——排队用例原先用"HTTP 响应到达时刻"代理"amend 获锁时刻"，两者
+    // 隔着整段事务执行时间，删掉互斥锁后该代理时刻依然满足">=详情进入时刻"这个弱断言（假绿）。改为在
+    // amend 端点 sysBeginImmediate() 成功返回后立即调用本钩子，测试侧据此拿到真实获锁时刻。
+    afterAmendBeginHook: null,
+    // [C3c·M3·538 回卷] 详情端 sysTxnMutex 临界区**内部中途**的可释放屏障——位置在 devAssignees/
+    // workNoteRows/devCommits/noCodeRecords/bugCauseRecords 均已读完、附件 SELECT 之前（见调用点注释）。
+    // 排队组用它证明"amend 事务在详情临界区中途仍未获锁"（而不只是"获锁顺序晚于详情响应到达"），补齐
+    // detailHoldHook 只能卡在临界区入口、测不出"同一临界区"这件事的证据缺口。
+    detailMidHook: null,
+    // [C3c·M5·538 回卷] sysPersistAttachments 持久化前（sysBeginImmediate 之后、逐文件 rename+INSERT
+    // 循环之前）——测试用它在这一时刻制造状态变化（如把上传者移出在册/把单据翻到终态），验证既有
+    // recheckFn（INSERT 之后、COMMIT 之前重验）确能捕获并同事务回滚（409 + 行未提交 + 已移动文件清理），
+    // 而不是靠"直连 SQL 绕过上传端点插入附件行"这种不经过 recheckFn 校验路径的假证据。
+    beforeAttachmentInsertHook: null,
+  };
   let __sysTxnRelease = null;   // 当前持锁事务的 release（单持有者不变量，mutex 串行化保证）
   function releaseSysTxn() { const r = __sysTxnRelease; __sysTxnRelease = null; if (r) r(); }
   // 取代 dbRunAsync('BEGIN IMMEDIATE')：先拿 mutex 串行化，再开事务；超时→SysTransitionError(503)；开事务失败→释放锁后抛原错。
@@ -3289,6 +3309,9 @@ module.exports = (deps) => {
     // [C4] commit 行编辑三端点守卫③（方案 §6.3："主状态∈(SYS_DEV∪SYS_VERIFY)"）——复用本矩阵而非另写一份
     // family 判定，与既有五个成员动作同一 409 INVALID_STATUS 语义收口（S17/S27"冻结态→409"实测依据）。
     commit: ['DEV', 'VERIFY'],
+    // [B·D-L1·2026-09-10 决策记录] 开发提交原地修正——DEV/VERIFY/LIAISON_TEST 三族放开（推翻 v1.5
+    // 原「LIAISON_TEST 锁死」已决点，D_PRE/FROZEN 409（族门天然排除，不另开状态级白名单）。
+    amend: ['DEV', 'VERIFY', 'LIAISON_TEST'],
   };
   // C2c（2026-07-18·codex 115 MED 修正）：type 级族门覆盖——reassign 对**变更流(feature/improvement)**排除 D_PRE 族。
   //   设计立场（对抗审 B·WEAKENED 后精确化）：变更流 **声明式改派(reassign)仅开放 DEV/VERIFY**——D_PRE 首次组建
@@ -3303,7 +3326,8 @@ module.exports = (deps) => {
       feature: ['DEV', 'VERIFY'],
       improvement: ['DEV', 'VERIFY'],
       // [S1a 补丁 T·T3] config 同 improvement：与 CONFIG_FLOW_TRANSITIONS.reassign.from=['处理中','待验证']
-      //   同源，去掉基础矩阵的 D_PRE（待处理/已暂缓）——待处理须走 assign 采集 exec_mode 不得绕过，
+      //   同源，去掉基础矩阵的 D_PRE（待处理/已暂缓）——待处理须走 assign 完成首次指派、不得绕道声明式
+      //   reassign（此为动作语义分门，非「执行方式」相关：#56·2026-09-10 该契约已下线，与本条无关）；
       //   已暂缓沿模块级「暂缓期改派冻结」不变量（§4.5）。裁定：加 override，不扩 CONFIG_FLOW_TRANSITIONS
       //   的 from（扩 from 会让 config 成为唯一允许暂缓期改派的类型，与该不变量冲突）。
       config: ['DEV', 'VERIFY'],
@@ -3549,6 +3573,28 @@ module.exports = (deps) => {
       [issueId, devAssigneeId, relatedDevAssigneeId || null, action, reason || null, operatorId, payload ? JSON.stringify(payload) : null]
     );
   }
+
+  // [B·D11·2026-09-09 方案 v1.5·B.5] 轻量版本锁——不透明字符串 `e<E>-a<A>-n<N>`：
+  //   E = MAX(sys_issue_dev_events.id)（issue 全事件，含 amend 修正链，「有没有新交付内容」的信号）
+  //   A/N = 只统计**在册开发上传的 active delivery/screenshot 附件**（uploaded_by ∈ 当前在册名单）——
+  //   「交付内容」的定义=在册开发交出来的东西；验收者/对接人上传的凭证天然不计入，无需请求侧排除集合
+  //   （530/531 号审两轮否决"客户端传 attachment_ids 排除"的方案，理由=客户端给的 id 列表证明不了
+  //   "本次新上传"，且与刷新重试互相打架）。空集合分量各为 0。**唯一权威实现**——详情端/amend 响应/
+  //   accept 校验/审计四处调用点必须全部走本函数，禁止各自手写同款 SQL（同源不漂移，530 H1 收口）。
+  async function computeDeliveryRev(issueId) {
+    const eRow = await dbGetAsync(`SELECT COALESCE(MAX(id), 0) AS e FROM sys_issue_dev_events WHERE issue_id = ?`, [issueId]);
+    const anRow = await dbGetAsync(
+      `SELECT COALESCE(MAX(id), 0) AS a, COUNT(*) AS n FROM sys_issue_attachments
+        WHERE issue_id = ? AND attachment_type IN ('delivery','screenshot') AND status = 'active'
+          AND uploaded_by IN (SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL)`,
+      [issueId, issueId]
+    );
+    const E = Number(eRow && eRow.e) || 0;
+    const A = Number(anRow && anRow.a) || 0;
+    const N = Number(anRow && anRow.n) || 0;
+    return `e${E}-a${A}-n${N}`;
+  }
+  const DELIVERY_REV_RE = /^e\d+-a\d+-n\d+$/;
 
   // C2 交付物②：服务层代表选举（方案 §3.6 四步序）——所有成员写事务末尾统一调用（不变量 8）。
   //   ⚠️ 与 C0 一次性重置脚本内联版（scripts/sys-multidev-c0-reset.js electRepresentativeInline）算法逐字相同；
@@ -4315,14 +4361,16 @@ module.exports = (deps) => {
   // ⭐⭐ R4 守卫下沉（用户手测抓出绕过·191 号审 M"守卫只在单一 HTTP 处理器"当时被主会话裁定漏掉——
   //   如实记录）：变更流在「待指派」族投入开发资源的**所有入口**共用本守卫——/assign（A 路径）、
   //   dev-assignees POST（加成员）、reassign（批量差量含新增）。语义=「指派开发前必须有 OA 号」盖的是
-  //   "把人放上单子"这件事本身，不是某一个端点。bug 不受限（D2）；DEV/VERIFY 族的加人不查（进族时
-  //   已过本守卫·存量不追溯）。同事务自查 oa_number（不依赖调用方 row 列形状——[3.6] 踩过的坑）。
+  //   "把人放上单子"这件事本身，不是某一个端点。bug 结构性豁免（首行 type guard，D2 不变）；
+  //   feature/improvement/config 均须过守卫（2026-09-09 方案 v1.5 D1——此前 config 曾被单方判断豁免，
+  //   非用户拍板，本次改回纳入）；DEV/VERIFY 族的加人不查（进族时已过本守卫·存量不追溯，见 D3）。
+  //   同事务自查 oa_number（不依赖调用方 row 列形状——[3.6] 踩过的坑）。
   // ⭐⭐⭐ 建单优化批 C3b（方案 20260801_v1.3 §6c 设计点4）：新契约——`oa_exempt=1`（建单弹窗显式勾选
   //   「本单无需 OA」，一次性定死，编辑窗口不提供翻转入口）单直接放行，不再走 OA 号格式校验；
   //   `oa_exempt=0` 时现状规则不变（无号 409 引导补号）。号与豁免正交：exempt=1 单事后仍可正常
   //   set-oa-number 填号（守卫任一条件满足即过，填号不联动清标志，见 set-oa-number 端点）。
   async function assertSysDevCommitmentOaGuard(issueId, issueType) {
-    if (issueType !== 'feature' && issueType !== 'improvement') return;
+    if (issueType === 'bug') return;   // bug 结构性豁免（不变）；feature/improvement/config 均须过守卫（2026-09-09 方案 v1.5 D1）
     const r = await dbGetAsync('SELECT oa_number, oa_exempt FROM sys_issues WHERE id = ?', [issueId]);
     if (r && Number(r.oa_exempt) === 1) return;   // 免 OA 单：豁免格式校验，直接放行
     try {
@@ -5988,6 +6036,27 @@ module.exports = (deps) => {
           } else if (Object.prototype.hasOwnProperty.call(payload, 'online_mode')) {
             throw new SysTransitionError(400, 'ONLINE_MODE_NOT_APPLICABLE', `「${type}」类型不支持指定上线方式`);
           }
+          // [B·D11·B.5·2026-09-09 方案 v1.5] 验收版本锁——expected_delivery_rev 字段存在即校验（不看真值，
+          //   看键是否存在，同 online_mode「携带判据」范式）：须为匹配 /^e\d+-a\d+-n\d+$/ 的字符串，否则
+          //   400 VALIDATION；事务内 computeDeliveryRev 重算与之比对，不等 409 DELIVERY_CHANGED「交付内容
+          //   已变更，请刷新后再验收」。**缺省放行**——不传该键的既有 90 处 /accept 调用零改动（同 D3 契约，
+          //   不强制要求，只在传了才校验）。凭证关联（attachment_ids）与版本计算彻底解耦，既有校验分支不动。
+          // [C4b·Opus 预筛 L-1] delivery_rev 无条件在此（事务入口，格式校验之前即可算，不依赖
+          //   expected_delivery_rev 是否传）算这**唯一一次**——下方 409 比对与更靠后的 M1 payload
+          //   写入点（:6187 一带）都只引用这个变量，不再各自决定"要不要重算"。两条路径此前各自
+          //   判断"是否需要计算"容易在未来分叉出不同判据（M1 那处已发生过一次：曾经只在
+          //   hasExpectedDeliveryRev 为真时算），改为同源单点计算后二者天然同步。
+          const deliveryRevAtAccept = await computeDeliveryRev(issueId);
+          const hasExpectedDeliveryRev = Object.prototype.hasOwnProperty.call(payload, 'expected_delivery_rev');
+          if (hasExpectedDeliveryRev) {
+            const expectedRev = payload.expected_delivery_rev;
+            if (typeof expectedRev !== 'string' || !DELIVERY_REV_RE.test(expectedRev)) {
+              throw new SysTransitionError(400, 'VALIDATION', 'expected_delivery_rev 格式错误');
+            }
+            if (deliveryRevAtAccept !== expectedRev) {
+              throw new SysTransitionError(409, 'DELIVERY_CHANGED', '交付内容已变更，请刷新后再验收');
+            }
+          }
           setFrags.push("accepted_at = datetime('now','localtime')");
           // ⭐ [C9 无 commit 单验收直翻·方案 v1.7 §10.1] 目标态若已被 resolveToStatusInTxn 判成「已上线」
           //   （准入四条件全满足，判定函数=evaluateNoCommitDirectOnline，与本 UPDATE **同一事务**），
@@ -6112,11 +6181,23 @@ module.exports = (deps) => {
             //   合法值（与 payload.online_mode 同源，见 :5216-5219 归一化提取），direct 分支与 release
             //   分支共用同一条 case 'accept' 尾部逻辑（本块在 break 之前，C9 直翻写点不提前 return/break），
             //   故 online_mode 键落的是**同一条 accept timeline 行**，非 C9 另写的行。
-            if (hasAcceptNote || hasAcceptAttachment || type === 'config') {
+            // [B·D11·B.5] delivery_rev 追加进 timeline payload——**只在已经要写 payload 时追加**，不为它
+            //   单独强制打开 payload（D3「90 处既有 /accept 调用零改动」契约钉死 payload_json 在纯无 note/
+            //   无附件/非 config/未传 expected_delivery_rev 时必须仍是 NULL，见 verify-sys-accept-evidence.js
+            //   [A1]）。hasExpectedDeliveryRev 为真时视为"客户端主动要求版本锁审计"，同样触发打开 payload。
+            if (hasAcceptNote || hasAcceptAttachment || type === 'config' || hasExpectedDeliveryRev) {
               const acceptPayloadObj = {};
               if (hasAcceptNote) acceptPayloadObj.note = acceptNoteTrim;
               if (hasAcceptAttachment) acceptPayloadObj.attachment_ids = acceptAttachmentIds;
               if (type === 'config') acceptPayloadObj.online_mode = configOnlineMode;
+              // [C3c·M1·538 回卷 → C4b·Opus 预筛 L-1 收口] 验收审计漏记——只要进了「已写 payload」分支
+              //   （note/附件/config online_mode/expected_delivery_rev 任一触发），delivery_rev 一律
+              //   无条件写入。deliveryRevAtAccept 已在事务入口处单点算好（:6052 一带，不管 hasExpected
+              //   DeliveryRev 是否为真都会算），此处直接引用同一个变量，不再判空重算——两处读同一份值，
+              //   不存在两条计算路径分叉的可能。纯 accept（四者皆无）不进本 if 分支，timelinePayloadJson
+              //   仍保持 null，不破坏 verify-sys-accept-evidence.js [A1]「90 处既有 /accept 调用零改动」
+              //   契约（deliveryRevAtAccept 虽然此时也已算出，但纯 accept 分支从不读它、不落库）。
+              acceptPayloadObj.delivery_rev = deliveryRevAtAccept;
               timelinePayloadJson = JSON.stringify(acceptPayloadObj);
             }
             // summary（决策记录 J7）：仅当 C9 直翻分支未写（summary 仍为上方初始值 null）时才由说明/附件
@@ -6159,6 +6240,24 @@ module.exports = (deps) => {
           const passEligible = passAnalysis.allComplete ? await isGateEligibleForVerify(issueId, type) : false;
           if (!(passAnalysis.allComplete && passEligible && passAnalysis.hasDeliverable)) {
             throw new SysTransitionError(409, 'LIAISON_TEST_PASS_INVARIANT', '当前不满足对接测试通过前置条件（在册未全完成态/资格未过/无交付记录）');
+          }
+          // [D-L1·2026-09-10 决策记录] 对接测试通过版本锁——同 case 'accept' 同款：expected_delivery_rev
+          //   字段存在即校验（不看真值，看键是否存在），须为匹配 DELIVERY_REV_RE 的字符串否则 400
+          //   VALIDATION；事务内 computeDeliveryRev 重算与之比对，不等 409 DELIVERY_CHANGED「交付内容已
+          //   变更，请刷新后再通过」；**缺省放行**（既有直调 /liaison-test-pass 的用例零改动）。校验位置=
+          //   「这次通过在业务上是否成立」（上方①b 复查）之后、「操作者有没有留凭证」（下方凭证校验）之
+          //   前——"通过的是不是我看过的版本"夹在两者中间。deliveryRevAtPass 单点算一次，供下方 payload_json
+          //   条件写入复用，不二次计算（同 case 'accept' :6049 一带的单点计算纪律）。
+          const deliveryRevAtPass = await computeDeliveryRev(issueId);
+          const hasExpectedDeliveryRevAtPass = Object.prototype.hasOwnProperty.call(payload, 'expected_delivery_rev');
+          if (hasExpectedDeliveryRevAtPass) {
+            const expectedRevAtPass = payload.expected_delivery_rev;
+            if (typeof expectedRevAtPass !== 'string' || !DELIVERY_REV_RE.test(expectedRevAtPass)) {
+              throw new SysTransitionError(400, 'VALIDATION', 'expected_delivery_rev 格式错误');
+            }
+            if (deliveryRevAtPass !== expectedRevAtPass) {
+              throw new SysTransitionError(409, 'DELIVERY_CHANGED', '交付内容已变更，请刷新后再通过');
+            }
           }
           // [方案 D22-④·2026-08-06 批2·codex 291 号 H-1/H-2/M-1 收口] pass 凭证校验：口径="进入本轮待
           //   对接测试之后新上传的附件" 或 "pass 当场填写的测试说明文字"，至少其一。置于①b 复查**之后**——
@@ -6206,6 +6305,10 @@ module.exports = (deps) => {
           const payloadObj = { evidence, cycle_no: row.liaison_test_cycle_no };
           if (hasNote) payloadObj.test_note = testNoteTrim;
           if (hasAttachment) payloadObj.attachment_ids = attachmentIds;
+          // [D-L1] delivery_rev 仅当请求携带 expected_delivery_rev 且校验通过时写入（同 accept 条件审计
+          //   口径，决策记录 §2 D-L1）——走到这里说明上方比对已通过（不等已 409 提前抛出），evidence/
+          //   cycle_no/test_note/attachment_ids 四键既有写法不动。
+          if (hasExpectedDeliveryRevAtPass) payloadObj.delivery_rev = deliveryRevAtPass;
           timelinePayloadJson = JSON.stringify(payloadObj);
           // summary 收窄为 80 字展示摘要（列表/时间线一览用，不再是唯一凭证载体——完整凭证在 payload_json）。
           // ⚠️ XSS 核实：前端时间线渲染 summary 走 `esc(e.summary)`（Sys_Iteration.html siRenderTimeline，
@@ -6879,7 +6982,9 @@ module.exports = (deps) => {
   //   改在两模块交界的本端点就地合并（同 bizSystems 消费口径：前端一律通过 GET meta 一次性拿全部字典，
   //   不看常量物理定义在哪个文件）。
   router.get('/sys-issues/meta', authenticateToken, requireSysSchemaReady, (req, res) => {
-    res.json({ ...T.buildMeta(), sources: SYS_SOURCES, execModes: SYS_EXEC_MODES });
+    // [#56·2026-09-10] execModes 字段已随「执行方式」整组下线（用户拍板），meta 不再下发；
+    // 前端 META.execModes 消费点已同步移除（Sys_Iteration.html）。
+    res.json({ ...T.buildMeta(), sources: SYS_SOURCES });
   });
 
   // ── GET /sys-issues/intake-liaisons：对接人下拉候选（建单优化批 C1 §3 改动点5）──────────
@@ -7325,7 +7430,6 @@ module.exports = (deps) => {
       let devAssignees, primaryRow, targetStatus;
       let assignEtaOverdue = null;   // [组A·2.3] 提到外层——事务内写，post-commit notify/响应体两处都要读
       let assignNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
-      let assignIssueType = null, assignExecMode = null, assignVendorName = null;   // [S1a] 提到外层——响应体读
       try {
         const row = await dbGetAsync('SELECT id, type, status, oa_number, oa_exempt, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
@@ -7339,42 +7443,9 @@ module.exports = (deps) => {
           await sysRollback();
           return res.status(403).json({ error: '仅管理员或该单对接人可执行此操作', code: 'NOT_BOUND_LIAISON' });
         }
-        // [S1a·config 流激活 方案 v1.0 §3/§4·D1/D13] exec_mode/vendor_name 契约：config 首次指派必带
-        //   exec_mode（非法/缺省 400）；vendor 时 vendor_name 必填 trim 1..100，否则清空；非 config
-        //   携带任一字段 → 400 EXEC_MODE_NOT_APPLICABLE（字段存在即校验，不静默忽略）。
-        // [S1a 补丁 V·V2·codex 505-A M2] 「携带」判据按分支拆两套：非 config 分支只看**键是否存在**
-        //   （`assignHasExecModeKey`/`assignHasVendorNameKey`，不看值）——`exec_mode: null` 这种显式传空
-        //   值也应被视为"携带了该字段"而拒绝，不能因为 `!= null` 短路而静默放行；config 分支仍看
-        //   **是否有非 null 值**（`assignHasExecModeField`/`assignHasVendorNameField`）——null 在 config
-        //   语境下等价于「未提供」，走 EXEC_MODE_REQUIRED 缺省分支，语义不变。
-        assignIssueType = row.type;   // 提到外层的变量赋值（响应体读，非重新声明）
-        const assignHasExecModeKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'exec_mode');
-        const assignHasVendorNameKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'vendor_name');
-        const assignHasExecModeField = assignHasExecModeKey && (req.body || {}).exec_mode != null;
-        const assignHasVendorNameField = assignHasVendorNameKey && (req.body || {}).vendor_name != null;
-        if (row.type === 'config') {
-          if (!assignHasExecModeField) {
-            await sysRollback();
-            return res.status(400).json({ error: '请选择执行方式', code: 'EXEC_MODE_REQUIRED' });
-          }
-          const rawExecMode = (req.body || {}).exec_mode;
-          if (!SYS_EXEC_MODES.includes(rawExecMode)) {
-            await sysRollback();
-            return res.status(400).json({ error: `非法的执行方式：${rawExecMode}`, code: 'INVALID_EXEC_MODE' });
-          }
-          assignExecMode = rawExecMode;
-          if (assignExecMode === 'vendor') {
-            const rawVendorName = (typeof (req.body || {}).vendor_name === 'string' ? (req.body || {}).vendor_name.trim() : '');
-            if (!rawVendorName || rawVendorName.length > 100) {
-              await sysRollback();
-              return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
-            }
-            assignVendorName = rawVendorName;
-          }   // 非 vendor：assignVendorName 恒清空（保持初值 null）
-        } else if (assignHasExecModeKey || assignHasVendorNameKey) {
-          await sysRollback();
-          return res.status(400).json({ error: `「${row.type}」类型不支持执行方式设置`, code: 'EXEC_MODE_NOT_APPLICABLE' });
-        }
+        // [#56·2026-09-10] D1/D13 引入的 exec_mode/vendor_name（执行方式/乙方名称）必填与校验已随用户
+        //   拍板整组下线——assign 不再要求、不再读取、不再校验该二字段；请求体若携带 exec_mode/vendor_name
+        //   （旧前端缓存等），端点不再拒绝，静默忽略（不新造「多余键拒绝」校验，前端已不发送）。
         // [组A·2.3 超时指派] 既有 ETA 已过期（非空∧≤now）→ 强制指派操作者重填新值，不填不能提交；
         //   §3C.3 组C接管点——本写点将来由组 C 接管容差/理由，此处保持局部清晰。
         //   ⚠️【回炉纠偏·主会话裁定】本分支**真实可达，且正是方案 §2.3 设计要拦的目标场景**——组 A
@@ -7387,9 +7458,10 @@ module.exports = (deps) => {
         //   成立，对 ETA 已不成立，两者是不同的字段）。与 /reassign 共享同一判据，两端点均真实可达，
         //   验证见 verify-sys-eta-generation.js [M7]（真实路径：受理自动生成 → DB 模拟指派拖延 → 断言
         //   /assign 必填闸生效）。
-        // ⭐⭐ R4 指派守卫（C2.5 撤销·方案 v2.1 §4·用户拍板"指派开发前必须有号"）：**变更流专属**——
-        //   开发资源投入必须挂 OA 立项依据。对 oa_number **现值跑完整格式校验**（189 号审：`IS NOT NULL`
-        //   会放过空串/空白/绕道写入的非法值），不合格一律 409 引导先补号。bug 不受限（OA 对 bug 可选·D2）。
+        // ⭐⭐ R4 指派守卫（C2.5 撤销·方案 v2.1 §4·用户拍板"指派开发前必须有号"；2026-09-09 方案 v1.5 D1
+        //   订正范围）：**仅 bug 豁免**，feature/improvement/config 均须过——开发资源投入必须挂 OA 立项
+        //   依据。对 oa_number **现值跑完整格式校验**（189 号审：`IS NOT NULL` 会放过空串/空白/绕道写入
+        //   的非法值），不合格一律 409 引导先补号。bug 结构性不受限（OA 对 bug 可选·D2 不变）。
         //   置于权限精判之后（无权者稳得 403，不借 409 侧信道探单据 OA 状态——同 [3.5] 排序理由）。
         // 统一走共享守卫（三入口同源·两份实现=漂移温床）；throw→txErr 回滚→外层 sendSysTransitionError
         await assertSysDevCommitmentOaGuard(id, row.type);
@@ -7536,12 +7608,9 @@ module.exports = (deps) => {
         const etaSetParams = assignEtaOverdue
           ? [assignEtaOverdue.newEta, assignEtaReasonResult.reasonCode, assignEtaReasonResult.reasonNote]
           : [];
-        // [S1a·config 流激活] exec_mode/vendor_name 与状态流转同一 UPDATE 原子落库（config 专属，D1/D13）。
-        const execSetFrag = row.type === 'config' ? ', exec_mode = ?, vendor_name = ?' : '';
-        const execSetParams = row.type === 'config' ? [assignExecMode, assignVendorName] : [];
         const upd = await dbRunAsync(
-          `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime'), gate_deferred_at = NULL${etaSetFrag}${execSetFrag} WHERE id = ? AND status = ?`,
-          [targetStatus, ...etaSetParams, ...execSetParams, id, row.status]
+          `UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime'), gate_deferred_at = NULL${etaSetFrag} WHERE id = ? AND status = ?`,
+          [targetStatus, ...etaSetParams, id, row.status]
         );
         if (!upd || upd.changes !== 1) {
           throw new SysTransitionError(409, 'GATE_INVARIANT', '迭代单状态已变更，请刷新重试');
@@ -7580,11 +7649,7 @@ module.exports = (deps) => {
           // [组 C·SC3·修复 a] timeline 携带理由——三态文案共用同一条追加（同段落，不逐分支重复判定）。
           assignEtaSummaryPart += buildEtaOverrunReasonSummarySuffix(assignEtaReasonResult, row.eta_overrun_reason_code || null);
         }
-        // [S1a·config 流激活] 执行方式留痕并入 assign timeline 行摘要（不新开 INSERT 站点，同 ETA/免 OA 折叠范式）。
-        const assignExecSummaryPart = row.type === 'config'
-          ? `｜执行方式：${assignExecMode}` + (assignExecMode === 'vendor' ? `（乙方：${assignVendorName}）` : '')
-          : '';
-        const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '') + assignEtaSummaryPart + assignExecSummaryPart;
+        const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '') + assignEtaSummaryPart;
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
            VALUES (?, 'assign', ?, ?, ?, ?, ?)`,
@@ -7623,8 +7688,6 @@ module.exports = (deps) => {
           source: assignEtaOverdue.overdue ? 'overdue' : 'voluntary',
           dev_estimated_at: assignEtaOverdue.newEta,
         } } : {}),
-        // [S1a·config 流激活] 响应体带执行方式（仅 config 有值，其余类型不返该键，前端零改动）。
-        ...(assignIssueType === 'config' ? { exec_mode: assignExecMode, vendor_name: assignVendorName } : {}),
       });
     } catch (err) { sendSysTransitionError(res, err); }
   });
@@ -7652,12 +7715,10 @@ module.exports = (deps) => {
     let repChanged = false, newRepUserId = null;
     let reassignEtaOverdue = null;   // [组A·2.3] 提到外层——事务内写，post-commit notify/响应体两处都要读
     let reassignNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
-    let reassignIssueType = null, reassignExecMode = null, reassignVendorName = null;   // [S1a] 提到外层——响应体读
-    let reassignExecOrVendorChanged = false;   // [S1a·J18] 供响应体标注本次是否写了执行方式/乙方名称
     try {
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, type, status, assigned_to, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note, exec_mode, vendor_name FROM sys_issues WHERE id = ?', [id]);
+        const row = await dbGetAsync('SELECT id, type, status, assigned_to, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         rowStatusAtStart = row.status;
         const prevAssignedTo = (row.assigned_to !== null && row.assigned_to !== undefined) ? Number(row.assigned_to) : null;
@@ -7682,65 +7743,9 @@ module.exports = (deps) => {
         assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期改派冻结（bug-only）
         assertMemberActionFamilyAllowed('reassign', row.type, row.status);
         const family = SF.familyOfStatus(row.type, row.status);
-        reassignIssueType = row.type;   // 提到外层的变量赋值（响应体读，非重新声明）
-
-        // [S1a·config 流激活 方案 v1.0 §3/§4·D13/J18] reassign 可附带 exec_mode/vendor_name 变更——
-        //   config 专属，不带则保留现值；归一化=trim + 非 vendor 时恒清空；非 config 携带任一字段 → 400。
-        // [S1a 补丁 V·V2·codex 505-A M2] 「携带」判据按分支拆两套（同 assign 端点同款拆分）：非 config
-        //   分支只看**键是否存在**（`reassignHasExecModeKey`/`reassignHasVendorNameKey`），`exec_mode:
-        //   null` 显式传空值也应被视为"携带"而拒绝；config 分支仍看**是否有非 null 值**
-        //   （`reassignHasExecModeField`/`reassignHasVendorNameField`）——null 视为未携带、保留现值，
-        //   语义不变（真正的"vendor 终态但名称为空"由 V1 的终态校验兜底，不靠这里的携带判据）。
-        reassignExecMode = row.exec_mode;      // 默认保留现值
-        reassignVendorName = row.vendor_name;  // 默认保留现值
-        let reassignExecModeChanged = false, reassignVendorNameChanged = false;
-        const reassignHasExecModeKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'exec_mode');
-        const reassignHasVendorNameKey = Object.prototype.hasOwnProperty.call(req.body || {}, 'vendor_name');
-        const reassignHasExecModeField = reassignHasExecModeKey && (req.body || {}).exec_mode != null;
-        const reassignHasVendorNameField = reassignHasVendorNameKey && (req.body || {}).vendor_name != null;
-        if (row.type === 'config') {
-          if (reassignHasExecModeField) {
-            const rawExecMode = (req.body || {}).exec_mode;
-            if (!SYS_EXEC_MODES.includes(rawExecMode)) {
-              await sysRollback();
-              return res.status(400).json({ error: `非法的执行方式：${rawExecMode}`, code: 'INVALID_EXEC_MODE' });
-            }
-            reassignExecMode = rawExecMode;
-          }
-          if (reassignExecMode === 'vendor') {
-            if (reassignHasVendorNameField) {
-              const rawVendorName = (typeof (req.body || {}).vendor_name === 'string' ? (req.body || {}).vendor_name.trim() : '');
-              if (!rawVendorName || rawVendorName.length > 100) {
-                await sysRollback();
-                return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
-              }
-              reassignVendorName = rawVendorName;
-            }   // 未传 vendor_name：沿用现值（保留现有乙方名称，允许"只改方式不改名称"）
-          } else {
-            reassignVendorName = null;   // 非 vendor：恒清空
-          }
-          reassignExecModeChanged = (row.exec_mode || null) !== (reassignExecMode || null);
-          const normalizedOldVendor = (row.vendor_name || '').trim();
-          const normalizedNewVendor = (reassignVendorName || '').trim();
-          reassignVendorNameChanged = normalizedOldVendor !== normalizedNewVendor;
-          // [S1a 补丁 V·V1·codex 505-A H1] 终态校验（归一化完成后、任何写之前）：非 vendor→vendor 切换
-          //   不带 vendor_name 时，上方"未传则沿用现值"沿用的是切换前的旧值——旧值在非 vendor 态下恒为
-          //   NULL（:7696 非 vendor 恒清空），会落成 exec_mode='vendor' ∧ vendor_name=NULL 的无名 vendor
-          //   脏态。改按**终态**校验（不看"是否传了这个字段"，只看"归一化后 exec_mode 最终是不是
-          //   vendor 且 vendor_name 最终是否非空"）——沿用既有 VENDOR_NAME_REQUIRED 码与文案，「只改名称
-          //   不改方式」「vendor→vendor 不传名称沿用现值」两条既有语义不受影响（两者归一化后 vendor_name
-          //   本就非空）。
-          if (reassignExecMode === 'vendor' && !(reassignVendorName || '').trim()) {
-            await sysRollback();
-            return res.status(400).json({ error: '请填写乙方名称（1-100 字）', code: 'VENDOR_NAME_REQUIRED' });
-          }
-        } else if (reassignHasExecModeKey || reassignHasVendorNameKey) {
-          await sysRollback();
-          return res.status(400).json({ error: `「${row.type}」类型不支持执行方式设置`, code: 'EXEC_MODE_NOT_APPLICABLE' });
-        }
-        // execOnlyChange：仅方式/名称变化（成员集合本身无差量）——J18 判据 = 三者非全不变即成立，
-        //   下方 no-op 判定/成员增删/代表选举/成员门重算/成员变化通知均据此分流。
-        reassignExecOrVendorChanged = reassignExecModeChanged || reassignVendorNameChanged;
+        // [#56·2026-09-10] D1/D13/J18 引入的 exec_mode/vendor_name（执行方式/乙方名称）可附带变更契约
+        //   已随用户拍板整组下线——reassign 不再要求、不再读取、不再校验、不再写入该二字段；execOnlyChange
+        //   （仅方式/名称变化即视为非 no-op）分支随之整体撤销，no-op 判据回归纯粹的成员集合是否有差量。
 
         const currentRows = await dbAllAsync(`SELECT id, user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL`, [id]);
         const currentIds = currentRows.map(r => Number(r.user_id));
@@ -7748,9 +7753,11 @@ module.exports = (deps) => {
         const targetSet = new Set(targetIds);
         toAdd = targetIds.filter(uid => !currentSet.has(uid));
         // R4 下沉：批量差量含新增且在待指派族 → 同守卫（纯移除不拦）。⚠️ 现状**防御性在位但不可触发**：
-        //   变更流 reassign 被上方族闸拦在 DEV/VERIFY（TYPE_OVERRIDE），bug 可达 D_PRE 但 helper 对 bug
-        //   early-return（D2）。留守卫=若未来放开变更流 D_PRE reassign，OA 不变量已就位（verify [AS] 有
-        //   不可达哨兵联动提醒）。
+        //   feature/improvement/config 的 reassign 均被上方族闸拦在 DEV/VERIFY（
+        //   MEMBER_ACTION_FAMILY_TYPE_OVERRIDE.reassign 对三者均只放 DEV/VERIFY、排除 D_PRE——config 见
+        //   `:3309` 一带 `reassign.config=['DEV','VERIFY']`，与 feature/improvement 同形），bug 可达 D_PRE
+        //   但 helper 对 bug early-return（D2）。留守卫=若未来放开任一类型的 D_PRE reassign，OA 不变量
+        //   已就位（verify [AS] 有不可达哨兵联动提醒）。
         if (family === 'D_PRE' && toAdd.length > 0) await assertSysDevCommitmentOaGuard(id, row.type);
         toRemove = currentIds.filter(uid => !targetSet.has(uid));
 
@@ -7783,16 +7790,11 @@ module.exports = (deps) => {
           }
         }
 
-        // [S1a·J18] execOnlyChange：成员集合无差量但 config 的 exec_mode/vendor_name 确有变化——
-        //   不算 no-op，跳过下方成员增删/代表选举/成员门重算/成员变化通知（见本函数下方对应分支）。
-        const execOnlyChange = row.type === 'config' && toAdd.length === 0 && toRemove.length === 0 && reassignExecOrVendorChanged;
-        if (toAdd.length === 0 && toRemove.length === 0 && !execOnlyChange) {
+        // [#56·2026-09-10] execOnlyChange（config 专属"仅执行方式/乙方名称变化即非 no-op"）已随该契约
+        //   整组下线撤销——config 现与其余类型同形，no-op 判据回归纯粹的成员集合无差量（400 VALIDATION）。
+        if (toAdd.length === 0 && toRemove.length === 0) {
           await sysRollback();
-          // config 的 no-op 判据=成员集合∧exec_mode∧归一化 vendor_name 三者全不变（409）；其他类型不变（400 VALIDATION）。
-          return res.status(row.type === 'config' ? 409 : 400).json({
-            error: row.type === 'config' ? '开发集合与执行方式均无变更，无需改派' : '开发集合无变更，无需改派',
-            code: 'VALIDATION',
-          });
+          return res.status(400).json({ error: '开发集合无变更，无需改派', code: 'VALIDATION' });
         }
         if ((family === 'DEV' || family === 'VERIFY') && targetIds.length === 0) {
           await sysRollback();
@@ -7929,29 +7931,6 @@ module.exports = (deps) => {
             [id, reassignEtaSummary, Number(actor.id) || null, actor.name || null]
           );
         }
-        // [S1a·config 流激活 D13/J18] exec_mode/vendor_name 变更落库 + 时间线留痕（同事务，仅 config 且确有
-        //   变化时写；成员集合是否同时变化不影响本段——两种情形都要落这两列 + 一条 note）。
-        if (row.type === 'config' && reassignExecOrVendorChanged) {
-          const execUpd = await dbRunAsync(
-            `UPDATE sys_issues SET exec_mode = ?, vendor_name = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-            [reassignExecMode, reassignVendorName, id]
-          );
-          if (!execUpd || execUpd.changes !== 1) {
-            throw new SysTransitionError(409, 'GATE_INVARIANT', 'reassign 执行方式写入失败（单据可能已被并发修改）');
-          }
-          const execPayload = {
-            exec_mode_from: row.exec_mode || null, exec_mode_to: reassignExecMode || null,
-            vendor_name_from: row.vendor_name || null, vendor_name_to: reassignVendorName || null,
-          };
-          const execSummaryParts = [];
-          if ((row.exec_mode || null) !== (reassignExecMode || null)) execSummaryParts.push(`执行方式：${row.exec_mode || '（未设置）'} → ${reassignExecMode}`);
-          if ((row.vendor_name || '') !== (reassignVendorName || '')) execSummaryParts.push(`乙方名称：${row.vendor_name || '（无）'} → ${reassignVendorName || '（无）'}`);
-          await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, payload_json, operator_id, operator_name)
-             VALUES (?, 'note', ?, ?, ?, ?)`,
-            [id, execSummaryParts.join('｜'), JSON.stringify(execPayload), actor.id, actor.name]
-          );
-        }
         // 先插新（§3：与 supersede-excuse 顺序相反）——始终 INSERT 新行，不复活旧软删行（§4.4 同一原则）。
         for (const uid of toAdd) {
           const user = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [uid]);
@@ -7992,16 +7971,15 @@ module.exports = (deps) => {
             `reassign 差量应用后在册集合与目标集合不一致：目标=${JSON.stringify([...targetSetFinal])} 实际=${JSON.stringify([...postDiffSet])}`);
         }
 
-        // [S1a·J18] execOnlyChange（仅方式/名称变化，成员集合本身无差量）：跳过代表选举/成员门重算——
-        //   J18 明文"跳过成员增删/代表选举/成员门重算/成员变化通知"，repChanged 保持初值 false（不通知）。
-        if (!execOnlyChange) {
-          await electRepresentative(id);
-          const afterRow = await dbGetAsync('SELECT assigned_to FROM sys_issues WHERE id = ?', [id]);
-          newRepUserId = (afterRow && afterRow.assigned_to !== null && afterRow.assigned_to !== undefined) ? Number(afterRow.assigned_to) : null;
-          repChanged = prevAssignedTo !== newRepUserId;
+        // [#56·2026-09-10] execOnlyChange（仅执行方式/乙方名称变化即跳过代表选举/成员门重算）已随该
+        //   契约整组下线撤销——成员集合无差量已在上方 no-op 闸拦截，走到这里必是真实的成员差量，代表
+        //   选举/W-GATE 无条件执行。
+        await electRepresentative(id);
+        const afterRow = await dbGetAsync('SELECT assigned_to FROM sys_issues WHERE id = ?', [id]);
+        newRepUserId = (afterRow && afterRow.assigned_to !== null && afterRow.assigned_to !== undefined) ? Number(afterRow.assigned_to) : null;
+        repChanged = prevAssignedTo !== newRepUserId;
 
-          gateResult = await runWGate(id, row.type, row.status, actor);   // 一次 W-GATE（差量已全部落地）
-        }
+        gateResult = await runWGate(id, row.type, row.status, actor);   // 一次 W-GATE（差量已全部落地）
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
@@ -8037,8 +8015,6 @@ module.exports = (deps) => {
           source: reassignEtaOverdue.overdue ? 'overdue' : 'voluntary',
           dev_estimated_at: reassignEtaOverdue.newEta,
         } } : {}),
-        // [S1a·config 流激活] 响应体带执行方式现值（仅 config 有值，其余类型不返该键）。
-        ...(reassignIssueType === 'config' ? { exec_mode: reassignExecMode, vendor_name: reassignVendorName } : {}),
       });
     } catch (err) {
       sendSysTransitionError(res, err);
@@ -8073,7 +8049,8 @@ module.exports = (deps) => {
         if (!(await isBoundLiaisonEligibleOrAdmin(actor, row))) { await sysRollback(); return res.status(403).json({ error: '仅管理员或该单对接人可执行此操作', code: 'NOT_BOUND_LIAISON' }); }
         assertRosterNotFrozen(row.type, row.status);   // S2·§4.5：暂缓期加人冻结（bug-only）
         const addFamily = assertMemberActionFamilyAllowed('add', row.type, row.status);
-        // R4 下沉：待指派族加成员=投入开发资源，变更流须先有 OA（与 /assign、reassign 同守卫）。
+        // R4 下沉：待指派族加成员=投入开发资源，feature/improvement/config 须先有 OA（与 /assign、reassign
+        //   同守卫，仅 bug 豁免，2026-09-09 方案 v1.5 D1）。
         //   ⚠️ 口径钉死（196 增量审 M2·产品语义裁定）：**D_PRE 族任何加成员请求先过 OA**——含重复加已在册、
         //   复活已移除成员（fail-closed 宁严勿漏·空数组在上游 rawIds 校验已 400 不达此处）；不做"算出实际
         //   新增集合再守卫"的精细化——那要在守卫前复制 addOrReaddMembers 的集合逻辑，两份必漂。
@@ -9542,19 +9519,39 @@ module.exports = (deps) => {
            FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`,
         [id]
       );
-      // 附件（delivery/screenshot/spec，仅 active）
-      const attachments = await dbAllAsync(
-        `SELECT id, attachment_type, round_no, file_name, original_name, file_size, mime_type,
-                status, uploaded_by, uploaded_by_name, created_at
-           FROM sys_issue_attachments WHERE issue_id = ? AND status = 'active' ORDER BY id`,
-        [id]
-      );
+      // [C3b·H1 订正·2026-09-09] 附件 SELECT（delivery/screenshot/spec，仅 active）原在锁外——与写侧
+      //   sysPersistAttachments 的 INSERT（同批一并改为持锁写，见该函数）不对称，"一致快照"的声称不成立
+      //   （锁外读可能读到并发未提交/已回滚的中间态）。移进下方 sysTxnMutex 临界区、computeDeliveryRev
+      //   之前——读侧与写侧现在共享同一把锁，快照真实一致。
+      // [B·B.5·2026-09-09 方案 v1.5] 交付字段互斥读——从这里到 bugCauseRecords/attachments 结束
+      //   （devAssignees 行/commit 行/workNoteRows/noCodeRecords/bugCauseRecords/附件/computeDeliveryRev）
+      //   在 sysTxnMutex 临界区内一次性读取，与写事务（amend/submit/accept/附件上传删除等均经
+      //   sysBeginImmediate 持同一把锁）互斥，得到一致快照——B23/B24 已有事实：单共享连接上未持锁的单
+      //   语句会被插进他人未提交事务（读到脏值）+ dev_events.id 无 AUTOINCLE、回滚后 rowid 可复用，
+      //   "先算 rev 再读内容"这类 fail-closed 论证在本模块不成立（530 H2 裁定），故改为持锁读而非仅在
+      //   计算 rev 前后各读一次。**只持锁、不 BEGIN 事务**——sysBeginImmediate/sysCommit/sysRollback 是
+      //   "锁+事务"打包语义，这里只要锁，直接调 sysTxnMutex.acquire 并在 finally 释放，不写
+      //   __sysTxnRelease（该模块级变量专属"当前持有写事务的锁"，与本处纯读锁的生命周期不同，混用会让
+      //   某个 sysCommit/sysRollback 误释放这里的锁）。timeline/issue 主行均非"交付内容"的一部分，
+      //   不入锁（已在上方读取）；附件面的"一致"依赖上传/删除端点均已改持锁写（见 H1 写侧订正），本处
+      //   锁内读到的即为已提交的最终态，accept 事务内另有 computeDeliveryRev 重算兜底二次校验。
+      let deliveryLockRelease;
+      try {
+        deliveryLockRelease = await sysTxnMutex.acquire(5000);
+      } catch (lockErr) {
+        throw new SysTransitionError(503, 'SYS_BUSY', '系统繁忙（并发处理中），请稍后重试');
+      }
+      let devAssignees, devCommits, noCodeRecords, bugCauseRecords = [], deliveryRev, attachments;
+      try {
+      // [B·B.8] 可释放屏障——测试在发出并发请求后主动 resolve 该 Promise（脚本内建兜底 1.5s 自动
+      // resolve，防用例遗漏导致本请求死等），生产路径 SYS_TEST_HOOKS_ENABLED 为 false 时整行短路。
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.detailHoldHook) { await __testHooks.detailHoldHook(); }
       // ── 通知改造 C2 §E（写读同源）：多开发协作子表 join，附录 A 读接口契约——
       //   仅 removed_at IS NULL 在册行，主开发（is_primary=1）排前。通知能力派生（can_send 等）/发送/
       //   read-status 属 C3、前端渲染属 C4/C5——本批只保证这里的数据结构正确，不做更多。
       //   ⚠️ 写读同源铁律：本列集用 fetchActiveDevAssignees 单一来源，与全部 mutation 响应镜像
       //   （path A 建单/assign/reassign/C2 四新端点）共用同一 SELECT，杜绝各自手写漂移。
-      const devAssignees = await fetchActiveDevAssignees(id);
+      devAssignees = await fetchActiveDevAssignees(id);
       // P4（详情端补查·仅此端点）：每个在册 dev 最近一次 submit/no_code 事件的 work_note（工作说明）——从 dev_events
       //   payload_json 提取（json_extract），按 dev_assignee_id 关联当前在册行，取该行最近事件（id DESC LIMIT 1）。
       //   写读同源：写侧落 submit/no_code 事件 payload_json.work_note（上方 eventPayload），读侧此处提取回填。
@@ -9570,12 +9567,18 @@ module.exports = (deps) => {
         // [B4·C6] 同一查询顺带提取 bug_cause_note（写读同源：写侧见上方 submit handler 的 eventPayload）——
         //   与 work_note 同一存储范式（各 dev 各自最近一次 submit/no_code 事件独立承载），故复用本条查询、
         //   不另开一次查询。bug 单每轮必填故非 bug 单历史行、bug 单迁移前旧行读到 null 是预期形态。
+        // [B·B.6·2026-09-09 方案 v1.5] +amend_no/changed_json——每实例最新 submit/no_code 事件的修正链
+        // 派生字段（普通提交事件无这两键，json_extract 返回 NULL，JS 侧归一为 0/[]）；与 work_note 同一
+        // MAX(id) 查询，不另开一次往返。changed 是数组，json_extract 对 JSON 数组值返回其序列化文本，
+        // 下方 JS 侧 JSON.parse。
         const workNoteRows = await dbAllAsync(
           `SELECT e.dev_assignee_id AS da_id,
                   json_extract(e.payload_json, '$.work_note') AS work_note,
                   json_extract(e.payload_json, '$.bug_cause_note') AS bug_cause_note,
                   json_extract(e.payload_json, '$.${SUBMIT_SELF_TESTED_KEY}') AS ${SUBMIT_SELF_TESTED_KEY},
                   json_extract(e.payload_json, '$.${SUBMIT_TEST_ENV_DEPLOYED_KEY}') AS ${SUBMIT_TEST_ENV_DEPLOYED_KEY},
+                  json_extract(e.payload_json, '$.amend_no') AS amend_no,
+                  json_extract(e.payload_json, '$.changed') AS changed_json,
                   e.created_at AS submitted_at
              FROM sys_issue_dev_events e
              JOIN (
@@ -9600,13 +9603,20 @@ module.exports = (deps) => {
           if (v === 0) return false;
           return null;
         }
+        // [B·B.6] amend_no 缺失（普通提交事件）→ 0；changed_json 解析失败/缺失 → []（fail-closed，不让
+        // 一条解析异常的历史行炸穿整个详情端点）。
         const wnMap = new Map(workNoteRows.map(r => {
           const note = r.work_note || null;
+          let changedArr = [];
+          if (r.changed_json) { try { const p = JSON.parse(r.changed_json); if (Array.isArray(p)) changedArr = p; } catch (_) { changedArr = []; } }
           return [r.da_id, {
             work_note: note, submitted_at: note ? r.submitted_at : null,
             bug_cause_note: r.bug_cause_note || null,   // [B4·C6] 无值（非 bug 单/历史行）→ null，同 work_note 的 || null 归一写法
             [SUBMIT_SELF_TESTED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_SELF_TESTED_KEY]),
             [SUBMIT_TEST_ENV_DEPLOYED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_TEST_ENV_DEPLOYED_KEY]),
+            amend_no: Number.isInteger(r.amend_no) ? r.amend_no : 0,
+            changed: changedArr,
+            latest_event_created_at: r.submitted_at,
           }];
         }));
         for (const d of devAssignees) {
@@ -9616,13 +9626,22 @@ module.exports = (deps) => {
           d.bug_cause_note = wn ? wn.bug_cause_note : null;   // [B4·C6]
           d[SUBMIT_SELF_TESTED_KEY] = wn ? wn[SUBMIT_SELF_TESTED_KEY] : null;
           d[SUBMIT_TEST_ENV_DEPLOYED_KEY] = wn ? wn[SUBMIT_TEST_ENV_DEPLOYED_KEY] : null;
+          // [B·B.6·2026-09-09 方案 v1.5] 提交原地修正派生字段——amend_no/changed 取自最新 submit/no_code
+          // 事件 payload（普通提交=0/[]）；first_submitted_at=花名册 resolved_at（首次提交后不再变，
+          // amend 不改该列）；amended_at 仅 amend_no>0 时=最新事件 created_at，否则 null。
+          const amendNo = wn ? wn.amend_no : 0;
+          d.amend_no = amendNo;
+          d.changed = wn ? wn.changed : [];
+          d.first_submitted_at = d.resolved_at;
+          d.amended_at = (amendNo > 0 && wn) ? wn.latest_event_created_at : null;
         }
       }
+      // devAssignees 为空数组时上方整段查询与赋值循环天然零次执行，无需额外分支兜底。
       // C1（新增）：commit 留痕行（方案 §13 S1「各自 commit 行」+ §8 快照口径同源——含 removed 实例的行，
       //   即使该实例已软删也不撤回其历史 commit 记录）。JOIN 取 user_name 供前端直接渲染"开发"列，不用前端
       //   自行按 dev_assignee_id 反查在册成员名（在册成员可能已被移除，join 用 sys_issue_dev_assignees 的
       //   历史行本身取名，非当前在册集合）。C3/C4 写入口尚未接线，当前表必为空，返回 []。
-      const devCommits = await dbAllAsync(
+      devCommits = await dbAllAsync(
         `SELECT c.id, c.dev_assignee_id, c.dev_user_id, da.user_name AS dev_user_name,
                 c.component, c.commit_ref, c.created_at, c.updated_at
            FROM sys_issue_dev_commits c
@@ -9640,7 +9659,7 @@ module.exports = (deps) => {
       //   非空白就算数——无代码说明同样是已发生的事实，不因成员被移出而消失。
       // [D 组件①] 补投影 round_no——前端 removedTag 靠它把「（已移出）」换成「（第N轮）」（round_no 为
       //   NULL 的存量行前端降级回退旧文案，见 Sys_Iteration.html ncItems 渲染处）。
-      const noCodeRecords = await dbAllAsync(
+      noCodeRecords = await dbAllAsync(
         `SELECT id, user_id, user_name, no_code_reason, resolved_at, removed_at, round_no
            FROM sys_issue_dev_assignees
           WHERE issue_id = ? AND dev_status = 'no_code'
@@ -9662,11 +9681,18 @@ module.exports = (deps) => {
       //   removed_at）。按**事件 id** 升序（非 dev_assignee_id 升序）：事件 id 天然是提交发生的时间序，
       //   同一 dev 跨轮的两次提交必然对应两个不同的 dev_assignee_id（remove+re-add 产生新实例），事件 id
       //   顺序即轮次顺序。
-      //   [codex 327 M-2 口径固化] MAX(id) per 实例的聚合**实际无损**：dev_status CAS 单向（pending→
-      //   code_submitted/no_code 后不回 pending，重做恒走 remove+re-add=新实例），同一实例结构上至多产生
-      //   一条 submit/no_code 事件，聚合只是防御性写法。若未来放开「同实例重复提交」，本查询须改为全事件
-      //   列出（含 submitted_at 逐条展示），否则会静默丢弃早期原因。
-      let bugCauseRecords = [];
+      //   [codex 327 M-2 口径固化·**2026-09-09 方案 v1.5 B.6 订正**] 原注释"同一实例结构上至多产生一条
+      //   submit/no_code 事件"已被本批 POST /sys-issues/:id/submit/amend 推翻——**同实例重复提交（修正）
+      //   现是合法路径**，MAX(id) per dev_assignee_id 聚合不再是"防御性写法"而是**有意的产品选择**：详情
+      //   视图（本查询）与上方 workNoteRows 一致，只取**当前视图**=最新一次修正后的内容（B.6 裁定：登记
+      //   接受，非缺陷）。被覆盖的早期原因/说明**不在本端点任何响应字段里可见**——每个 dev_assignee 行
+      //   新增的 amend_no/changed（本文件 :9634 一带）只告知"改过 N 次、这次改了哪些维度"，不携带旧值；
+      //   完整历史 payload 只存在于 `sys_issue_dev_events` 表本身（本批未新增任何"列出某在役单全部历史
+      //   事件"的读端点——⚠️ 与 `dev_events_json` 无关：那是**物理删除单**的审计快照列（`sys_issue_
+      //   delete_audit` 表，见 :13319 一带），只在单据被删除时落一次，对在役单不适用，此前误写"详情
+      //   dev_events_json"已订正）。原注释"若放开需改列出全事件"这一前提已随本批成立但结论未采纳（改
+      //   列出会让详情视图从"当前状态"变成"变更日志"，与本端点其余字段的"读现在"语义不一致）——如需
+      //   审计历史版本，目前只能直接查库，非本批交付范围，已写入报告供后续评估是否需要专门的历史端点。
       if (row.type === 'bug') {
         // [D 组件①] 补投影 da.round_no——同 noCodeRecords 先例，前端 removedTag 消费点见
         //   Sys_Iteration.html bcItems 渲染处。
@@ -9692,6 +9718,24 @@ module.exports = (deps) => {
           round_no: r.round_no,
         }));
       }
+      // [C3c·M3·538 回卷] 交付查询中途可释放屏障——devAssignees/commit 行/workNoteRows/noCodeRecords/
+      // bugCauseRecords 均已读完，附件 SELECT 尚未开始；挂在临界区**内部中途**而非入口，供排队组证明
+      // amend 事务在本详情请求仍处于临界区中段时确实还未获锁（同一临界区，非仅"获锁顺序更晚"）。
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.detailMidHook) { await __testHooks.detailMidHook(); }
+      // [C3b·H1] 附件 SELECT 移入锁内——原在锁外，与写侧持锁不对称（见函数顶部本批订正说明）。
+      attachments = await dbAllAsync(
+        `SELECT id, attachment_type, round_no, file_name, original_name, file_size, mime_type,
+                status, uploaded_by, uploaded_by_name, created_at
+           FROM sys_issue_attachments WHERE issue_id = ? AND status = 'active' ORDER BY id`,
+        [id]
+      );
+      // [B·D11] 与上方全部交付字段同一把锁下计算——避免"先算 rev 再读内容"或"先读内容再算 rev"两种
+      // 顺序各自的竞态窗口（530 H2）。
+      deliveryRev = await computeDeliveryRev(id);
+      } finally {
+        deliveryLockRelease();
+      }
+      row.delivery_rev = deliveryRev;
       // ── S6（先行上线两步化·方案 v1.8 §4-8）：详情附「值班执行人集合」+ 进度计数 ────────────────
       //   仅 type='bug' 查询（同上方 bugCauseRecords 判据——非 bug 单结构上不可能产生本表任何行，授权
       //   端点已按 type 门控，查询本身即无意义，跳过节省一次 DB 往返）。
@@ -9801,6 +9845,11 @@ module.exports = (deps) => {
       const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
       res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, derive_family: deriveFamily, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null, fast_release_executors: fastReleaseExecutors, fast_release_exec_progress: fastReleaseExecProgress });
     } catch (err) {
+      // [B·B.5·2026-09-09 方案 v1.5，C3b·L2 复用既有 helper 订正] 详情端 SysTransitionError 从固定 500
+      // 改为按 status 透传——锁超时（503 SYS_BUSY）等须让前端拿到可操作信息而非"未知详情查询失败"。
+      // 原实现自写 `res.status(err.httpStatus).json(...)`，与本文件其余端点（:11409/:11599/:12199 等）
+      // 已有的 sendSysTransitionError 是同一件事的两份实现——改为直接复用，避免第二份逐渐漂移。
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
       logger.error('[系统迭代] 详情查询失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '详情查询失败' });
     }
@@ -9962,6 +10011,64 @@ module.exports = (deps) => {
   //   缺失/显式 false 视为"未勾选"（_REQUIRED，同 EFFORT_REQUIRED 语义——"你还没做这件事"）；非
   //   undefined/null/false/true 的其余类型或值视为"畸形输入"（_INVALID，同 EFFORT_INVALID 语义——
   //   "你传了什么东西但不是我们要的布尔值"）。错误码语义化对齐 §3.2 EFFORT_REQUIRED/EFFORT_INVALID 先例。
+  // [B·D5·2026-09-09 方案 v1.5] 三个字段校验抽成独立函数——供 validateSubmitBody（下方）与
+  // POST /sys-issues/:id/submit/amend 共用同一校验逻辑（"不另造口径"，B.3 字段语义表要求）。
+  // 行为与抽取前逐字相同，仅是把内联逻辑搬进具名函数——validateSubmitBody 下方随即改为调用它们。
+  function validateWorkNoteField(raw) {
+    if (raw !== undefined && raw !== null && typeof raw !== 'string') return { ok: false, message: 'work_note 须为字符串' };
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    if ([...trimmed].length > 1000) return { ok: false, message: 'work_note 过长（上限 1000 字）' };
+    return { ok: true, value: trimmed || null };
+  }
+  function validateBugCauseNoteField(raw) {
+    if (raw !== undefined && raw !== null && typeof raw !== 'string') return { ok: false, message: 'bug_cause_note 须为字符串' };
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    if ([...trimmed].length > 500) return { ok: false, message: 'bug_cause_note 过长（上限 500 字）' };
+    return { ok: true, value: trimmed || null };
+  }
+  function validateNoCodeReasonField(raw) {
+    if (raw === null) return { ok: false, message: 'no_code_reason 不能为 null' };
+    const reason = (typeof raw === 'string' ? raw.trim() : '');
+    if (!reason || [...reason].length > 500) return { ok: false, message: 'no_code_reason 必填（trim 长度 1..500）' };
+    return { ok: true, value: reason };
+  }
+  // 事务内（已知真实 issueType）对 no_code_reason 的二次分层收紧——config 加 10 码点下限；其他类型仍按
+  // 原 500 码元上限复核（submit handler 既有逻辑逐字迁入，amend 同源调用，防两处各自维护漂移）。
+  function assertNoCodeReasonTypeConstraints(issueType, reason) {
+    if (issueType === 'config') {
+      if ([...reason].length < 10) return { ok: false, message: '配置说明需 10..500 字', code: 'VALIDATION' };
+    } else if (reason.length > 500) {
+      return { ok: false, message: 'no_code_reason 必填（trim 长度 1..500）', code: 'VALIDATION' };
+    }
+    return { ok: true };
+  }
+  // [C3b·M2·2026-09-09] commits[] 元素级形状校验——原是 validateSubmitBody 与 amend 端点各自维护的一份
+  // 复制件（逐字相同），抽出共用，避免"改一处忘改另一处"两处各自漂移。纯函数，不接 db（自然键查重是
+  // 独立的异步函数，见下方 assertCommitNaturalKeyFree）。
+  function validateCommitItems(rawArr) {
+    if (!Array.isArray(rawArr) || rawArr.length === 0) return { ok: false, message: 'commits 至少 1 条' };
+    const commits = [];
+    for (const raw of rawArr) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, message: 'commits 元素非法' };
+      const extraCommitKeys = Object.keys(raw).filter(k => !['component', 'commit_ref'].includes(k));
+      if (extraCommitKeys.length > 0) return { ok: false, message: `commits 元素含不支持字段：${extraCommitKeys.join(',')}` };
+      if (!COMMIT_COMPONENTS.includes(raw.component)) return { ok: false, message: 'component 仅支持 frontend/backend' };
+      if (typeof raw.commit_ref !== 'string') return { ok: false, message: 'commit_ref 须为字符串' };
+      const ref = raw.commit_ref.trim();
+      if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
+      commits.push({ component: raw.component, commit_ref: ref });
+    }
+    return { ok: true, commits };
+  }
+  // [C3b·M2] commit 自然键（dev_assignee_id+component+commit_ref）查重——submit/amend 两端 INSERT 前同源
+  // 调用，不各自手写 SELECT（§10.3 单组系统 component 归一后的值传进来，调用方负责先做归一）。
+  async function assertCommitNaturalKeyFree(devAssigneeId, component, commitRef) {
+    const dup = await dbGetAsync(
+      `SELECT id FROM sys_issue_dev_commits WHERE dev_assignee_id = ? AND component = ? AND commit_ref = ?`,
+      [devAssigneeId, component, commitRef]
+    );
+    if (dup) throw new SysTransitionError(400, 'VALIDATION', `commit 已存在（自然键重复）：${component}`);
+  }
   function assertSubmitChecklistFlag(raw, label, requiredCode, invalidCode) {
     if (raw === undefined || raw === null || raw === false) {
       return { ok: false, message: `请先勾选"${label}"再提交`, code: requiredCode };
@@ -10017,32 +10124,29 @@ module.exports = (deps) => {
     const fixGapNote = typeof b.fix_gap_note === 'string' ? b.fix_gap_note : null;
     // P4 work_note（选填·两模式均可带）：非 string 且非 undefined/null → 400（不静默吞·方案 §4.3 H-MED）；
     //   trim 上限 1000 字符（Unicode 码点 [...str].length 计·防中文/emoji 组合字符按字节误判）；空白落 null（统一）。
-    if (b.work_note !== undefined && b.work_note !== null && typeof b.work_note !== 'string') {
-      return { ok: false, message: 'work_note 须为字符串' };
-    }
-    const workNoteRaw = typeof b.work_note === 'string' ? b.work_note.trim() : '';
-    if ([...workNoteRaw].length > 1000) return { ok: false, message: 'work_note 过长（上限 1000 字）' };
-    const workNote = workNoteRaw || null;
+    // [B·D5·2026-09-09 方案 v1.5] 逻辑抽到 validateWorkNoteField（本文件上方），amend 端点同源调用。
+    const workNoteCheck = validateWorkNoteField(b.work_note);
+    if (!workNoteCheck.ok) return workNoteCheck;
+    const workNote = workNoteCheck.value;
 
     // [B4·C6] bug_cause_note 形状校验（类型无关，同 work_note 写法）：非 string 且非 undefined/null → 400；
     //   trim 后 Unicode 码点数上限 500（对齐用户拍板口径）。是否必填/是否适用（仅 type='bug'）依赖 row.type，
     //   validateSubmitBody 是纯函数拿不到 row，必填/适用面闸门下沉到 handler（见该处 BUG_CAUSE_REQUIRED/
     //   BUG_CAUSE_NOT_APPLICABLE）——本函数只保证"传了就必须是合法字符串"这一层，与业务语义无关。
-    if (b.bug_cause_note !== undefined && b.bug_cause_note !== null && typeof b.bug_cause_note !== 'string') {
-      return { ok: false, message: 'bug_cause_note 须为字符串' };
-    }
-    const bugCauseNoteRaw = typeof b.bug_cause_note === 'string' ? b.bug_cause_note.trim() : '';
-    if ([...bugCauseNoteRaw].length > 500) return { ok: false, message: 'bug_cause_note 过长（上限 500 字）' };
-    const bugCauseNote = bugCauseNoteRaw || null;
+    // [B·D5] 逻辑抽到 validateBugCauseNoteField（本文件上方），amend 端点同源调用。
+    const bugCauseNoteCheck = validateBugCauseNoteField(b.bug_cause_note);
+    if (!bugCauseNoteCheck.ok) return bugCauseNoteCheck;
+    const bugCauseNote = bugCauseNoteCheck.value;
 
     if (b.mode === 'no_code') {
-      if (b.no_code_reason === null) return { ok: false, message: 'no_code_reason 不能为 null' };
-      const reason = (typeof b.no_code_reason === 'string' ? b.no_code_reason.trim() : '');
       // [S1a·config 流激活 J17] 事务前（本函数不知道真实 type）只做公共上限：trim 非空 + ≤500 **码点**
       //   （`[...s].length`，非 UTF-16 code unit）——事务内取真实类型后再分层收紧：config 加 10 码点
       //   下限；其他类型仍按原 500 码元上限复核（见 submit 端点内实现），本处上限口径从"码元"改"码点"
       //   是为放行 config 侧潜在的高码点补充平面字符样本，不影响既有三类型的正常输入。
-      if (!reason || [...reason].length > 500) return { ok: false, message: 'no_code_reason 必填（trim 长度 1..500）' };
+      // [B·D5] 逻辑抽到 validateNoCodeReasonField（本文件上方），amend 端点同源调用。
+      const noCodeReasonCheck = validateNoCodeReasonField(b.no_code_reason);
+      if (!noCodeReasonCheck.ok) return noCodeReasonCheck;
+      const reason = noCodeReasonCheck.value;
       // [S1a 补丁 V·V3·codex 505-A M3] 事务外（本函数不知道真实 type）只做 commits 的**形状**校验
       //   （必须是数组），**不再**在此拒绝"非空"——把"no_code 且携带非空 commits"记成标志
       //   `noCodeHasNonEmptyCommits`，真正的拒绝下沉到事务内、取真实 type 并过 assertDevMember（权限
@@ -10065,17 +10169,10 @@ module.exports = (deps) => {
     // commit 记录改造（2026-07-19）：删除「同 component 至多 1 条」限制——前端改为「前端组/后端组」两分组、组内多行，
     //   同一 component 可含多条 commit。完全重复行（同实例+component+ref）由 §6.2 步骤4 自然键查重兜底（同批第一条
     //   入库后第二条 SELECT 即命中→400），故此处不再维护 seenComponents，仅做元素级字段校验。
-    const commits = [];
-    for (const raw of b.commits) {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, message: 'commits 元素非法' };
-      const extraCommitKeys = Object.keys(raw).filter(k => !['component', 'commit_ref'].includes(k));
-      if (extraCommitKeys.length > 0) return { ok: false, message: `commits 元素含不支持字段：${extraCommitKeys.join(',')}` };
-      if (!COMMIT_COMPONENTS.includes(raw.component)) return { ok: false, message: 'component 仅支持 frontend/backend' };
-      if (typeof raw.commit_ref !== 'string') return { ok: false, message: 'commit_ref 须为字符串' };
-      const ref = raw.commit_ref.trim();
-      if (!ref || ref.length > 200) return { ok: false, message: 'commit_ref 必填（trim 长度 1..200）' };
-      commits.push({ component: raw.component, commit_ref: ref });
-    }
+    // [C3b·M2] 元素级校验抽到 validateCommitItems（本文件上方），amend 端点同源调用。
+    const commitsCheck = validateCommitItems(b.commits);
+    if (!commitsCheck.ok) return commitsCheck;
+    const commits = commitsCheck.commits;
     return { ok: true, mode: 'commits', noCodeReason: null, commits, fixGapNote, workNote, bugCauseNote, selfTested: b[SUBMIT_SELF_TESTED_KEY], testEnvDeployed: b[SUBMIT_TEST_ENV_DEPLOYED_KEY] };   // 273 号 M：带原始值非硬编码（同上方 no_code 分支注释）
   }
 
@@ -10141,13 +10238,18 @@ module.exports = (deps) => {
             await sysRollback();
             return res.status(400).json({ error: '配置变更提交不接受代码提交记录', code: 'CONFIG_NO_COMMITS' });
           }
-          if ([...parsed.noCodeReason].length < 10) {
+          // [B·D5·2026-09-09 方案 v1.5] 逻辑抽到 assertNoCodeReasonTypeConstraints（本文件上方），amend 端点同源调用。
+          const reasonCheck = assertNoCodeReasonTypeConstraints('config', parsed.noCodeReason);
+          if (!reasonCheck.ok) {
             await sysRollback();
-            return res.status(400).json({ error: '配置说明需 10..500 字', code: 'VALIDATION' });
+            return res.status(400).json({ error: reasonCheck.message, code: reasonCheck.code });
           }
-        } else if (parsed.mode === 'no_code' && parsed.noCodeReason.length > 500) {
-          await sysRollback();
-          return res.status(400).json({ error: 'no_code_reason 必填（trim 长度 1..500）', code: 'VALIDATION' });
+        } else if (parsed.mode === 'no_code') {
+          const reasonCheck = assertNoCodeReasonTypeConstraints(row.type, parsed.noCodeReason);
+          if (!reasonCheck.ok) {
+            await sysRollback();
+            return res.status(400).json({ error: reasonCheck.message, code: reasonCheck.code });
+          }
         }
 
         // [组B·S2-2·拆直上分支] direct_release=true 前置闸（type='bug' ∧ status='处理中' ∧ 活跃授权谓词
@@ -10308,11 +10410,8 @@ module.exports = (deps) => {
         if (parsed.mode === 'commits') {
           for (const c of parsed.commits) {
             const comp = forceSingleCommitBackend ? 'backend' : c.component;
-            const dup = await dbGetAsync(
-              `SELECT id FROM sys_issue_dev_commits WHERE dev_assignee_id = ? AND component = ? AND commit_ref = ?`,
-              [memberRow.id, comp, c.commit_ref]
-            );
-            if (dup) throw new SysTransitionError(400, 'VALIDATION', `commit 已存在（自然键重复）：${comp}`);
+            // [C3b·M2] 自然键查重抽到 assertCommitNaturalKeyFree（本文件上方），amend 端点同源调用。
+            await assertCommitNaturalKeyFree(memberRow.id, comp, c.commit_ref);
             const insRes = await dbRunAsync(
               `INSERT INTO sys_issue_dev_commits (issue_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at)
                VALUES (?, ?, ?, ?, ?, datetime('now','localtime'))`,
@@ -10511,6 +10610,270 @@ module.exports = (deps) => {
         // 见 siModalDevSubmit 成功回调（据此收起理由块/toast 提示，MED-2 双向回补的"服务端说不要"半条）。
         ...(gateResult.completion_overrun ? { completion_overrun: gateResult.completion_overrun } : {}),
       });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  // ============================================================
+  // 二·七b、B（2026-09-09 方案 v1.5 §B）：开发提交原地修正——POST /sys-issues/:id/submit/amend
+  //   验收前（DEV/VERIFY 两族）本人在册实例可就地修正自己最近一次的提交内容，不撤回、不重跑门控、
+  //   不推送，每次修正在同一事务内生成三源快照并写一条完整 submit/no_code 事件（amend_of/amend_no/
+  //   changed 三键标记修正链）。B.3 四格契约 + B.4 事务七步逐字实现，见函数体内逐段注释。
+  // ============================================================
+  const AMEND_TOP_KEYS = ['mode', 'no_code_reason', 'work_note', 'bug_cause_note', 'commits'];
+  router.post('/sys-issues/:id/submit/amend', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const actor = sysActor(req);
+    const b = req.body || {};
+    try {
+      // B.4 事务前置——sysBeginImmediate() 在首次业务读取之前（同 submit 范式）。
+      await sysBeginImmediate();
+      try {
+        // [C3b·H2→C3c·M2·538 回卷] 真实获锁时刻打点（见 __testHooks.afterAmendBeginHook 头部注释）——移入
+        //   内层 try 首行（原在 sysBeginImmediate() 与内层 try 之间，钩子抛错时事务与锁无人释放：外层 catch
+        //   只 sendSysTransitionError，不 rollback）。现钩子抛错会被本 try 的 catch(txErr) 捕获→sysRollback
+        //   （幂等）→释放锁→rethrow，同一批次下一次 amend 请求可正常获锁，不留半持锁状态。
+        if (SYS_TEST_HOOKS_ENABLED && __testHooks.afterAmendBeginHook) { __testHooks.afterAmendBeginHook(); }
+        // ① 读 issue（404）
+        const row = await dbGetAsync(`SELECT id, type, status, system_name FROM sys_issues WHERE id = ?`, [id]);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        // ② assertKnownIssueStatus（族外拒绝，409 GATE_INVARIANT）
+        assertKnownIssueStatus(row.type, row.status);
+        // ③ assertDevMember（403 NOT_ROSTERED）——命中返回该在册 dev_assignee 行（{id,user_id,user_name,dev_status}）
+        const memberRow = await assertDevMember(id, actor.id);
+        // [C3b·L1] mode 合法性 + 顶层多余键——**不依赖实例态**（不需要 memberRow.dev_status/originMode），
+        //   前移到 assertDevMember 之后、本人实例态判定（④）之前，与 submit 端点 X2「畸形体 400 先于状态
+        //   409」的排序哲学对齐（同一份"请求体本身合不合法"的判断不应该等在"这单现在能不能做这动作"之
+        //   后才做）。依赖 originMode 的四格键组合校验（下方）仍需先过④/⑤拿到合法 dev_status/family，
+        //   保持原位不挪。
+        const extraTop = Object.keys(b).filter(k => !AMEND_TOP_KEYS.includes(k));
+        if (extraTop.length > 0) { await sysRollback(); return res.status(400).json({ error: `不支持的字段：${extraTop.join(',')}`, code: 'VALIDATION' }); }
+        if (b.mode !== 'no_code' && b.mode !== 'commits') {
+          await sysRollback();
+          return res.status(400).json({ error: 'mode 仅支持 no_code/commits', code: 'VALIDATION' });
+        }
+        const targetMode = b.mode;
+        // ④ 本人在册实例 dev_status∈{code_submitted,no_code}，否则 409 INVALID_STATUS（D8：本人在册 ∧ 当前实例
+        //   已交付过——尚未提交(pending)/已开脱(excused) 均不适用 amend，语义上"还没交过东西，谈不上修正"）。
+        if (memberRow.dev_status !== 'code_submitted' && memberRow.dev_status !== 'no_code') {
+          await sysRollback();
+          return res.status(409).json({ error: `当前实例交付态「${memberRow.dev_status}」不允许提交修正（须已交付：code_submitted/no_code）`, code: 'INVALID_STATUS' });
+        }
+        // ⑤ assertMemberActionFamilyAllowed('amend', type, status)——D-L1（2026-09-10 决策记录，推翻
+        //   v1.5 D7 原「LIAISON_TEST 锁死」）：DEV/VERIFY/LIAISON_TEST 三族放开，D_PRE/FROZEN 409
+        //   （族门天然排除，本函数统一处理）。
+        assertMemberActionFamilyAllowed('amend', row.type, row.status);
+        // config 单：mode 只能 no_code（结构上 originMode 恒为 no_code——submit 端点已强制 config 恒 no_code，
+        //   这里仍显式校验 targetMode，防止把"config 从不产生 commits 实例"这条不变量的证明责任悄悄转嫁给
+        //   "originMode 恒 no_code 所以 commits→no_code 分支天然不可达"这一间接推理）。
+        if (row.type === 'config' && targetMode !== 'no_code') {
+          await sysRollback();
+          return res.status(400).json({ error: '配置变更提交不接受代码提交记录', code: 'CONFIG_NO_COMMITS' });
+        }
+        const originMode = memberRow.dev_status === 'code_submitted' ? 'commits' : 'no_code';
+        const hasNoCodeReasonKey = Object.prototype.hasOwnProperty.call(b, 'no_code_reason');
+        const hasCommitsKey = Object.prototype.hasOwnProperty.call(b, 'commits');
+        const hasWorkNoteKey = Object.prototype.hasOwnProperty.call(b, 'work_note');
+        const hasBugCauseNoteKey = Object.prototype.hasOwnProperty.call(b, 'bug_cause_note');
+        // B.3 四格键组合闸——按方向逐格判定"允许/必带/禁止"（畸形体 400，早于任何字段内容校验）。
+        if (originMode === 'commits' && targetMode === 'commits') {
+          if (hasCommitsKey) { await sysRollback(); return res.status(400).json({ error: 'commits→commits 微调请使用 PUT/DELETE commit 行端点，本接口不支持在此方向携带 commits 字段', code: 'VALIDATION' }); }
+          if (hasNoCodeReasonKey) { await sysRollback(); return res.status(400).json({ error: 'commits 模式禁止携带 no_code_reason 字段', code: 'VALIDATION' }); }
+        } else if (originMode === 'no_code' && targetMode === 'no_code') {
+          if (hasCommitsKey) { await sysRollback(); return res.status(400).json({ error: 'no_code→no_code 禁止携带 commits 字段', code: 'VALIDATION' }); }
+        } else if (originMode === 'no_code' && targetMode === 'commits') {
+          if (hasNoCodeReasonKey) { await sysRollback(); return res.status(400).json({ error: '切至 commits 模式禁止携带 no_code_reason 字段', code: 'VALIDATION' }); }
+          if (!hasCommitsKey || !Array.isArray(b.commits) || b.commits.length === 0) { await sysRollback(); return res.status(400).json({ error: 'commits 至少 1 条', code: 'VALIDATION' }); }
+        } else {
+          // originMode === 'commits' && targetMode === 'no_code'
+          if (hasCommitsKey) { await sysRollback(); return res.status(400).json({ error: '切至 no_code 模式禁止携带 commits 字段', code: 'VALIDATION' }); }
+          if (!hasNoCodeReasonKey) { await sysRollback(); return res.status(400).json({ error: '切至 no_code 模式须填写 no_code_reason', code: 'VALIDATION' }); }
+        }
+
+        // bug_cause_note 适用面——同 submit 端点既有口径（仅 type='bug' 适用），amend 未在 B.3 表另行
+        // 声明豁免，按既有不变量延续：非 bug 单携带该键 → 400 BUG_CAUSE_NOT_APPLICABLE（同 submit 错误码）。
+        if (hasBugCauseNoteKey && row.type !== 'bug') {
+          await sysRollback();
+          return res.status(400).json({ error: '该类型单据无「bug 产生原因」字段', code: 'BUG_CAUSE_NOT_APPLICABLE' });
+        }
+        // ── 字段语义校验（B.3：缺省=保留，work_note 空串=清除，no_code_reason/bug_cause_note 空串=400，
+        //    任何字段显式 null=400；no_code_reason/bug_cause_note 复用 submit 同款校验函数）────────
+        let workNoteProvided = false, workNoteValue = null;
+        if (hasWorkNoteKey) {
+          if (b.work_note === null) { await sysRollback(); return res.status(400).json({ error: 'work_note 不能为 null', code: 'VALIDATION' }); }
+          const chk = validateWorkNoteField(b.work_note);
+          if (!chk.ok) { await sysRollback(); return res.status(400).json({ error: chk.message, code: 'VALIDATION' }); }
+          workNoteProvided = true; workNoteValue = chk.value;   // 可能为 null＝清除
+        }
+        let bugCauseNoteProvided = false, bugCauseNoteValue = null;
+        if (hasBugCauseNoteKey) {
+          if (b.bug_cause_note === null) { await sysRollback(); return res.status(400).json({ error: 'bug_cause_note 不能为 null', code: 'VALIDATION' }); }
+          const chk = validateBugCauseNoteField(b.bug_cause_note);
+          if (!chk.ok) { await sysRollback(); return res.status(400).json({ error: chk.message, code: 'VALIDATION' }); }
+          if (!chk.value) { await sysRollback(); return res.status(400).json({ error: 'bug_cause_note 不能为空', code: 'VALIDATION' }); }
+          bugCauseNoteProvided = true; bugCauseNoteValue = chk.value;
+        }
+        let noCodeReasonProvided = false, noCodeReasonValue = null;
+        if (hasNoCodeReasonKey) {
+          const chk = validateNoCodeReasonField(b.no_code_reason);   // null/空串已在函数内各自拒绝，同 submit 同源
+          if (!chk.ok) { await sysRollback(); return res.status(400).json({ error: chk.message, code: 'VALIDATION' }); }
+          const typeChk = assertNoCodeReasonTypeConstraints(row.type, chk.value);
+          if (!typeChk.ok) { await sysRollback(); return res.status(400).json({ error: typeChk.message, code: typeChk.code }); }
+          noCodeReasonProvided = true; noCodeReasonValue = chk.value;
+        }
+
+        // ── 三源读取（B.4 步骤3，事务内）────────────────────────────────────────────────
+        // ① 花名册列（no_code_reason/resolved_at 供归一比对；resolved_at 本函数不改写，仅供读，不比对）。
+        const rosterRow = await dbGetAsync(
+          `SELECT dev_status, no_code_reason, resolved_at FROM sys_issue_dev_assignees WHERE id = ?`,
+          [memberRow.id]
+        );
+        // ② 本实例最新 submit/no_code 事件（amend_of/amend_no/changed 均以此为源）。
+        const latestEventRow = await dbGetAsync(
+          `SELECT id, action, payload_json, created_at FROM sys_issue_dev_events
+            WHERE issue_id = ? AND dev_assignee_id = ? AND action IN ('submit','no_code')
+            ORDER BY id DESC LIMIT 1`,
+          [id, memberRow.id]
+        );
+        if (!latestEventRow) {
+          // 结构上不应发生（dev_status 已是 code_submitted/no_code，必然经过一次 submit/no_code 事件）——
+          // fail-closed 而非静默当作首次提交处理，防"从未提交却在册处于已交付态"这种数据异常被 amend 掩盖。
+          throw new Error(`[写前不变量违反] dev_assignee_id=${memberRow.id} dev_status=${memberRow.dev_status} 但查无 submit/no_code 事件`);
+        }
+        let latestPayload = {};
+        try { latestPayload = latestEventRow.payload_json ? JSON.parse(latestEventRow.payload_json) : {}; } catch (_) { latestPayload = {}; }
+        const amendOf = latestEventRow.id;
+        const amendNo = (Number.isInteger(latestPayload.amend_no) ? latestPayload.amend_no : 0) + 1;
+        // ③ commit 行（当前实例，供 commits→commits/no_code→commits 快照与 commits→no_code 删除前留痕）。
+        const currentCommitRows = await dbAllAsync(
+          `SELECT id, component, commit_ref FROM sys_issue_dev_commits WHERE dev_assignee_id = ? ORDER BY id ASC`,
+          [memberRow.id]
+        );
+
+        // ── 归一比对得 changed[]（B.4 步骤4）──────────────────────────────────────────
+        const beforeWorkNote = latestPayload.work_note || null;
+        const beforeBugCauseNote = latestPayload.bug_cause_note || null;
+        const beforeNoCodeReason = originMode === 'no_code' ? (rosterRow.no_code_reason || null) : null;
+        const beforeCommitsSig = originMode === 'commits' ? currentCommitRows.map(r => `${r.component}:${r.commit_ref}`).sort().join('|') : '';
+
+        const afterWorkNote = workNoteProvided ? workNoteValue : beforeWorkNote;
+        const afterBugCauseNote = bugCauseNoteProvided ? bugCauseNoteValue : beforeBugCauseNote;
+        const afterNoCodeReason = targetMode === 'no_code' ? (noCodeReasonProvided ? noCodeReasonValue : beforeNoCodeReason) : null;
+        // commits→commits 方向禁止携带 commits 字段（上方已拦），故该方向的"after commits 签名"恒等于当前
+        // 实际行（PUT/DELETE 三端点各自维护，amend 不改）；no_code→commits 方向 after 签名待 INSERT 后再算。
+
+        const changed = [];
+        if (targetMode !== originMode) changed.push('mode');
+        if (afterNoCodeReason !== beforeNoCodeReason) changed.push('no_code_reason');
+        if (afterWorkNote !== beforeWorkNote) changed.push('work_note');
+        if (afterBugCauseNote !== beforeBugCauseNote) changed.push('bug_cause_note');
+        // commits 变化：no_code→commits 恒视为变化（从"无 commits"变为"有 commits"）；commits→commits 因禁止
+        // 携带 commits 字段，本次调用结构上不可能改变 commits 集合，不计入；commits→no_code 已由 mode 变化
+        // 覆盖（无需再重复标记 commits 键——changed 记录的是"这次调用改了什么维度"，不是"最终态和最初态比"）。
+        if (originMode === 'no_code' && targetMode === 'commits') changed.push('commits');
+
+        if (changed.length === 0) {
+          await sysRollback();
+          return res.status(400).json({ error: '本次提交与当前内容完全相同，无变化', code: 'VALIDATION' });
+        }
+
+        // ── 写：CAS UPDATE（B.4 步骤5）──────────────────────────────────────────────────
+        // [C3c·rec·538 回卷登记] 方案 §B.8 变异矩阵原列"删 WHERE dev_status=? 条件 → 用例应红"一条——
+        // 本端点全程持 sysBeginImmediate（BEGIN IMMEDIATE + 模块级 sysTxnMutex 全局互斥串行化），同一
+        // 事务内该行只可能被本请求自身改写，删掉这一层 CAS 条件在当前并发模型下结构上不可达（无法构造出
+        // 会触发它的并发场景），与 Opus 预筛 L4 结论一致。本条 CAS 保留为纵深防御（万一未来并发模型改变），
+        // 但不再作为"可被自动变异脚本证伪"的覆盖项登记——移除该矩阵行前的"应有覆盖"声称，避免"能力声明
+        // 大于实作"（矩阵说测了、实际测不出）。
+        const targetDevStatus = targetMode === 'no_code' ? 'no_code' : 'code_submitted';
+        const upd = await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees SET dev_status = ?, no_code_reason = ?
+             WHERE id = ? AND dev_status = ? AND removed_at IS NULL`,
+          [targetDevStatus, targetMode === 'no_code' ? afterNoCodeReason : null, memberRow.id, rosterRow.dev_status]
+        );
+        if (!upd || upd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '实例状态已并发变化，请刷新后重试', code: 'INVALID_STATUS' });
+        }
+
+        // ── 按方向增删 commit 行（B.4 步骤5 续）────────────────────────────────────────
+        let finalCommitsSnapshot;   // 仅 targetMode==='commits' 时非 undefined，写入事件 payload.commits
+        if (originMode === 'commits' && targetMode === 'no_code') {
+          // commits→no_code：**先 DELETE commit 行**，再逐行写 delete-commit 事件（顺序与三注入点命名
+          // 一致——①afterCommitRowsDeletedHook「行已删、事件未写」②afterDeleteEventsHook「事件已写、
+          // 最终事件未写」，见 B.8 回滚组）。
+          if (currentCommitRows.length > 0) {
+            await dbRunAsync(`DELETE FROM sys_issue_dev_commits WHERE dev_assignee_id = ?`, [memberRow.id]);
+          }
+          if (SYS_TEST_HOOKS_ENABLED && __testHooks.afterCommitRowsDeletedHook) { await __testHooks.afterCommitRowsDeletedHook(); }
+          for (const c of currentCommitRows) {
+            await insertDevEvent({
+              issueId: id, devAssigneeId: memberRow.id, action: 'delete-commit',
+              reason: '提交修正：切换为无代码交付', operatorId: actor.id,
+              payload: { commit_id: c.id, component: c.component, commit_ref: c.commit_ref, dev_assignee_id: memberRow.id, via: 'amend_mode_switch', amend_no: amendNo },
+            });
+          }
+          if (SYS_TEST_HOOKS_ENABLED && __testHooks.afterDeleteEventsHook) { await __testHooks.afterDeleteEventsHook(); }
+        } else if (originMode === 'no_code' && targetMode === 'commits') {
+          // no_code→commits：INSERT，校验/查重**真同源**（[C3b·M2] validateCommitItems + assertCommitNaturalKeyFree，
+          // 本文件上方定义，submit 端点同源调用——此前是两处逐字复制，改一处忘改另一处会漂移）。
+          const forceSingleCommitBackend = await isSingleCommitGroupSystem(row.system_name);
+          const shapeCheck = validateCommitItems(b.commits);
+          if (!shapeCheck.ok) { await sysRollback(); return res.status(400).json({ error: shapeCheck.message, code: 'VALIDATION' }); }
+          for (const raw of shapeCheck.commits) {
+            const ref = raw.commit_ref;
+            const comp = forceSingleCommitBackend ? 'backend' : raw.component;
+            await assertCommitNaturalKeyFree(memberRow.id, comp, ref);
+            await dbRunAsync(
+              `INSERT INTO sys_issue_dev_commits (issue_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now','localtime'))`,
+              [id, memberRow.id, actor.id, comp, ref]
+            );
+          }
+        }
+        if (targetMode === 'commits') {
+          // ── 重新读取 commit 行生成快照（B.4 步骤6）——不复用写前读到的行/写时缓存的 insert 结果，
+          //   击穿"复用写前空集合"这类变异（529 M2）：no_code→commits 与 commits→commits 两方向统一
+          //   在此重查，快照恒反映事务内此刻的真实库值。
+          const freshCommitRows = await dbAllAsync(
+            `SELECT id, component, commit_ref FROM sys_issue_dev_commits WHERE dev_assignee_id = ? ORDER BY id ASC`,
+            [memberRow.id]
+          );
+          finalCommitsSnapshot = freshCommitRows.map(r => ({ commit_id: r.id, component: r.component, commit_ref: r.commit_ref }));
+        }
+
+        // ── 写恰 1 条 submit|no_code 事件（B.4 步骤6 续）——payload = 三源快照 + amend_of/amend_no/changed。
+        //   双勾（self_tested/test_env_deployed）继承最新事件真实值，历史缺失则不写键（B.2 D5）。
+        const eventPayload = { mode: targetMode };
+        if (targetMode === 'no_code') eventPayload.no_code_reason = afterNoCodeReason;
+        else eventPayload.commits = finalCommitsSnapshot;
+        eventPayload.dev_assignee_id = memberRow.id;
+        if (Object.prototype.hasOwnProperty.call(latestPayload, SUBMIT_SELF_TESTED_KEY)) eventPayload[SUBMIT_SELF_TESTED_KEY] = latestPayload[SUBMIT_SELF_TESTED_KEY];
+        if (Object.prototype.hasOwnProperty.call(latestPayload, SUBMIT_TEST_ENV_DEPLOYED_KEY)) eventPayload[SUBMIT_TEST_ENV_DEPLOYED_KEY] = latestPayload[SUBMIT_TEST_ENV_DEPLOYED_KEY];
+        if (afterWorkNote) eventPayload.work_note = afterWorkNote;
+        if (afterBugCauseNote) eventPayload.bug_cause_note = afterBugCauseNote;
+        eventPayload.amend_of = amendOf;
+        eventPayload.amend_no = amendNo;
+        eventPayload.changed = changed;
+
+        if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeFinalEventHook) { await __testHooks.beforeFinalEventHook(); }
+        await insertDevEvent({
+          issueId: id, devAssigneeId: memberRow.id,
+          action: targetMode === 'no_code' ? 'no_code' : 'submit',
+          operatorId: actor.id, payload: eventPayload,
+        });
+
+        // 不调 runWGate/electRepresentative（B.4 步骤7：amend 不改主状态、不改代表选举，依据 B14——两函数
+        // 判据只看 dev_status/mode 是否为"可交付态"，amend 前后该实例恒已是可交付态，调用即 no-op，省略）。
+        const deliveryRev = await computeDeliveryRev(id);
+        await sysCommit();
+        res.json({ id, dev_assignee: memberRow.id, amend_no: amendNo, delivery_rev: deliveryRev });
+      } catch (txErr) {
+        // 同既有端点范式（如 :8068 一带）——多数分支已手动 sysRollback+return（不会走到这里）；本 catch
+        // 只服务真正抛出的错误（assertDevMember/assertMemberActionFamilyAllowed 等守卫 throw、写前
+        // 不变量违反、DB 异常）。best-effort 二次 rollback 对已回滚的事务是 no-op（releaseSysTxn 幂等）。
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
@@ -11794,9 +12157,11 @@ module.exports = (deps) => {
     // 2026-09-07 S1a 主会话 J 判断：config OA 流入·集合=improvement 替换状态名——config 单来源本就是
     //   OA 流入（方案 v1.6 §18.1），OA 号应可设，按"improvement 流复制 + 状态名替换"原则登记：
     //   improvement 集合 ['待指派','开发中',...] 把 待指派→待处理、开发中→处理中，其余四态（待验证/
-    //   待上线/已上线/已暂缓）逐字保留。与 bug 的"结构性不进 OA 守卫"不同——config 走 assertSysDevCommitmentOaGuard
-    //   时该守卫仅豁免 feature/improvement 之外的类型的**必填**校验（config 不强制要求指派前必须有号），
-    //   但不等于"config 不能设号"：本集合管的是 set-oa-number 端点的**可填窗口**，两件事正交。
+    //   待上线/已上线/已暂缓）逐字保留。**2026-09-09 方案 v1.5 D1 订正**：config 与 bug 的"结构性不进
+    //   OA 守卫"不同——config 走 assertSysDevCommitmentOaGuard 时与 feature/improvement 同受
+    //   **指派前须有 OA 号**的必填校验（oa_exempt=1 放行同规则），此前"config 不强制要求指派前必须
+    //   有号"的表述已随本次改动作废。本集合管的是 set-oa-number 端点的**可填窗口**，与指派前必填
+    //   校验是两件正交的事——可填窗口本身不变。
     config: ['待处理', '处理中', '待验证', '待上线', '已上线', '已暂缓'],
   };
   router.post('/sys-issues/:id/set-oa-number', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
@@ -14388,13 +14753,22 @@ module.exports = (deps) => {
   //   F1（C4.5 审 CONFIRMED）：INSERT 纳入 sysBeginImmediate 事务 → 经 sysTxnMutex 与状态机事务同锁串行化，
   //     杜绝 autocommit INSERT 落进他人已开事务被一起回滚的脏态（"全模块覆盖"=DB 写全串行，非仅 15 状态机点）。
   //     文件 renameSync 在锁内（≤5 个，metadata 级，<100ms）；失败走事务 ROLLBACK 撤 INSERT + unlink 文件（无需手工 DELETE）。
-  async function sysPersistAttachments(issueId, files, attachmentType, roundNo, uploader) {
+  // [C3b·H1 写侧订正·2026-09-09] opts.recheckFn（可选）——delivery/screenshot 上传原先"INSERT 独立提交
+  //   →释放锁→锁外再查一次状态/授权"，与 DELETE 端点"检查+删除同一把锁内"不对称（H1）。传入 recheckFn 时，
+  //   状态/授权重验挪到**INSERT 之后、COMMIT 之前**，与 INSERT 共享同一个 sysBeginImmediate 事务：不通过则
+  //   在本事务内 sysRollback + 删已 rename 的物理文件后返回 `{ aborted:true, reason }`，调用方按此返回定向
+  //   409，不再需要事后单独起一个 sysRollbackPersisted 事务撤销已提交的行（那个函数仍保留给 spec 分支与
+  //   本函数自身抛异常时的兜底路径用，未删除）。**不传 opts.recheckFn 时行为与改前逐字相同**（spec 分支
+  //   未改造，见调用点——其"锁外重验"张力如实保留，未在本批处理，如实登记）。
+  async function sysPersistAttachments(issueId, files, attachmentType, roundNo, uploader, opts = {}) {
     const finalDir = path.join(SYS_UPLOAD_BASE, String(issueId));
     fs.mkdirSync(finalDir, { recursive: true });
     const inserted = [];
     const movedPaths = [];
     await sysBeginImmediate();
     try {
+      // [C3c·M5] 持久化前可控注入点——逐文件 rename/INSERT 循环尚未开始（见钩子声明处注释）。
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeAttachmentInsertHook) { await __testHooks.beforeAttachmentInsertHook(); }
       for (const f of files) {
         const finalName = f.filename;
         const finalPath = path.join(finalDir, finalName);
@@ -14411,8 +14785,16 @@ module.exports = (deps) => {
         );
         inserted.push({ id: r.lastID, attachment_type: attachmentType, round_no: roundNo, file_name: relPath, original_name: f.originalname, file_size: fileSize, mime_type: mimeType });
       }
+      if (typeof opts.recheckFn === 'function') {
+        const verdict = await opts.recheckFn();
+        if (!verdict || !verdict.ok) {
+          await sysRollback();
+          for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (_) {} }
+          return { aborted: true, reason: (verdict && verdict.reason) || 'RECHECK_FAILED', inserted: [] };
+        }
+      }
       await sysCommit();
-      return inserted;
+      return opts.recheckFn ? { aborted: false, inserted } : inserted;
     } catch (e) {
       try { await sysRollback(); } catch (_) { /* 事务 ROLLBACK 撤本次 INSERT */ }
       for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (_) {} }
@@ -14627,21 +15009,23 @@ module.exports = (deps) => {
       const inDevOrVerify = SF.isInFamily(row.type, row.status, 'DEV') || SF.isInFamily(row.type, row.status, 'VERIFY') || SF.isInFamily(row.type, row.status, 'LIAISON_TEST');
       if (!inDevOrVerify) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '仅开发进行态（开发中/处理中/待验证/待对接测试）可上传交付附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
       if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
-      persisted = await sysPersistAttachments(id, files, attachmentType, null, actor);
-      // TOCTOU 二次守卫：persist 后重读仍处 SYS_DEV∪SYS_VERIFY 态 且 授权仍成立（type 不可变用首读值；协调人身份
-      //   不受事务影响故不重查，仅"在册"路径需重查——校验→INSERT 间被 remove/打回/作废则回滚）。
-      const recheck = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
-      const recheckStatusOk = !!recheck && (SF.isInFamily(row.type, recheck.status, 'DEV') || SF.isInFamily(row.type, recheck.status, 'VERIFY') || SF.isInFamily(row.type, recheck.status, 'LIAISON_TEST'));
-      const recheckAuthOk = isCoordinator || (await sysAttachmentRosterState(id, actor.id)).active;
-      if (!recheckStatusOk || !recheckAuthOk) {
-        const failedIds = persisted.map(a => a.id);
-        const rolledBack = await sysRollbackPersisted(persisted); persisted = [];
-        if (!rolledBack) {
-          logger.error(`[系统迭代] 附件上传撤销未确认（delivery/screenshot 锁外重验命中）：issue=${id}, attachment_ids=${JSON.stringify(failedIds)}`);
-          return res.status(409).json({ error: '迭代单状态已变更，上传撤销未确认，请联系管理员核查附件', code: 'INVALID_STATE_FOR_ATTACHMENT' });
-        }
+      // [C3b·H1 写侧订正] TOCTOU 二次守卫挪进 sysPersistAttachments 的同一把锁/同一事务内（recheckFn），
+      //   与 INSERT 原子——不再是"独立事务提交→释放锁→锁外再查一次→查不过再起一个事务撤销"这种存在
+      //   "撤销本身也可能失败"这一失败态的三段式；重验不过直接在同一事务内回滚（DB 与已落盘文件一起
+      //   撤销），结构上不再可能出现"已提交但状态早已不对"的窗口，故下方也不再需要 sysRollbackPersisted
+      //   兜底 + "撤销未确认"分支（旧分支依赖的失败态已被消除，非简化掉了某种仍可能发生的情形）。
+      const recheckFn = async () => {
+        const recheck = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
+        const recheckStatusOk = !!recheck && (SF.isInFamily(row.type, recheck.status, 'DEV') || SF.isInFamily(row.type, recheck.status, 'VERIFY') || SF.isInFamily(row.type, recheck.status, 'LIAISON_TEST'));
+        const recheckAuthOk = isCoordinator || (await sysAttachmentRosterState(id, actor.id)).active;
+        return { ok: recheckStatusOk && recheckAuthOk };
+      };
+      const persistResult = await sysPersistAttachments(id, files, attachmentType, null, actor, { recheckFn });
+      if (persistResult.aborted) {
+        logger.warn(`[系统迭代] 附件上传已撤销（delivery/screenshot 事务内重验未过，DB 与已落盘文件同事务原子回滚）：issue=${id}`);
         return res.status(409).json({ error: '迭代单状态已变更，上传已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
       }
+      persisted = persistResult.inserted;
       logger.info(`用户 ${req.user.username} 为迭代单 #${id} 上传${attachmentType === 'screenshot' ? '截图' : '交付物'} ${persisted.length} 个（round_no 遗产①：恒 NULL，无待绑语义，C5）`);
       return res.json({ ok: true, id, attachment_type: attachmentType, attachments: persisted });
     } catch (e) {
@@ -20373,6 +20757,10 @@ module.exports = (deps) => {
   // ============================================================
   const _internals = {
     SYS_SCHEMA_STATE,
+    // [B·B.8·2026-09-09 方案 v1.5] 提交原地修正回滚三注入点 + 详情锁可释放屏障——仅 SYS_TEST_HOOKS=1 时
+    // 生产分支才会读取，导出对象本身在任意环境下都存在（供 verify 判空/赋值），不代表生效。
+    __testHooks,
+    computeDeliveryRev,   // 供 verify 直调核对四处调用点同源（B.5 静态守卫依据之一）。
     // [codex 278 号审 M-4] notify-liaison-test 外呼超时时长——生产默认 8 分钟（NOTIFY_SEND_TIMEOUT_MS
     //   闭包变量），仅供 verify 测试改成几十毫秒以自动化覆盖"超时命中"这条高风险分支；不暴露为端点
     //   可传参（超时策略是服务端配置，不应由请求方控制）。
@@ -20481,11 +20869,11 @@ module.exports = (deps) => {
     nextReleaseNo,
     RELEASABLE_TYPES,
     RELEASE_FAMILY_BY_TYPE,   // [S1a] verify-sys-config-flow.js 断言族别映射（同 RELEASABLE_TYPES 既有导出理由）
-    SYS_EXEC_MODES,   // [S1a 补丁 W·W2②] verify-sys-config-flow.js [A] 断言 GET meta 的 execModes 与本常量同值（同 RELEASABLE_TYPES 既有导出理由，防第二份清单漂移）
     // [S1d·L4] 通知状态白名单四族八常量导出——Sys_Iteration.html 的 SI_NOTIFY_* 系列（siNotifyStatusesFor
     //   函数用到的字面量，:1450 一带）是本组常量的手抄副本，全仓 scripts/ 此前无任何守卫比对这一族
     //   常量是否漂移（既有 bug 一族 + feature/improvement 共用的 *_CHANGE 一族同样裸奔，非 config 新增
-    //   才有此问题）。同 SYS_EXEC_MODES 既有导出理由，供 verify-sys-config-flow.js 新增 [L4] 组用
+    //   才有此问题）。同 RELEASABLE_TYPES 既有导出理由（原 SYS_EXEC_MODES 已随 #56·2026-09-10「执行
+    //   方式」整组下线一并删除，此处指路对象订正），供 verify-sys-config-flow.js 新增 [L4] 组用
     //   require 的真值 + 正则提取前端字面量做前后端对拍，防第二份副本漂移。
     SYS_NOTIFY_DEV_STATUSES,
     SYS_NOTIFY_RELAY_STATUSES,

@@ -122,6 +122,15 @@ const timelineCount = async (id) => {
 // return 恒 event_type='return' + action_code=null（transitions.js 三条目一致，见 :318/663/952）。
 const latestAcceptTimeline = (id) => get(`SELECT * FROM sys_issue_timeline WHERE issue_id=? AND action_code='accept' ORDER BY id DESC LIMIT 1`, [id]);
 const latestReturnTimeline = (id) => get(`SELECT * FROM sys_issue_timeline WHERE issue_id=? AND event_type='return' ORDER BY id DESC LIMIT 1`, [id]);
+// [C3c·M1·538 回卷] accept 端只要进入「已写 payload」分支（note/attachment_ids/config online_mode/
+// expected_delivery_rev 任一），delivery_rev 现无条件写入（见 index.js accept 分支注释）——本文件
+// A2/A4/A5/A10/A11 四条 deepStrictEqual 精确形状断言原本按「改前」契约只列 note/attachment_ids 键，
+// 现须补上 delivery_rev 键。accept 本身不改交付内容（commits/attachments），事后 computeDeliveryRev(id)
+// 与事务内当时算出的值同源同值，可直接拿来拼期望对象。
+async function expectAcceptPayloadWithRev(id, tl, extraFields, msg) {
+  const rev = await I.computeDeliveryRev(id);
+  assert.deepStrictEqual(JSON.parse(tl.payload_json), { ...extraFields, delivery_rev: rev }, msg);
+}
 
 let oaSeq = 20260906001;
 // improvement 最短路径夹具：create → intake-accept(risk_level) → set-oa-number → assign → estimate →
@@ -176,6 +185,9 @@ async function main() {
   try {
     // ══════════════════════════════════════════════════════════════════════
     // [A1] accept 无 note 无 ids → 200；timeline 最新 accept 行 payload_json/summary 均 NULL；status=待上线
+    //   [C3b·【A1】注释] expected_delivery_rev（方案 v1.5 D11）也是同一枚 payload 开关——传了才打开 payload
+    //   （见 index.js accept 分支 hasExpectedDeliveryRev），本用例不传该键，D3「90 处既有零改动」契约不受
+    //   影响，payload_json 仍应为 NULL（版本锁校验本身也缺省放行，见 verify-sys-submit-amend.js [版本锁]组）。
     // ══════════════════════════════════════════════════════════════════════
     {
       const id = await seedImprovementToVerify();
@@ -198,9 +210,9 @@ async function main() {
       const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { note });
       assert.strictEqual(r.status, 200, `[A2] accept note 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       const tl = await latestAcceptTimeline(id);
-      assert.deepStrictEqual(JSON.parse(tl.payload_json), { note }, '[A2] ⭐ payload_json 精确形状：仅 note 一键（无附件，attachment_ids 不落键——仅有值时加键）');
+      await expectAcceptPayloadWithRev(id, tl, { note }, '[A2] ⭐ payload_json 精确形状：note + delivery_rev 两键（无附件，attachment_ids 不落键——538 回卷 M1 起进入 payload 分支恒带 delivery_rev）');
       assert.strictEqual(tl.summary, `验收说明：${note}`, '[A2] ⭐ summary 精确文案（决策记录 J7：说明预览+可选附件后缀，本例无附件后缀）');
-      ok('[A2] accept note（无附件）→ payload_json={note} + summary="验收说明：<note>"（决策记录 J6/J7）');
+      ok('[A2] accept note（无附件）→ payload_json={note,delivery_rev} + summary="验收说明：<note>"（决策记录 J6/J7 + 538 回卷 M1）');
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -257,9 +269,9 @@ async function main() {
       const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [attId] });
       assert.strictEqual(r.status, 200, `[A4] accept 携真实附件 id 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       const tl = await latestAcceptTimeline(id);
-      assert.deepStrictEqual(JSON.parse(tl.payload_json), { attachment_ids: [attId] }, '[A4] ⭐ payload_json 精确形状：仅 attachment_ids 一键（无说明，note 不落键）');
+      await expectAcceptPayloadWithRev(id, tl, { attachment_ids: [attId] }, '[A4] ⭐ payload_json 精确形状：attachment_ids + delivery_rev 两键（无说明，note 不落键；538 回卷 M1 起恒带 delivery_rev）');
       assert.strictEqual(tl.summary, '验收附件 1 个', '[A4] ⭐ summary 精确文案（仅附件路径固定文案，决策记录 J7）');
-      ok('[A4] 真实上传 screenshot（POST /sys-issues/:id/attachments）拿 id → accept {attachment_ids} → payload_json={attachment_ids:[id]} + summary="验收附件 1 个"');
+      ok('[A4] 真实上传 screenshot（POST /sys-issues/:id/attachments）拿 id → accept {attachment_ids} → payload_json={attachment_ids:[id],delivery_rev} + summary="验收附件 1 个"');
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -272,9 +284,9 @@ async function main() {
       const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { note, attachment_ids: [attId] });
       assert.strictEqual(r.status, 200, `[A5] accept 携说明+附件应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       const tl = await latestAcceptTimeline(id);
-      assert.deepStrictEqual(JSON.parse(tl.payload_json), { note, attachment_ids: [attId] }, '[A5] ⭐ payload_json 两键共存（note+attachment_ids，真三态验证）');
+      await expectAcceptPayloadWithRev(id, tl, { note, attachment_ids: [attId] }, '[A5] ⭐ payload_json 三键共存（note+attachment_ids+delivery_rev，538 回卷 M1 起恒带 delivery_rev）');
       assert.strictEqual(tl.summary, `验收说明：${note}（另有 1 个验收附件）`, '[A5] ⭐ summary=说明预览+附件数量后缀（决策记录 J7）');
-      ok('[A5] note+ids 同传 → payload_json={note,attachment_ids} + summary="验收说明：<note>（另有 1 个验收附件）"');
+      ok('[A5] note+ids 同传 → payload_json={note,attachment_ids,delivery_rev} + summary="验收说明：<note>（另有 1 个验收附件）"');
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -357,9 +369,9 @@ async function main() {
       const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [dlId] });
       assert.strictEqual(r.status, 200, `[A10] delivery 类型 id 作凭证应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       const tl = await latestAcceptTimeline(id);
-      assert.deepStrictEqual(JSON.parse(tl.payload_json), { attachment_ids: [dlId] }, '[A10] ⭐ payload_json 含 delivery 附件 id（若 helper 被收窄成仅 screenshot，此处 400 判红）');
+      await expectAcceptPayloadWithRev(id, tl, { attachment_ids: [dlId] }, '[A10] ⭐ payload_json 含 delivery 附件 id + delivery_rev（若 helper 被收窄成仅 screenshot，此处 400 判红；538 回卷 M1 起恒带 delivery_rev）');
       assert.strictEqual(tl.summary, '验收附件 1 个', '[A10] summary 固定文案');
-      ok('[A10] delivery 类型附件 id 作验收凭证 → 200 + payload_json={attachment_ids:[id]}（钉住 helper 的 delivery/screenshot 双类放行）');
+      ok('[A10] delivery 类型附件 id 作验收凭证 → 200 + payload_json={attachment_ids:[id],delivery_rev}（钉住 helper 的 delivery/screenshot 双类放行）');
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -373,9 +385,9 @@ async function main() {
       const r = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [b, a, a] });
       assert.strictEqual(r.status, 200, `[A11] 降序带重复 ids 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
       const tl = await latestAcceptTimeline(id);
-      assert.deepStrictEqual(JSON.parse(tl.payload_json), { attachment_ids: [a, b] }, '[A11] ⭐ payload_json.attachment_ids 去重后数值升序（[b,a,a] → [a,b]；字典序/未去重均判红）');
+      await expectAcceptPayloadWithRev(id, tl, { attachment_ids: [a, b] }, '[A11] ⭐ payload_json.attachment_ids 去重后数值升序（[b,a,a] → [a,b]；字典序/未去重均判红）+ delivery_rev（538 回卷 M1 起恒带）');
       assert.strictEqual(tl.summary, '验收附件 2 个', '[A11] ⭐ summary N=2（硬编码 1 判红）');
-      ok('[A11] ids=[b,a,a] → payload attachment_ids=[a,b] + summary="验收附件 2 个"（去重/升序/计数三契约各有区分力）');
+      ok('[A11] ids=[b,a,a] → payload attachment_ids=[a,b]+delivery_rev + summary="验收附件 2 个"（去重/升序/计数三契约各有区分力）');
 
       const id2 = await seedImprovementToVerify();
       const r2 = await call('POST', `/api/sys-issues/${id2}/accept`, adminTok, { attachment_ids: [] });

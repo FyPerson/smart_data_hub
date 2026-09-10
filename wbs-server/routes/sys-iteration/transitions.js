@@ -10,7 +10,8 @@
 //     真钉钉建群=③；手动链式通知+对接人白名单=④；派生双描述=⑤。
 //   - **config 流已追加（S1a·config流激活_方案_20260907_v1.0 §3）**：CONFIG_FLOW_TRANSITIONS 见下方——
 //     与 bug 流状态集同形（无「待对接测试」），删评估/对接测试/范围变更/reopen 四类动作，
-//     assign/reassign 新增 exec_mode/vendor_name 契约，submit 强制 no_code，accept 按 online_mode 分流上线。
+//     submit 强制 no_code，accept 按 online_mode 分流上线。（原 assign/reassign 的 exec_mode/vendor_name
+//     契约由 D1/D13 引入，已于 #56·2026-09-10 用户拍板整组下线，assign/reassign 现与 feature/improvement 同形。）
 'use strict';
 
 // ── 被迭代的业务系统白名单（决策①，§12 GET /sys-systems 下拉源）──────────
@@ -1137,12 +1138,9 @@ const BUG_FLOW_TRANSITIONS = [
 //     null，引擎 [1] 找不到边时走通用 400 INVALID_TRANSITION 兜底（唯一码，不像 bug/变更流那样在
 //     「已上线→已关闭」路径上额外精判 409 ISSUE_NOT_ARCHIVED——那条精判要求 findTransition(type,
 //     'reopen','已关闭') 非 null 才触发，config 恒不满足，故任何 fromStatus 下 reopen 均是同一 400）。
-//   · assign 新增 exec_mode（首次指派必带，D1/D13）+ vendor_name（vendor 时必填 1..100，否则清空）——
-//     契约在 index.js assign 端点内校验落库，本条目 requiredPayload 仅记无条件必填字段（vendor_name
-//     条件必填不入列，同 liaison_test_pass 的 test_note 先例）。
-//   · reassign 可附 exec_mode/vendor_name 变更（不带则保留，J18）——no-op 判据扩为"成员集合∧exec_mode∧
-//     归一化 vendor_name 三者全不变才 409"（其他类型仍 400 VALIDATION），仅方式/名称变化时跳过成员
-//     增删/代表选举/成员门重算/成员变化通知，改动详见 index.js reassign 端点。
+//   · assign/reassign 与 feature/improvement 同形——D1/D13 引入的 exec_mode（执行方式）/vendor_name
+//     （乙方名称）契约已于 #56·2026-09-10 用户拍板整组下线（不再要求、不再校验、不再写入；sys_issues.
+//     exec_mode/vendor_name 两列保留，存量值不动，仅不再有新写入）。
 //   · submit 在事务内强制 mode='no_code'（D12，带 commits→400 CONFIG_NO_COMMITS）；no_code_reason 承载
 //     配置说明，config 专属 10..500 码点（其他类型仍 1..500 码元，J17 分层校验见 index.js）。
 //   · accept 必带 online_mode∈'release'|'direct'（D11）——本条目 to 仍是静态「待上线」（同 bug/变更流写法），
@@ -1212,26 +1210,20 @@ const CONFIG_FLOW_TRANSITIONS = [
     action: 'assign',                       // 指派：待处理 → 处理中（状态名替换，intake_liaison）
     from: ['待处理'], to: '处理中',
     roleGuard: 'intake_liaison', ownerGuard: null,
-    // D1/D13：config 首次指派必带 exec_mode（self/assigned/vendor）；vendor 时 vendor_name 必填 1..100
-    //   （条件必填，不入本无条件必填清单，同 liaison_test_pass 的 test_note 先例）；非 config 携带
-    //   exec_mode/vendor_name 任一字段 → 400 EXEC_MODE_NOT_APPLICABLE（index.js 端点内校验）。
-    requiredPayload: ['assigned_to', 'exec_mode'],
-    sideEffects: ['assigned_to/_name/assigned_at 写入', 'exec_mode/vendor_name 同一 UPDATE 原子落库（非 vendor 时 vendor_name 清空）'],
+    // [#56·2026-09-10] D1/D13 引入的「执行方式（exec_mode/vendor_name）首次指派必填」已下线——config
+    //   与 feature/improvement 同形，assign 不再要求、不再校验该二字段（用户拍板整组下线，非本次误删）。
+    requiredPayload: ['assigned_to'],
+    sideEffects: ['assigned_to/_name/assigned_at 写入'],
     timelineEvent: 'assign', actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',
   },
   {
-    action: 'reassign',                     // 改派：处理中/待验证（状态名替换），可附 exec_mode/vendor_name 变更（D13/J18）
+    action: 'reassign',                     // 改派：处理中/待验证（状态名替换）
     from: ['处理中', '待验证'], to: null,
     roleGuard: 'intake_liaison', ownerGuard: null,
     requiredPayload: ['member_ids', 'reason'],
     sideEffects: ['开发集合差量应用（新增 INSERT pending / 移除软删）', '选举 electRepresentative 重算 assigned_to/_name',
       'W-GATE 按新 roster 完成态判定主状态是否联动', '仅代表真实变化时才 notifyAssignedDeveloper',
-      // J18：exec_mode/vendor_name 不带则保留（归一化=trim+非 vendor 清空）；no-op 判据=成员集合∧exec_mode∧
-      //   归一化 vendor_name 三者全不变才 409（其他类型仍 400 VALIDATION）；仅方式/名称变化时同事务写字段 +
-      //   时间线 payload_json（exec_mode_from/to、vendor_name_from/to），跳过成员增删/代表选举/成员门重算/
-      //   成员变化通知（index.js reassign 端点内实现）。
-      'exec_mode/vendor_name 可附带变更（不带则保留，J18：仅方式/名称变化跳过成员增删/代表选举/成员门重算/成员变化通知）',
     ],
     timelineEvent: null, actionCode: null,
     notifyAfterCommit: 'notifyAssignedDeveloper',

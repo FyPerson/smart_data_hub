@@ -1085,7 +1085,10 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   [2026-09-07 S1a config 流激活] 50→51：reassign 端点新增「执行方式/乙方名称变更」写入点
 //   （event_type='note'·action_code=null·payload_json={exec_mode_from,exec_mode_to,vendor_name_from,vendor_name_to}·
 //   仅 config 类型且字段确有变化时写入·方案 v1.0 J18）——码表 时间线写入点码表_20260810.md 同步登记。
-const EXPECTED_INSERT_SITE_COUNT = 51;
+//   [2026-09-10 #56] 51→50：该写入点随「执行方式」契约整组下线一并删除（reassign 不再写 exec_mode/
+//   vendor_name 变更行），用户拍板，非本文件误改。docs/local/系统迭代/时间线写入点码表_20260810.md
+//   须同步登记（本次改动时该目录在本地不可达，未能同步更新，留给下次接触到该目录时补）。
+const EXPECTED_INSERT_SITE_COUNT = 50;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

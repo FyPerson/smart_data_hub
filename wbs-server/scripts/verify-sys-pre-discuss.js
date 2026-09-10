@@ -19,7 +19,7 @@
 //       + 待受理拒 + 格式非法拒 + number 类型拒 + 同值再提交 200 no-op（timeline 不新增）+ 首次成功
 //       落一条 action_code='set_oa_number' timeline
 //   [AS] assign 的 OA 前置守卫：变更流无号/空串/非法值 409 ASSIGN_REQUIRES_OA_NUMBER·有效号 200·
-//       bug 无号 200（不受限，D2）
+//       bug 无号 200（不受限，D2）·config 无号 409（2026-09-09 方案 v1.5 D1 起纳入，此前"不受限"口径已废）
 //
 // ✅ 已裁定（S4 收口·2026-07-28·原"待主会话核对"矛盾已闭）：bug 流**无**「已暂缓」——契约首版照抄
 //   变更流集合属方案笔误，SYS_OA_ALLOWED_STATUSES.bug 与方案 v2.1 §4 均已收窄（`2afa103`）。
@@ -552,6 +552,14 @@ async function main() {
     assert.strictEqual(rb1.status, 200, `[AS] bug 无 OA 号 assign 应 200（不受限）, got ${rb1.status} ${JSON.stringify(rb1.body)}`);
     assert.strictEqual(rb1.body.status, '处理中', '[AS] bug assign 待处理→处理中');
 
+    // config：无号 → 409（2026-09-09 方案 v1.5 D1 起纳入 OA 守卫，此前"config 不受限"口径已废）
+    const cfg1 = await create('config');
+    await intakeAccept(cfg1.body.id, liaisonTok, { risk_level: '二级' });   // → 待处理，oa_number 仍 NULL
+    const rcfg1 = await call('POST', `/api/sys-issues/${cfg1.body.id}/assign`, adminTok, { assigned_to: 5 });
+    assert.strictEqual(rcfg1.status, 409, `[AS] config 无 OA 号 assign 应 409, got ${rcfg1.status} ${JSON.stringify(rcfg1.body)}`);
+    assert.strictEqual(rcfg1.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[AS] config 无号应为 ASSIGN_REQUIRES_OA_NUMBER');
+    assert.strictEqual(await statusOf(cfg1.body.id), '待处理', '[AS] config 409 后状态零变动');
+
     // ⭐ 196 号线（用户手测抓出绕过·191 M 当时漏裁）：守卫下沉共享 helper 后，**三入口全测**——
     //   /assign 之外，dev-assignees POST 加成员与 reassign 批量新增在待指派族同样必须被拦。
     {
@@ -560,9 +568,11 @@ async function main() {
       const rAdd = await call('POST', `/api/sys-issues/${cD.body.id}/dev-assignees`, adminTok, { user_ids: [5] });
       assert.strictEqual(rAdd.status, 409, `[AS/加成员] 待指派无 OA 加成员应 409, got ${rAdd.status} ${JSON.stringify(rAdd.body)}`);
       assert.strictEqual(rAdd.body.code, 'ASSIGN_REQUIRES_OA_NUMBER', '[AS/加成员] 确切码');
-      // reassign：变更流在 D_PRE 被**族闸先拦**（MEMBER_ACTION_FAMILY_TYPE_OVERRIDE 仅 DEV/VERIFY）——
-      //   该入口对变更流待指派不可达=无绕过面（红灯诊断=断言写错：首版期望 OA 码，实为族闸 INVALID_STATUS）。
-      //   本断言即"不可达哨兵"：若未来放开该族，红灯提醒同步评估 OA 守卫（守卫已防御性在位）。
+      // reassign：变更流在 D_PRE 被**族闸先拦**（MEMBER_ACTION_FAMILY_TYPE_OVERRIDE.reassign 对
+      //   feature/improvement 仅 DEV/VERIFY）——该入口对变更流待指派不可达=无绕过面（红灯诊断=断言写错：
+      //   首版期望 OA 码，实为族闸 INVALID_STATUS）。本断言即"不可达哨兵"：若未来放开该族，红灯提醒同步
+      //   评估 OA 守卫（守卫已防御性在位）。config 同族门排除 D_PRE——`reassign.config=['DEV','VERIFY']`
+      //   （index.js:3309 一带），待处理/已暂缓两态同样不可达，用例见 verify-sys-config-flow.js [S] 组。
       const rRe = await call('POST', `/api/sys-issues/${cD.body.id}/reassign`, adminTok, { member_ids: [5], reason: '探针' });
       assert.strictEqual(rRe.status, 409, `[AS/reassign] 变更流待指派 reassign 应 409, got ${rRe.status} ${JSON.stringify(rRe.body)}`);
       assert.strictEqual(rRe.body.code, 'INVALID_STATUS', '[AS/reassign] 族闸先拦（入口不可达哨兵·非 OA 维）');
@@ -576,7 +586,7 @@ async function main() {
       const rB = await call('POST', `/api/sys-issues/${cB.body.id}/dev-assignees`, adminTok, { user_ids: [5] });
       assert.strictEqual(rB.status, 200, `[AS/bug] 待处理无 OA 加成员应 200, got ${rB.status} ${JSON.stringify(rB.body)}`);
     }
-    ok('[AS] assign OA 前置守卫（共享 helper）：**两个可达入口实测**（/assign NULL/空串/非法值 409+有效号 200·dev-assignees 加成员 409+补号 200 对照）+ **一个不可达入口哨兵**（reassign 变更流 D_PRE 被族闸先拦 INVALID_STATUS·守卫防御性在位未经路由级证明——196 增量审声称收窄）；bug 全入口不受限（D2）');
+    ok('[AS] assign OA 前置守卫（共享 helper）：**两个可达入口实测**（/assign NULL/空串/非法值 409+有效号 200·dev-assignees 加成员 409+补号 200 对照）+ **一个不可达入口哨兵**（reassign 变更流 D_PRE 被族闸先拦 INVALID_STATUS·守卫防御性在位未经路由级证明——196 增量审声称收窄）；bug 全入口不受限（D2）；config 无号 assign 409 ASSIGN_REQUIRES_OA_NUMBER（2026-09-09 方案 v1.5 D1 纳入）');
   }
 
 

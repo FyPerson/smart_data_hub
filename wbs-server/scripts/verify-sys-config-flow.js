@@ -5,14 +5,17 @@
 // 覆盖（编号对应报告用）：
 //   [A] 建单（对接人必填 400 / 正向 → 待受理）
 //   [B] 受理（risk_level 缺 400 / 提供 → 待处理 D15）
-//   [C] 指派 exec_mode/vendor_name 契约（缺/非法/vendor 必填名称/非 config 携带 400）
+//   [C] 指派 exec_mode/vendor_name 契约已整组下线（#56·2026-09-10）：不带该字段 200 且两列仍 NULL；
+//       携带（含非法/超长值）静默忽略不落库；非 config 携带同样不再 400
 //   [D] 两成员逐次 no_code 提交 + 成员增删重算
 //   [E] no_code_reason 长度分层（9/10/500/501 码点 + 补充平面字符）
 //   [F] submit 带 commits → 400 CONFIG_NO_COMMITS
 //   [G] add/edit/delete-commit 对 config 三端点 → 400 CONFIG_NO_COMMITS
 //   [H] accept online_mode 契约（缺/非法/release 不直翻/direct 直翻/非 config 携带 400）
 //   [H-close] config close 正向（有 assignee 200）+ reopen 仍 400（补丁 U·与 bug-transitions 无 assignee 负例镜像）
-//   [I] reassign exec_mode/vendor_name（仅方式变化 200 不动成员/三者不变 409/非 config 携带 400）
+//   [I] reassign exec_mode/vendor_name 契约已整组下线（#56·2026-09-10）：成员集合不变仅带该字段 400
+//       VALIDATION（config 不再有 409 特例）；真实差量 200 且该二字段不落库/响应体不展开；非 config
+//       携带同样不再 400
 //   [J] hold 四态 + resume 逐态回原态
 //   [K] issue_reject 前置守卫（无 tech_lead_comment 409 / 有 → 200）+ reactivate
 //   [L] void
@@ -170,26 +173,31 @@ async function mkAssignable(type, riskLevel = '二级') {
   assert.strictEqual(r.status, 201, `建 ${type} 单 201, got ${r.status} ${JSON.stringify(r.body)}`);
   const acc = await call('POST', `/api/sys-issues/${r.body.id}/intake-accept`, adminTok, { risk_level: riskLevel });
   assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
-  // 变更流（feature/improvement）assign 前置要求 OA 号通过校验（bug/config 不受限，assertSysDevCommitmentOaGuard
-  // 首行 type guard 直接 return）——本 helper 名为"可指派"，一并补齐，避免下游 assign 调用误撞
+  // feature/improvement/config 三类 assign 前置均要求 OA 号通过校验（bug 结构性豁免，assertSysDevCommitmentOaGuard
+  // 首行 type guard 直接 return；2026-09-09 方案 v1.5 D1 起 config 纳入，此前"config 不受限"的旧口径已废）——
+  // 本 helper 名为"可指派"，一并补齐，避免下游 assign/reassign/dev-assignees 调用误撞
   // ASSIGN_REQUIRES_OA_NUMBER（与本文件测试目的无关的噪音），同 verify-sys-role-perm-c1.js mkAssignable 既有范式。
-  if (type === 'feature' || type === 'improvement') {
+  // createBody 不传 oa_exempt 时接口真实默认落 0（DB DEFAULT 0，见 index.js:731）——不把前端"建单默认恒
+  // 勾选免 OA"的界面行为当接口默认，故 config 与 feature/improvement 同样需要在此补号（可填窗口含待处理，
+  // 见 SYS_OA_ALLOWED_STATUSES.config）。
+  if (type === 'feature' || type === 'improvement' || type === 'config') {
     const oa = await call('POST', `/api/sys-issues/${r.body.id}/set-oa-number`, adminTok, { oa_number: '2026090001' });
     assert.strictEqual(oa.status, 200, `${type} 补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
   }
   return r.body.id;
 }
 
-// config 专属指派（exec_mode 必带）
-async function assignConfig(id, execMode = 'assigned', extra = {}) {
-  return call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, exec_mode: execMode, ...extra });
+// config 专属指派 helper（[#56·2026-09-10] D1/D13 引入的 exec_mode/vendor_name 首次指派必带契约已随
+//   用户拍板整组下线——assign 请求体不再需要该二字段，config 与 feature/improvement 同形）。
+async function assignConfig(id, extra = {}) {
+  return call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, ...extra });
 }
 // [S1d·V/W 组] config 单快速夹具：建单 → 受理 → 指派 → estimate → no_code 提交 → 落「待验证」。
 //   单开发成员最短路径（同 [D] 组 dev5 单人分支同款调用序列，不含成员增删场景）。
-async function mkConfigToVerify(execMode = 'self', reason) {
+async function mkConfigToVerify(reason) {
   const id = await mkAssignable('config');
-  const asg = await assignConfig(id, execMode);
-  assert.strictEqual(asg.status, 200, `夹具：指派(${execMode}) 200, got ${asg.status} ${JSON.stringify(asg.body)}`);
+  const asg = await assignConfig(id);
+  assert.strictEqual(asg.status, 200, `夹具：指派 200, got ${asg.status} ${JSON.stringify(asg.body)}`);
   const est = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
   assert.strictEqual(est.status, 200, `夹具：estimate 200, got ${est.status} ${JSON.stringify(est.body)}`);
   const sub = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: reason || '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
@@ -244,12 +252,13 @@ async function main() {
     const tlCountAfterTrg = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [r.body.id])).c;
     assert.strictEqual(tlCountAfterTrg, tlCountBeforeTrg, '[A] 触发器拒绝后 timeline 行数不变（零副作用）');
 
-    // [S1a 补丁 W·W2②] GET meta 的 execModes 与 _internals.SYS_EXEC_MODES 同值（同一份真相源，前端读
-    //   meta 渲染选项，不硬编码字面量；HTTP 往返经 JSON 序列化，只能证值相等，不证同一引用）。
+    // [#56·2026-09-10] GET meta 的 execModes 字段已随「执行方式」整组下线（用户拍板）——meta 不再下发
+    // 该键，_internals.SYS_EXEC_MODES 常量本身也已随之删除（不存在了，不能再拿它对拍）。
+    // 「实现坏成什么样这条会红」：若有人把 execModes 重新塞回 meta 响应体，本条会从 undefined 变有值。
     const metaResp = await call('GET', '/api/sys-issues/meta', adminTok);
     assert.strictEqual(metaResp.status, 200, `[A] GET /sys-issues/meta 应 200, got ${metaResp.status} ${JSON.stringify(metaResp.body)}`);
-    assert.deepStrictEqual(metaResp.body.execModes, ['self', 'assigned', 'vendor'], '[A] meta execModes 恰为 [self,assigned,vendor]');
-    assert.deepStrictEqual(metaResp.body.execModes, I.SYS_EXEC_MODES, '[A] meta execModes 与 _internals.SYS_EXEC_MODES 同值（同一份真相源）');
+    assert.strictEqual(metaResp.body.execModes, undefined, '[A] meta 不再下发 execModes 键（契约已下线）');
+    assert.strictEqual(I.SYS_EXEC_MODES, undefined, '[A] _internals 不再暴露 SYS_EXEC_MODES（本断言只证导出不存在；定义已删由 grep 残留扫描保证）');
 
     // [S1a 补丁 X·X1·codex 506-A M1] change_intake_mode 条目已从 config 删除（config 是新类型，无历史
     //   timeline 行/无兼容需求，且路由已全类型恒 409）；improvement 仍含（三既有流阶段 2 才删）。
@@ -259,7 +268,7 @@ async function main() {
     const improvementActionsX1 = (metaResp.body.typeFlows.improvement || []).map(t => t.action);
     assert.ok(improvementActionsX1.includes('change_intake_mode'), '[A] typeFlows.improvement 仍含 change_intake_mode（三既有流未动，阶段 2 才删）');
 
-    ok('[A] 建单：缺对接人 400 INTAKE_LIAISON_REQUIRED；正向 201 → 待受理；触发器拒绝 intake_required=0（DB 不变量，零副作用）；meta execModes 与 _internals.SYS_EXEC_MODES 同值（补丁 W·W2）；typeFlows.config 不含 change_intake_mode，improvement 仍含（补丁 X·X1）');
+    ok('[A] 建单：缺对接人 400 INTAKE_LIAISON_REQUIRED；正向 201 → 待受理；触发器拒绝 intake_required=0（DB 不变量，零副作用）；meta 不再下发 execModes（#56 契约已下线）；typeFlows.config 不含 change_intake_mode，improvement 仍含（补丁 X·X1）');
   }
 
   // ═══ [B] 受理 ═══
@@ -277,82 +286,59 @@ async function main() {
     ok('[B] 受理：缺 risk_level 400 RISK_LEVEL_REQUIRED；提供 → 200 + 待处理 + risk_level 落库（D15）');
   }
 
-  // ═══ [C] 指派 exec_mode/vendor_name 契约 ═══
+  // ═══ [C] 指派 exec_mode/vendor_name 契约已整组下线（#56·2026-09-10，用户拍板）═══
+  //   原契约（D1/D13）：config 首次指派必带 exec_mode，vendor 时必填 vendor_name，非法/缺省/超长/非
+  //   config 携带均 400——本组此前逐条正向覆盖这些校验。契约下线后，assign 不再要求、不再读取、不再
+  //   校验该二字段；sys_issues.exec_mode/vendor_name 两列保留（存量值不动），但不再有新写入。
+  //   本组改为负向断言：① config 不带该字段即 200 且两列仍 NULL；② 携带（含非法/超长值）不再被拒绝，
+  //   静默忽略、不落库；③ 非 config 携带同样不再 400。「实现坏成什么样这条会红」：若有人在 assign
+  //   端点里加回 exec_mode 必填/校验（即便只对 config 生效），noMode 会从 200 变回 400，本组即报红。
   {
+    // ① config 不带 exec_mode/vendor_name → 200，两列仍 NULL（未被任何写点触达）。
     const id1 = await mkAssignable('config');
     const noMode = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(noMode.status, 400, `[C] 缺 exec_mode 应 400, got ${noMode.status} ${JSON.stringify(noMode.body)}`);
-    assert.strictEqual(noMode.body.code, 'EXEC_MODE_REQUIRED', '[C] 缺 exec_mode code=EXEC_MODE_REQUIRED');
-
-    const badMode = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, exec_mode: 'outsourced' });
-    assert.strictEqual(badMode.status, 400, `[C] 非法 exec_mode 应 400, got ${badMode.status} ${JSON.stringify(badMode.body)}`);
-    assert.strictEqual(badMode.body.code, 'INVALID_EXEC_MODE', '[C] 非法 exec_mode code=INVALID_EXEC_MODE');
-
-    const vendorNoName = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, exec_mode: 'vendor' });
-    assert.strictEqual(vendorNoName.status, 400, `[C] vendor 缺 vendor_name 应 400, got ${vendorNoName.status} ${JSON.stringify(vendorNoName.body)}`);
-    assert.strictEqual(vendorNoName.body.code, 'VENDOR_NAME_REQUIRED', '[C] vendor 缺名称 code=VENDOR_NAME_REQUIRED');
-
-    const vendorLongName = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, exec_mode: 'vendor', vendor_name: '甲'.repeat(101) });
-    assert.strictEqual(vendorLongName.status, 400, `[C] vendor_name 101 字应 400, got ${vendorLongName.status} ${JSON.stringify(vendorLongName.body)}`);
-    assert.strictEqual(vendorLongName.body.code, 'VENDOR_NAME_REQUIRED', '[C] vendor_name 超长同码 VENDOR_NAME_REQUIRED');
-
-    // [S1a 补丁 T·L6] 纯空白 vendor_name → 400（trim 后为空串，同「未填」同码）——边界此前只测了超长单侧。
-    const vendorBlankName = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, exec_mode: 'vendor', vendor_name: '   ' });
-    assert.strictEqual(vendorBlankName.status, 400, `[C] vendor_name 纯空白应 400, got ${vendorBlankName.status} ${JSON.stringify(vendorBlankName.body)}`);
-    assert.strictEqual(vendorBlankName.body.code, 'VENDOR_NAME_REQUIRED', '[C] vendor_name 纯空白同码 VENDOR_NAME_REQUIRED（trim 后为空串）');
-
-    const vendorOk = await call('POST', `/api/sys-issues/${id1}/assign`, adminTok, { assigned_to: 5, exec_mode: 'vendor', vendor_name: '某乙方公司' });
-    assert.strictEqual(vendorOk.status, 200, `[C] vendor + 合法名称应 200, got ${vendorOk.status} ${JSON.stringify(vendorOk.body)}`);
+    assert.strictEqual(noMode.status, 200, `[C] config assign 不带 exec_mode 应 200（契约已下线）, got ${noMode.status} ${JSON.stringify(noMode.body)}`);
     assert.strictEqual(await statusOf(id1), '处理中', '[C] 指派后落「处理中」');
     const row1 = await rowOf(id1);
-    assert.strictEqual(row1.exec_mode, 'vendor', '[C] exec_mode 落库=vendor');
-    assert.strictEqual(row1.vendor_name, '某乙方公司', '[C] vendor_name 落库');
-    // [S1a 补丁 W·W4·变异候选 2] 响应体展开项与落库一致——此前只回读库，若 assign 响应体的
-    // exec_mode/vendor_name 展开项被删（响应体仍 200 但缺字段/字段错），只查库仍绿，本条会红。
-    assert.strictEqual(vendorOk.body.exec_mode, 'vendor', '[C] 响应体 exec_mode=vendor 与落库一致');
-    assert.strictEqual(vendorOk.body.vendor_name, '某乙方公司', '[C] 响应体 vendor_name 与落库一致');
+    assert.strictEqual(row1.exec_mode, null, '[C] exec_mode 列不再被写入，指派后仍为 NULL（旧契约已下线，列保留存量不动）');
+    assert.strictEqual(row1.vendor_name, null, '[C] vendor_name 列同样不再被写入，指派后仍为 NULL');
+    assert.strictEqual(noMode.body.exec_mode, undefined, '[C] 响应体不再携带 exec_mode 键（同 GET meta 的 execModes 一并下线）');
+    assert.strictEqual(noMode.body.vendor_name, undefined, '[C] 响应体不再携带 vendor_name 键');
 
-    // [S1a 补丁 T·L6] vendor_name 恰 100 字（上限含边界）→ 200 通过正例——此前只测了 101 字拒绝单侧。
-    const id1b = await mkAssignable('config');
-    const vendorName100 = '乙'.repeat(100);
-    const vendor100 = await call('POST', `/api/sys-issues/${id1b}/assign`, adminTok, { assigned_to: 5, exec_mode: 'vendor', vendor_name: vendorName100 });
-    assert.strictEqual(vendor100.status, 200, `[C] vendor_name 恰 100 字应 200（上限含边界）, got ${vendor100.status} ${JSON.stringify(vendor100.body)}`);
-    assert.strictEqual((await rowOf(id1b)).vendor_name, vendorName100, '[C] vendor_name 恰 100 字落库全等原文');
-
-    // self / assigned 两值 + 非 vendor 时 vendor_name 清空
+    // ② 携带（含非法枚举值、超长字符串）不再被拒绝——静默忽略，不写库、不报错。
     const id2 = await mkAssignable('config');
-    const selfOk = await call('POST', `/api/sys-issues/${id2}/assign`, adminTok, { assigned_to: 5, exec_mode: 'self', vendor_name: '应被忽略清空' });
-    assert.strictEqual(selfOk.status, 200, `[C] exec_mode=self 应 200, got ${selfOk.status} ${JSON.stringify(selfOk.body)}`);
+    const legacyPayload = await call('POST', `/api/sys-issues/${id2}/assign`, adminTok, { assigned_to: 5, exec_mode: 'outsourced', vendor_name: '甲'.repeat(999) });
+    assert.strictEqual(legacyPayload.status, 200, `[C] 携带非法/超长 exec_mode/vendor_name 不再被拒绝（旧前端缓存等场景）, got ${legacyPayload.status} ${JSON.stringify(legacyPayload.body)}`);
     const row2 = await rowOf(id2);
-    assert.strictEqual(row2.exec_mode, 'self', '[C] exec_mode=self 落库');
-    assert.strictEqual(row2.vendor_name, null, '[C] 非 vendor 时 vendor_name 恒清空（即便请求体携带）');
-    // [S1a 补丁 W·W4] 响应体展开项与落库一致——非 vendor 模式响应体 vendor_name 应为 null（不回显请求体
-    // 携带的「应被忽略清空」字面量，证明响应体读的是归一化后的落库值而非透传请求体）。
-    assert.strictEqual(selfOk.body.exec_mode, 'self', '[C] 响应体 exec_mode=self 与落库一致');
-    assert.strictEqual(selfOk.body.vendor_name, null, '[C] 响应体 vendor_name=null（非 vendor 恒清空，与落库一致）');
+    assert.strictEqual(row2.exec_mode, null, '[C] 即便请求体携带非法 exec_mode，落库仍为 NULL（未被写入/未报错）');
+    assert.strictEqual(row2.vendor_name, null, '[C] 即便请求体携带超长 vendor_name，落库仍为 NULL（未被写入/未报错）');
 
-    const id3 = await mkAssignable('config');
-    const assignedOk = await call('POST', `/api/sys-issues/${id3}/assign`, adminTok, { assigned_to: 5, exec_mode: 'assigned' });
-    assert.strictEqual(assignedOk.status, 200, `[C] exec_mode=assigned 应 200, got ${assignedOk.status} ${JSON.stringify(assignedOk.body)}`);
-    assert.strictEqual((await rowOf(id3)).exec_mode, 'assigned', '[C] exec_mode=assigned 落库');
-    assert.strictEqual(assignedOk.body.exec_mode, 'assigned', '[C] 响应体 exec_mode=assigned 与落库一致');
-    assert.strictEqual(assignedOk.body.vendor_name, null, '[C] 响应体 vendor_name=null（非 vendor，与落库一致）');
+    // ②b [codex 541 rec1] 存量非空值保留——全 NULL 夹具只能发现「重新写入请求值」，发现不了「误清空存量」。
+    //   预置两列为历史值后再指派（请求体带不同的值），断言两列逐字不变。
+    //   「实现坏成什么样这条会红」：assign 的 UPDATE 若残留/回归 `exec_mode = NULL` 或 `exec_mode = ?`
+    //   任一形态，历史值都会被覆盖，本条即红。
+    const id2b = await mkAssignable('config');
+    await run(`UPDATE sys_issues SET exec_mode = 'vendor', vendor_name = '历史乙方' WHERE id = ?`, [id2b]);
+    const keepLegacy = await call('POST', `/api/sys-issues/${id2b}/assign`, adminTok, { assigned_to: 5, exec_mode: 'self', vendor_name: '新值不应落库' });
+    assert.strictEqual(keepLegacy.status, 200, `[C] 存量非空值单指派应 200, got ${keepLegacy.status} ${JSON.stringify(keepLegacy.body)}`);
+    const row2b = await rowOf(id2b);
+    assert.strictEqual(row2b.exec_mode, 'vendor', `[C] 存量 exec_mode 历史值在指派后逐字保留（既不被请求值覆盖也不被清空），实得=${row2b.exec_mode}`);
+    assert.strictEqual(row2b.vendor_name, '历史乙方', `[C] 存量 vendor_name 历史值在指派后逐字保留，实得=${row2b.vendor_name}`);
 
-    // 非 config 携带 exec_mode → 400 EXEC_MODE_NOT_APPLICABLE
+    // ③ 非 config 类型携带 exec_mode 同样不再被拒绝（此前 400 EXEC_MODE_NOT_APPLICABLE）。
     const impId = await mkAssignable('improvement', '二级');
-    const impBad = await call('POST', `/api/sys-issues/${impId}/assign`, adminTok, { assigned_to: 5, exec_mode: 'self' });
-    assert.strictEqual(impBad.status, 400, `[C] improvement 携带 exec_mode 应 400, got ${impBad.status} ${JSON.stringify(impBad.body)}`);
-    assert.strictEqual(impBad.body.code, 'EXEC_MODE_NOT_APPLICABLE', '[C] 非 config 携带 exec_mode code=EXEC_MODE_NOT_APPLICABLE');
-    assert.strictEqual(await statusOf(impId), '待指派', '[C] improvement 被拒后状态原样（仍待指派，未被误指派）');
+    const impNowOk = await call('POST', `/api/sys-issues/${impId}/assign`, adminTok, { assigned_to: 5, exec_mode: 'self' });
+    assert.strictEqual(impNowOk.status, 200, `[C] improvement 携带 exec_mode 不再被拒绝, got ${impNowOk.status} ${JSON.stringify(impNowOk.body)}`);
+    assert.strictEqual(await statusOf(impId), '开发中', '[C] improvement 指派后落「开发中」（未被已下线的 exec_mode 校验误伤）');
 
-    ok('[C] 指派 exec_mode/vendor_name：缺/非法/vendor 缺名/超长/纯空白 均 400；恰 100 字边界 200；self/assigned/vendor 三值落库正确+响应体展开项与落库一致（补丁 W·W4）、非 vendor 清空；非 config 携带 400 EXEC_MODE_NOT_APPLICABLE 且状态原样');
+    ok('[C] 指派 exec_mode/vendor_name 契约已整组下线（#56·2026-09-10）：config 不带该字段即 200 且两列保持 NULL；携带（含非法/超长值）静默忽略、不写库、不报错；非 config 携带同样不再 400');
   }
 
   // ═══ [D] 两成员逐次 no_code 提交 + 成员增删重算 ═══
   let dId;   // 供 [E]/[F]/[G]/[H] 等复用一张已到「待验证」的单
   {
     const id = await mkAssignable('config');
-    const asg = await assignConfig(id, 'assigned');
+    const asg = await assignConfig(id);
     assert.strictEqual(asg.status, 200, 'D 夹具：指派 200');
     const est = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     assert.strictEqual(est.status, 200, `[D] config /estimate 应 200（W06 isW06Allowed 需含 config，见 status-families.js）, got ${est.status} ${JSON.stringify(est.body)}`);
@@ -399,7 +385,7 @@ async function main() {
   {
     // 独立造一张单（单成员，处理中态）反复测长度边界——失败的长度校验不写库，可重复提交同一实例。
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
 
     const attempt = (reason) => call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: reason, self_tested: true, test_env_deployed: true });
@@ -416,7 +402,7 @@ async function main() {
   // 重新独立验证 10/500/501 码点与补充平面字符（拆开写，避免上面自检占位句误导断言真值）
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const attempt = (reason) => call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: reason, self_tested: true, test_env_deployed: true });
 
@@ -433,7 +419,7 @@ async function main() {
   }
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const attempt = (reason) => call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: reason, self_tested: true, test_env_deployed: true });
 
@@ -449,7 +435,7 @@ async function main() {
   }
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const attempt = (reason) => call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: reason, self_tested: true, test_env_deployed: true });
 
@@ -465,7 +451,7 @@ async function main() {
     //   即便 UTF-16 code unit 数翻倍）——直接证明 J17"事务前改按码点判定"生效。
     const emoji = '\u{1F600}';   // 😀，1 码点 / 2 code unit
     const id1 = await mkAssignable('config');
-    await assignConfig(id1, 'assigned');
+    await assignConfig(id1);
     await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const reason300 = emoji.repeat(300);
     assert.strictEqual([...reason300].length, 300, '[E] 夹具自检：300 码点（emoji）');
@@ -479,7 +465,7 @@ async function main() {
     assert.strictEqual(rec300.no_code_reason, reason300, '[E-emoji-300] 落库 no_code_reason 与提交原文全等');
 
     const id2 = await mkAssignable('config');
-    await assignConfig(id2, 'assigned');
+    await assignConfig(id2);
     await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const reason500e = emoji.repeat(500);
     assert.strictEqual([...reason500e].length, 500, '[E] 夹具自检：500 码点（emoji）');
@@ -509,7 +495,7 @@ async function main() {
   // ═══ [F] submit 带 commits → 400 CONFIG_NO_COMMITS ═══
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const r = await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'commits', commits: [{ component: 'backend', commit_ref: 'r1' }], self_tested: true, test_env_deployed: true });
     assert.strictEqual(r.status, 400, `[F] config 提交 commits 应 400, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -530,7 +516,7 @@ async function main() {
     //   （待验证，非 DEV 族），提交畸形体仍应 400（非 409 INVALID_STATUS）。「实现坏成什么样这条会红」：
     //   若 X2 的前置判定被挪回状态检查之后，本条会从 400 变 409 INVALID_STATUS。
     const idFX2 = await mkAssignable('config');
-    await assignConfig(idFX2, 'assigned');
+    await assignConfig(idFX2);
     await call('POST', `/api/sys-issues/${idFX2}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const s1FX2 = await call('POST', `/api/sys-issues/${idFX2}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     assert.strictEqual(s1FX2.status, 200, 'X2 config 夹具：submit 200（进入待验证）');
@@ -549,7 +535,7 @@ async function main() {
   // ═══ [G] add/edit/delete-commit 对 config 三端点 → 400 CONFIG_NO_COMMITS ═══
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'assigned');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
 
     // [S1a 补丁 T·T4] 排序验证：非在册用户 POST commit → 403（权限先于业务，T4 把 CONFIG_NO_COMMITS
@@ -618,7 +604,7 @@ async function main() {
 
     // 另造一单验证 direct：零 commit + 无活跃批次 → 直翻已上线
     const id2 = await mkAssignable('config');
-    await assignConfig(id2, 'assigned');
+    await assignConfig(id2);
     await call('POST', `/api/sys-issues/${id2}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     const s = await call('POST', `/api/sys-issues/${id2}/submit`, devTok, { mode: 'no_code', no_code_reason: '已在测试环境完成配置校验', self_tested: true, test_env_deployed: true });
     assert.strictEqual(s.status, 200, 'H 夹具：submit 200');
@@ -680,103 +666,51 @@ async function main() {
     ok('[H] accept online_mode：缺/非法 400；release 零 commit 不直翻恒待上线+payload_json.online_mode=release（无空键）；direct 零 commit 无批次直翻已上线+online_source+payload_json.online_mode=direct；非 config 携带 400 ONLINE_MODE_NOT_APPLICABLE（DIRECT_ONLINE_NOT_ELIGIBLE 409 分支真实端到端负例见 [U6]）');
   }
 
-  // ═══ [I] reassign exec_mode/vendor_name（J18）═══
+  // ═══ [I] reassign exec_mode/vendor_name 契约已整组下线（#56·2026-09-10，用户拍板）═══
+  //   原 J18 契约：config reassign 可附带 exec_mode/vendor_name 变更（切 vendor 未传名称终态校验 400、
+  //   仅方式/名称变化本身即视为非 no-op 并跳过成员增删/代表选举/成员门重算/成员变化通知、三者全不变
+  //   才 409）。下线后，reassign 不再读取/校验/写入该二字段；execOnlyChange 分支整体撤销，no-op 判据
+  //   统一回归"成员集合本身有无差量"（config 不再有 409 特例，与其他类型同形 400 VALIDATION）。
   {
-    // [S1a 补丁 V·V1·codex 505-A H1] 切 vendor 未传名称的终态校验——config 已 assign self（exec_mode=
-    //   'self'，vendor_name=NULL）→ reassign 仅 exec_mode:'vendor'（不带 vendor_name）：旧逻辑"未传则
-    //   沿用现值"会沿用切换前的 NULL，落成 exec_mode='vendor' ∧ vendor_name=NULL 的无名 vendor 脏态；
-    //   现按终态校验 → 400 VENDOR_NAME_REQUIRED，写前拦截。「实现坏成什么样这条会红」：若 V1 的终态
-    //   校验被删/绕过，本组 v1NoName 会从 400 变 200，且 rowV1AfterReject.exec_mode 会从 'self' 变
-    //   'vendor'（无名 vendor 脏态真实落库）。
-    const idV1 = await mkAssignable('config');
-    await assignConfig(idV1, 'self');
-    const tlCountBeforeV1 = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [idV1])).c;
-    // [S1a 补丁 X·X3·codex 506-B #1] 成员零写对拍——含已软删行（不加 removed_at IS NULL 过滤），防
-    //   "实现先改写/重建成员行再返回 400"这类改坏了也绿的场景（此前只断了 sys_issues 主表两列 + timeline
-    //   计数，未覆盖成员子表本身）。「实现坏成什么样这条会红」：若拒绝路径在返回 400 之前已经写过/重建过
-    //   sys_issue_dev_assignees 行（即便最终仍 400），rosterV1Before/After 的 deepStrictEqual 会红。
-    const rosterV1Before = await all('SELECT id, user_id, dev_status, notify_status, removed_at FROM sys_issue_dev_assignees WHERE issue_id=? ORDER BY id', [idV1]);
-    const eventCountV1Before = (await get(`SELECT COUNT(*) AS c FROM sys_issue_dev_events WHERE issue_id=?`, [idV1])).c;
-    const v1NoName = await call('POST', `/api/sys-issues/${idV1}/reassign`, adminTok, { member_ids: [5], reason: '切乙方但忘填名称', exec_mode: 'vendor' });
-    assert.strictEqual(v1NoName.status, 400, `[I] V1 切 vendor 未传名称应 400, got ${v1NoName.status} ${JSON.stringify(v1NoName.body)}`);
-    assert.strictEqual(v1NoName.body.code, 'VENDOR_NAME_REQUIRED', '[I] V1 切 vendor 未传名称 code=VENDOR_NAME_REQUIRED（终态校验，非"未传则沿用旧值"落成无名 vendor）');
-    const rowV1AfterReject = await rowOf(idV1);
-    assert.strictEqual(rowV1AfterReject.exec_mode, 'self', '[I] V1 被拒后 exec_mode 仍 self（终态校验在任何写之前拦截，未落成 vendor+NULL 脏态）');
-    assert.strictEqual(rowV1AfterReject.vendor_name, null, '[I] V1 被拒后 vendor_name 仍 NULL');
-    const tlCountAfterV1 = (await get(`SELECT COUNT(*) AS c FROM sys_issue_timeline WHERE issue_id=?`, [idV1])).c;
-    assert.strictEqual(tlCountAfterV1, tlCountBeforeV1, '[I] V1 被拒后时间线无新 note 行（零副作用）');
-    const rosterV1After = await all('SELECT id, user_id, dev_status, notify_status, removed_at FROM sys_issue_dev_assignees WHERE issue_id=? ORDER BY id', [idV1]);
-    assert.deepStrictEqual(rosterV1After, rosterV1Before, '[I] V1 被拒后成员表逐字段零写（含已软删行，补丁 X·X3）');
-    const eventCountV1After = (await get(`SELECT COUNT(*) AS c FROM sys_issue_dev_events WHERE issue_id=?`, [idV1])).c;
-    assert.strictEqual(eventCountV1After, eventCountV1Before, '[I] V1 被拒后成员事件表（sys_issue_dev_events）计数不变（补丁 X·X3）');
-
-    // 同请求带 vendor_name → 200 且落库两字段
-    const v1WithName = await call('POST', `/api/sys-issues/${idV1}/reassign`, adminTok, { member_ids: [5], reason: '切乙方并填名称', exec_mode: 'vendor', vendor_name: '乙方A' });
-    assert.strictEqual(v1WithName.status, 200, `[I] V1 切 vendor 带名称应 200, got ${v1WithName.status} ${JSON.stringify(v1WithName.body)}`);
-    const rowV1AfterOk = await rowOf(idV1);
-    assert.strictEqual(rowV1AfterOk.exec_mode, 'vendor', '[I] V1 落库 exec_mode=vendor');
-    assert.strictEqual(rowV1AfterOk.vendor_name, '乙方A', '[I] V1 落库 vendor_name=乙方A');
-
-    // 再 reassign 仅改名称（不带 exec_mode）→ 200，方式仍 vendor（既有语义「vendor→vendor 不传名称/仅改名称」保持）
-    const v1RenameOnly = await call('POST', `/api/sys-issues/${idV1}/reassign`, adminTok, { member_ids: [5], reason: '仅改乙方名称', vendor_name: '乙方B' });
-    assert.strictEqual(v1RenameOnly.status, 200, `[I] V1 仅改名称应 200, got ${v1RenameOnly.status} ${JSON.stringify(v1RenameOnly.body)}`);
-    const rowV1AfterRename = await rowOf(idV1);
-    assert.strictEqual(rowV1AfterRename.exec_mode, 'vendor', '[I] V1 仅改名称后 exec_mode 仍 vendor（未传 exec_mode，沿用现值）');
-    assert.strictEqual(rowV1AfterRename.vendor_name, '乙方B', '[I] V1 落库 vendor_name 更新为乙方B');
-
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
 
-    // 仅方式变化（成员不变）→ 200，不动成员进度/不发通知/不动 roster 行 id 集合/不动 assigned_to（J18）
-    const before = await all('SELECT id, user_id, dev_status, notify_status FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY id', [id]);
-    const rowBefore = await rowOf(id);
-    const r1 = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '改为乙方跟踪', exec_mode: 'vendor', vendor_name: '新乙方公司' });
-    assert.strictEqual(r1.status, 200, `[I] 仅方式变化应 200, got ${r1.status} ${JSON.stringify(r1.body)}`);
+    // ① 成员集合不变、仅请求体携带 exec_mode/vendor_name → 400 VALIDATION（与其他类型同形）。
+    //   「实现坏成什么样这条会红」：若 execOnlyChange 分支复活（仅带该字段即视为非 no-op），本次会从
+    //   400 变 200。
+    const noopWithExecMode = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '仅带执行方式', exec_mode: 'vendor', vendor_name: '新乙方公司' });
+    assert.strictEqual(noopWithExecMode.status, 400, `[I] 成员集合不变仅带 exec_mode 应 400（execOnlyChange 已下线）, got ${noopWithExecMode.status} ${JSON.stringify(noopWithExecMode.body)}`);
+    assert.strictEqual(noopWithExecMode.body.code, 'VALIDATION', '[I] no-op 码统一 VALIDATION（config 不再有 409 特例）');
+    const rowAfterNoop = await rowOf(id);
+    assert.strictEqual(rowAfterNoop.exec_mode, null, '[I] 400 后 exec_mode 仍 NULL（未被写入）');
+    assert.strictEqual(rowAfterNoop.vendor_name, null, '[I] 400 后 vendor_name 仍 NULL（未被写入）');
+
+    // ② 真实成员差量 + 携带 exec_mode/vendor_name → 200，差量正常生效，但该二字段不落库、响应体不再
+    //   展开这两个键、时间线不再新增「执行方式变更」的独立 note 行（payload_json 含 exec_mode_to）。
+    //   [codex 541 rec1] 差量前预置存量历史值（与请求体携带值不同）：断言「逐字保留」而非「仍为 NULL」——
+    //   全 NULL 夹具发现不了 reassign 的 UPDATE 误清空存量。「实现坏成什么样这条会红」：reassign 若残留
+    //   `exec_mode = ?` 写入或 `= NULL` 清空，历史值都会变，本条即红。
+    await run(`UPDATE sys_issues SET exec_mode = 'assigned', vendor_name = '存量乙方' WHERE id = ?`, [id]);
+    const r1 = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5, 6], reason: '真实加人', exec_mode: 'vendor', vendor_name: '新乙方公司' });
+    assert.strictEqual(r1.status, 200, `[I] 真实成员差量应 200, got ${r1.status} ${JSON.stringify(r1.body)}`);
     const row1 = await rowOf(id);
-    assert.strictEqual(row1.exec_mode, 'vendor', '[I] exec_mode 变更落库');
-    assert.strictEqual(row1.vendor_name, '新乙方公司', '[I] vendor_name 变更落库');
-    assert.strictEqual(r1.body.exec_mode, 'vendor', '[I] 响应体带新 exec_mode');
-    const after = await all('SELECT id, user_id, dev_status, notify_status FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY id', [id]);
-    // [S1a 补丁 T·M3] execOnlyChange 分支前后对拍——防"execOnlyChange 分支照常调 electRepresentative/
-    //   notifyAssignedDeveloper"这类改坏了也绿的场景（J18 三条"跳过"此前只测了"不重置 dev_status"一条）。
-    assert.deepStrictEqual(after.map(r => r.id), before.map(r => r.id), '[I] roster 行 id 集合未变（跳过成员增删）');
-    assert.strictEqual(after[0].dev_status, before[0].dev_status, '[I] 成员 dev_status 未被重置（跳过成员门重算，J18）');
-    assert.strictEqual(after[0].notify_status, before[0].notify_status, '[I] 成员 notify_status 未从 not_sent 翻 sent（跳过 notifyAssignedDeveloper，J18）');
-    assert.strictEqual(after[0].notify_status, 'not_sent', '[I] 夹具自检：notify_status 本就是 not_sent（未调用过 notify-developer）');
-    assert.strictEqual(row1.assigned_to, rowBefore.assigned_to, '[I] assigned_to 未变（跳过 electRepresentative 重算，J18）');
-    // timeline 应新增一条 note 且带 payload_json（exec_mode_from/to）
-    const tl = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' ORDER BY id DESC LIMIT 1`, [id]);
-    assert.ok(tl && tl.payload_json, '[I] 时间线写入 payload_json');
-    const payload = JSON.parse(tl.payload_json);
-    assert.strictEqual(payload.exec_mode_from, 'self', '[I] payload exec_mode_from=self');
-    assert.strictEqual(payload.exec_mode_to, 'vendor', '[I] payload exec_mode_to=vendor');
+    assert.strictEqual(row1.exec_mode, 'assigned', `[I] 真实差量 reassign 后存量 exec_mode 逐字保留（携带值被忽略、存量不被清空），实得=${row1.exec_mode}`);
+    assert.strictEqual(row1.vendor_name, '存量乙方', `[I] 真实差量 reassign 后存量 vendor_name 逐字保留，实得=${row1.vendor_name}`);
+    assert.strictEqual(r1.body.exec_mode, undefined, '[I] 响应体不再携带 exec_mode 键');
+    assert.strictEqual(r1.body.vendor_name, undefined, '[I] 响应体不再携带 vendor_name 键');
+    const after = await all('SELECT id, user_id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY id', [id]);
+    assert.strictEqual(after.length, 2, '[I] 真实差量已生效（新增 dev6）');
+    const execChangeNote = await get(`SELECT id FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' AND payload_json LIKE '%exec_mode_to%' ORDER BY id DESC LIMIT 1`, [id]);
+    assert.strictEqual(execChangeNote, undefined, '[I] 时间线不再出现「执行方式变更」payload_json 行（写点已随契约整组下线）');
 
-    // 三者全不变 → 409（config 专属 no-op 判据）
-    const r2 = await call('POST', `/api/sys-issues/${id}/reassign`, adminTok, { member_ids: [5], reason: '重复提交', exec_mode: 'vendor', vendor_name: '新乙方公司' });
-    assert.strictEqual(r2.status, 409, `[I] 三者全不变应 409, got ${r2.status} ${JSON.stringify(r2.body)}`);
-    assert.strictEqual(r2.body.code, 'VALIDATION', '[I] 三者全不变 code=VALIDATION（config 专属 409 与其他类型的 400 共用同一错误码，只分 HTTP 状态码）');
-
-    // [S1a 补丁 T·M3·预筛 C-e] 「待验证」态仅改 exec_mode → 200 且主状态仍待验证（不误触主状态联动——
-    //   runWGate 被 execOnlyChange 跳过，gateResult 初值 changed:false，此前无用例覆盖该态）。
-    const verifyId = await mkAssignable('config');
-    await assignConfig(verifyId, 'self');
-    await call('POST', `/api/sys-issues/${verifyId}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
-    await call('POST', `/api/sys-issues/${verifyId}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
-    assert.strictEqual(await statusOf(verifyId), '待验证', 'I 待验证夹具：已到待验证');
-    const rVerify = await call('POST', `/api/sys-issues/${verifyId}/reassign`, adminTok, { member_ids: [5], reason: '待验证态改执行方式', exec_mode: 'assigned' });
-    assert.strictEqual(rVerify.status, 200, `[I] 待验证态仅改 exec_mode 应 200, got ${rVerify.status} ${JSON.stringify(rVerify.body)}`);
-    assert.strictEqual(await statusOf(verifyId), '待验证', '[I] 待验证态仅改 exec_mode 后主状态仍待验证（未被误触联动）');
-    assert.strictEqual((await rowOf(verifyId)).exec_mode, 'assigned', '[I] 待验证态 exec_mode 变更仍正常落库');
-
-    // 非 config 携带 exec_mode → 400
+    // ③ 非 config 类型携带 exec_mode（真实成员差量）同样不再被拒绝（此前 400 EXEC_MODE_NOT_APPLICABLE）。
     const impId = await mkAssignable('improvement', '二级');
     const impAssign = await call('POST', `/api/sys-issues/${impId}/assign`, adminTok, { assigned_to: 5 });
     assert.strictEqual(impAssign.status, 200, 'I 对照组夹具：improvement 指派 200');
-    const impBad = await call('POST', `/api/sys-issues/${impId}/reassign`, adminTok, { member_ids: [6], reason: '换人', exec_mode: 'self' });
-    assert.strictEqual(impBad.status, 400, `[I] improvement 携带 exec_mode 应 400, got ${impBad.status} ${JSON.stringify(impBad.body)}`);
-    assert.strictEqual(impBad.body.code, 'EXEC_MODE_NOT_APPLICABLE', '[I] 非 config 携带 code=EXEC_MODE_NOT_APPLICABLE');
+    const impOk = await call('POST', `/api/sys-issues/${impId}/reassign`, adminTok, { member_ids: [6], reason: '换人', exec_mode: 'self' });
+    assert.strictEqual(impOk.status, 200, `[I] improvement 携带 exec_mode 不再被拒绝, got ${impOk.status} ${JSON.stringify(impOk.body)}`);
 
-    ok('[I] reassign exec_mode/vendor_name：切 vendor 未传名称终态校验 400 VENDOR_NAME_REQUIRED 且零副作用+成员表/事件表逐字段零写（补丁 V·V1 + X·X3）+ 带名称 200 落库 + 仅改名称 200；仅方式变化 200 + 落库 + payload_json 留痕 + roster id 集合/assigned_to/notify_status 三者不变；三者全不变 409 VALIDATION（config 专属 no-op）；待验证态仅改 exec_mode 200 且主状态不联动；非 config 携带 400');
+    ok('[I] reassign exec_mode/vendor_name 契约已整组下线（#56·2026-09-10）：成员集合不变仅带该字段 400 VALIDATION（config 不再有 409 特例，execOnlyChange 已撤销）；真实差量 200 且该二字段落库仍 NULL/响应体不展开/时间线不再写变更 note；非 config 携带同样不再 400');
   }
 
   // ═══ [J] hold 四态 + resume 逐态回原态 ═══
@@ -800,7 +734,7 @@ async function main() {
     // 处理中
     {
       const id = await mkAssignable('config');
-      await assignConfig(id, 'self');
+      await assignConfig(id);
       const h = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '暂缓②' });
       assert.strictEqual(h.status, 200, `[J] 处理中 hold 应 200, got ${h.status} ${JSON.stringify(h.body)}`);
       assert.strictEqual(await statusOf(id), '已暂缓', '[J] hold → 已暂缓');
@@ -811,7 +745,7 @@ async function main() {
     // 待验证
     {
       const id = await mkAssignable('config');
-      await assignConfig(id, 'self');
+      await assignConfig(id);
       await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
       await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
       const h = await call('POST', `/api/sys-issues/${id}/hold`, adminTok, { reason: '暂缓③' });
@@ -823,7 +757,7 @@ async function main() {
     // 待上线
     {
       const id = await mkAssignable('config');
-      await assignConfig(id, 'self');
+      await assignConfig(id);
       await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
       await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
       const acc = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { online_mode: 'release' });
@@ -919,7 +853,7 @@ async function main() {
   {
     // 已上线态
     const id1 = await mkAssignable('config');
-    await assignConfig(id1, 'self');
+    await assignConfig(id1);
     await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     await call('POST', `/api/sys-issues/${id1}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     await call('POST', `/api/sys-issues/${id1}/accept`, adminTok, { online_mode: 'direct' });
@@ -941,7 +875,7 @@ async function main() {
   // ═══ [N] feasibility/blocked/unblock/scope_change/liaison_test_* 对 config 拒绝 ═══
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
 
     const feas = await call('POST', `/api/sys-issues/${id}/feasibility`, devTok, { conclusion: '可行', requirement_confirm: '已确认', dev_estimated_at: futureEst(30) });
     assert.strictEqual(feas.status, 409, `[N] feasibility 对 config 应 409, got ${feas.status} ${JSON.stringify(feas.body)}`);
@@ -974,7 +908,7 @@ async function main() {
   // ═══ [O] 通知四通道状态白名单 ═══
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
 
     // developer：处理中可发
     const devNotify = await call('POST', `/api/sys-issues/${id}/notify-developer`, intakeTok, { dev_user_id: 5 });
@@ -1010,7 +944,7 @@ async function main() {
     // developer 通道负例：待上线 → 409 STATUS_NOT_NOTIFIABLE（方案 §7"config 处理中可发、开发中不可发"的
     //   "不可发"半边，此前完全没测）
     const releasedId = await mkAssignable('config');
-    await assignConfig(releasedId, 'self');
+    await assignConfig(releasedId);
     await call('POST', `/api/sys-issues/${releasedId}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     await call('POST', `/api/sys-issues/${releasedId}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     const relAcc = await call('POST', `/api/sys-issues/${releasedId}/accept`, adminTok, { online_mode: 'release' });
@@ -1075,7 +1009,7 @@ async function main() {
     // (type<>'config' OR release_id IS NULL) 已随受控重建移除（scripts/migrate-sys-issues-drop-config-release-check.js），
     // config 单现应正常挂入批次：200 + release_id=目标批次 + 批次详情端点返回的成员含该单（codex 505-B2 M3 强度要求）。
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
     await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     await call('POST', `/api/sys-issues/${id}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { online_mode: 'release' });
@@ -1138,7 +1072,7 @@ async function main() {
 
     async function configToReady() {
       const cid = await mkAssignable('config');
-      await assignConfig(cid, 'self');
+      await assignConfig(cid);
       await call('POST', `/api/sys-issues/${cid}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
       await call('POST', `/api/sys-issues/${cid}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
       await call('POST', `/api/sys-issues/${cid}/accept`, adminTok, { online_mode: 'release' });
@@ -1245,7 +1179,7 @@ async function main() {
     //   批次（生产不可达的中间态，同 verify-sys-release.js :380 造脏惯例），验证 evaluateNoCommitDirectOnline
     //   条件②（"存在 active 批次关联"）在这种脏组合下确实经真实 accept() 端点拒绝，非仅函数级单测。
     const uCfg6 = await mkAssignable('config');
-    await assignConfig(uCfg6, 'self');
+    await assignConfig(uCfg6);
     await call('POST', `/api/sys-issues/${uCfg6}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
     await call('POST', `/api/sys-issues/${uCfg6}/submit`, devTok, { mode: 'no_code', no_code_reason: '配置已在测试环境验证完成', self_tested: true, test_env_deployed: true });
     assert.strictEqual(await statusOf(uCfg6), '待验证', '[U6] 夹具：config 单到待验证（尚未 accept）');
@@ -1539,7 +1473,7 @@ async function main() {
   //     通用机制——本组只钉 config 特有的组合：online_mode 与 attachment_ids 同 payload_json 共存、
   //     以及 return→重新提交→再次 accept 跨轮引用同一张附件的真实端到端回路）═══
   {
-    const idV = await mkConfigToVerify('self', 'V 组夹具：首轮配置说明');
+    const idV = await mkConfigToVerify('V 组夹具：首轮配置说明');
     const upV1 = await upload(`/api/sys-issues/${idV}/attachments`, devTok, { attachment_type: 'screenshot' }, 'v-round1.png');
     assert.strictEqual(upV1.status, 200, `[V] 首轮上传 screenshot 应 200, got ${upV1.status} ${JSON.stringify(upV1.body)}`);
     const attV1 = upV1.body.attachments[0].id;
@@ -1569,15 +1503,18 @@ async function main() {
     const accV2 = await call('POST', `/api/sys-issues/${idV}/accept`, adminTok, { online_mode: 'release', attachment_ids: [attV1] });
     assert.strictEqual(accV2.status, 200, `[V] 二轮 accept 引用首轮截图 id 应 200（引擎无 round 概念，只校验 issue_id∧active∧type，属既有设计非本组新增行为）, got ${accV2.status} ${JSON.stringify(accV2.body)}`);
     const tlAcceptV = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='accept' ORDER BY id DESC LIMIT 1`, [idV]);
-    assert.deepStrictEqual(JSON.parse(tlAcceptV.payload_json), { attachment_ids: [attV1], online_mode: 'release' }, '[V] ⭐ config accept payload_json 三键潜在组合中 attachment_ids+online_mode 两键共存精确形状（note 未传不落键；[H]组此前只钉过"两者皆无"这一态，本条是它的互补态）');
+    // [C3c·M1·538 回卷] type='config' 恒触发「已写 payload」分支，故 delivery_rev 现无条件写入
+    // （见 index.js accept 分支注释）——精确形状断言补第三键。
+    const idVRev = await I.computeDeliveryRev(idV);
+    assert.deepStrictEqual(JSON.parse(tlAcceptV.payload_json), { attachment_ids: [attV1], online_mode: 'release', delivery_rev: idVRev }, '[V] ⭐ config accept payload_json 四键潜在组合中 attachment_ids+online_mode+delivery_rev 共存精确形状（note 未传不落键；[H]组此前只钉过"两者皆无"这一态，本条是它的互补态；538 回卷 M1 起恒带 delivery_rev）');
 
     // 反例：跨单附件 id（另一张 config 单上传的截图）在本单 accept 中应仍 400——config 场景下 issue_id
     //   隔离闸同样生效，非本组新机制豁免（同 verify-sys-accept-evidence.js [A6] 同款负例，换成 config 类型）。
-    const idVOther = await mkConfigToVerify('self', 'V 组另一张单（供跨单附件反例）');
+    const idVOther = await mkConfigToVerify('V 组另一张单（供跨单附件反例）');
     const upVOther = await upload(`/api/sys-issues/${idVOther}/attachments`, devTok, { attachment_type: 'screenshot' }, 'v-other.png');
     assert.strictEqual(upVOther.status, 200, `[V] 另一张单上传 screenshot 应 200, got ${upVOther.status} ${JSON.stringify(upVOther.body)}`);
     const attVOther = upVOther.body.attachments[0].id;
-    const idV3 = await mkConfigToVerify('self', 'V 组第三张单（供跨单附件反例的验收对象）');
+    const idV3 = await mkConfigToVerify('V 组第三张单（供跨单附件反例的验收对象）');
     const crossAcc = await call('POST', `/api/sys-issues/${idV3}/accept`, adminTok, { online_mode: 'release', attachment_ids: [attVOther] });
     assert.strictEqual(crossAcc.status, 400, `[V] 跨单附件 id 在 config accept 应 400, got ${crossAcc.status} ${JSON.stringify(crossAcc.body)}`);
     assert.strictEqual(crossAcc.body.code, 'ACCEPT_ATTACHMENT_INVALID', '[V] 跨单附件 code=ACCEPT_ATTACHMENT_INVALID（config 与 improvement 共用同一份 resolveEvidenceAttachmentIds，隔离闸不因类型而异）');
@@ -1588,7 +1525,7 @@ async function main() {
     // 里不应凭空出现首轮附件。上面 idV 那次 accept 是**显式重传**了 attachment_ids，证的是"可以
     // 复用"，不是"不会被自动绑上"——两件事；[H] 组"两者皆无"态用的是从没挂过附件的单，同样构不成
     // 对照（它从未经历过"打回时有附件"这个前提）。本条补上真正缺的那一面。
-    const idV4 = await mkConfigToVerify('self', 'V4 组夹具：首轮配置说明');
+    const idV4 = await mkConfigToVerify('V4 组夹具：首轮配置说明');
     const upV4 = await upload(`/api/sys-issues/${idV4}/attachments`, devTok, { attachment_type: 'screenshot' }, 'v4-round1.png');
     assert.strictEqual(upV4.status, 200, `[V4] 首轮上传 screenshot 应 200, got ${upV4.status} ${JSON.stringify(upV4.body)}`);
     assert.ok(Array.isArray(upV4.body.attachments) && upV4.body.attachments.length === 1 && Number.isInteger(upV4.body.attachments[0].id) && upV4.body.attachments[0].id > 0, `[V4] 上传响应含恰一个正整数 id 的附件（实得=${JSON.stringify(upV4.body)}）`);
@@ -1604,7 +1541,10 @@ async function main() {
     const accV4 = await call('POST', `/api/sys-issues/${idV4}/accept`, adminTok, { online_mode: 'release' });
     assert.strictEqual(accV4.status, 200, `[V4] 二轮 accept（不传 attachment_ids）应 200, got ${accV4.status} ${JSON.stringify(accV4.body)}`);
     const tlAcceptV4 = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='accept' ORDER BY id DESC LIMIT 1`, [idV4]);
-    assert.deepStrictEqual(JSON.parse(tlAcceptV4.payload_json), { online_mode: 'release' }, `[V4] ⭐「不误绑」核心断言：accept 不传 attachment_ids 时 payload_json 恰只含 online_mode 一键，不会凭空出现 attachment_ids（实得=${tlAcceptV4.payload_json}）——证明引擎不会把打回轮次挂过的附件自动继承进本次验收，方案 §7"不误绑"的字面含义在此得到独立验证（非靠"引擎无 round 概念"这条推理带过）`);
+    // [C3c·M1·538 回卷] 同上——delivery_rev 现无条件写入，精确形状断言补第二键（核心断言"不含
+    // attachment_ids"不受影响）。
+    const idV4Rev = await I.computeDeliveryRev(idV4);
+    assert.deepStrictEqual(JSON.parse(tlAcceptV4.payload_json), { online_mode: 'release', delivery_rev: idV4Rev }, `[V4] ⭐「不误绑」核心断言：accept 不传 attachment_ids 时 payload_json 恰只含 online_mode+delivery_rev 两键，不会凭空出现 attachment_ids（实得=${tlAcceptV4.payload_json}）——证明引擎不会把打回轮次挂过的附件自动继承进本次验收，方案 §7"不误绑"的字面含义在此得到独立验证（非靠"引擎无 round 概念"这条推理带过；538 回卷 M1 起恒带 delivery_rev）`);
 
     ok('[V] config × 验收附件两步链：return 携首轮截图 200+payload_json 精确形状（与 improvement 同源闸）；打回→重提（重新 estimate+no_code 提交）跨轮后首轮截图仍 active；二轮 accept 复用首轮截图 id 200（引擎无 round 概念，issue_id∧active∧type 为唯一校验维度）+ payload_json.attachment_ids/online_mode 两键共存精确形状（[H]组"两者皆无"态的互补态）；跨单附件 id 在 config accept 场景下仍 400 ACCEPT_ATTACHMENT_INVALID（隔离闸不因类型而异）；[补丁 AH·AH6]「不误绑」负例：打回携附件→重提→accept 不传 attachment_ids → payload_json 恰无该键，证明不会自动继承旧附件（方案 §7 原文字面含义独立验证，非本组此前用"可复用"推理代替）');
   }
@@ -1627,7 +1567,7 @@ async function main() {
     // direct 场景在通用断言之外补核上线字段（released_at/online_source），不只断 status 字符串。
     const xAgent = new http.Agent({ keepAlive: false, maxSockets: 2 });
     async function runXScenario(label, onlineMode) {
-      const idX = await mkConfigToVerify('self');
+      const idX = await mkConfigToVerify();
       const [r1, r2] = await Promise.all([
         callTimed('POST', `/api/sys-issues/${idX}/accept`, adminTok, { online_mode: onlineMode }, xAgent),
         callTimed('POST', `/api/sys-issues/${idX}/accept`, adminTok, { online_mode: onlineMode }, xAgent),
@@ -1690,15 +1630,17 @@ async function main() {
     assert.strictEqual(acceptNull.status, 400, `[Q] improvement accept 带 online_mode:null 应 400, got ${acceptNull.status} ${JSON.stringify(acceptNull.body)}`);
     assert.strictEqual(acceptNull.body.code, 'ONLINE_MODE_NOT_APPLICABLE', '[Q] online_mode:null 也算携带，code=ONLINE_MODE_NOT_APPLICABLE（补丁 V·V2）');
 
+    // [#56·2026-09-10] exec_mode:null 携带曾是 V·V2 判据的核心用例（non-config 400 EXEC_MODE_NOT_
+    // APPLICABLE / config 400 EXEC_MODE_REQUIRED，两码语义还互斥）——契约整组下线后该判据本身已不存在，
+    // 两个类型现在对 exec_mode:null 均不再校验、不再拒绝，统一 200（负向断言：若校验被加回，会从 200 变 400）。
     const idV2Assign = await mkAssignable('improvement', '二级');
     const assignNull = await call('POST', `/api/sys-issues/${idV2Assign}/assign`, adminTok, { assigned_to: 5, exec_mode: null });
-    assert.strictEqual(assignNull.status, 400, `[Q] improvement assign 带 exec_mode:null 应 400, got ${assignNull.status} ${JSON.stringify(assignNull.body)}`);
-    assert.strictEqual(assignNull.body.code, 'EXEC_MODE_NOT_APPLICABLE', '[Q] exec_mode:null 也算携带，code=EXEC_MODE_NOT_APPLICABLE（补丁 V·V2）');
+    assert.strictEqual(assignNull.status, 200, `[Q] improvement assign 带 exec_mode:null 不再被拒绝（契约已下线）, got ${assignNull.status} ${JSON.stringify(assignNull.body)}`);
 
     const idV2ConfigAssign = await mkAssignable('config');
     const configAssignNull = await call('POST', `/api/sys-issues/${idV2ConfigAssign}/assign`, adminTok, { assigned_to: 5, exec_mode: null });
-    assert.strictEqual(configAssignNull.status, 400, `[Q] config assign 带 exec_mode:null 应 400, got ${configAssignNull.status} ${JSON.stringify(configAssignNull.body)}`);
-    assert.strictEqual(configAssignNull.body.code, 'EXEC_MODE_REQUIRED', '[Q] config exec_mode:null 视为未携带（缺省），code=EXEC_MODE_REQUIRED（补丁 V·V2，config 分支 null 仍视为缺失，与非 config 分支语义相反）');
+    assert.strictEqual(configAssignNull.status, 200, `[Q] config assign 带 exec_mode:null 不再被拒绝（契约已下线）, got ${configAssignNull.status} ${JSON.stringify(configAssignNull.body)}`);
+    assert.strictEqual((await rowOf(idV2ConfigAssign)).exec_mode, null, '[Q] config assign 带 exec_mode:null，落库 exec_mode 仍为 NULL（未被写入）');
 
     // [S1a 补丁 V·V3] improvement 对照组：mode='no_code' + 非空 commits → 400 VALIDATION，文案与改前逐字相同。
     const idV3Contrast = await mkAssignable('improvement', '二级');
@@ -1728,7 +1670,7 @@ async function main() {
     assert.strictEqual(rX2Legal.status, 409, `[Q] improvement 待验证态 + 合法体应 409 INVALID_STATUS（对照组）, got ${rX2Legal.status} ${JSON.stringify(rX2Legal.body)}`);
     assert.strictEqual(rX2Legal.body.code, 'INVALID_STATUS', '[Q] improvement 合法体仍受状态闸拦截（补丁 X·X2 对照组）');
 
-    ok('[Q] 对照组 improvement：assign 无需 exec_mode、submit 带 commits 不受 CONFIG_NO_COMMITS 影响、accept 不需 online_mode、reassign 缺字段精确 400 VALIDATION —— 逐条同今；null 携带三例（accept/assign/config assign，补丁 V·V2）；mode=no_code 携带非空 commits 400 VALIDATION 文案逐字不变（补丁 V·V3）；畸形体优先于状态合法性 400（非 409），合法体仍受状态闸拦（补丁 X·X2）');
+    ok('[Q] 对照组 improvement：assign 无需 exec_mode、submit 带 commits 不受 CONFIG_NO_COMMITS 影响、accept 不需 online_mode、reassign 缺字段精确 400 VALIDATION —— 逐条同今；accept 携带 online_mode:null 仍 400 ONLINE_MODE_NOT_APPLICABLE（该契约未受本次 #56 变更影响）；assign 携带 exec_mode:null（improvement/config 两类）均不再被拒绝，统一 200（#56 契约已下线，补丁 V·V2 的两条互斥码判据随之撤销）；mode=no_code 携带非空 commits 400 VALIDATION 文案逐字不变（补丁 V·V3）；畸形体优先于状态合法性 400（非 409），合法体仍受状态闸拦（补丁 X·X2）');
   }
 
   // ═══ [R] 补丁：set-oa-number 对 config 的可填窗口（2026-09-07 主会话 J 判断，SYS_OA_ALLOWED_STATUSES.config）═══
@@ -1737,7 +1679,7 @@ async function main() {
   {
     // 处理中态：应放行（config 集合含「处理中」）
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
     assert.strictEqual(await statusOf(id), '处理中', 'R 夹具：config 已到处理中');
     const oaOk = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: '2026090101' });
     assert.strictEqual(oaOk.status, 200, `[R] config 处理中态 set-oa-number 应 200, got ${oaOk.status} ${JSON.stringify(oaOk.body)}`);
@@ -1773,38 +1715,38 @@ async function main() {
   //   （index.js:7666）应先于任何写操作拒绝（409 INVALID_STATUS，assertRosterNotFrozen 对 config 不生效
   //   ——该函数 bug-only，config 走的是族门本身排除 D_PRE，见 index.js:3513-3517）。
   {
-    // 待处理（受理后未指派）：不得绕过 assign 直接改派采集 exec_mode
+    // 待处理（受理后未指派）：不得绕过 assign 直接改派（[#56·2026-09-10] payload 不再附带已下线的
+    // exec_mode——族门排除 D_PRE 这条不变量与 exec_mode 契约无关，改动只是清掉一个不再有意义的字段）。
     const pendingId = await mkAssignable('config');
     assert.strictEqual(await statusOf(pendingId), '待处理', 'S 夹具：config 待处理（未指派）');
-    const rPending = await call('POST', `/api/sys-issues/${pendingId}/reassign`, adminTok, { member_ids: [5], reason: '待处理态尝试改派', exec_mode: 'self' });
+    const rPending = await call('POST', `/api/sys-issues/${pendingId}/reassign`, adminTok, { member_ids: [5], reason: '待处理态尝试改派' });
     assert.strictEqual(rPending.status, 409, `[S] config 待处理态 reassign 应拒（非 500）, got ${rPending.status} ${JSON.stringify(rPending.body)}`);
     assert.strictEqual(rPending.body.code, 'INVALID_STATUS', '[S] config 待处理态 reassign code=INVALID_STATUS（族门排除 D_PRE）');
     const pendingRoster = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [pendingId]);
     assert.strictEqual(pendingRoster.length, 0, '[S] config 待处理态 reassign 被拒后 sys_issue_dev_assignees 零行（未曾 assign，本就零行，验证拒绝发生在任何写之前）');
-    assert.strictEqual((await rowOf(pendingId)).exec_mode, null, '[S] config 待处理态 reassign 被拒后 exec_mode 仍 NULL');
 
     // 已暂缓（处理中 hold 后）：暂缓期改派冻结不变量对 config 同样生效
     const holdId = await mkAssignable('config');
-    await assignConfig(holdId, 'self');
+    await assignConfig(holdId);
     assert.strictEqual(await statusOf(holdId), '处理中', 'S 夹具：config 已到处理中');
     const holdRosterBefore = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY id', [holdId]);
     const h = await call('POST', `/api/sys-issues/${holdId}/hold`, adminTok, { reason: 'S 组暂缓' });
     assert.strictEqual(h.status, 200, 'S 夹具：hold 200');
     assert.strictEqual(await statusOf(holdId), '已暂缓', 'S 夹具：config 已暂缓');
-    const rHold = await call('POST', `/api/sys-issues/${holdId}/reassign`, adminTok, { member_ids: [5], reason: '已暂缓态尝试改派', exec_mode: 'vendor', vendor_name: '试图绕过' });
+    const rHold = await call('POST', `/api/sys-issues/${holdId}/reassign`, adminTok, { member_ids: [5], reason: '已暂缓态尝试改派' });
     assert.strictEqual(rHold.status, 409, `[S] config 已暂缓态 reassign 应拒（非 500）, got ${rHold.status} ${JSON.stringify(rHold.body)}`);
     assert.strictEqual(rHold.body.code, 'INVALID_STATUS', '[S] config 已暂缓态 reassign code=INVALID_STATUS（族门排除 D_PRE）');
     const holdRosterAfter = await all('SELECT id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL ORDER BY id', [holdId]);
     assert.deepStrictEqual(holdRosterAfter.map(r => r.id), holdRosterBefore.map(r => r.id), '[S] config 已暂缓态 reassign 被拒后 roster 行 id 集合前后相等');
 
-    ok('[S] config reassign 族门 override：待处理（未指派）与已暂缓两态均 409 INVALID_STATUS（非 500）——前者 sys_issue_dev_assignees 零行+exec_mode 仍 NULL，后者 roster id 集合前后相等（暂缓期改派冻结不变量对 config 同样生效）');
+    ok('[S] config reassign 族门 override：待处理（未指派）与已暂缓两态均 409 INVALID_STATUS（非 500）——前者 sys_issue_dev_assignees 零行，后者 roster id 集合前后相等（暂缓期改派冻结不变量对 config 同样生效）');
   }
 
   // ═══ [T] config return（验收打回 待验证→处理中）═══ [S1a 补丁 T·M4]
   //   方案 §7 验证矩阵明列"打回"是 config 主流程正常回路，也是"受困态恢复路"关键一环，S1a 交付零覆盖。
   {
     const id = await mkAssignable('config');
-    await assignConfig(id, 'self');
+    await assignConfig(id);
 
     // 先 estimate 落 dev_estimated_at
     const est1 = await call('POST', `/api/sys-issues/${id}/estimate`, devTok, { dev_estimated_at: futureEst(30) });
@@ -1858,7 +1800,7 @@ async function main() {
   //   代表选举提前 return），主状态会停在「处理中」，下方 statusOf/main_status 两条断言均会红。
   {
     const idW1 = await mkAssignable('config');
-    await assignConfig(idW1, 'self');   // dev5 已指派
+    await assignConfig(idW1);   // dev5 已指派
     const addW1_6 = await call('POST', `/api/sys-issues/${idW1}/dev-assignees`, adminTok, { user_ids: [6] });
     assert.strictEqual(addW1_6.status, 200, `[W1] 加协作开发 dev6 应 200, got ${addW1_6.status} ${JSON.stringify(addW1_6.body)}`);
     await call('POST', `/api/sys-issues/${idW1}/estimate`, devTok, { dev_estimated_at: futureEst(30) });

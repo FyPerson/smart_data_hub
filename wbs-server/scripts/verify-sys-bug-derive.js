@@ -434,7 +434,7 @@ async function main() {
     r = await call('POST', `/api/sys-issues/${guardId}/intake-accept`, adminTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 200, `D11-3 受理 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${guardId}/assign`, adminTok, { assigned_to: 5 });
-    assert.strictEqual(r.status, 200, `D11-3 免 OA feature 派生单 assign 应 200（不被 ASSIGN_REQUIRES_OA_NUMBER 拦——#85 卡死的正是这扇门·变更流才真进该守卫）, got ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.status, 200, `D11-3 免 OA feature 派生单 assign 应 200（不被 ASSIGN_REQUIRES_OA_NUMBER 拦——#85 卡死的正是这扇门·2026-09-09 方案 v1.5 D1 起非 bug 类型均进该守卫）, got ${r.status} ${JSON.stringify(r.body)}`);
     // 对照组：oa_exempt=0 的 feature 派生单（显式覆盖继承）无号 assign 必 409——证上面那条 200 不是
     //   "守卫根本没开"的假绿，守卫对非豁免变更流仍在拦。
     r = await call('POST', `/api/sys-issues/${guardOrigin}/derive`, adminTok, { type: 'feature', title: 'D11 守卫对照·要OA', system_name: 'BMS', source: '内部', derive_reason: 'D11 组3对照', oa_exempt: 0 });

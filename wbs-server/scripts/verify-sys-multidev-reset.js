@@ -343,12 +343,13 @@ async function scenarioReleaseFamilyBackfill() {
     assert.notStrictEqual(row.no_code_reason, RELEASE_MIGRATION_NO_CODE_REASON, 'HIGH（96号）：VERIFY 族文案不应与 RELEASE 族文案相同（分开措辞）');
   }
 
-  // 独立连接跑一遍探针（非信 runReset 内部自证）：验证落库最终态真实满足全部 15 条恒真不变量（含 P14 VERIFY 恒真）。
+  // 独立连接跑一遍探针（非信 runReset 内部自证）：验证落库最终态真实满足全部 16 条恒真不变量（含 P14 VERIFY
+  // 恒真 + 2026-09-09 方案 v1.5 新增 P16「修正链恒真」——reset 场景不产生 amend_of 事件，P16 天然 pass）。
   const probeDb = new sqlite3.Database(dbPath);
   const probeResults = await runProbes(probeDb);
   const failedProbes = probeResults.filter(p => !p.pass);
   assert.strictEqual(failedProbes.length, 0, `HIGH：reset 后独立探针复核应全绿，实际失败：${JSON.stringify(failedProbes)}`);
-  assert.strictEqual(probeResults.length, 15, 'HIGH：探针结果集应恰好 15 条（P1-P15）');
+  assert.strictEqual(probeResults.length, 16, 'HIGH：探针结果集应恰好 16 条（P1-P15 + P16）');
   await new Promise((resolve) => probeDb.close(() => resolve()));
 
   ok('[HIGH] 完成态族状态感知回填：DEV 族单仍走 pending（对照）+ 待上线/已上线单（RELEASE）与待验证单（VERIFY）统一回填 no_code（含软删历史行，各自专属文案）+ resolved_at 非空 + 独立复核 P1-P15 全绿（含 P14）');

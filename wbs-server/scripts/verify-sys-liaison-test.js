@@ -14,6 +14,8 @@
 //       单永不可达该态）
 //   [5] 决策树 ④：全完成但资格不足（工期缺失）→ 落 gate_deferred_at，不进测试段也不降级
 //   [6] liaison_test_pass：正例 + ①b 复查（roster 被绕过写坏 → 409·含 unknownCount 脏值反例）+ hasDeliverable 反例
+//       + [6j] D-L1 版本锁（带当前 rev 200/落 payload_json.delivery_rev、中途 amend 后旧 rev 409
+//       DELIVERY_CHANGED、格式错 400、不带键缺省放行）
 //   [7] liaison_test_return：正例（原因必填+字段清理套餐-不计 return_count+花名册重置）+ D18 return_count 恒定断言
 //   [8] 待对接测试态七写入口 409 矩阵（add/re-add/remove/self-remove/excuse/supersede-excuse/reassign）+ hold 400 锁死
 //   [9] last_completed_at 白名单（C0 §F-8）：⑦ 正常/⑥ 降级/两轮完成取末次/resume 伪行排除
@@ -775,6 +777,67 @@ async function main() {
       assert.strictEqual(r.status, 400, `[6i] spec 类型附件不应计入凭证，应仍 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
       assert.strictEqual(r.body.code, 'LIAISON_TEST_PASS_EVIDENCE_REQUIRED', '[6i] 错误码仍 LIAISON_TEST_PASS_EVIDENCE_REQUIRED（spec 不计入）');
       ok('[6i] spec 类型附件（建单需求材料，非交付/截图）即便 id 落在本轮水位之后也不计入凭证，仍 400（只认 delivery/screenshot 两种类型，口径精确不放宽）');
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // [6j] ⭐ D-L1·2026-09-10 决策记录：对接测试通过版本锁——同 case 'accept' 同款 expected_delivery_rev
+    //   字段存在即校验（须匹配 DELIVERY_REV_RE），不等 409 DELIVERY_CHANGED，缺省放行；payload_json
+    //   仅当携带且校验通过时写 delivery_rev（既有 evidence/cycle_no/test_note/attachment_ids 四键不动）。
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      // [6j-1] 带当前 rev 通过 → 200，payload_json.delivery_rev 落当次 rev
+      {
+        const { id } = await mkFreshLiaisonTestIssue();
+        const detail = await call('GET', `/api/sys-issues/${id}`, adminTok);
+        const rev = detail.body.issue.delivery_rev;
+        assert.ok(typeof rev === 'string' && /^e\d+-a\d+-n\d+$/.test(rev), `[6j-1] 前置：详情应带合法 delivery_rev，实得=${JSON.stringify(rev)}`);
+        const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '带版本锁通过', expected_delivery_rev: rev });
+        assert.strictEqual(r.status, 200, `[6j-1] 带当前 rev 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const tl = await latestTimeline(id);
+        const payload = JSON.parse(tl.payload_json);
+        assert.strictEqual(payload.delivery_rev, rev, `[6j-1] payload_json.delivery_rev 应落当次 rev，实得=${payload.delivery_rev}`);
+        ok('[6j-1] 带当前 delivery_rev 通过应 200 且 payload_json.delivery_rev 落值（D-L1 条件审计）');
+      }
+      // [6j-2] 中途 amend（放开后的待对接测试态修正，同 D-L1 首条决策）顶高 rev → 用旧 rev pass 应 409
+      //   DELIVERY_CHANGED，status 仍待对接测试（整事务回滚，无副作用）。⚠️ amend 端点的"三源读取"
+      //   依赖真实存在的 submit/no_code 事件行（写前不变量），mkFreshLiaisonTestIssue/mkMember 是直连
+      //   SQL 造的花名册行（无事件），本例改走真实 POST /submit 单人团队（feature 单人团队全完成后
+      //   W-GATE 天然自动进「待对接测试」，同 verify-sys-submit-amend.js 准入组同款事实）。
+      {
+        const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13 });
+        await mkMember(id, 5, '开发甲', 'pending');
+        const subR6j2 = await call('POST', `/api/sys-issues/${id}/submit`, devTok(5), { mode: 'commits', commits: [{ component: 'backend', commit_ref: '6j2-seed' }], self_tested: true, test_env_deployed: true });
+        assert.strictEqual(subR6j2.status, 200, `[6j-2] 前置：单人团队真实 submit 应 200，实际 ${subR6j2.status} ${JSON.stringify(subR6j2.body)}`);
+        assert.strictEqual(await statusOf(id), '待对接测试', `[6j-2] 前置：单人团队 submit 后应天然到「待对接测试」，实得=${await statusOf(id)}`);
+        const detail = await call('GET', `/api/sys-issues/${id}`, adminTok);
+        const oldRev = detail.body.issue.delivery_rev;
+        const amendR = await call('POST', `/api/sys-issues/${id}/submit/amend`, devTok(5), { mode: 'commits', work_note: '版本锁夹具：中途修正' });
+        assert.strictEqual(amendR.status, 200, `[6j-2] 前置：待对接测试态 amend 应 200（D-L1 放开），实际 ${amendR.status} ${JSON.stringify(amendR.body)}`);
+        const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '旧 rev 通过', expected_delivery_rev: oldRev });
+        assert.strictEqual(r.status, 409, `[6j-2] 旧 rev 应 409 DELIVERY_CHANGED，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'DELIVERY_CHANGED', '[6j-2] 错误码 DELIVERY_CHANGED');
+        assert.strictEqual(await statusOf(id), '待对接测试', '[6j-2] 拒绝后状态仍待对接测试（整事务回滚）');
+        ok('[6j-2] 中途 amend 后用旧 rev 通过应 409 DELIVERY_CHANGED，status 仍待对接测试');
+      }
+      // [6j-3] 格式错 rev → 400 VALIDATION
+      {
+        const { id } = await mkFreshLiaisonTestIssue();
+        const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '格式错', expected_delivery_rev: 'bad-format' });
+        assert.strictEqual(r.status, 400, `[6j-3] 格式错 rev 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'VALIDATION', '[6j-3] 错误码 VALIDATION');
+        assert.strictEqual(await statusOf(id), '待对接测试', '[6j-3] 拒绝后状态不变');
+        ok('[6j-3] expected_delivery_rev 格式错误应 400 VALIDATION');
+      }
+      // [6j-4] 不带键 → 缺省放行 200，payload_json 无 delivery_rev 键（既有直调用例零改动契约）
+      {
+        const { id } = await mkFreshLiaisonTestIssue();
+        const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '不带版本锁通过' });
+        assert.strictEqual(r.status, 200, `[6j-4] 不带 expected_delivery_rev 应缺省放行 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const tl = await latestTimeline(id);
+        const payload = JSON.parse(tl.payload_json);
+        assert.ok(!Object.prototype.hasOwnProperty.call(payload, 'delivery_rev'), `[6j-4] payload_json 不应含 delivery_rev 键（未携带该字段），实得=${JSON.stringify(payload)}`);
+        ok('[6j-4] 不带 expected_delivery_rev 缺省放行 200，payload_json 无 delivery_rev 键');
+      }
     }
   }
 

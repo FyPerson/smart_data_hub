@@ -155,14 +155,16 @@ async function mkAssignable(type) {
   assert.strictEqual(acc.status, 200, `${type} 受理 200, got ${acc.status} ${JSON.stringify(acc.body)}`);
   assert.strictEqual(await statusOf(r.body.id), ASSIGNABLE_STATUS[type],
     `夹具 mkAssignable(${type})：受理后须真落「${ASSIGNABLE_STATUS[type]}」`);
-  // ⭐ 角色权限重构 v2.1 §4：变更流 assign 前置要求 oa_number 通过校验（bug/config 不受限）→ 本 helper 名为
+  // ⭐ 角色权限重构 v2.1 §4：feature/improvement/config 三类 assign 前置均要求 oa_number 通过校验
+  //   （bug 结构性豁免，assertSysDevCommitmentOaGuard 首行 type guard 对 bug 直接 return）→ 本 helper 名为
   //   "可指派"，把 OA 前置一并做进来，使所有调用点的 assign 测的都是"权限/状态"本身，不被"忘设 OA"
-  //   这个无关变量污染。⚠️ 这个分支本身就是被测语义之一：若哪天 bug/config 也被误拉进 OA 门槛，这里会因
-  //   set-oa-number 未被调用而在下游 assign 处当场红灯。
-  // [S1a 订正] 条件从 `type !== 'bug'` 改显式枚举 `feature/improvement`——原写法在新增 config 后会连带把
-  //   config 也拉进 OA 分支（assertSysDevCommitmentOaGuard 对 config 同 bug 直接 return，config 单据从不
-  //   要求 OA 号，调用 set-oa-number 本身无害但语义不对，显式枚举更贴合"仅变更流需要 OA"的真实口径）。
-  if (type === 'feature' || type === 'improvement') {
+  //   这个无关变量污染。⚠️ 若哪天 bug 也被误拉进 OA 门槛，这里会因 set-oa-number 的调用/断言与下游
+  //   assign 行为不一致而当场红灯；但 config 方向的反向哨兵（守卫回退成豁免 config）**不在本文件**——
+  //   本文件对 config 恒先补号再 assign，回退成豁免时补号只是多此一举，assign 仍 200，本文件没有任何
+  //   断言会红。config 方向的哨兵在 `verify-sys-oa-exempt.js` ⑯（config exempt=0 无号 assign 应 409）。
+  // [2026-09-09 方案 v1.5 D1 订正] config 纳入 OA 守卫——此前"config 单据从不要求 OA 号"的口径已废
+  //   （原判断是 S1a 主会话单方判断，非用户拍板）；条件显式枚举 `feature/improvement/config`，仅 bug 豁免。
+  if (type === 'feature' || type === 'improvement' || type === 'config') {
     const oa = await call('POST', `/api/sys-issues/${r.body.id}/set-oa-number`, adminTok, { oa_number: '2026070001' });
     assert.strictEqual(oa.status, 200, `${type} 补 OA 号 200, got ${oa.status} ${JSON.stringify(oa.body)}`);
   }
@@ -175,9 +177,9 @@ async function mkAssignable(type) {
 //   矩阵全塌。故把 999999 失效窗口收窄到「仅 submit 期间」（下移进 mkVerifying），mkInDev 产物恒绑 13。
 async function mkInDev(type) {
   const id = await mkAssignable(type);
-  // [S1a·D1/D13] config 首次指派必带 exec_mode（其余类型不适用，携带即 400 EXEC_MODE_NOT_APPLICABLE，
-  //   故仅对 config 加这个字段——本矩阵夹具目的是权限而非 exec_mode 契约本身，覆盖面见 verify-sys-config-flow.js）。
-  const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5, ...(type === 'config' ? { exec_mode: 'assigned' } : {}) });
+  // [#56·2026-09-10] D1/D13 引入的 config 首次指派必带 exec_mode 契约已整组下线，assign 请求体不再需要
+  //   按 type 分流附带该字段（本矩阵夹具目的本就是权限而非 exec_mode 契约，无需额外覆盖面）。
+  const r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
   assert.strictEqual(r.status, 200, `${type} assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual(await statusOf(id), DEV_STATUS[type], `夹具 mkInDev(${type})：指派后须真落「${DEV_STATUS[type]}」`);
   return id;
@@ -272,9 +274,9 @@ async function main() {
     for (const type of TYPES) {
       for (const role of ROLES) {
         const allow = role.isAdmin || role.isIntake;
-        // ① assign（[S1a] config 必带 exec_mode——非授权角色仍先撞权限闸 403，exec_mode 校验到不了）
+        // ① assign（[#56·2026-09-10] config 必带 exec_mode 契约已下线，三类型请求体同形）
         let id = await mkAssignable(type);
-        let r = await call('POST', `/api/sys-issues/${id}/assign`, role.tok, { assigned_to: 5, ...(type === 'config' ? { exec_mode: 'assigned' } : {}) });
+        let r = await call('POST', `/api/sys-issues/${id}/assign`, role.tok, { assigned_to: 5 });
         assert.strictEqual(r.status, allow ? 200 : 403,
           `[M1/assign] ${role.who} × ${type} 期望 ${allow ? 200 : 403}, got ${r.status} ${JSON.stringify(r.body)}`);
         if (allow) {
