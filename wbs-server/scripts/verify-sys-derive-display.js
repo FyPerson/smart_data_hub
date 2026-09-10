@@ -104,10 +104,18 @@ console.log('\n═══ [C2-S] 矩阵可静态断言面：siIssueDisplayNo 系�
   // [2026-09-10 C4·提交修正与config指派OA守卫 方案v1.5 §B 前端段] +1 来源=siModalAmendSubmission
   //   弹窗标题 `siModal('修正我的提交 ' + siIssueDisplayNoById(iss.id), ...)`（新增「修正我的提交」
   //   入口，弹窗标题沿用既有 helper 拼接范式，非另起一套），基线由 19/16 各 +1 校准为 20/17。
+  // [2026-09-10 W2·开发撤回提交 方案v1.2 §5.10 前端段] +1 来源=siModalWithdrawSubmission 弹窗标题
+  //   `siModal('撤回提交 ' + siIssueDisplayNoById(iss.id), ...)`（新增「撤回提交」入口，弹窗标题沿用
+  //   既有 helper 拼接范式，非另起一套），基线由 20/17 各 +1 校准为 21/18。
+  //   ⚠️ 本次校准的发现过程值得记：W2 交付报告称"已 grep 定点核实无其他脚本对 siComputeCaps 或按钮
+  //   拼接行做字面量断言"——结论没错但**判据面正交**：本守卫数的既不是 siComputeCaps 也不是按钮行，
+  //   而是"siIssueDisplayNoById 这个 helper 的全文消费点计数"。改动只要**加入了被别人计数的那一类**
+  //   （这里=用了该 helper 拼弹窗标题），就会打红一个自己没改过的文件。查"我改了谁"不够，还要查
+  //   "我加入了哪些被别人计数的类别"。
   const byIdCalls = [...clean.matchAll(/siIssueDisplayNoById\(/g)].length;
-  assert.strictEqual(byIdCalls, 20, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 20 处（1 处函数定义 + 19 处消费：17 处 siModal 标题 + 2 处批次成员行降级展示，2026-09-07 校准基线 19（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission 弹窗标题 +1 = 20），实抓 ${byIdCalls}——数量变化需人工核实是新增消费点未登记，还是既有消费点被误删`);
+  assert.strictEqual(byIdCalls, 21, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 21 处（1 处函数定义 + 20 处消费：18 处 siModal 标题 + 2 处批次成员行降级展示，2026-09-07 校准基线 19（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission 弹窗标题 +1 = 20 + 2026-09-10 W2 siModalWithdrawSubmission 弹窗标题 +1 = 21），实抓 ${byIdCalls}——数量变化需人工核实是新增消费点未登记，还是既有消费点被误删`);
   const modalTitleCalls = [...clean.matchAll(/siModal\([^;]*?siIssueDisplayNoById\(/gs)].length;
-  assert.strictEqual(modalTitleCalls, 17, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 17 处（2026-09-07 校准 16（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission +1 = 17），实抓 ${modalTitleCalls}`);
+  assert.strictEqual(modalTitleCalls, 18, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 18 处（2026-09-07 校准 16（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission +1 = 17 + 2026-09-10 W2 siModalWithdrawSubmission +1 = 18），实抓 ${modalTitleCalls}`);
   // [408-M3①] 补删除任务弹窗——此前两条断言都只扫 siIssueDisplayNoById，漏了 siDeleteIssue（:5654 一带）
   // 的删除任务弹窗标题：它走的是 siIssueDisplayNo(iss) **直接传对象**分支（siDetail.issue 现成在手，
   // 不需要像其余弹窗那样只有 issueId 时退化查 siList），不含 "ById" 字样，两条既有正则完全扫不到它——

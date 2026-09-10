@@ -810,7 +810,17 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════
   {
     const id = await mkIssue('feature', '开发中');
-    const daId = await mkMember(id, 5, '开发甲', 'pending');
+    // [开发撤回提交·C0-3 收口·2026-09-10 方案 v1.2 §5.9 涟漪] devStatus 改 'no_code'（非 'pending'）——
+    // 详情端新增"仅当前仍处于已交付态（code_submitted/no_code）才展示最近一次交付内容"的过滤（C0-3）。
+    // ⚠️ [2026-09-10 codex 554 订正] 过滤判据是"该实例最近一次 submit/no_code 事件的 id 是否出现在
+    // dev_withdraw 事件的 withdrawn_event_id 集合里"（真正被撤回过），不是按 dev_status==='pending'
+    // 判——pending 本身不等价于"已撤回/从未交付"：liaison_test_return（对接测试打回）同样把 dev_status
+    // 重置为 pending，但那些行从不写 dev_withdraw，其 work_note/self_tested 等仍照常展示（见
+    // index.js withdrawnEventIdSet 一带注释）。本用例若仍用 pending 造夹具，会被"当前仍处于已交付态
+    // （code_submitted/no_code）"这一更前置的门槛直接挡在外面（pending 两者都不满足），
+    // self_tested/test_env_deployed 会被过滤成 null，与本用例意图（测试 JSON 严格布尔映射，非测试
+    // 展示过滤）无关——改用真实交付态（no_code）对齐夹具语义，这部分理由依然成立。
+    const daId = await mkMember(id, 5, '开发甲', 'no_code');
     // 畸形 payload_json：self_tested 是字符串 'false'（非布尔）、test_env_deployed 是空数组（非布尔）——
     // 两者在 JS 里都是 truthy（!!'false'===true、!![]===true），是 !! 强转会被"化妆成已确认"的典型脏值。
     await run(
@@ -826,7 +836,7 @@ async function main() {
     // 对照组：同一条 SQL 造正常 JSON 原生 true/false 值，确认严格映射没有连合法值也一起拒了——防止
     // "为了堵脏值把好值也堵了"这种矫枉过正的假绿（M-1 只该收紧非法输入，不该收紧合法输入）。
     const id2 = await mkIssue('feature', '开发中');
-    const daId2 = await mkMember(id2, 5, '开发甲', 'pending');
+    const daId2 = await mkMember(id2, 5, '开发甲', 'no_code');   // 同上，理由见 C0-3 涟漪注释
     await run(
       `INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, payload_json, created_at)
        VALUES (?, ?, 'no_code', ?, ?, datetime('now'))`,

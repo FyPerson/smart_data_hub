@@ -4647,9 +4647,11 @@ module.exports = (deps) => {
   //   或未过期）即 no-op 返回 false；终结后六列全空，同代次内任意后续触碰均 no-op、超时留痕恰一条。
   //   重授权（触碰点⑦）开启新代次，新授权将来自然过期允许产生**新的**超时留痕，不属"重复留痕"（新
   //   auth_at 是新代次的起点，与旧代次那条已写入的留痕行是两件独立的审计事实）。
-  //   【入参】issueId/actor 同族常规；trigger 供未来审计追溯标注调用来源（[S1-fix LOW-2] 当前**八个**
+  //   【入参】issueId/actor 同族常规；trigger 供未来审计追溯标注调用来源（[S1-fix LOW-2] 当前**九个**
   //   触碰点各自传一个具名字符串：'submit_gate'/'exec_confirm'/'roster_add'/'roster_remove'/
-  //   'event_five'/'revoke'/'reauthorize'/'batch_publish'——首版此处漏数了批次发布双保险点，本条修正），
+  //   'event_five'/'revoke'/'reauthorize'/'batch_publish'/'submit_withdraw'——首版此处漏数了批次发布
+  //   双保险点，S1-fix LOW-2 补齐为八个；2026-09-10 开发撤回提交批新增第九个触碰点——原实现漏了本函数
+  //   （只抄了 case 'accept' 的窗口内半边），Opus 预筛 HIGH 指出后补齐），
   //   本函数当前不按 trigger 分叉任何行为（summary 文案固定，同一件事——"超时未启用，
   //   收回"——不因触碰来源而改变表述），仅做白名单 fail-closed 校验（同 attemptFastReleaseFlipInTxn 头部
   //   trigger 校验同款精神：这是编程错误断言，非业务态）；nowStr 由调用方在事务开始处统一物化后透传，
@@ -4658,7 +4660,7 @@ module.exports = (deps) => {
   //   预计算的计数/快照"同款精神）——即便调用方已经判过一次残留∧过期，仍在这里独立复核，事务串行下
   //   两次判定理论必然一致，但不因"理论一致"就省略这层复核（同本文件其余纵深防御范式）。
   const FAST_RELEASE_EXPIRY_TRIGGERS = ['submit_gate', 'exec_confirm', 'roster_add', 'roster_remove',
-    'event_five', 'revoke', 'reauthorize', 'batch_publish'];
+    'event_five', 'revoke', 'reauthorize', 'batch_publish', 'submit_withdraw'];
   async function terminateExpiredFastReleaseAuthInTxn(issueId, actor, trigger, nowStr) {
     if (!FAST_RELEASE_EXPIRY_TRIGGERS.includes(trigger)) {
       throw new Error(`terminateExpiredFastReleaseAuthInTxn: 未知 trigger="${trigger}"（调用方传参错误，非业务态）`);
@@ -4861,7 +4863,7 @@ module.exports = (deps) => {
   //   accept 内终结过一次，本处是纵深防御非当前可达缺口）。
   //   ⚠️ [S1·先行上线授权超时收回·:4454 收口] 上一句"void 是唯一真正能清到 done 行的路径"这条**绝对
   //   声称已随本批证伪、不再成立**——过期分叉引入了另外两条能携 done 行到达本函数的出口：① 超时终结
-  //   内核 terminateExpiredFastReleaseAuthInTxn（八个触碰点任一检测到"残留∧过期"时调用，done 有无均
+  //   内核 terminateExpiredFastReleaseAuthInTxn（现九个触碰点任一检测到"残留∧过期"时调用，done 有无均
   //   同，见其定义处"唯一所有权声明"）；② revoke 格 5（跨轮旧授权残迹清理，420 收口明令"不含 NOT
   //   EXISTS done 限制"）。故本函数当前有**三类**能清到 done 行的调用路径：void（窗口内终极出口）+
   //   超时终结内核（过期收集，唯一所有权）+ revoke 格 5（跨轮残迹清理面 fail-open）——"done 行恒不被
@@ -6762,7 +6764,21 @@ module.exports = (deps) => {
       //   带着≥1 名 code_submitted/no_code 成员，本次重置理论上必然命中≥1 行；0 行说明 GATE 判定与
       //   本次重置之间数据不一致，throw 触发整事务回滚（同 [[feedback_state_machine_update_invariant]]：
       //   changes 检查 + 失败阻断，不用 .catch(warn) 静默吞）。
+      // [#55 修复·开发撤回提交 方案 v1.2 §5.4] 原实现只重置花名册不删 commit 行，导致 `pending ∧
+      //   commit 行≥1` 违反 sys-multidev-probes 的 P2 配对不变量，且该开发重提 commits 模式时同 ref
+      //   会撞自然键查重 400。范围必须精确——事务内先 SELECT 出「本次真正从 code_submitted/no_code
+      //   改为 pending」的在册实例 id 集合（与下方 UPDATE 同 WHERE，必须在 UPDATE **之前**查——UPDATE
+      //   后这些行 dev_status 已变为 pending，同条件再查会得到 0 行），只删该集合对应的 commit 行。
+      //   不得按 issue_id 或 dev_user_id 整体删除——会误删同单里本次未被重置的 pending/excused 成员，
+      //   以及已移除历史实例（removed_at 非空）的记录。
       if (action === 'liaison_test_return') {
+        const ltAffectedRows = await dbAllAsync(
+          `SELECT id FROM sys_issue_dev_assignees
+            WHERE issue_id = ? AND removed_at IS NULL AND dev_status IN ('code_submitted', 'no_code')`,
+          [issueId]
+        );
+        const ltAffectedIds = ltAffectedRows.map(r => r.id);
+
         const ltResetResult = await dbRunAsync(
           `UPDATE sys_issue_dev_assignees
               SET dev_status = 'pending', resolved_at = NULL, no_code_reason = NULL
@@ -6772,6 +6788,28 @@ module.exports = (deps) => {
         if (!ltResetResult || ltResetResult.changes < 1) {
           throw new SysTransitionError(500, 'LIAISON_TEST_RETURN_RESET_INVARIANT',
             `对接测试打回花名册重置行数应≥1，实际=${ltResetResult ? ltResetResult.changes : 0}（issue ${issueId}，数据不一致需人工核查）`);
+        }
+
+        // #55：commit 行删除 + 逐行留痕（照抄撤回端点「先读、后删、再逐行写事件」范式，见本文件
+        //   :11090 一带注释；独立来源标识 via:'liaison_test_return'，与撤回的 'withdraw'、amend 的
+        //   'amend_mode_switch' 三源可分，便于统计口径切分与事后追溯）。IN 集合就是上面 SELECT 出的
+        //   ltAffectedIds——精确到实例 id，不按 issue_id 整体删。
+        if (ltAffectedIds.length > 0) {
+          const ltPlaceholders = ltAffectedIds.map(() => '?').join(',');
+          const ltCommitRows = await dbAllAsync(
+            `SELECT id, dev_assignee_id, component, commit_ref FROM sys_issue_dev_commits WHERE dev_assignee_id IN (${ltPlaceholders})`,
+            ltAffectedIds
+          );
+          if (ltCommitRows.length > 0) {
+            await dbRunAsync(`DELETE FROM sys_issue_dev_commits WHERE dev_assignee_id IN (${ltPlaceholders})`, ltAffectedIds);
+            for (const c of ltCommitRows) {
+              await insertDevEvent({
+                issueId, devAssigneeId: c.dev_assignee_id, action: 'delete-commit',
+                reason: '对接测试打回', operatorId: actor.id,
+                payload: { commit_id: c.id, component: c.component, commit_ref: c.commit_ref, dev_assignee_id: c.dev_assignee_id, via: 'liaison_test_return' },
+              });
+            }
+          }
         }
       }
 
@@ -9552,6 +9590,20 @@ module.exports = (deps) => {
       //   ⚠️ 写读同源铁律：本列集用 fetchActiveDevAssignees 单一来源，与全部 mutation 响应镜像
       //   （path A 建单/assign/reassign/C2 四新端点）共用同一 SELECT，杜绝各自手写漂移。
       devAssignees = await fetchActiveDevAssignees(id);
+      // [开发撤回提交·codex 551 HIGH 回填·2026-09-10] 撤回事件集合上移到 devAssignees 判空块之外、
+      // 无条件计算一次——原实现把它声明在下方 `if (devAssignees && devAssignees.length)` 块内部，
+      // bcRows（下方 bug_cause_records 查询，独立于 devAssignees 块之外）拿不到这个变量，只能各写
+      //一套判据，导致 workNoteRows 已按"是否真撤回"展示、bcRows 仍按旧的 dev_status 展示——同一份
+      // 详情响应体自相矛盾（对接测试打回后 bug_cause_note 显示、顶层 bug_cause_records 却消失）。
+      // 现在两条投影共用同一份 withdrawnEventIdSet，不再各自维护一份判据。
+      const withdrawnEventRows = await dbAllAsync(
+        `SELECT json_extract(payload_json, '$.withdrawn_event_id') AS withdrawn_event_id
+           FROM sys_issue_timeline WHERE issue_id = ? AND action_code = 'dev_withdraw'`,
+        [id]
+      );
+      const withdrawnEventIdSet = new Set(
+        withdrawnEventRows.map(r => r.withdrawn_event_id).filter(v => v !== null && v !== undefined)
+      );
       // P4（详情端补查·仅此端点）：每个在册 dev 最近一次 submit/no_code 事件的 work_note（工作说明）——从 dev_events
       //   payload_json 提取（json_extract），按 dev_assignee_id 关联当前在册行，取该行最近事件（id DESC LIMIT 1）。
       //   写读同源：写侧落 submit/no_code 事件 payload_json.work_note（上方 eventPayload），读侧此处提取回填。
@@ -9571,8 +9623,12 @@ module.exports = (deps) => {
         // 派生字段（普通提交事件无这两键，json_extract 返回 NULL，JS 侧归一为 0/[]）；与 work_note 同一
         // MAX(id) 查询，不另开一次往返。changed 是数组，json_extract 对 JSON 数组值返回其序列化文本，
         // 下方 JS 侧 JSON.parse。
+        // [开发撤回提交·§5.6 令牌来源契约·2026-09-10 方案 v1.2] 补投影 e.id AS latest_submit_event_id——
+        //   撤回令牌的唯一来源，须与下方交付内容在同一次查询/同一快照里读出（不得分两次查，否则一个陈旧
+        //   页面可能拿到比它自己更新的令牌，版本锁形同虚设，见方案 §5.6"令牌来源契约"）。该字段对任意
+        //   dev_status 均返回（不受下方 C0-3 展示过滤影响——过滤只管"交付内容"，令牌本身不是交付内容）。
         const workNoteRows = await dbAllAsync(
-          `SELECT e.dev_assignee_id AS da_id,
+          `SELECT e.id AS latest_submit_event_id, e.dev_assignee_id AS da_id,
                   json_extract(e.payload_json, '$.work_note') AS work_note,
                   json_extract(e.payload_json, '$.bug_cause_note') AS bug_cause_note,
                   json_extract(e.payload_json, '$.${SUBMIT_SELF_TESTED_KEY}') AS ${SUBMIT_SELF_TESTED_KEY},
@@ -9610,6 +9666,7 @@ module.exports = (deps) => {
           let changedArr = [];
           if (r.changed_json) { try { const p = JSON.parse(r.changed_json); if (Array.isArray(p)) changedArr = p; } catch (_) { changedArr = []; } }
           return [r.da_id, {
+            latest_submit_event_id: r.latest_submit_event_id,
             work_note: note, submitted_at: note ? r.submitted_at : null,
             bug_cause_note: r.bug_cause_note || null,   // [B4·C6] 无值（非 bug 单/历史行）→ null，同 work_note 的 || null 归一写法
             [SUBMIT_SELF_TESTED_KEY]: strictBoolFromJsonExtract(r[SUBMIT_SELF_TESTED_KEY]),
@@ -9619,21 +9676,39 @@ module.exports = (deps) => {
             latest_event_created_at: r.submitted_at,
           }];
         }));
+        // [开发撤回提交·M7 回填·2026-09-10 Opus 预筛·codex 551 HIGH 收口] 展示过滤判据改为"该实例最近
+        // 一次 submit/no_code 事件是否已被真撤回"，不再按当前 dev_status 判——按 dev_status 判会误伤
+        // 既有 liaison_test_return 打回：该端点同样把 dev_status 重置为 pending（:6768 一带），但那是
+        // "对接测试打回"业务语义（开发要照着旧工作说明改），不是"开发主动撤回"，旧内容理应继续展示，
+        // 按状态过滤会让打回后的开发连自己上一轮写了什么都看不到，属既有流程功能退化。改为查 timeline
+        // 里 action_code='dev_withdraw' 的行，其 payload.withdrawn_event_id 精确点名"哪一条事件被撤回
+        // 了"——只有该实例的最新事件恰好出现在这个集合里，才是真撤回，隐藏内容；liaison_test_return
+        // 从不写这个 action_code，天然不受影响。withdrawnEventIdSet 现已上移到本 if 块之外（本文件
+        // :9557 一带）与 bcRows 共用同一份，不在此重复计算——两条投影用两套判据会让同一份详情响应体
+        // 自相矛盾（对接测试打回后 bug_cause_note 显示、顶层 bug_cause_records 却消失，codex 551 HIGH）。
         for (const d of devAssignees) {
           const wn = wnMap.get(d.id);
-          d.work_note = wn ? wn.work_note : null;
-          d.work_note_submitted_at = wn ? wn.submitted_at : null;
-          d.bug_cause_note = wn ? wn.bug_cause_note : null;   // [B4·C6]
-          d[SUBMIT_SELF_TESTED_KEY] = wn ? wn[SUBMIT_SELF_TESTED_KEY] : null;
-          d[SUBMIT_TEST_ENV_DEPLOYED_KEY] = wn ? wn[SUBMIT_TEST_ENV_DEPLOYED_KEY] : null;
+          // latest_submit_event_id 是撤回令牌来源，不受本过滤影响——任意 dev_status/是否已撤回均如实
+          // 返回（§5.6 令牌来源契约：前端打开撤回弹窗固定该编号）。
+          d.latest_submit_event_id = wn ? wn.latest_submit_event_id : null;
+          // 展示过滤：该实例存在最近一次提交事件 ∧ 该事件未出现在"已撤回事件"集合里，才当作当前交付
+          // 展示（不删事件行——dev_events 是 append-only 审计流，只是这里不再把已撤回的那次投影成"当前"）。
+          const showAsCurrentDelivery = !!wn && !withdrawnEventIdSet.has(wn.latest_submit_event_id);
+          const wnForDisplay = showAsCurrentDelivery ? wn : null;
+          d.work_note = wnForDisplay ? wnForDisplay.work_note : null;
+          d.work_note_submitted_at = wnForDisplay ? wnForDisplay.submitted_at : null;
+          d.bug_cause_note = wnForDisplay ? wnForDisplay.bug_cause_note : null;   // [B4·C6]
+          d[SUBMIT_SELF_TESTED_KEY] = wnForDisplay ? wnForDisplay[SUBMIT_SELF_TESTED_KEY] : null;
+          d[SUBMIT_TEST_ENV_DEPLOYED_KEY] = wnForDisplay ? wnForDisplay[SUBMIT_TEST_ENV_DEPLOYED_KEY] : null;
           // [B·B.6·2026-09-09 方案 v1.5] 提交原地修正派生字段——amend_no/changed 取自最新 submit/no_code
           // 事件 payload（普通提交=0/[]）；first_submitted_at=花名册 resolved_at（首次提交后不再变，
-          // amend 不改该列）；amended_at 仅 amend_no>0 时=最新事件 created_at，否则 null。
-          const amendNo = wn ? wn.amend_no : 0;
+          // amend 不改该列；撤回时该列已被 CAS 清 NULL，故撤回后自然归 null）；amended_at 仅 amend_no>0
+          // 时=最新事件 created_at，否则 null。
+          const amendNo = wnForDisplay ? wnForDisplay.amend_no : 0;
           d.amend_no = amendNo;
-          d.changed = wn ? wn.changed : [];
+          d.changed = wnForDisplay ? wnForDisplay.changed : [];
           d.first_submitted_at = d.resolved_at;
-          d.amended_at = (amendNo > 0 && wn) ? wn.latest_event_created_at : null;
+          d.amended_at = (amendNo > 0 && wnForDisplay) ? wnForDisplay.latest_event_created_at : null;
         }
       }
       // devAssignees 为空数组时上方整段查询与赋值循环天然零次执行，无需额外分支兜底。
@@ -9696,8 +9771,16 @@ module.exports = (deps) => {
       if (row.type === 'bug') {
         // [D 组件①] 补投影 da.round_no——同 noCodeRecords 先例，前端 removedTag 消费点见
         //   Sys_Iteration.html bcItems 渲染处。
+        // [开发撤回提交·C0-3 收口·2026-09-10 方案 v1.2 §5.9·codex 551 HIGH 收口] 展示过滤与 workNoteRows
+        // 共用同一份 withdrawnEventIdSet（本文件 :9557 一带，不再各写一套判据——两条投影各自维护判据是
+        // 上一轮 HIGH 的直接成因：workNoteRows 已改判"是否真撤回"、bcRows 仍按旧的 dev_status 判，导致
+        // 对接测试打回后 bug_cause_note 显示而顶层 bug_cause_records 却消失，同一详情响应体自相矛盾）。
+        // 已移出实例（da.removed_at 非空）的历史行语义不变（既有 B6·MED-1 跨轮可见性设计，冻结在移出
+        // 那一刻，继续展示，与撤回无关，不受 withdrawnEventIdSet 影响）；仍在册的实例只有其最近一次
+        // submit/no_code 事件未出现在 withdrawnEventIdSet 里才展示——过滤挪到 JS 侧（而非 SQL WHERE），
+        // 确保与 workNoteRows 逐字引用同一个 Set，不给两处判据留漂移空间。
         const bcRows = await dbAllAsync(
-          `SELECT e.dev_assignee_id AS dev_assignee_id, da.user_id AS user_id, da.user_name AS user_name,
+          `SELECT e.id AS latest_submit_event_id, e.dev_assignee_id AS dev_assignee_id, da.user_id AS user_id, da.user_name AS user_name,
                   json_extract(e.payload_json, '$.bug_cause_note') AS bug_cause_note,
                   e.created_at AS submitted_at, da.removed_at AS removed_at, da.round_no AS round_no
              FROM sys_issue_dev_events e
@@ -9712,11 +9795,13 @@ module.exports = (deps) => {
             ORDER BY e.id ASC`,
           [id, id]
         );
-        bugCauseRecords = bcRows.map(r => ({
-          dev_assignee_id: r.dev_assignee_id, user_id: r.user_id, user_name: r.user_name,
-          bug_cause_note: r.bug_cause_note, submitted_at: r.submitted_at, removed: !!r.removed_at,
-          round_no: r.round_no,
-        }));
+        bugCauseRecords = bcRows
+          .filter(r => r.removed_at !== null || !withdrawnEventIdSet.has(r.latest_submit_event_id))
+          .map(r => ({
+            dev_assignee_id: r.dev_assignee_id, user_id: r.user_id, user_name: r.user_name,
+            bug_cause_note: r.bug_cause_note, submitted_at: r.submitted_at, removed: !!r.removed_at,
+            round_no: r.round_no,
+          }));
       }
       // [C3c·M3·538 回卷] 交付查询中途可释放屏障——devAssignees/commit 行/workNoteRows/noCodeRecords/
       // bugCauseRecords 均已读完，附件 SELECT 尚未开始；挂在临界区**内部中途**而非入口，供排队组证明
@@ -10871,6 +10956,262 @@ module.exports = (deps) => {
         // 同既有端点范式（如 :8068 一带）——多数分支已手动 sysRollback+return（不会走到这里）；本 catch
         // 只服务真正抛出的错误（assertDevMember/assertMemberActionFamilyAllowed 等守卫 throw、写前
         // 不变量违反、DB 异常）。best-effort 二次 rollback 对已回滚的事务是 no-op（releaseSysTxn 幂等）。
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  // ============================================================
+  // 二·七c、B'（2026-09-10 方案 v1.2）：开发撤回提交——POST /sys-issues/:id/submit/withdraw
+  //   自查发现交付实质有问题（非填写内容）时开发主动收回，理由必填、不限次数、不加 return_count（W1-W6，
+  //   §3 已决点）。§5.6 七级校验顺序（顺序即契约，不可调换）：①请求格式 ②单据存在 ③在册权限 ④主状态
+  //   准入 ⑤成员已提交态 ⑥先行上线 done 阻断 ⑦撤回令牌。§5.3 事务十步：CAS 退回→commit 行删除+逐行
+  //   留痕→（无 done 但有活跃授权时）终结授权→electRepresentative→重跑 W-GATE→断言主状态落开发族→
+  //   写 timeline。零 schema 变更（§5.7）：业务留痕落 sys_issue_timeline（event_type='note' 既有白名单值
+  //   + 新 action_code='dev_withdraw'，该列无 DDL CHECK）；commit 删除事件复用既有枚举 'delete-commit'
+  //   （via:'withdraw' 区分 amend 的 'amend_mode_switch'）；sys_issue_dev_events.action 不新增任何值
+  //   （该列 CHECK 11 值不含 withdraw，F6，禁止触碰）。
+  //   ⚠️ C0-4：先行上线 done 阻断必须在本端点内、调 runWGate 之前完成——runWGate 弹回分支（VERIFY→DEV，
+  //   improvement/bug 二元逻辑）内置了同款 done 闸门（:4057 一带，抛 FASTLANE_DEPLOY_IN_PROGRESS），若
+  //   本端点自己不先挡住，会误撞内部闸门返回与本契约不符的错误码/文案。本端点第⑥级校验通过后，事务
+  //   全程只读不再产生新 done 行（单事务持锁，无并发写窗口），故走到 runWGate 时内部闸门恒不命中。
+  const AMEND_STYLE_WITHDRAW_TOKEN_KEYS = ['reason', 'expected_submit_event_id'];
+  router.post('/sys-issues/:id/submit/withdraw', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const actor = sysActor(req);
+    const b = req.body || {};
+    try {
+      // §5.3 步骤1：事务前置于首次业务读取之前（同 amend/submit 范式）。
+      await sysBeginImmediate();
+      try {
+        // ── §5.6 第①级：请求基础格式（早于任何读取，同 amend §B.3「畸形体 400 先于状态 409」排序哲学）──
+        const extraTop = Object.keys(b).filter(k => !AMEND_STYLE_WITHDRAW_TOKEN_KEYS.includes(k));
+        if (extraTop.length > 0) {
+          await sysRollback();
+          return res.status(400).json({ error: `不支持的字段：${extraTop.join(',')}`, code: 'VALIDATION' });
+        }
+        // reason：trim 后非空且 ≤300 码点（同 case 'return' :6333 一带 typeof 兜底写法）。
+        const reason = (typeof b.reason === 'string' ? b.reason.trim() : '');
+        if (!reason) {
+          await sysRollback();
+          return res.status(400).json({ error: '请填写撤回理由', code: 'WITHDRAW_REASON_REQUIRED' });
+        }
+        if ([...reason].length > 300) {
+          await sysRollback();
+          return res.status(400).json({ error: '撤回理由过长（trim 长度上限 300 字）', code: 'WITHDRAW_REASON_TOO_LONG' });
+        }
+        // 撤回令牌（549-H1）：必填，可选等于没堵——不带令牌的迟到请求仍满足全部准入会把新交付再撤一次。
+        const expectedSubmitEventId = parsePositiveId(b.expected_submit_event_id);
+        if (!expectedSubmitEventId) {
+          await sysRollback();
+          return res.status(400).json({ error: 'expected_submit_event_id 必填且须为正整数', code: 'VALIDATION' });
+        }
+
+        // ── 第②级：单据存在性 ──────────────────────────────────────────
+        // SELECT 含先行上线活跃授权判定六列（FAST_RELEASE_ACTIVE_AUTH_INPUT_COLS）——供 §5.5 授权终结
+        // 复用同一份事务内快照，同 case 'accept'/'return' 一带"row 一次读全、后续分支复用"范式。
+        const row = await dbGetAsync(
+          `SELECT id, type, status,
+                  fast_release_auth_at, fast_release_revoked_at, fast_release_consumed_at,
+                  released_at, online_source, reopened_at
+             FROM sys_issues WHERE id = ?`,
+          [id]
+        );
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+
+        // ── 第③级：在册权限（权限先于业务——非在册即 403，不管主状态是否也不允许，§5.6 末尾用例点名）──
+        const memberRow = await assertDevMember(id, actor.id, { code: 'FORBIDDEN', message: '仅在册开发可撤回提交' });
+
+        // ── 第④级：主状态准入 = 开发族 ∪ 待验证 ∪ 待对接测试（F3 前端 canWithdrawSubmission 同源判据，
+        //   用 status-families.js 族常量判断，不硬编码中文状态名）──
+        const inWithdrawFamily = SF.isInFamily(row.type, row.status, 'DEV')
+          || SF.isInFamily(row.type, row.status, 'VERIFY')
+          || SF.isInFamily(row.type, row.status, 'LIAISON_TEST');
+        if (!inWithdrawFamily) {
+          await sysRollback();
+          return res.status(409).json({ error: `当前状态「${row.status}」不允许撤回提交`, code: 'STATE_NOT_ALLOWED_FOR_WITHDRAW' });
+        }
+
+        // ── 第⑤级：成员已提交态 ──────────────────────────────────────────
+        if (memberRow.dev_status !== 'code_submitted' && memberRow.dev_status !== 'no_code') {
+          await sysRollback();
+          return res.status(409).json({
+            error: `当前实例交付态「${memberRow.dev_status}」不允许撤回（须已交付：code_submitted/no_code）`,
+            code: 'NOT_SUBMITTED',
+          });
+        }
+        const devStatusBefore = memberRow.dev_status;
+
+        // ── 第⑥级：先行上线 done 阻断（§5.5 判据逐字冻结）——必须在授权终结/名单清理之前检查（否则先
+        //   终结会把证据清掉），不因授权已过期而豁免，历史软删行（removed_at 非空）不阻断，且与
+        //   isActiveFastReleaseAuth 判定无关（无活跃授权但残留未软删的 done 行同样拒绝，防数据异常被
+        //   静默放行）。M13 回填：改用 sysFastReleaseExecActiveWhere() 统一谓词（:4703-4715 明文约束
+        //   "该集合的全部消费点必须复用同一谓词，禁各写一份"），非手写字面量——生成的 SQL 文本与冻结版
+        //   逐字相同（该 helper 无参调用即返回 `issue_id = ? AND removed_at IS NULL`），仅来源收口。
+        const fastlaneDoneRow = await dbGetAsync(
+          `SELECT 1 FROM sys_fast_release_executors WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'done' LIMIT 1`,
+          [id]
+        );
+        if (fastlaneDoneRow) {
+          await sysRollback();
+          return res.status(409).json({
+            error: '该单已有先行上线执行确认，不能撤回提交（部署事实已发生），请联系管理员处理',
+            code: 'FAST_RELEASE_EXECUTED',
+          });
+        }
+
+        // ── 第⑦级：撤回令牌——本人在册实例最新 submit/no_code 事件必须与请求携带的令牌一致 ──────────
+        //   同一查询顺带取 payload_json，供下方 §5.9 审计快照复用（任何写入之前读全，不再第二次查询）。
+        const latestEventRow = await dbGetAsync(
+          `SELECT id, payload_json FROM sys_issue_dev_events
+            WHERE issue_id = ? AND dev_assignee_id = ? AND action IN ('submit','no_code')
+            ORDER BY id DESC LIMIT 1`,
+          [id, memberRow.id]
+        );
+        if (!latestEventRow) {
+          // 结构上不应发生（dev_status 已是 code_submitted/no_code，必然经过一次 submit/no_code 事件）——
+          // fail-closed，不静默当首次提交处理（同 amend 端点 :10741 一带同款写前不变量断言）。
+          throw new SysTransitionError(500, 'WITHDRAW_NO_SUBMIT_EVENT',
+            `[写前不变量违反] dev_assignee_id=${memberRow.id} dev_status=${memberRow.dev_status} 但查无 submit/no_code 事件`);
+        }
+        if (latestEventRow.id !== expectedSubmitEventId) {
+          await sysRollback();
+          return res.status(409).json({ error: '交付内容已变更，请刷新后重试', code: 'WITHDRAW_TARGET_CHANGED' });
+        }
+
+        // ══ 七级校验全部通过，进入 §5.3 事务动作 ═══════════════════════════════
+        // 任何写入之前读全审计快照（§5.9）：撤回前 delivery_rev + 本人当前实例最新一份交付内容 + 真实
+        // 现存 commit 行（"真实提交行"——不信任 latestPayload.commits 快照，重新查库，同 amend :10834
+        // 一带"重新读取生成快照"纪律，且这份行也正是下方 b) 要删除的那些行，一次查询两用）。
+        const deliveryRevBefore = await computeDeliveryRev(id);
+        let latestPayload = {};
+        try { latestPayload = latestEventRow.payload_json ? JSON.parse(latestEventRow.payload_json) : {}; } catch (_) { latestPayload = {}; }
+        // 严格布尔映射（同详情端 :9601 strictBoolFromJsonExtract 同款纪律，只是这里源是已解析的 JS 值非
+        // SQL json_extract）——历史缺键/非布尔垃圾值一律 null，不得补成 false/true。
+        const strictBoolFromPayloadValue = (v) => (v === true ? true : (v === false ? false : null));
+        const currentCommitRows = await dbAllAsync(
+          `SELECT id, component, commit_ref FROM sys_issue_dev_commits WHERE dev_assignee_id = ? ORDER BY id ASC`,
+          [memberRow.id]
+        );
+        const auditPayload = {
+          delivery_rev_before: deliveryRevBefore,
+          dev_assignee_id: memberRow.id,
+          dev_status_before: devStatusBefore,
+          withdrawn_event_id: latestEventRow.id,
+          work_note: latestPayload.work_note || null,
+          no_code_reason: latestPayload.no_code_reason || null,
+          bug_cause_note: latestPayload.bug_cause_note || null,
+          checks: {
+            self_tested: strictBoolFromPayloadValue(latestPayload[SUBMIT_SELF_TESTED_KEY]),
+            test_env_deployed: strictBoolFromPayloadValue(latestPayload[SUBMIT_TEST_ENV_DEPLOYED_KEY]),
+          },
+          commits: currentCommitRows.map(r => ({ commit_id: r.id, component: r.component, commit_ref: r.commit_ref })),
+        };
+
+        // a) 行级 CAS 退回（状态机字段 UPDATE 三件套：双条件 WHERE + changes 检查 + 失败阻断，§5.3 步骤4
+        //    冻结 SQL，逐字未改）。
+        const casUpd = await dbRunAsync(
+          `UPDATE sys_issue_dev_assignees SET dev_status = 'pending', resolved_at = NULL, no_code_reason = NULL
+             WHERE id = ? AND issue_id = ? AND user_id = ? AND removed_at IS NULL AND dev_status IN ('code_submitted','no_code')`,
+          [memberRow.id, id, actor.id]
+        );
+        if (!casUpd || casUpd.changes !== 1) {
+          await sysRollback();
+          return res.status(409).json({ error: '实例状态已并发变化，请刷新后重试', code: 'CONCURRENT_STATE_CHANGE' });
+        }
+
+        // b) commit 行删除 + 逐行留痕（照抄 amend :10800-10815「先读、后删、再逐行写事件」范式，
+        //    via:'withdraw' 与 amend 的 'amend_mode_switch'、#55 的 'liaison_test_return' 三源区分）。
+        if (currentCommitRows.length > 0) {
+          await dbRunAsync(`DELETE FROM sys_issue_dev_commits WHERE dev_assignee_id = ?`, [memberRow.id]);
+          for (const c of currentCommitRows) {
+            await insertDevEvent({
+              issueId: id, devAssigneeId: memberRow.id, action: 'delete-commit',
+              reason: '开发撤回提交', operatorId: actor.id,
+              payload: { commit_id: c.id, component: c.component, commit_ref: c.commit_ref, dev_assignee_id: memberRow.id, via: 'withdraw' },
+            });
+          }
+        }
+
+        // c) 授权终结（仅当无 done 行——第⑥级已挡——但仍有活跃授权时；HIGH 回填：原实现漏了"过期分叉"，
+        //    只照抄了 case 'accept'/'return' 的 else 半边（窗口内既有五事件终结）——`isActiveFastReleaseAuth`
+        //    只判"六列残留"不含时间，可达场景：bug 单授权→开发窗口内 submit 挂牌→执行人一直没确认→次日
+        //    08:00 授权过期（六列仍残留）→开发撤回。此刻若直接走内联三件套会把**超时收回**误记成**人为
+        //    终结**，`fast_release_auth_expired` 留痕永不产生，统计系统性少计。index.js:4638-4645
+        //    （`terminateExpiredFastReleaseAuthInTxn` 定义处）明文所有权声明："任何触碰点检测到『残留∧
+        //    过期』后必须调用本函数，禁止自行拼装或补写第二条超时留痕"——同 case 'accept'/'return'/
+        //    'issue_reject'/'void' 一带同款"二择一分叉"（残留后 consumable? 窗口内既有逻辑 : 超时内核）。
+        //    `fastReleaseNowStrOnce` 定义在 sysIssueTransition 引擎作用域内，本路由拿不到，改用 runWGate
+        //    :4065 一带同款单点查询。
+        if (isActiveFastReleaseAuth(row)) {
+          const withdrawNowRow = await dbGetAsync(`SELECT datetime('now','localtime') AS n`);
+          const withdrawFastReleaseNowStr = withdrawNowRow && withdrawNowRow.n;
+          if (!withdrawFastReleaseNowStr) throw new SysTransitionError(500, 'FAST_RELEASE_NOW_QUERY_FAILED', '获取服务器时间失败（内部错误）');
+          if (!isConsumableFastReleaseAuth(row, withdrawFastReleaseNowStr)) {
+            // 过期支——唯一所有权在 terminateExpiredFastReleaseAuthInTxn 内（清六列+清执行人集合+写
+            // fast_release_auth_expired 独立留痕），trigger 取新值 'submit_withdraw'（FAST_RELEASE_EXPIRY_TRIGGERS
+            // 白名单第 9 项，见 :4660 一带）。
+            await terminateExpiredFastReleaseAuthInTxn(id, actor, 'submit_withdraw', withdrawFastReleaseNowStr);
+          } else {
+            // 窗口内支——既有内联三件套（清六列 + fast_release_auth_terminated 独立留痕 + 清执行人集合），
+            // 逐字未改。
+            const clearAuthUpd = await dbRunAsync(
+              `UPDATE sys_issues SET ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')
+                 WHERE id = ? AND ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}`,
+              [id]
+            );
+            if (!clearAuthUpd || clearAuthUpd.changes !== 1) {
+              // 同一事务持锁期间该快照与本 UPDATE 的真实前置状态理论必然一致（同 case 'accept' 纵深防御
+              // 注释），不一致即内部不一致性，fail-closed 500，不静默跳过终结（状态机字段 UPDATE 三件套精神）。
+              throw new SysTransitionError(500, 'WITHDRAW_FAST_RELEASE_TERMINATE_INVARIANT',
+                '撤回时终结先行上线授权失败（活跃授权判定与 WHERE 层判据不一致，内部错误）');
+            }
+            await dbRunAsync(
+              `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
+               VALUES (?, 'note', ?, 'fast_release_auth_terminated', ?, ?)`,
+              [id, '直上授权已失效（开发撤回提交）', Number(actor.id) || null, actor.name || null]
+            );
+            await clearFastReleaseRosterOnTermination(id, actor, '开发撤回提交');
+          }
+        }
+
+        // d) 代表重选（549-H2·不可省略）：撤回把 code_submitted/no_code 改回 pending，改变了选举分支②
+        //    「在册 pending 最小 user_id」的候选集合，现任代表已不在册时会改变赢家；代表实变时同事务重置
+        //    dev 侧通知五列（属通知字段重置，非新增通知，不违反 W3）。
+        await electRepresentative(id);
+
+        // e) 重跑 W-GATE（F9：runWGate 原生支持反向弹回，"弹回≠资格问题已解决，是新增未完成成员"）——
+        //    此刻已在第⑥级确认无 done 行且事务全程持锁无并发写窗口，走到这里不会撞内部同款闸门
+        //    （:4057/:6133 一带）。currentStatus 传入本次调用前读到的 row.status（同事务内 sys_issues.status
+        //    尚未被本请求任何前序步骤改写，与 case 'accept' 等既有调用点"row.status 即当前真实值"同前提）。
+        const gateResult = await runWGate(id, row.type, row.status, actor);
+        void gateResult;
+
+        // 撤回成功后须断言主状态确实落在开发族（§5.3 步骤8 明文要求）——fail-closed，不静默信任
+        // runWGate 内部逻辑；同一事务内重查，不依赖调用前快照。
+        const postGateRow = await dbGetAsync(`SELECT status FROM sys_issues WHERE id = ?`, [id]);
+        if (!postGateRow || !SF.isInFamily(row.type, postGateRow.status, 'DEV')) {
+          throw new SysTransitionError(500, 'WITHDRAW_GATE_INVARIANT',
+            `撤回后主状态应落在开发族，实得「${postGateRow && postGateRow.status}」`);
+        }
+
+        // f) 写 timeline（F7：event_type='note' 既有 15 值白名单内 + 新 action_code='dev_withdraw'，该列
+        //    无 DDL CHECK，零迁移）。payload_json = §5.9 冻结的审计快照（写入前已构造好，未被后续任何
+        //    写操作污染——commits 字段是删除前读到的真实行，非删除后的空集合）。
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'dev_withdraw', ?, ?, ?)`,
+          [id, `开发撤回提交：${reason}`, Number(actor.id) || null, actor.name || null, JSON.stringify(auditPayload)]
+        );
+
+        const deliveryRevAfter = await computeDeliveryRev(id);
+        await sysCommit();
+        res.json({ id, dev_assignee: memberRow.id, delivery_rev: deliveryRevAfter, main_status: postGateRow.status });
+      } catch (txErr) {
+        // 同既有端点范式（如 amend :10870 一带）——多数分支已手动 sysRollback+return（不会走到这里）；
+        // 本 catch 只服务真正抛出的错误（assertDevMember 等守卫 throw、写前不变量违反、DB 异常）。
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }

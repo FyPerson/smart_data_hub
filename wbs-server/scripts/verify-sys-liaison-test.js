@@ -33,6 +33,10 @@
 //       前置由 SQL 夹具注入·不覆盖通知发送转换；真实端点 POST /sys-releases/:id/executors/:userId/notify
 //       本轮不改走）
 //
+// [#55 修复回归说明] liaison_test_return 花名册重置同时精确删除 commit 行——独立收在
+//   verify-sys-liaison-return-commit-cleanup.js（本文件其余用例共享同一张内存表且部分组故意遗留
+//   非法 dev_status/配对脏值不清理，与 #55 用例需要的全表 P1-P16 探针自证互斥，故不并入本文件）。
+//
 // in-process app + 内存库 + 自签 token，照 verify-sys-multidev-members.js 范式：issue/roster 直接 raw SQL
 // 造数（本文件测的是 runWGate 决策树与两条新引擎边，非建单/受理/指派链路本身），真实 HTTP 调用触发被测端点。
 'use strict';

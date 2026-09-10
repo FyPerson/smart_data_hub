@@ -4223,7 +4223,11 @@
         //   index.js DELETE /sys-releases/:id 步骤⑤），标签统一用中性描述"上线单已删除"。⚠️ 同 D9
         //   不注册进 SI_TL_RELEASE_SCOPE_LABEL——那会被「隐藏上线单调整记录」过滤器连带隐藏（方案未
         //   明文要求 O4 走 D9，但 O4 删除是比 O3 编辑更高关注度的事件，理应同等甚至更强地"始终可见"）。
-        release_deleted: '上线单已删除'
+        release_deleted: '上线单已删除',
+        // [开发撤回提交 方案 v1.2 §5.10] 开发撤回提交——note 型独立徽章（同 assign_overdue_eta/
+        //   fast_release_* 等既有"自定义端点直写 timeline"范式），需登记三处：本表 + SI_TL_CLS +
+        //   SI_TL_NOTE_OWN_LABEL_CODES（下方两处同步，改一处必须同改另两处）。
+        dev_withdraw: '撤回提交'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -4296,7 +4300,11 @@
         // [R-C7] 归 red——与既有 fast_release_revoke/fast_release_roster_cleared/fast_release_auth_expired
         //   同族语义（"批次/关联被收回或清除"这个动作性质本身，同 :3376 一带既有取色原则），删除是
         //   本页最高关注度的收回类动作。
-        release_deleted: 'si-tl-red'
+        release_deleted: 'si-tl-red',
+        // [开发撤回提交 方案 v1.2 §5.10] 归 amber——警示但非错误：开发自查主动收回，不是被验收/对接
+        //   测试判定拒绝那种负面动作（那些归 red），也非纯程序性动作（那些归 indigo），与既有
+        //   completion_overrun_reason/liaison_test_skip_* "值得留意但非负面判定"语义同族。
+        dev_withdraw: 'si-tl-amber'
     };
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
@@ -4422,7 +4430,10 @@
     // [上线单管理体验优化 R-C7·方案 §3 O4] +release_deleted（删除上线单独立徽章，见上方 SI_TL_LABEL/
     //   SI_TL_CLS 处注释；同款口径同源纪律——已同步改 verify-sys-timeline-label-coverage.js 的
     //   NOTE_OWN_LABEL_ACTION_CODES，见该文件 R-C7 一带注释）。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted']);
+    // [开发撤回提交 方案 v1.2 §5.10] +dev_withdraw（撤回提交独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS
+    //   处注释；与 scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES
+    //   同一份口径同源，改这里必须同改那边）。
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4657,6 +4668,13 @@
             //   no_code} ∧ 主状态∈SI_AMEND_STATUSES）。与 canAddCommit/canEditCommits 并存、互不替代：
             //   commit 行的单条微调仍走既有 PUT/DELETE 入口，本能力管的是"整体重新提交"（可切 mode）。
             canAmendSubmission: !!(myRow && ['code_submitted', 'no_code'].includes(myRow.dev_status) && SI_AMEND_STATUSES.includes(iss.status)),
+            // [开发撤回提交 方案 v1.2 §5.2] 撤回提交——与 canAmendSubmission **当前逐字同判据**（后端
+            //   withdraw 端点第④/⑤级校验与 amend 端点同源，见 index.js withdraw 路由内 F3 注释）。刻意
+            //   写成独立字面量而非抽共享变量——scripts/verify-sys-submit-amend-static.js §② 对
+            //   canAmendSubmission 那一行做精确源码文本正则锚点校验，抽共享变量会让该既有静态守卫的
+            //   锚点失配（同一坑已实测踩过，改回字面量），代价是两行文本重复；若未来两者判据出现分歧，
+            //   各自独立修改即可，不依赖任何代码结构维持同步。
+            canWithdrawSubmission: !!(myRow && ['code_submitted', 'no_code'].includes(myRow.dev_status) && SI_AMEND_STATUSES.includes(iss.status)),
         };
     }
 
@@ -5804,7 +5822,17 @@
         if (siCaps && siCaps.canAmendSubmission) {
             amendBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siModalAmendSubmission(siDetail.issue)">修正我的提交</button>`;
         }
-        box.innerHTML = gate + ((btns + hotfixBtn + chatBtn + amendBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns) || fallback);
+        // [开发撤回提交 方案 v1.2 §5.10] 撤回提交——与「修正我的提交」并列渲染，同一套独立渲染范式
+        //   （不经 meta/typeFlows 通用循环）。⚠️ 但理由与上方 amendBtn 不同：撤回**会改变主状态**
+        //   （弹回开发族，见后端 §5.3 步骤7-8 electRepresentative+重跑 W-GATE）——它不进 transitions.js
+        //   是因为走的是 W-GATE 联动这条既有反向弹回通路（F9），不是因为"不改主状态"。
+        //   canWithdrawSubmission 已含在册∧dev_status∧主状态三条件（siComputeCaps，与 canAmendSubmission
+        //   当前同判据），此处零重复判断。
+        let withdrawBtn = '';
+        if (siCaps && siCaps.canWithdrawSubmission) {
+            withdrawBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siModalWithdrawSubmission(siDetail.issue)">撤回提交</button>`;
+        }
+        box.innerHTML = gate + ((btns + hotfixBtn + chatBtn + amendBtn + withdrawBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns) || fallback);
     }
 
     // ============================================================
@@ -8546,6 +8574,71 @@
         const nBox = document.getElementById('siAmendNoCodeBox');
         if (cBox) cBox.style.display = mode === 'commits' ? '' : 'none';
         if (nBox) nBox.style.display = mode === 'no_code' ? '' : 'none';
+    }
+
+    // [开发撤回提交 方案 v1.2 §5.10] 撤回弹层——开发自查发现交付实质有问题（非填写内容错误，那种走
+    //   siModalAmendSubmission）时主动收回，理由必填、不限次数。
+    function siModalWithdrawSubmission(iss) {
+        const myRow = siCaps && siCaps.myRow;
+        if (!myRow) { showToast('未找到你的开发记录', 'error'); return; }
+        // ⭐ [方案 §5.6 令牌来源契约·核心约束] expected_submit_event_id 必须在**打开弹窗这一刻**从
+        //   已加载的详情数据里固定（myRow.latest_submit_event_id 由详情端点与交付内容在同一次查询/
+        //   同一快照中读出，任意 dev_status 均返回，见 index.js GET 详情端点 :9590 一带注释）。严禁在
+        //   点击「确认撤回」时另发请求去拉最新编号再提交——那会让一个陈旧页面拿到比它自己更新的
+        //   令牌，版本锁形同虚设。详情里没有该编号（结构上不应发生：dev_status 已是 code_submitted/
+        //   no_code 就必然存在一次 submit/no_code 事件）时要求用户刷新，不静默降级为不带令牌提交。
+        const expectedSubmitEventId = myRow.latest_submit_event_id;
+        if (!expectedSubmitEventId) {
+            showToast('未获取到本次提交的版本编号，请刷新详情后重试', 'error');
+            return;
+        }
+        siModal('撤回提交 ' + siIssueDisplayNoById(iss.id), [
+            // [W2·Opus 预筛 M1] 文案不硬编码具体状态名——后端弹回目标是 SF.SYS_DEV_STATUSES[issueType][0]
+            //   （index.js:4010/4079），而 status-families.js 里 bug/config 的 DEV 族是「处理中」、只有
+            //   feature/improvement 才是「开发中」。方案 §5.10 原文写的就是硬编码「开发中」，属方案继承
+            //   缺陷（已记入 v1.3 待订正）；四类流里两类会被告知与事实不符的状态名，故改用族级说法。
+            // [W2·codex 553 LOW] 补一句"会删除本轮当前提交记录"——用户此前不知道撤回会清掉 commit 行/
+            //   无代码说明这个当前记录（历史审计仍保留，见 §5.9 payload_json 冻结快照，只是不再展示为
+            //   当前交付）。措辞刻意避免"删除代码"这类会被误读成"删仓库代码"的说法，也不加二次确认弹窗
+            //   （方案 W2/W4 已决点：理由必填本身就是一次确认动作，不叠加 window.confirm）。
+            { k: null, html: `<div class="si-note-box">撤回后本单退回开发环节（开发中／处理中）：将删除本轮当前提交记录（含 commit 记录/无代码说明，历史审计保留），你的交付内容将收回，重新提交时需重新填写。</div>` },
+            fTextarea('reason', '撤回理由', '', true, 'trim 后必填，≤300 字（含中文/emoji 按码点计）'),
+        ], async v => {
+            // 同 siModalAmendSubmission :8456 一带同款纪律——onConfirm 内含 await，成功/409 两分支都要
+            // 手动 siCloseModal+siAfterAction，须先核实本弹层是否仍是当前活跃弹层（用户可能已关闭/
+            // 换开了别的弹层），迟到的响应不该再碰"当前"这个已经不相关的弹层。
+            const modalInstanceAtStart = siModalInstanceSeq;
+            const reason = (v.reason || '').trim();
+            if (!reason) { showToast('请填写撤回理由', 'error'); return false; }
+            // [...s].length 按码点计数，与后端逐字同口径（index.js withdraw 端点 `[...reason].length > 300`）
+            //   ——不用 s.length（UTF-16 code unit 计数），否则中文/emoji 场景两端计数会不一致。
+            if ([...reason].length > 300) { showToast('撤回理由过长（trim 后上限 300 字）', 'error'); return false; }
+            const r = await siApi('/sys-issues/' + iss.id + '/submit/withdraw', {
+                method: 'POST',
+                body: { reason, expected_submit_event_id: expectedSubmitEventId },
+            });
+            if (siModalInstanceSeq !== modalInstanceAtStart) return false;
+            if (!r.ok) {
+                if (r.status === 409) {
+                    // 含 WITHDRAW_TARGET_CHANGED（交付已变更——后端 error 文案本身已是"交付内容已变更，
+                    //   请刷新后重试"，siApiErr 优先取 r.data.error 原样透出即可）/
+                    //   STATE_NOT_ALLOWED_FOR_WITHDRAW/NOT_SUBMITTED/FAST_RELEASE_EXECUTED/
+                    //   CONCURRENT_STATE_CHANGE——统一关弹窗+刷新，不让用户停留在过期表单里重复尝试
+                    //   （同 siModalAmendSubmission 409 分支范式）。
+                    siApiErr(r, '状态已变化，已为你刷新最新数据');
+                    siCloseModal();
+                    await siAfterAction();
+                } else {
+                    // 400（VALIDATION/WITHDRAW_REASON_REQUIRED/WITHDRAW_REASON_TOO_LONG）/403 FORBIDDEN
+                    //   等——理由必填与长度前端已拦，令牌前端恒携带，这些分支理论少见，siApiErr 原样
+                    //   透出后端中文 error 文案即可。
+                    siApiErr(r);
+                }
+                return false;
+            }
+            showToast('已撤回提交，本单已退回开发环节', 'success');   // [W2·M1] 同上，不硬编码状态名
+            return true;
+        }, '确认撤回');
     }
 
     // C7：commit 行内编辑三入口（canEditCommits 管既有行 PUT/DELETE；canAddCommit 独立判定管补充 POST）。

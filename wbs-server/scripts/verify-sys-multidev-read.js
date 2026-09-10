@@ -232,7 +232,10 @@ async function main() {
     // （assign/reassign/path A 建单）结构上不产出——方案原文「徽章只认详情」：凡用 mutation 响应重渲
     // 成员区的路径必须随后 siRenderDrawer 重拉详情，不得从 mutation 响应画修正徽标，故此处**不**反向
     // 给 mutation 响应补这四列，只扩详情专属白名单。
-    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at', 'self_tested', 'test_env_deployed', 'bug_cause_note', 'amend_no', 'changed', 'first_submitted_at', 'amended_at'];   // P4+C3+C6+C3(538) 详情端专属增强（唯一允许的差集）
+    // [开发撤回提交·2026-09-10 方案 v1.2 §5.6 令牌来源契约涟漪] +latest_submit_event_id——撤回令牌
+    // 唯一来源，同一 workNoteRows 补查循环挂载（index.js 详情端），mutation 响应结构上不产出，同
+    // amend_no/changed 等既有详情专属列同款白名单登记方式。
+    const DETAIL_ONLY_KEYS = ['work_note', 'work_note_submitted_at', 'self_tested', 'test_env_deployed', 'bug_cause_note', 'amend_no', 'changed', 'first_submitted_at', 'amended_at', 'latest_submit_event_id'];   // P4+C3+C6+C3(538)+撤回令牌 详情端专属增强（唯一允许的差集）
     const detailKeys = Object.keys(rDetail.body.dev_assignees[0]).sort();
     const detailBaseKeys = detailKeys.filter(k => !DETAIL_ONLY_KEYS.includes(k));
     assert.deepStrictEqual(mutationKeys, detailBaseKeys, `${label}：mutation 响应与详情 GET 的 dev_assignees **基础列集**应完全一致（防镜像漂移·排除 P4 详情专属列 ${DETAIL_ONLY_KEYS.join('/')}），mutation=${JSON.stringify(mutationKeys)} detailBase=${JSON.stringify(detailBaseKeys)}`);

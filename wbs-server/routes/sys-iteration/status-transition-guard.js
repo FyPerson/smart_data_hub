@@ -240,8 +240,13 @@ function assertMainStatusTransition(p) {
     //   · verifyStatus→devStatus：弹回（全类型，新 pending 成员打破全完成态）。
     //   · devStatus→liaisonTestStatus：feature ⑦ 正常进入待对接测试（liaisonTestStatus 对 improvement/bug
     //     恒为 null，故这两个分支对它们结构性不可达，不会误放行）。
-    //   · liaisonTestStatus→devStatus：feature 测试段弹回（§3.1 点4"脏数据防御分支"——正常业务流程走
-    //     花名册七写入口 409 挡住新增 pending，此边只在写入口被绕过/直接改库等异常情形下兜底）。
+    //   · liaisonTestStatus→devStatus：feature 测试段弹回。原注释曾写"正常业务流程走花名册七写入口 409
+    //     挡住新增 pending，此边只在写入口被绕过/直接改库等异常情形下兜底"——**该表述已被推翻**：
+    //     `POST /sys-issues/:id/submit/withdraw`（开发撤回提交，2026-09-10 用户拍板放行待对接测试态
+    //     撤回，方案 v1.2）是本边的**正常业务来源**——开发在待对接测试态撤回提交时，CAS 把该实例
+    //     dev_status 改回 pending，随后同事务重跑 runWGate，命中的正是这一条边（LIAISON_TEST→DEV）。
+    //     "脏数据防御分支"的语义仍部分成立（写入口被绕过/直接改库等异常情形下同样会走到这里兜底），
+    //     只是不再是唯一来源，故本条边现由两类场景共同覆盖：①正常业务（withdraw）②异常兜底（脏数据）。
     if (before === devStatus && after === verifyStatus) afterFamily = 'VERIFY';
     else if (before === verifyStatus && after === devStatus) afterFamily = 'DEV';
     else if (liaisonTestStatus && before === devStatus && after === liaisonTestStatus) afterFamily = 'LIAISON_TEST';

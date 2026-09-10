@@ -884,7 +884,11 @@ function extractSetLiteralStrings(text, constName) {
 //   48→49 处注释）本码刻意暂未登记，前端三处登记留给 R-C5；本批已在 Sys_Iteration.html 补齐
 //   SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES 三处，此处同步补齐（两处必须逐字同步，见下方
 //   [预筛 MED-5] 双向核对断言）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted']);
+// [2026-09-10 开发撤回提交 方案 v1.2·W2 前端] +dev_withdraw——W1 阶段（见上方 EXPECTED_INSERT_SITE_COUNT
+//   50→52 一带注释）该码落回 event_type='note' 的通用「备注」标签展示，本批（W2）补齐前端三处登记
+//   （Sys_Iteration.html 的 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES）后升级为独立 display key
+//   'dev_withdraw'，本文件同步补登记（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1088,7 +1092,16 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   [2026-09-10 #56] 51→50：该写入点随「执行方式」契约整组下线一并删除（reassign 不再写 exec_mode/
 //   vendor_name 变更行），用户拍板，非本文件误改。docs/local/系统迭代/时间线写入点码表_20260810.md
 //   须同步登记（本次改动时该目录在本地不可达，未能同步更新，留给下次接触到该目录时补）。
-const EXPECTED_INSERT_SITE_COUNT = 50;
+//   [2026-09-10 开发撤回提交 方案 v1.2] 50→52：新端点 POST /sys-issues/:id/submit/withdraw 新增 2 处
+//   INSERT INTO sys_issue_timeline——① event_type='note'·action_code='fast_release_auth_terminated'
+//   （仅当撤回时命中活跃先行上线授权才写，复用既有 action_code，非新码）② event_type='note'·
+//   action_code='dev_withdraw'（新码，恰是本批新增的"真"新码——NOT in NOTE_OWN_LABEL_ACTION_CODES，
+//   computeDisplayKey 按其"note 且未登记 own-label"分支归并到通用 display key 'note'，已在 SI_TL_LABEL
+//   覆盖内，不产生新的标签覆盖缺口；方案 §5.10 前端登记三处映射是 W2 范围，本批不做，登记后该码会
+//   从"落 note 通用备注"升级为独立"撤回提交"徽章，届时仍不影响本文件覆盖判定，只是显示更醒目）。
+//   docs/local/系统迭代/时间线写入点码表_20260810.md 须同步登记（本次改动时该目录在本地不可达，
+//   未能同步更新，留给下次接触到该目录时补，同上一条 #56 处置一致）。
+const EXPECTED_INSERT_SITE_COUNT = 52;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(
