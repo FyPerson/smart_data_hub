@@ -916,15 +916,25 @@ async function main() {
 
   // [F4] feature × deadline 已过期（非空∧≤受理时刻）→ 回退 SLA + summary 注明"期望已过期" + C11 触发
   {
-    const pastDeadline = fmt(addDays(new Date(), -3));   // 3 天前，已过期
-    const id = await mkIssue('feature', nowStrForFixture(), { deadline: pastDeadline });
+    // [C1 collateral·Opus 预筛 M3 收口] 建单端点起自本轮起拒绝已过期 deadline——本用例测的是「deadline
+    //   建单时合法、受理时已过期」这一真实时间流逝场景，不是"建单允许过期"；改为先建单（不传 deadline）
+    //   再直接 SQL 回填过期值，绕开建单闸模拟时间流逝，语义不变（同本文件其余处"直接 SQL 造历史脏值"
+    //   手法）。回填值改用 fmtLocalNoSec(...)+':00'（非 fmt() 带真实秒）——生产经 normalizeDeadlineDT
+    //   入库的 deadline 恒截到分钟、秒位补 ':00'，回填值须与该真实落库形态一致，否则下方 :00 拼接负例
+    //   断言（notStrictEqual）会因两边格式本就不同而恒真、测不出真正的行为。
+    const pastDeadline = fmtLocalNoSec(addDays(new Date(), -3)) + ':00';   // 3 天前，已过期
+    const id = await mkIssue('feature', nowStrForFixture());
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [pastDeadline, id]);
     const r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 200, `[F4] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     const eta = r.body.eta;
     const row = await issueRow(id);
     const defaultEta = I.computeSysDefaultEta(row.created_at, 'feature');
     assert.strictEqual(row.dev_estimated_at, defaultEta, `[F4] ⭐ 已过期 → 仍回退 SLA 公式（非 deadline），实得 ${row.dev_estimated_at}`);
-    assert.notStrictEqual(row.dev_estimated_at, `${pastDeadline}:00`, '[F4] 库内值不应是那个已过期的 deadline 本身');
+    // [Opus 预筛 M3 收口·随附] pastDeadline 现已是 fmtLocalNoSec+':00' 的完整落库形态（'YYYY-MM-DD HH:MM:00'），
+    //   不应再拼接第二个 ':00'（原写法基于 fmt() 带真实秒的旧值，会产出 'HH:MM:SS:00' 双秒位串，与
+    //   normalizeDeadlineDT 的真实落库形态从未一致过，负例恒真、测不出东西）。
+    assert.notStrictEqual(row.dev_estimated_at, pastDeadline, '[F4] 库内值不应是那个已过期的 deadline 本身');
     assert.ok(eta.expected_gap_days > 0, `[F4] ⭐ C11 照常触发——defaultEta（未来）必晚于已过期的 deadline，expected_gap_days 应为正数，实得 ${eta.expected_gap_days}`);
     const marker = await timelineByActionCode(id, 'eta_auto_sla');
     assert.ok(marker, '[F4] 应产出独立 action_code=eta_auto_sla 留痕行');
@@ -937,8 +947,11 @@ async function main() {
   //   "有效"），slaExceeded=true 时代码结构层面整体跳过 `!slaExceeded` 子分支（deadline 是否存在不再
   //   影响路径选择），与"为空×已超"汇入同一条既有分支——400 必填照旧，零 §13 新增留痕。
   {
-    const pastDeadline = fmt(addDays(new Date(), -3));
-    const id = await mkIssue('feature', FAR_PAST_CREATED, { deadline: pastDeadline });
+    // [C1 collateral·Opus 预筛 M3 收口] 同上 [F4]：先建单（不传 deadline）再 SQL 回填过期值，绕开建单闸
+    //   模拟时间流逝；回填值同上改用 fmtLocalNoSec+':00'（与生产 normalizeDeadlineDT 落库形态一致）。
+    const pastDeadline = fmtLocalNoSec(addDays(new Date(), -3)) + ':00';
+    const id = await mkIssue('feature', FAR_PAST_CREATED);
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [pastDeadline, id]);
     // feature 类型 risk_level 恒必填（同 [F3-SLA已超] 注释，与 §13/§14 无关的独立闸，每次调用都带）。
     let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, { risk_level: '二级' });
     assert.strictEqual(r.status, 400, `[F4-SLA已超-反] 不填应 400，实得 ${r.status} ${JSON.stringify(r.body)}`);

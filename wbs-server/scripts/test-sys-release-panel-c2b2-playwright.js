@@ -488,27 +488,42 @@ async function main() {
             const pageAdmin = await newPage(adminTok);
             await gotoRelease(pageAdmin, batchG1);
 
-            // not_sent → 点「📣 发通知」（真实点击，dry-run 安全）→ sent（含 dry_run 文案）。
+            // not_sent → 点「发送通知」（真实点击，dry-run 安全）→ sent（含 dry_run 文案）。
+            // [C3b·Opus 预筛 L-9 收口] 按钮文案过期修正——Sys_Iteration.html:10125 行级发通知按钮三态实为
+            // `ns==='not_sent'?'发送通知':(ns==='sent'?'重新通知':'重试')`，无「📣」前缀（📣 前缀是另一处
+            // 「安排上线」按钮:10017 的文案，本行级按钮从未带过），本文件原断言文案已与实现脱节，判正确
+            // 系因 `:has-text()` 做子串匹配、旧文案"📣 发通知"恰巧不出现导致该断言原本就该判红却被后续
+            // 代码路径掩盖（发现于 C3b Opus 预筛复核）。
             const liuItem = pageAdmin.locator('.si-att-item:has-text("示例开发A")');
-            await shotOnFail(pageAdmin, (await liuItem.locator('button:has-text("📣 发通知")').count()) > 0, 'g3-liu-notsent-btn', 'G3 示例开发A行 not_sent 态显示「📣 发通知」按钮');
-            await liuItem.locator('button:has-text("📣 发通知")').click();
+            await shotOnFail(pageAdmin, (await liuItem.locator('button:has-text("发送通知")').count()) > 0, 'g3-liu-notsent-btn', 'G3 示例开发A行 not_sent 态显示「发送通知」按钮');
+            await liuItem.locator('button:has-text("发送通知")').click();
             await pageAdmin.waitForTimeout(500);
             const toastNotify1 = await lastToastText(pageAdmin);
-            await shotOnFail(pageAdmin, toastNotify1.includes('已通知') && toastNotify1.includes('演练模式，未真实外呼'), 'g3-notify-toast', `G3 示例开发A行发通知成功 toast 含演练标注（实得："${toastNotify1}"）`);
+            // [C3b·Opus 预筛 L-9 顺带修·文案过期] 真实 toast 文案见 Sys_Iteration.html:10212
+            // `showToast('已通知' + (d.dry_run ? '（演练·未真实发送）' : '') + tlSuffix, 'success')`——
+            // 旧断言期望的「演练模式，未真实外呼」与此不同源，属另一处过期文案（发现于 C3b 复核）。
+            await shotOnFail(pageAdmin, toastNotify1.includes('已通知') && toastNotify1.includes('演练·未真实发送'), 'g3-notify-toast', `G3 示例开发A行发通知成功 toast 含演练标注（实得："${toastNotify1}"）`);
             const liuItem2 = pageAdmin.locator('.si-att-item:has-text("示例开发A")');
             await shotOnFail(pageAdmin, (await liuItem2.locator('.si-release-badge:has-text("已通知")').count()) > 0, 'g3-liu-sent-badge', 'G3 示例开发A行发通知后徽标变为「已通知」');
-            await shotOnFail(pageAdmin, (await liuItem2.locator('button:has-text("📣 重新通知")').count()) > 0, 'g3-liu-resend-btn', 'G3 示例开发A行发通知后按钮变为「📣 重新通知」');
+            await shotOnFail(pageAdmin, (await liuItem2.locator('button:has-text("重新通知")').count()) > 0, 'g3-liu-resend-btn', 'G3 示例开发A行发通知后按钮变为「重新通知」');
             await shotOnFail(pageAdmin, (await liuItem2.locator('button:has-text("查询已读")').count()) > 0, 'g3-liu-readbtn', 'G3 示例开发A行发通知后出现「查询已读」按钮');
 
             // 查询已读（真实点击，dry-run message_key 短路，安全）。
+            // [C3b·Opus 预筛 L-9 顺带修·断言目标面过期] 原断言检查 toast——但 siExecutorRowReadStatus
+            // （Sys_Iteration.html:10253）dry_run 分支走的是行内结果框 `put(html, toastMsg, ...)`，
+            // `put` 只在结果框元素挂不上时才回落 toast（Sys_Iteration.html:10260 注释"结果框写入统一走
+            // 这里：挂不上（DOM 与预期不符）就回落 toast"），正常路径下不产生 toast——原断言检查了错误
+            // 的 UI 表面，之前之所以看起来"通过"是因为读到了上一步发通知遗留的旧 toast 文本，恰好含
+            // "已通知" 子串蒙混过关；本条真正应检查的是结果框 `#siExecReadBox_${releaseId}_${userId}`
+            // 的内容（Sys_Iteration.html:10289 `dry_run` 分支：`⚠️ 演练发送（未真实外呼），无法查询已读`）。
             await liuItem2.locator('button:has-text("查询已读")').click();
             await pageAdmin.waitForTimeout(400);
-            const toastRead1 = await lastToastText(pageAdmin);
-            await shotOnFail(pageAdmin, toastRead1.includes('该消息是演练发送，不可查真实已读'), 'g3-read-dryrun-toast', `G3 查询已读命中 dry_run 短路分支 toast 正确（实得："${toastRead1}"）`);
+            const readBoxText = await pageAdmin.locator(`#siExecReadBox_${batchG1}_${EXEC_A_ID}`).textContent();
+            await shotOnFail(pageAdmin, !!readBoxText && readBoxText.includes('演练发送（未真实外呼），无法查询已读'), 'g3-read-dryrun-box', `G3 查询已读命中 dry_run 短路分支，结果框文案正确（实得："${readBoxText}"）`);
 
             // 示例开发B行同款发通知（供后续 execute 全链路用）。
             const zhangItem = pageAdmin.locator('.si-att-item:has-text("示例开发B")');
-            await zhangItem.locator('button:has-text("📣 发通知")').click();
+            await zhangItem.locator('button:has-text("发送通知")').click();
             await pageAdmin.waitForTimeout(500);
             const toastNotify2 = await lastToastText(pageAdmin);
             await shotOnFail(pageAdmin, toastNotify2.includes('已通知'), 'g3-zhang-notify-toast', `G3 示例开发B行发通知成功（实得："${toastNotify2}"）`);

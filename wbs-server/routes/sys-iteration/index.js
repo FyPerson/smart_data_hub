@@ -2097,6 +2097,16 @@ module.exports = (deps) => {
       ];
       await alterAddMissingCols('sys_issues', SYS_CONFIG_FLOW_ISSUE_COLS, 'S1a·config流激活_方案_20260907_v1.0 §4 执行方式契约');
 
+      // [C2·A 块] 上线逾期留痕——2 列（overdue_reason_code/overdue_reason_note），照 :2073-2077
+      //   SYS_COMPLETION_OVERRUN_ISSUE_COLS 同款写法（无 DDL CHECK，理由码值域由服务层
+      //   RELEASE_OVERDUE_REASON_CODES 校验 + verify 全库探针双层保障）。两列同挂 sys_releases（批次级，
+      //   非 sys_issues 单级——逾期是批次发布时刻 vs 批次计划日的判定，理由随批次落一次，非随单）。
+      const RELEASE_OVERDUE_COLS = [
+        ['overdue_reason_code', 'TEXT'],
+        ['overdue_reason_note', 'TEXT'],
+      ];
+      await alterAddMissingCols('sys_releases', RELEASE_OVERDUE_COLS, '上线逾期留痕与日期硬拦_方案_20260910_v1.2 §6·A 块');
+
       // [codex 291 号 H-2 收口] sys_issue_timeline 首次经 alterAddMissingCols 补列（此前该表无 ALTER 路径，
       //   旧库靠 CREATE TABLE IF NOT EXISTS no-op 停在原 12 列——TEXT 列无 CHECK 语义损失，ALTER 补列本身低风险）。
       await alterAddMissingCols('sys_issue_timeline', [['payload_json', "TEXT CHECK (payload_json IS NULL OR json_valid(payload_json))"]], 'D22 pass 凭证结构化留痕（291 号 H-2·292 号 M-4 补 json_valid 约束与 DDL 同款——读侧 JSON.parse/json_extract 不被脏值击穿的 DB 层保证）');
@@ -2678,6 +2688,23 @@ module.exports = (deps) => {
     return { ok: true, value: `${m[1]}-${m[2]}-${m[3]} ${pad(hh)}:${pad(mi)}:00` };
   }
 
+  // ── C1·「不早于今天」硬拦判据（deadline/planned_date 共用，独立函数）────────────────────
+  //   ⚠️⚠️ 红线（C0 核查报告 ⑦-b）：禁止把本判据塞进 normalizeDeadline/normalizeDeadlineDT 函数体——
+  //     normalizeDeadline 另服务 scheduled_start/duty_date/date_from/date_to 四个"允许补录历史值"的
+  //     字段（方案明确不动），塞进函数体会一次性把它们也收紧。故新建本函数，在 6 个写入点各自调用。
+  //   取「今天」写法同源复用「未来上线日期执行闸」（:186xx 一带 execute 端点）：SELECT date('now','localtime')，
+  //     同一 SQLite localtime（单机部署同 TZ）。仅判**日历日 < 今天**；今天允许（`<` 严格比较，非 `<=`）。
+  //   入参：dl.value（normalizeDeadlineDT 输出，'YYYY-MM-DD HH:MM:SS' 或 null）或 pd.value（normalizeDeadline
+  //     输出，'YYYY-MM-DD' 或 null）——两者均已过构造后回比对，取前 10 位即真实日历日，不再重复校验格式。
+  //   空值调用方自行短路（`dl.value && await isBeforeToday(...)`），本函数不处理空值语义。
+  async function isBeforeToday(dateOnlyOrDateTimeStr) {
+    const dayStr = String(dateOnlyOrDateTimeStr).slice(0, 10);
+    const todayRow = await dbGetAsync(`SELECT date('now','localtime') AS d`);
+    const todayStr = todayRow && todayRow.d;
+    if (!todayStr) return false;   // 防御：查询返回空行时放行（不拦）；查询抛错随既有出口传播——与「未来上线日期执行闸」逐字同口径，不另捕获
+    return dayStr < todayStr;
+  }
+
   // ── deadline 的**文本**截断件（时间格式统一 S3·D3）────────────────────────────────────
   //   ⚠️ 不能用 truncToMinute：它匹配 `^(日期) (时:分)`，对**纯日期**返回 null——存量 deadline 正是纯日期，
   //     拿它拼留痕会把 '2026-08-10' 变成"空"，凭空造出一条"从空改为 X"的假记录。
@@ -2783,6 +2810,124 @@ module.exports = (deps) => {
   const ETA_OVERRUN_TOLERANCE_DAYS = { improvement: 5, feature: 7 };
   const ETA_OVERRUN_REASON_CODES = ['需求变更', '技术难度超预期', '依赖阻塞', '资源冲突', '其他'];   // C5：单选必填
   const ETA_OVERRUN_REASON_NOTE_MAX = 300;
+
+  // ── C2·A 块（上线逾期留痕，方案 20260910 v1.2 §5.1/§6）：独立值域——⚠️ 不复用上面的
+  //   ETA_OVERRUN_REASON_CODES（D3 拍板独立白名单，场景不同：本组专属"批次实际发布日晚于计划上线日"）。
+  const RELEASE_OVERDUE_REASON_CODES = ['业务方要求延后', '值班人员变更', '环境或依赖未就绪', '通知到达晚', '其他'];
+  const RELEASE_OVERDUE_REASON_NOTE_MAX = 300;
+
+  // 理由参数完整契约（方案 §5.1.3a，六情形）：纯函数，入参请求体，返回 { ok:true, code, note }
+  //   或 { ok:false, httpStatus, code, error }。⚠️ 比 completionOverrunGroupInvariantViolations 一带
+  //   的既有范式更严——那处把"非字符串"隐式 `typeof … === 'string' ? … : ''` 归成空串，会落到
+  //   `_REQUIRED` 而非独立码；本函数显式 typeof 分支，非字符串直接判 400 RELEASE_OVERDUE_REASON_INVALID，
+  //   不做隐式归一（C0 附加事实 C 已指出两者契约不同，不能照抄）。
+  function resolveReleaseOverdueReasonInput(body) {
+    const b = body || {};
+    const rawCode = b.overdue_reason_code;
+    const rawNote = b.overdue_reason_note;
+    const codeMissing = rawCode === undefined || rawCode === null;
+    const noteMissing = rawNote === undefined || rawNote === null;
+    if (!codeMissing && typeof rawCode !== 'string') {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_OVERDUE_REASON_INVALID', error: '逾期原因码格式错误（须为字符串）' };
+    }
+    if (!noteMissing && typeof rawNote !== 'string') {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_OVERDUE_REASON_INVALID', error: '逾期原因说明格式错误（须为字符串）' };
+    }
+    const code = codeMissing ? '' : rawCode.trim();
+    const note = noteMissing ? '' : rawNote.trim();
+    if (!code && !note) {
+      return { ok: false, httpStatus: 409, code: 'RELEASE_OVERDUE_REASON_REQUIRED', error: '较计划上线日已逾期，请填写逾期原因' };
+    }
+    if (!code || !note) {
+      return { ok: false, httpStatus: 409, code: 'RELEASE_OVERDUE_REASON_REQUIRED', error: '逾期原因码与说明须同时填写' };
+    }
+    if (!RELEASE_OVERDUE_REASON_CODES.includes(code)) {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_OVERDUE_REASON_CODE_INVALID', error: `逾期原因码不在允许范围内（${RELEASE_OVERDUE_REASON_CODES.join('/')}）` };
+    }
+    if (note.length > RELEASE_OVERDUE_REASON_NOTE_MAX) {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_OVERDUE_REASON_NOTE_TOO_LONG', error: `逾期原因说明超长（最多 ${RELEASE_OVERDUE_REASON_NOTE_MAX} 字）` };
+    }
+    return { ok: true, code, note };
+  }
+
+  // 日历日整日差（方案 §5.1.2/§6 判定式）：Date.UTC 构造避 DST，入参均为已过 round-trip 校验的
+  //   'YYYY-MM-DD'。供写点与 verify 直调同一份实现，防复刻漂移。
+  function releaseOverdueCalendarDayDiff(laterDayStr, earlierDayStr) {
+    const toUtcMs = (s) => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+    return Math.round((toUtcMs(laterDayStr) - toUtcMs(earlierDayStr)) / 86400000);
+  }
+
+  // ── C4·B 块（改期基准留痕，方案 20260910 v1.2 §5.2.2）：独立值域——单字段自由文本理由，
+  //   与 §5.1.3a 的「码+说明」双字段契约（resolveReleaseOverdueReasonInput）不是同一场景，不复用。
+  //   显式 typeof 分支（与 resolveReleaseOverdueReasonInput 同款风格）：非字符串直接判 400 …_INVALID，
+  //   不做隐式归一，缺失/空 trim 判 400 …_REQUIRED，超长判 400 …_TOO_LONG。
+  const RELEASE_DATE_CHANGE_REASON_MAX = 200;
+  function resolveReleaseDateChangeReasonInput(body) {
+    const raw = (body || {}).reason;
+    if (raw === undefined || raw === null) {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_DATE_CHANGE_REASON_REQUIRED', error: '原计划上线日已逾期，改期须填写理由' };
+    }
+    if (typeof raw !== 'string') {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_DATE_CHANGE_REASON_INVALID', error: '改期理由格式错误（须为字符串）' };
+    }
+    const reason = raw.trim();
+    if (!reason) {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_DATE_CHANGE_REASON_REQUIRED', error: '原计划上线日已逾期，改期须填写理由' };
+    }
+    if (reason.length > RELEASE_DATE_CHANGE_REASON_MAX) {
+      return { ok: false, httpStatus: 400, code: 'RELEASE_DATE_CHANGE_REASON_TOO_LONG', error: `改期理由超长（最多 ${RELEASE_DATE_CHANGE_REASON_MAX} 字）` };
+    }
+    return { ok: true, reason };
+  }
+
+  // 旧值展示态解析（方案 §5.2.2 旧值合法性守卫）：null → 未设定（不触发理由闸）；round-trip 合法 →
+  //   真实日历日（可触发理由闸）；非法脏值（历史空串/`2026-13-99` 等）→ 如实显示原值+异常标注，
+  //   dayStr 恒 null（不触发理由闸、不生成迟到天数）。三态单出口，端点与 timeline 摘要共用同一判定，
+  //   避免脏值被字符串比较误判为「已逾期」（那会把「修复脏日期」这条自救路也一并堵死）。
+  function resolveReleaseDateChangeOldValueDisplay(raw) {
+    if (raw === undefined || raw === null || raw === '') return { display: '未设定', dayStr: null, valid: true };
+    const check = normalizeDeadline(raw);
+    // [C4b·L1 收口] normalizeDeadline 内部对 raw 先 trim 再校验——比对基准须同样 trim，否则存量"合法但
+    //   带前后空格"的历史值（如 " 2026-09-10 "）会被误判成脏值（check.value 是 trim 后的干净串，直接
+    //   比 raw 恒不等），显示成不实的"（异常）"标注。
+    if (check.ok && check.value === String(raw).trim()) return { display: check.value, dayStr: check.value, valid: true };
+    return { display: `${raw}（异常）`, dayStr: null, valid: false };
+  }
+
+  // 层一·全库探针（方案 §7.1，适用全部批次含历史）：⚠️ 必须允许"两列都空"——应急单的合法形态
+  //   （留痕行在、理由为空）与本功能上线前的历史批次均如此，不得断言"凡逾期批次必有理由"（那是
+  //   层二事务级断言职责，verify 脚本自行按 released_at vs 功能上线时刻划定适用范围）。
+  // [C2c·codex 556 号 MEDIUM 收口] 「非空」口径须与写点 resolveReleaseOverdueReasonInput 同源——
+  //   那里是 `typeof === 'string' && trim() !== ''` 才算「有值」，trim 后空视为未填。此前本探针只判
+  //   `!== ''`（不 trim），纯空白（如三个空格）会被误判为「已填」，让"只码+空白说明"这类半成品态在
+  //   无 DDL CHECK 兜底下从探针眼皮底下溜过。改为同一口径；非字符串类型（数组/对象/数字/布尔——理论
+  //   只能经绕过服务层的脏写入产生）本身就是异常，单独报违例，不参与「present」判定（避免和下面的
+  //   同空同非空判定重复混淆语义，两条各自成立可以同时命中同一行）。
+  function releaseOverdueGroupInvariantViolations(row) {
+    const violations = [];
+    const rawCode = row.overdue_reason_code;
+    const rawNote = row.overdue_reason_note;
+    const codeNullish = rawCode === null || rawCode === undefined;
+    const noteNullish = rawNote === null || rawNote === undefined;
+    if (!codeNullish && typeof rawCode !== 'string') {
+      violations.push(`overdue_reason_code 非字符串类型（${JSON.stringify(rawCode)}）`);
+    }
+    if (!noteNullish && typeof rawNote !== 'string') {
+      violations.push(`overdue_reason_note 非字符串类型（${JSON.stringify(rawNote)}）`);
+    }
+    const codePresent = typeof rawCode === 'string' && rawCode.trim() !== '';
+    const notePresent = typeof rawNote === 'string' && rawNote.trim() !== '';
+    if (codePresent !== notePresent) {
+      violations.push(`overdue_reason_code/note 非同空同非空（code=${JSON.stringify(rawCode)}, note=${JSON.stringify(rawNote)}）`);
+    }
+    if (codePresent && !RELEASE_OVERDUE_REASON_CODES.includes(rawCode)) {
+      violations.push(`overdue_reason_code 不在白名单内（${JSON.stringify(rawCode)}）`);
+    }
+    if (notePresent && String(rawNote).length > RELEASE_OVERDUE_REASON_NOTE_MAX) {
+      violations.push(`overdue_reason_note 超长（${String(rawNote).length} 字，上限 ${RELEASE_OVERDUE_REASON_NOTE_MAX}）`);
+    }
+    return violations;
+  }
 
   // 日期归一契约（§3C.2·354-M4 采纳+加强，sqlite_date_check_gotcha 沉淀）：
   //   [codex 365 LOW 口径澄清] 精确契约=**trim 后**接受 'YYYY-MM-DD' / 'YYYY-MM-DD HH:MM' /
@@ -4689,14 +4834,27 @@ module.exports = (deps) => {
       throw new SysTransitionError(500, 'FAST_RELEASE_AUTH_EXPIRY_INVARIANT',
         `先行上线授权超时终结失败：事务内残留授权状态与终结 UPDATE 不一致（issue ${issueId}）`);
     }
+    // [C5·方案 §5.3] 清集合前先取"未确认执行人"名单（pending，未 done）——clearFastReleaseRosterOnTermination
+    // 会把本表未软删行统一软删（含 done），故必须在那一步之前读，否则 removed_at 已写、活跃谓词失配读不到。
+    const pendingRows = await dbAllAsync(
+      `SELECT user_id, user_name FROM sys_fast_release_executors
+         WHERE ${sysFastReleaseExecActiveWhere()} AND exec_status = 'pending' ORDER BY id`,
+      [issueId]);
+    // [C5b·L2 收口] 兜底同源化——本文件其余三处 sysFastReleaseSafeName 兜底均落 `user#${id}`（同 :5033/
+    // :12220 一带既有惯例），本处此前落空串 + .filter(Boolean) 会让脏名（纯空白 user_name，理论上被
+    // 建表 CHECK 挡住，但同文件纵深防御精神要求不依赖"理论不可达"）静默从名单里消失——改回同源兜底，
+    // 不再过滤剔除任何一条已查到的行。
+    const pendingNames = (pendingRows || []).map(r => sysFastReleaseSafeName(r.user_name, `user#${r.user_id}`));
     // 清执行人集合（含 done，S5 共享内核——同 void/重授路径"授权彻底终结"语义，唯一实现禁双写）。
     await clearFastReleaseRosterOnTermination(issueId, actor, '授权超时收回');
     // 超时留痕——独立 action_code，事件本身独立于既有 fast_release_auth_terminated（窗口内五事件终结）
-    // 之外，前端可据此区分"人为终结" vs "超时自动收回"两类成因。
+    // 之外，前端可据此区分"人为终结" vs "超时自动收回"两类成因。零在册（pendingNames 为空）不附记，
+    // 同 discarded_done_names 为空时不附加文本的既有处理（:16712-16714）。
+    const pendingSuffix = pendingNames.length > 0 ? `；未确认执行人：${pendingNames.join('、')}` : '';
     await dbRunAsync(
       `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
        VALUES (?, 'note', ?, 'fast_release_auth_expired', ?, ?)`,
-      [issueId, '先行上线授权超时未启用（次日 8:00 前未完成），已收回，转常规验收流程',
+      [issueId, `先行上线授权超时未启用（次日 8:00 前未完成），已收回，转常规验收流程${pendingSuffix}`,
         Number(actor.id) || null, actor.name || null]
     );
     return true;
@@ -7122,6 +7280,8 @@ module.exports = (deps) => {
       //   否则会出现"建单能填到分钟、一改范围/一编辑就被拒"的分裂）
       const dl = normalizeDeadlineDT(b.deadline);
       if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
+      // [C1] 建单传入非空 deadline 即校验「不早于今天」（独立判据函数，见 :2680 一带）。
+      if (dl.value && await isBeforeToday(dl.value)) return res.status(400).json({ error: '期望完成日不能早于今天', code: 'DEADLINE_BEFORE_TODAY' });
       // ── 角色权限重构 C0（方案 v1.5 §4-C0）：受理门焊死 ──────────────────────────────────────
       //   ⭐ 全类型建单**必经受理**（bug/feature/improvement），intake_required 由服务端恒定为 1，
       //     落态恒「待受理」——不再由 admin 勾选决定（原「需对接人受理」checkbox 随本 commit 从前端移除）。
@@ -12624,7 +12784,7 @@ module.exports = (deps) => {
   //   随之从"进事务前"挪到"读到真实 status、定完档位之后"（档位本身依赖事务内重读的 status 与 type）。
   //   最终 UPDATE 带 `WHERE id=? AND status IN (<该流该档白名单>)` 双条件守卫 + changes===0 → 409 回滚，
   //   防跨档漂移/TOCTOU。
-  //   审计（§5.2 codex M 消歧）：event_type=note + action_code=edit_in_revision（priority 改动也走此码·不单列 priority_change）·改动字段名列入 summary（timeline 无 payload_json 列·不为审计明文差异做 schema 迁移·codex C4 LOW-6：不落前后值）；
+  //   审计（§5.2 codex M 消歧）：event_type=note + action_code=edit_in_revision（priority 改动也走此码·不单列 priority_change）·改动字段名列入 summary + payload_json 落 {changes:[{field,old,new}]}（2026-09-11 时间线改动明细方案 D2 推翻 codex C4 LOW-6「不落前后值」）；
   //   当前轮已有技术负责人评估意见时追加"（当前轮已有评估意见，评估在先）"标注（§6.4·审 215 M-6 轻量版）——
   //   判定口径同源 clearPendingConsultOnLeave（:2612）："当前轮是否有意见" = tech_lead_notify_request_event_id
   //   非空 且 存在 timeline.id > 该 event_id 的 action_code='tech_lead_comment' 行，不再各写一份防漂移。
@@ -12743,7 +12903,7 @@ module.exports = (deps) => {
           return res.status(400).json({ error: `不支持编辑的字段：${extra.join(',')}`, code: 'EDIT_FIELD_NOT_ALLOWED' });
         }
         // 逐字段校验（复用建单口径）+ 计算改动集（幂等：值未变不列入）
-        const setFrags = [], setParams = [], changed = [];
+        const setFrags = [], setParams = [], changed = [], changes = [];
         for (const f of tierFields) {
           if (!(f in b)) continue;   // 未传字段不动
           let val;
@@ -12759,6 +12919,8 @@ module.exports = (deps) => {
           } else if (f === 'deadline') {
             const dl = normalizeDeadlineDT(b.deadline);   // 四处优化 D2：同建单口径（到分钟）
             if (!dl.ok) { await sysRollback(); return res.status(400).json({ error: '期望完成格式非法（YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' }); }
+            // [C1] body 里带 deadline 且非空才校验「不早于今天」；前端 dirty 门保证不改该字段就不进 body。
+            if (dl.value && await isBeforeToday(dl.value)) { await sysRollback(); return res.status(400).json({ error: '期望完成日不能早于今天', code: 'DEADLINE_BEFORE_TODAY' }); }
             val = dl.value;   // 规范化串或 null
           } else if (f === 'needs_feasibility') {
             // 0/1 + type guard（同建单：仅 feature/improvement 可设 1·L-2 输入收窄）
@@ -12813,6 +12975,10 @@ module.exports = (deps) => {
           setFrags.push(`${f} = ?`);
           setParams.push(val);
           changed.push(f);
+          // [时间线改动明细 方案 20260911 v1.2 §3.1·D2] 同步收集归一后的旧值/新值（deadline 已归到分、
+          //   needs_feasibility 归 0/1、自由文本 null-or-string）——与上方幂等比对同一份 normOld/normNew，
+          //   保证「记为改动」与「记录的差异」判据同源；落 payload_json 供详情页时间线展开渲染。
+          changes.push({ field: f, old: normOld, new: normNew });
         }
         if (!changed.length) {
           // 无有效改动 → 幂等零写入（不 UPDATE 不留 timeline·同 estimate unchanged 范式）
@@ -12833,15 +12999,17 @@ module.exports = (deps) => {
               `SELECT 1 FROM sys_issue_timeline WHERE issue_id=? AND action_code='tech_lead_comment' AND id > ?`,
               [id, row.tech_lead_notify_request_event_id])
           : null;
-        // note timeline + action_code=edit_in_revision（改动字段名列入 summary·结构化审计够用）。
-        //   ⚠️ sys_issue_timeline 无 payload_json 列（该列在 sys_issue_dev_events）——改动快照落 summary 文本·
-        //     不为审计明文差异做 schema 迁移（超 C4 范围·字段名列表已满足「哪些字段改了」审计需求）。
+        // note timeline + action_code=edit_in_revision（改动字段名列入 summary）。
+        //   [时间线改动明细 方案 20260911 v1.2 §3.1·D2] payload_json 补落 {changes:[{field,old,new}]}——推翻建单优化批
+        //   codex C4 LOW-6「不落前后值」（当时理由「字段名够审计」，现在需求是给人看改动内容）。sys_issue_timeline
+        //   的 payload_json 列早已存在（release_info_edit / completion_overrun_reason 等在用），零 DDL；summary 文本
+        //   逐字不变，历史行（payload_json 为 NULL）前端走原路径只显字段名。
         const changedLabels = changed.map(f => EDIT_FIELD_LABELS[f] || f);
         const noteSummary = `编辑内容（${changedLabels.join('、')}）` + (hasCurrentRoundComment ? '（当前轮已有评估意见，评估在先）' : '');
         await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'note', ?, 'edit_in_revision', ?, ?)`,
-          [id, noteSummary, Number(actor.id) || null, actor.name || null]);
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'edit_in_revision', ?, ?, ?)`,
+          [id, noteSummary, Number(actor.id) || null, actor.name || null, JSON.stringify({ changes })]);
         await sysCommit();
         return res.json({ id, changed, action: 'edit_in_revision' });
       } catch (txErr) {
@@ -14670,6 +14838,8 @@ module.exports = (deps) => {
       if (trimmedDeadline) {
         const dl = normalizeDeadlineDT(trimmedDeadline);   // 四处优化 D2：同建单口径（到分钟）
         if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
+        // [C1] 传入非空即校验「不早于今天」（端点当前不可达，契约照加，见 C0 核查报告 ⑦-a）。
+        if (dl.value && await isBeforeToday(dl.value)) return res.status(400).json({ error: '期望完成日不能早于今天', code: 'DEADLINE_BEFORE_TODAY' });
         dlValue = dl.value;
       }
       const actor = sysActor(req);
@@ -14871,6 +15041,8 @@ module.exports = (deps) => {
       const priority = (b.priority && ['P0', 'P1', 'P2', 'P3'].includes(b.priority)) ? b.priority : 'P2';
       const dl = normalizeDeadlineDT(b.deadline);   // 四处优化 D2：同建单口径（到分钟）
       if (!dl.ok) return res.status(400).json({ error: '期望完成格式非法（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM 的真实时间）', code: 'INVALID_DEADLINE' });
+      // [C1] 传入非空即校验「不早于今天」（前端无该控件，恒 undefined，契约照加，见 C0 核查报告 ⑦-a）。
+      if (dl.value && await isBeforeToday(dl.value)) return res.status(400).json({ error: '期望完成日不能早于今天', code: 'DEADLINE_BEFORE_TODAY' });
       // [⑤ §4 双描述·Q2 合并] derive_reason 取代旧 derive_note：既落新单 derive_reason 列、又作 derive timeline summary。
       //   必填范围（Q1）= 仅 bug 语境（origin.type='bug'），feature→feature 派生保持选填——精判在事务内（需 origin.type）。
       const deriveReason = (typeof b.derive_reason === 'string' ? b.derive_reason.trim() : '');
@@ -16380,7 +16552,10 @@ module.exports = (deps) => {
     //   已随批次级通知机制整体退场删除（见下方 opts.skipReset 分支），本函数体内再无任何地方读这两列。
     //   release_assignee_name 保留：cancel-schedule 的 MED-1 兜底（子表为空回落旧列）永久保留，需要它。
     const rel = await dbGetAsync(
-      `SELECT id, status, release_assignee_name FROM sys_releases WHERE id = ?`,
+      // [C4·B 块 / C5·D 块] release_no 供 release_date_change/release_add/release_remove 摘要拼「批次
+      //   R-XXX」，planned_date 供 release_add 摘要拼「计划上线 YYYY-MM-DD」——复用本已有查询，不新增
+      //   批次级查询（方案 §5.4 D 块"优先复用已有批次查询结果"，本函数内唯一一次批次级 SELECT）。
+      `SELECT id, status, release_assignee_name, release_no, planned_date FROM sys_releases WHERE id = ?`,
       [releaseId]
     );
     if (!rel) throw new SysTransitionError(404, 'RELEASE_NOT_FOUND', '上线批次不存在');
@@ -16490,27 +16665,56 @@ module.exports = (deps) => {
     const timelineTargets = [];
     // C4a（Opus 预筛 MED-3）：resetDiscardSuffix 在有真实被丢弃的 done 行时才非空，附加到"通知与执行人
     //   已重置"这一类文案末尾——keepExecutor 分支（reset 未运行）resetDiscardSuffix 恒为空串，天然不出现。
-    for (const iid of addedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_add', summary: `加入上线批次，通知与执行人已重置${resetDiscardSuffix}` });
+    // [C5·D 块，方案 §5.4] 贯穿性自足性要求：批次号/计划上线日就地写进句子，不要求读者去查另一个字段。
+    //   在现文案内补值，不整句替换（planned_date 空 → "未设定"，同既有 planned_date_*_display 三态惯例）。
+    const plannedDateDisp = rel.planned_date != null && rel.planned_date !== '' ? rel.planned_date : '未设定';
+    for (const iid of addedIds) timelineTargets.push({ issueId: iid, actionCode: 'release_add', summary: `加入上线批次（批次 ${rel.release_no}，计划上线 ${plannedDateDisp}），通知与执行人已重置${resetDiscardSuffix}` });
     // 2026-07-31 用户拍板（执行人移单四口径"仅时间线留痕"）：移除文案按"操作者角色 × 是否移空"分支——
     //   admin 分支维持改造前逐字文案（无 reason 时不变，有 reason 时追加原因，通知与执行人恒重置，
     //   因 admin 分支从不传 opts.keepExecutor）；执行人分支恒带 reason（端点已强制必填），按
     //   opts.keepExecutor 决定是否出现"通知与执行人已重置"字样——保留执行人时**不得**出现该字样
     //   （身份未被动），移空时才如实出现（keepExecutor 由 remove-issues 端点按剩余成员数算好传入）。
     for (const iid of removedIds) {
+      // [C5b·L3 收口] 以现有分支为骨架补入批次号——remove_reason 有无两分支/keepExecutor/resetDiscardSuffix
+      // 全部既有语义原样保留，不做整句模板替换（同方案 §5.4 表 release_remove 行明文要求）。批次号独立
+      // 成一个括号，不塞进「（原因：xxx）」括号内——原括号只表达"原因"这一件事，混进批次号会让读者误读成
+      // 批次号是原因文本的一部分。
       let summary;
       if (delta.remove_by_executor) {
         summary = opts.keepExecutor
-          ? `执行人移出上线批次（原因：${delta.remove_reason}）`
-          : `执行人移出上线批次（原因：${delta.remove_reason}）；批次已移空，通知与执行人已重置${resetDiscardSuffix}`;
+          ? `执行人移出上线批次（原因：${delta.remove_reason}）（批次 ${rel.release_no}）`
+          : `执行人移出上线批次（原因：${delta.remove_reason}）（批次 ${rel.release_no}）；批次已移空，通知与执行人已重置${resetDiscardSuffix}`;
       } else {
         summary = delta.remove_reason
-          ? `移出上线批次（原因：${delta.remove_reason}），通知与执行人已重置${resetDiscardSuffix}`
-          : `移出上线批次，通知与执行人已重置${resetDiscardSuffix}`;
+          ? `移出上线批次（原因：${delta.remove_reason}）（批次 ${rel.release_no}），通知与执行人已重置${resetDiscardSuffix}`
+          : `移出上线批次（批次 ${rel.release_no}），通知与执行人已重置${resetDiscardSuffix}`;
       }
       timelineTargets.push({ issueId: iid, actionCode: 'release_remove', summary });
     }
     if (delta.planned_date_changed) {
-      for (const m of currentMembers) timelineTargets.push({ issueId: m.id, actionCode: 'release_date_change', summary: `上线计划日期变更，通知与执行人已重置${resetDiscardSuffix}` });
+      // [C4·B 块，方案 §5.2.3] 旧值/新值/批次号/逾期理由均由端点透传（delta），本函数只做字符串拼接，
+      //   不重查——display 字段已在端点侧按「未设定 / 合法日期 / 原值（异常）」三态解析好。
+      const oldDisp = delta.planned_date_old_display != null ? delta.planned_date_old_display : '未设定';
+      const newDisp = delta.planned_date_new_display != null ? delta.planned_date_new_display : '未设定';
+      const summary = delta.overdue_change_reason
+        ? `上线计划日期变更：${oldDisp} → ${newDisp}（批次 ${rel.release_no}，原计划日已过 ${delta.overdue_days} 天，原因：${delta.overdue_change_reason}），通知与执行人已重置${resetDiscardSuffix}`
+        : `上线计划日期变更：${oldDisp} → ${newDisp}（批次 ${rel.release_no}），通知与执行人已重置${resetDiscardSuffix}`;
+      const payload = {
+        planned_date_old: delta.planned_date_old != null ? delta.planned_date_old : null,
+        planned_date_new: delta.planned_date_new != null ? delta.planned_date_new : null,
+        overdue_days: delta.overdue_days != null ? delta.overdue_days : null,
+        reason: delta.overdue_change_reason || null,
+        release_no: rel.release_no || null,
+      };
+      // [C4b·Opus 预筛 M1 收口] 零成员批次没有 sys_issue_timeline 行可挂（release_date_change 走"每受
+      //   影响成员各写一条"的既有范式，零成员=零行），本端点（update-planned-date）也不写
+      //   sys_release_audit（批次级审计表——那是 PATCH /sys-releases/:id 与 DELETE 端点专属的审计动作，
+      //   改期端点从未接线过），理由在这种边界态下确无落点。改期本身（CAS UPDATE）已提交，不因"理由
+      //   无处落痕"而拒绝已完成的操作，改为显式 warn 留一条可查日志，不静默吞：
+      if (currentMembers.length === 0 && delta.overdue_change_reason) {
+        logger.warn(`[系统迭代] 逾期改期理由无成员单可落痕 releaseId=${releaseId} reason=${delta.overdue_change_reason}`);
+      }
+      for (const m of currentMembers) timelineTargets.push({ issueId: m.id, actionCode: 'release_date_change', summary, payload });
     }
     if (delta.schedule_cancelled) {
       const reasonTxt = delta.cancel_reason || '';
@@ -16529,10 +16733,13 @@ module.exports = (deps) => {
       }
     }
     for (const t of timelineTargets) {
+      // [C4·B 块] payload_json 列此前本函数未写（release_add/release_remove/release_schedule_cancel
+      //   三类原本没有结构化载荷，`t.payload` undefined 时落 null，逐字沿用旧行为）——仅
+      //   release_date_change 分支携带 payload，同列复用不新增分支。
       await dbRunAsync(
-        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
-         VALUES (?, 'scope_change', ?, ?, ?, ?, ?)`,
-        [t.issueId, t.summary, t.actionCode, releaseId, Number(actor.id) || null, actor.name || null]
+        `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+         VALUES (?, 'scope_change', ?, ?, ?, ?, ?, ?)`,
+        [t.issueId, t.summary, t.actionCode, releaseId, Number(actor.id) || null, actor.name || null, t.payload ? JSON.stringify(t.payload) : null]
       );
     }
 
@@ -16576,6 +16783,8 @@ module.exports = (deps) => {
       if (versionTag && versionTag.length > SYS_VERSION_TAG_MAX) return res.status(400).json({ error: '版本号超长', code: 'VERSION_TAG_TOO_LONG' });
       const pd = normalizeDeadline(b.planned_date);   // 复用日期校验（YYYY-MM-DD 真实日期 / 空可选）
       if (!pd.ok) return res.status(400).json({ error: '计划上线日期格式非法（应为 YYYY-MM-DD 真实日期）', code: 'INVALID_PLANNED_DATE' });
+      // [C1] 建批次传入非空 planned_date 即校验「不早于今天」（独立判据函数，不动 normalizeDeadline 函数体）。
+      if (pd.value && await isBeforeToday(pd.value)) return res.status(400).json({ error: '上线计划日不能早于今天', code: 'PLANNED_DATE_BEFORE_TODAY' });
       const manualNo = (typeof b.release_no === 'string' ? b.release_no.trim() : '');
       if (manualNo && manualNo.length > SYS_VERSION_TAG_MAX) return res.status(400).json({ error: '批次号超长', code: 'RELEASE_NO_TOO_LONG' });
 
@@ -17445,6 +17654,41 @@ module.exports = (deps) => {
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能改期', code: 'RELEASE_NOT_PLANNING' }); }
         const changed = rel.planned_date !== newDate;   // 相同日期（含都为 null）= 差量空
+        // [C4b·L2 收口] 本端点内 C1 硬拦与 C4 理由闸此前各自独立查了一次 `date('now','localtime')`
+        //   （同一事务内两次相同只读查询）——改为只查一次，两处判据共用同一个 todayStr。isBeforeToday
+        //   本身是共用判据函数（供其余 5 个写点复用，未改），本端点这里改走内联比较是**同语义等价改写**
+        //   （newDate 已过 normalizeDeadline 清洗，恒为纯 'YYYY-MM-DD'，isBeforeToday 内部的
+        //   `.slice(0,10)` 对它是 no-op），不改变判据本身，只合并查询——不影响 isBeforeToday 的其余
+        //   调用方。
+        const todayStr = (await dbGetAsync(`SELECT date('now','localtime') AS d`) || {}).d;
+        // [C1] 仅当 changed===true 且新值非空才校验「不早于今天」——未传/清空不触发；同值提交（含旧值
+        //   已过期）维持既有 200 no-op（防回归头号用例，见 C0 核查报告 ⑦-b/方案 §5.5）。todayStr 为空
+        //   时 fail-open（不拦，与 isBeforeToday 查询返空行时的既有 fail-open 口径一致）。
+        if (changed && newDate && todayStr && newDate < todayStr) {
+          await sysRollback();
+          return res.status(400).json({ error: '上线计划日不能早于今天', code: 'PLANNED_DATE_BEFORE_TODAY' });
+        }
+        // [C4·B 块] 旧值合法性守卫 + 逾期后改期须理由（方案 §5.2.2）——只在 changed===true 时判断，
+        //   同值提交（含旧值已过期）维持既有 200 no-op，不受本闸影响（改期弹层"打开→直接确认"这个
+        //   无副作用操作是防回归头号用例，见 C0 核查报告 ③）。
+        const oldInfo = resolveReleaseDateChangeOldValueDisplay(rel.planned_date);
+        const newDisplay = newDate || '未设定';
+        let overdueDays = null;
+        let reasonText = null;
+        if (changed && oldInfo.valid && oldInfo.dayStr && todayStr && oldInfo.dayStr < todayStr) {
+          overdueDays = releaseOverdueCalendarDayDiff(todayStr, oldInfo.dayStr);
+          const reasonInput = resolveReleaseDateChangeReasonInput(req.body);
+          if (!reasonInput.ok) {
+            await sysRollback();
+            return res.status(reasonInput.httpStatus).json({
+              error: reasonInput.error, code: reasonInput.code,
+              date_change_reason_required: true,
+              planned_date_old: oldInfo.dayStr,
+              overdue_days: overdueDays,
+            });
+          }
+          reasonText = reasonInput.reason;
+        }
         if (changed) {
           // CAS 对旧值比对，防并发窗口内被另一次改期抢先。
           const upd = await dbRunAsync(
@@ -17458,6 +17702,13 @@ module.exports = (deps) => {
         }
         await applyReleaseChange(id, actor, {
           added_issue_ids: [], removed_issue_ids: [], planned_date_changed: changed, schedule_cancelled: false,
+          // [C4·B 块] 旧值由端点透传，helper 只构造摘要不重查（方案 §5.2.2）。
+          planned_date_old: rel.planned_date,
+          planned_date_new: newDate,
+          planned_date_old_display: oldInfo.display,
+          planned_date_new_display: newDisplay,
+          overdue_change_reason: reasonText,
+          overdue_days: overdueDays,
         });
         await sysCommit();
         res.json({ id, planned_date: newDate, changed });
@@ -18083,6 +18334,11 @@ module.exports = (deps) => {
   }
 
   async function sendReleaseExecutorNotifyAndWriteback(releaseId, userId, preempt, actor) {
+    // [C5·D 块，方案 §5.4] release_executor_notify 时间线自足性要补批次号——本函数原只在"真发"分支查过
+    //   一次 rel（供钉钉正文用），dry-run/executor 不存在两条分支都没查过；提到函数顶部一次性查询，
+    //   下方 markdown 构造与两处 timeline summary 共用同一份结果，不逐分支各查一次。
+    const relInfo = await dbGetAsync('SELECT id, release_no, title, planned_date FROM sys_releases WHERE id = ?', [releaseId]);
+    const releaseNoDisp = (relInfo && relInfo.release_no) || `#${releaseId}`;
     const executor = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [userId]);
     let sendResult = { ok: false, reason: '执行人用户不存在' };
     let isDryRun = false;
@@ -18097,7 +18353,6 @@ module.exports = (deps) => {
       if (isDryRun) {
         sendResult = { ok: true, dry_run: true, message_key: `dryrun-${Date.now()}` };
       } else {
-        const relInfo = await dbGetAsync('SELECT id, release_no, title, planned_date FROM sys_releases WHERE id = ?', [releaseId]);
         const baseUrl = await getSafePlatformBaseUrl();
         const { title, md } = buildReleaseBatchExecutorMarkdown(relInfo || { id: releaseId }, baseUrl);
         sendResult = await sendIssueDingtalkRaw(executor, title, md);
@@ -18138,7 +18393,7 @@ module.exports = (deps) => {
         // 300-L1（codex）：接收返回值——concurrent_changed 是账面不一致风险最高的路径（发送结果和 CAS
         //   记录本来就已经对不上了），补留痕这一步再失败必须让调用方/前端看得见，不能默默吞掉第二次。
         const timelineOkCC = await writeExecutorNotifyTimelineSafe(
-          releaseId, `通知执行人：${userName0}（通知已发出但结果未入账，并发变更）`, actor, 'concurrent_changed');
+          releaseId, `通知执行人：${userName0}（通知已发出但结果未入账，并发变更）— 批次 ${releaseNoDisp}`, actor, 'concurrent_changed');
         return { outcome: 'concurrent_changed', notify_status: fresh ? fresh.notify_status : null, dry_run: isDryRun, timeline_failed: !timelineOkCC };
       }
       await sysCommit();
@@ -18155,8 +18410,8 @@ module.exports = (deps) => {
     //   summary 显式标注"·演练"，事后翻 timeline 不会把一次 dry-run 误读成真的发出过通知。
     const dryTag = isDryRun ? '·演练' : '';
     const summary = sendResult.ok
-      ? `通知执行人：${userName}（${kindLabel}${dryTag}）`
-      : `通知执行人：${userName}（${kindLabel}，失败：${errMsg}）`;
+      ? `通知执行人：${userName}（${kindLabel}${dryTag}）— 批次 ${releaseNoDisp}`
+      : `通知执行人：${userName}（${kindLabel}，失败：${errMsg}）— 批次 ${releaseNoDisp}`;
     const timelineOk = await writeExecutorNotifyTimelineSafe(releaseId, summary, actor, 'send-result');
 
     return {
@@ -18302,13 +18557,17 @@ module.exports = (deps) => {
           }
 
           // timeline（照 applyReleaseChange §6.13 既有范式）：按受影响成员 issue 各写一条，ref_id=releaseId 关联
+          // [C5·D 块] 本端点此前未查过 release_no（⓿ 闸是 guarded 自赋值 UPDATE，无 SELECT）——只在 changed
+          // 分支才需要拼摘要，新增一次批次级查询（不逐成员查）。
           const names = resolved.map(r => r.name).join('、');
+          const relNoRow = await dbGetAsync('SELECT release_no FROM sys_releases WHERE id = ?', [id]);
+          const relNoDisp = (relNoRow && relNoRow.release_no) || `#${id}`;
           const members = await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ?', [id]);
           for (const m of members) {
             await dbRunAsync(
               `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
                VALUES (?, 'scope_change', ?, 'release_executors_set', ?, ?, ?)`,
-              [m.id, `设置上线执行人：${names}`, id, actor.id, actor.name]
+              [m.id, `设置上线执行人：${names}（批次 ${relNoDisp}）`, id, actor.id, actor.name]
             );
           }
         }
@@ -18714,6 +18973,79 @@ module.exports = (deps) => {
             id, actor, { release_note: releaseNote || undefined, version_tag: versionTag || undefined },
             'execute-release', 'execute'
           );
+
+          // ── [C2·A 块] 上线逾期留痕（方案 v1.2 §5.1.1-§5.1.6）：内核返回之后、sysCommit() 之前，
+          //   同一事务内读回内核刚写入的发布时刻。不新造时间锚、不向内核透传——released_at 是唯一
+          //   来源。fail-closed（546-H1）：status 未翻转「已发布」或 released_at 非法/为空 ⇒ 发布不
+          //   变量已破，throw 整体回滚（下方 catch(txErr) 走 sysRollback，与本函数其余出口同一保护）。
+          // ⚠️ 本闸只挂 execute；内核另一调用方 publishReleaseTransition(:16643 一带·当前未接路由·仅
+          //   verify 直调) 绕开本闸，若将来复活须同步挂闸（C0 ⑥-a）。
+          const relAfterPublish = await dbGetAsync(
+            `SELECT status, released_at, planned_date, release_kind, release_no FROM sys_releases WHERE id = ?`,
+            [id]
+          );
+          const releasedAtRaw = relAfterPublish && relAfterPublish.released_at;
+          const releasedAtDayStr = typeof releasedAtRaw === 'string' ? releasedAtRaw.slice(0, 10) : null;
+          const releasedAtCheck = releasedAtDayStr ? normalizeDeadline(releasedAtDayStr) : { ok: false, value: null };
+          const releasedAtDayValid = !!releasedAtDayStr && releasedAtCheck.ok && releasedAtCheck.value === releasedAtDayStr;
+          if (!relAfterPublish || relAfterPublish.status !== '已发布' || !releasedAtDayValid) {
+            logger.error(`[系统迭代] execute(A 块·发布时刻不变量) 批次 ${id} 读回异常：status=${relAfterPublish && relAfterPublish.status} released_at=${relAfterPublish && relAfterPublish.released_at}（内核出口应已写入合法 released_at 且 status=已发布，此处应不可达）`);
+            throw new SysTransitionError(500, 'RELEASE_PUBLISH_TIME_INVARIANT', '发布时刻校验失败（内部不变量被打破），本次发布已整体回滚');
+          }
+
+          // planned_date 空 → 不判（正常业务态）；非法脏值 → 不判（fail-open，存量数据，同 F1 未来
+          //   上线日期执行闸口径）——两者与上面 released_at 的 fail-closed 是不同的边界，不可互套。
+          const plannedDateCheck = normalizeDeadline(relAfterPublish.planned_date);
+          const plannedDateUsable = plannedDateCheck.ok && !!plannedDateCheck.value;
+          if (plannedDateUsable && releasedAtDayStr > plannedDateCheck.value) {
+            const overdueDays = releaseOverdueCalendarDayDiff(releasedAtDayStr, plannedDateCheck.value);
+            const isEmergency = relAfterPublish.release_kind === 'emergency';
+            if (!isEmergency) {
+              // 普通批次：理由必填闸——缺/非法理由 throw，事务整体回滚（含本人 CAS 一并撤销）。
+              const reasonInput = resolveReleaseOverdueReasonInput(b);
+              if (!reasonInput.ok) {
+                throw new SysTransitionError(reasonInput.httpStatus, reasonInput.code, reasonInput.error, {
+                  overdue_reason_required: true,
+                  planned_date: plannedDateCheck.value,
+                  released_date: releasedAtDayStr,
+                  overdue_days: overdueDays,
+                });
+              }
+              await dbRunAsync(
+                `UPDATE sys_releases SET overdue_reason_code = ?, overdue_reason_note = ? WHERE id = ?`,
+                [reasonInput.code, reasonInput.note, id]
+              );
+              const overdueSummary = `较计划上线日 ${plannedDateCheck.value} 迟 ${overdueDays} 天完成上线 · ${reasonInput.code}：${reasonInput.note}（批次 ${relAfterPublish.release_no}）`;
+              // 遍历内核返回的冻结成员集（pubResult.releasedIssueIds），不重查 sys_issues.release_id——
+              //   该列事后可被移单改变，反推"当时有哪些单"会错（方案 §7.1 明文）。
+              for (const iid of pubResult.releasedIssueIds) {
+                await dbRunAsync(
+                  `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+                   VALUES (?, 'note', ?, 'release_overdue_reason', ?, ?, ?, ?)`,
+                  [iid, overdueSummary, id, actor.id, actor.name, JSON.stringify({
+                    planned_date: plannedDateCheck.value, released_date: releasedAtDayStr, overdue_days: overdueDays,
+                    reason_code: reasonInput.code, reason_note: reasonInput.note,
+                    release_no: relAfterPublish.release_no, release_kind: relAfterPublish.release_kind,
+                  })]
+                );
+              }
+            } else {
+              // 应急批次：不校验、两列不写（保持 NULL），只写事实留痕行。
+              const overdueSummary = `应急上线跨日完成：计划 ${plannedDateCheck.value}，实际 ${releasedAtDayStr} 完成（迟 ${overdueDays} 天，批次 ${relAfterPublish.release_no}）`;
+              for (const iid of pubResult.releasedIssueIds) {
+                await dbRunAsync(
+                  `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+                   VALUES (?, 'note', ?, 'release_overdue_reason', ?, ?, ?, ?)`,
+                  [iid, overdueSummary, id, actor.id, actor.name, JSON.stringify({
+                    planned_date: plannedDateCheck.value, released_date: releasedAtDayStr, overdue_days: overdueDays,
+                    reason_code: null, reason_note: null,
+                    release_no: relAfterPublish.release_no, release_kind: relAfterPublish.release_kind,
+                  })]
+                );
+              }
+            }
+          }
+
           await sysCommit();
           outcome = { kind: 'published', result: pubResult };
         } else {
@@ -18733,11 +19065,16 @@ module.exports = (deps) => {
             logger.warn(`[系统迭代] execute(行级确认) timeline 留痕：批次 ${id} 零成员，无法挂 timeline`);
             timelineFailed = true;
           } else {
+            // [C5b·L5 收口] 批次级 release_no 查询下移进"确有成员单可挂"这一分支——零成员分支（上面
+            //   if 分支）本就不会消费这个值，之前查在判断之前是白查一次（零成员路径也会跑这条 SELECT，
+            //   浪费一次数据库往返）。
+            const relNoRowDone = await dbGetAsync('SELECT release_no FROM sys_releases WHERE id = ?', [id]);
+            const relNoDispDone = (relNoRowDone && relNoRowDone.release_no) || `#${id}`;
             for (const m of members) {
               await dbRunAsync(
                 `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
                  VALUES (?, 'scope_change', ?, 'release_executor_done', ?, ?, ?)`,
-                [m.id, `执行人${userName}确认完成（还差${pendingCount}人）`, id, actor.id, actor.name]
+                [m.id, `执行人${userName}确认完成（批次 ${relNoDispDone}，还差${pendingCount}人）`, id, actor.id, actor.name]
               );
             }
           }
@@ -18985,16 +19322,21 @@ module.exports = (deps) => {
         //   timeline 记录，与常规「安排上线」路径（PUT executors 落「设置上线执行人：...」timeline，见其
         //   路由头部注释）不对称。补两条，照 PUT executors §6.13 范式挂成员单（ref_id=releaseId 关联）：
         //   「应急建单」+「执行人指派」——本单是应急路径的唯一成员，故只挂它自己一条记录，非遍历 members。
+        // [C5b·M1 收口] planned_date 恒为建单当日，但摘要不能写死无日期的固定文案——读者仍应能就地看到
+        //   具体日期，不必去查批次详情页。JS 侧不自己算"今天"（避免与 SQL 侧 date('now','localtime')
+        //   各自取时产生第二个真相源），同事务读回刚落库的值，同 C2 读回 released_at 范式（唯一真相源）。
+        const hotfixRel = await dbGetAsync('SELECT planned_date FROM sys_releases WHERE id = ?', [releaseId]);
+        const hotfixPlannedDisp = (hotfixRel && hotfixRel.planned_date) || '未设定';
         const execNames = resolvedExecutors.map(r => r.name).join('、');
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
            VALUES (?, 'scope_change', ?, 'release_hotfix_create', ?, ?, ?)`,
-          [issueId, `应急建单 ${releaseNo}`, releaseId, actor.id, actor.name]
+          [issueId, `应急建单 ${releaseNo}（计划上线 ${hotfixPlannedDisp}，应急单=建单当日）`, releaseId, actor.id, actor.name]
         );
         await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name)
            VALUES (?, 'scope_change', ?, 'release_executors_set', ?, ?, ?)`,
-          [issueId, `设置上线执行人：${execNames}`, releaseId, actor.id, actor.name]
+          [issueId, `设置上线执行人：${execNames}（批次 ${releaseNo}）`, releaseId, actor.id, actor.name]
         );
 
         await sysCommit();
@@ -21231,6 +21573,16 @@ module.exports = (deps) => {
     SYS_RELEASE_TITLE_MAX,
     SYS_RELEASE_NOTE_MAX,
     SYS_VERSION_TAG_MAX,
+    // [C2·A 块] 上线逾期留痕（方案 20260910 v1.2）：verify 直调真实逻辑，防复刻漂移。
+    RELEASE_OVERDUE_REASON_CODES,
+    RELEASE_OVERDUE_REASON_NOTE_MAX,
+    resolveReleaseOverdueReasonInput,
+    releaseOverdueCalendarDayDiff,
+    releaseOverdueGroupInvariantViolations,
+    // [C4·B 块] 改期基准留痕（方案 20260910 v1.2 §5.2）：verify 直调真实逻辑，防复刻漂移。
+    RELEASE_DATE_CHANGE_REASON_MAX,
+    resolveReleaseDateChangeReasonInput,
+    resolveReleaseDateChangeOldValueDisplay,
     // C6：发布冻结快照（verify-sys-multidev-snapshots require 真实逻辑，RC-L2 防复刻漂移；
     //   直测 ON CONFLICT(release_id,issue_id) DO NOTHING 的幂等/changes=0 分支，业务状态机正常路径
     //   不可达二次发布，需绕开 HTTP 层直调本函数验证 SQL 层不变量）

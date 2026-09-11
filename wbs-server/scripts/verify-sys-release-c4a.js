@@ -105,6 +105,9 @@ async function putExecutors(relId, userIds) {
   assert.strictEqual(r.status, 200, `PUT executors 200, got ${r.status} ${JSON.stringify(r.body)}`);
   return r.body;
 }
+// [C5·D 块] release_add 摘要现补批次号/计划上线日（方案 §5.4），断言需要动态取值拼精确串——release_no
+// 由 nextReleaseNo() 顺序生成不固定，planned_date 由调用方传参决定。
+async function releaseNoOf(relId) { return (await get(`SELECT release_no FROM sys_releases WHERE id=?`, [relId])).release_no; }
 async function activeExecRows(relId) {
   return all(`SELECT id, user_id, user_name, notify_status, exec_status, removed_at, removed_by FROM sys_release_executors WHERE release_id = ? AND removed_at IS NULL ORDER BY user_id`, [relId]);
 }
@@ -383,7 +386,25 @@ async function main() {
     assert.strictEqual(tlAdd3a.length, tlAddBefore3a + 1, `[3a] release_add timeline +1（本次仅 issueNew3a 一条新记录），实际 ${tlAddBefore3a}→${tlAdd3a.length}`);
     const lastTlAdd3a = tlAdd3a[tlAdd3a.length - 1];
     assert.ok(/已丢弃 1 条完成确认：开发乙/.test(lastTlAdd3a.summary), `[3a] release_add 记录如实附"已丢弃 1 条完成确认：开发乙"，实际 ${lastTlAdd3a.summary}`);
-    ok('[3a] add-issues（差量非空）触发子表软删全员：2 名在册执行人（sent+done）在加单后全部被软删；release_add timeline +1 且含"已丢弃 1 条完成确认：开发乙"（与旧六列重置同步，并存期两边一致；丢弃附记非 schedule_cancelled 分支独有）');
+    // [3a-C5·方案 §5.4] rel3a 建批次时未传 planned_date（本组 mkRelease 调用未带 plannedDate）——负向用例：
+    // planned_date 空须显示"未设定"，不得输出 "undefined"/"null"/空串。
+    const relNo3a = await releaseNoOf(rel3a);
+    assert.strictEqual(lastTlAdd3a.summary,
+      `加入上线批次（批次 ${relNo3a}，计划上线 未设定），通知与执行人已重置（已丢弃 1 条完成确认：开发乙）`,
+      `[3a-C5] release_add 摘要精确含批次号+"计划上线 未设定"，实得="${lastTlAdd3a.summary}"`);
+    ok('[3a] add-issues（差量非空）触发子表软删全员：2 名在册执行人（sent+done）在加单后全部被软删；release_add timeline +1 且含"已丢弃 1 条完成确认：开发乙"（与旧六列重置同步，并存期两边一致；丢弃附记非 schedule_cancelled 分支独有）；批次号+"计划上线 未设定"就地写入摘要（C5·D 块）');
+
+    // [3a-C5b] 正例：批次有 planned_date 时摘要须显示真实日期（不落回"未设定"）。
+    const rel3aB = await mkRelease({ title: 'C4a-3a-C5-有计划日', plannedDate: '2032-09-01' });
+    const issue3aB = await mkIssue({ title: 'C4a-3a-C5-成员单' });
+    const r3aB = await call('POST', `/api/sys-releases/${rel3aB}/add-issues`, adminTok, { issue_ids: [issue3aB] });
+    assert.strictEqual(r3aB.status, 200, `[3a-C5b] 加单期望 200, got ${r3aB.status} ${JSON.stringify(r3aB.body)}`);
+    const relNo3aB = await releaseNoOf(rel3aB);
+    const tlAdd3aB = await timelineByCode(rel3aB, 'release_add');
+    assert.strictEqual(tlAdd3aB.length, 1, '[3a-C5b] release_add timeline 恰 1 条');
+    assert.strictEqual(tlAdd3aB[0].summary, `加入上线批次（批次 ${relNo3aB}，计划上线 2032-09-01），通知与执行人已重置`,
+      `[3a-C5b] release_add 摘要精确含批次号+真实计划上线日，实得="${tlAdd3aB[0].summary}"`);
+    ok('[3a-C5b] release_add 正例：批次有 planned_date 时摘要就地写入真实日期');
 
     // [3b] update-planned-date 触发同款效果
     const rel3b = await mkRelease({ title: 'C4a-3b-改期触发软删', plannedDate: '2032-06-01' });

@@ -142,9 +142,27 @@ function timelineSnapshot(id) {
   return get(`SELECT COUNT(*) AS c, MAX(id) AS mid FROM sys_issue_timeline WHERE issue_id=?`, [id]);
 }
 
+// [562-M1] 绕开建单端点直接 SQL 回填 deadline 的夹具，须落规范化形态（同 normalizeDeadlineDT 落库
+//   形态 'YYYY-MM-DD HH:MM:00'）——真实写点产出的 deadline 恒经该函数补齐时分秒，纯日期字符串是内核
+//   实际永不会产出的形态，测试夹具直连 SQL 时也不该拍一个假形态。祼日期（YYYY-MM-DD，10 字符）补
+//   ' 00:00:00'；已带时分秒的值原样透传（幂等，防重复补齐）。
+function toDeadlineDT(v) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v} 00:00:00` : v;
+}
 // bug → 处理中（受理 + 指派 dev5），不涉及 OA/feasibility，最省心的通用夹具。
+// [Opus 预筛 L5 收口] deadline 若已早于今天，须绕开建单闸直接 SQL 回填（同 verify-sys-eta-stats.js
+//   bugToReleased 的 M1 收口范式）——回填须落在 intake-accept 之前（同 [A2] 范式），非事后补丁。
 async function bugToProcessing(overrides = {}) {
-  const id = await mkIssue('bug', overrides);
+  const { deadline, ...rest } = overrides;
+  const isPast = deadline !== undefined && deadline < fmtDateOnly(new Date());
+  const id = await mkIssue('bug', isPast ? rest : overrides);
+  if (isPast) {
+    const dt = toDeadlineDT(deadline);
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [dt, id]);
+    // [562-M1] 受理前断言库值形态——确保回填真落了规范化形态，不依赖"写了什么就该是什么"的隐式信任。
+    const rowBefore = await get(`SELECT deadline FROM sys_issues WHERE id=?`, [id]);
+    assert.strictEqual(rowBefore.deadline, dt, `[夹具-bug 受理前] deadline 库值应已规范化为 ${dt}，实得 ${rowBefore.deadline}`);
+  }
   let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `[夹具-bug 受理] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });
@@ -334,15 +352,37 @@ async function main() {
 
     // [A2] 自动生成（C11）：留空 → 系统按创建锚计算默认 SLA。deadline 设成很早（保证自动生成值必超容差），
     //   断言即便超容差也不要求理由（body 不带 eta_overrun_reason_*），首诺仍写。
-    id = await mkIssue('improvement', { needs_feasibility: 0, deadline: '2020-01-01' });
+    // [C1 collateral] 建单端点起自本轮起拒绝已过期 deadline——本用例只是想让「自动生成 ETA 必超容差」，
+    //   与"deadline 是否早于今天"无关；改为先建单（不传 deadline）再直接 SQL 回填，绕开建单闸。
+    // [562-M1] 回填值须落规范化形态（同 normalizeDeadlineDT 落库形态 'YYYY-MM-DD HH:MM:00'）——真实写点
+    //   （建单/edit-in-revision/scope-change/derive 四处）产出的 deadline 恒经该函数补齐时分秒，测试夹具
+    //   绕开端点直接 SQL 回填时也应模拟这一形态，不能拍一个内核实际永不会产出的祼日期字符串。
+    id = await mkIssue('improvement', { needs_feasibility: 0 });
+    await run(`UPDATE sys_issues SET deadline = '2020-01-01 00:00:00' WHERE id = ?`, [id]);
+    const rowBeforeA2 = await issueRow(id);
+    assert.strictEqual(rowBeforeA2.deadline, '2020-01-01 00:00:00', '[A2·受理前] 库值应已是规范化形态 YYYY-MM-DD HH:MM:00');
     r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });   // 不填 dev_estimated_at
     assert.strictEqual(r.status, 200, `[A2] 自动生成应 200（C11 不要求理由），实得 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.eta && r.body.eta.auto_generated, true, '[A2] 响应体标记 auto_generated=true');
     row = await issueRow(id);
     assert.ok(row.dev_estimated_at, '[A2] 自动生成的 ETA 已写');
-    assert.strictEqual(row.eta_overrun_reason_code, null, '[A2] ⭐ C11：即便 deadline=2020-01-01（缺口巨大）也不要求/不写理由——系统动作无可归责的人');
+    assert.strictEqual(row.eta_overrun_reason_code, null, '[A2] ⭐ C11：即便 deadline=2020-01-01 00:00:00（缺口巨大）也不要求/不写理由——系统动作无可归责的人');
     assert.strictEqual(row.dev_estimated_first_at, row.dev_estimated_at, '[A2] ⭐ 首诺快照仍写——容差跳过与首诺快照是两件独立的事，C11 只跳过前者');
-    ok('[A2] intake_accept「受理自动生成」（C11）：跳过容差校验（纵有巨大缺口也不要求理由）+ 首诺快照仍正常写入');
+    ok('[A2] intake_accept「受理自动生成」（C11）：跳过容差校验（纵有巨大缺口也不要求理由）+ 首诺快照仍正常写入 + 回填值受理前已核对为规范化形态');
+
+    // [A2b·历史脏值兼容] 与 [A2] 同一场景，唯一差异是 deadline 回填成**纯日期祼值**（无时分秒，模拟
+    //   C1 硬拦上线之前遗留在库里的历史行——那批行从未经过 normalizeDeadlineDT，形态天然与规范化值不同）。
+    //   本用例不是"又测一遍 A2"，是显式证明 C11 自动生成分支对这种历史脏值形态同样容错，不会因为
+    //   deadline 缺时分秒而抛错/行为分裂——这条覆盖此前是隐式的（此前 A2 本身就长这样，改规范化后若不
+    //   补一条，历史脏值这条分支就悄悄失去覆盖了）。
+    id = await mkIssue('improvement', { needs_feasibility: 0 });
+    await run(`UPDATE sys_issues SET deadline = '2020-01-01' WHERE id = ?`, [id]);
+    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, { risk_level: '二级' });
+    assert.strictEqual(r.status, 200, `[A2b] 历史脏值（祼日期 deadline）自动生成应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.eta && r.body.eta.auto_generated, true, '[A2b] 响应体标记 auto_generated=true');
+    row = await issueRow(id);
+    assert.strictEqual(row.eta_overrun_reason_code, null, '[A2b] 历史脏值 deadline 同样不要求/不写理由');
+    ok('[A2b] 历史脏值兼容：deadline=祼日期「2020-01-01」（未经 normalizeDeadlineDT 规范化的历史形态）同样 200 + 不要求理由——C11 自动生成分支对新旧两种库值形态行为一致');
 
     // [A3] 超时受理必填：为空 × SLA 已超 → 弹窗必填。用创建时间伪造成很早（触发 SLA 已超），
     //   受理时必须填新值；若超容差还须带理由。
@@ -522,6 +562,10 @@ async function main() {
   // ══════════════════════════ [C] /estimate、/feasibility 容差校验 + 首诺快照 ══════════════════════════
   {
     // [C1] /estimate：bug 类型不参与容差（纵有巨大缺口）；improvement(nf=0) 超容差要理由。
+    // [C1(本轮建单硬拦) collateral·Opus 预筛 L5 收口] 建单端点起拒绝已过期 deadline——bugToProcessing
+    //   内部已按 deadline 是否已过期自动判定走 SQL 回填（落在 intake-accept 之前），此处直传即可，
+    //   不再由调用方自行拼 SQL（bug 不参与容差校验，deadline 具体值本就不影响本段断言，仅需存在巨大
+    //   缺口的库值）。
     let id = await bugToProcessing({ deadline: '2020-01-01' });
     // [追加批·370-MED-2] 相对基线（不猜 bugToProcessing 链路具体写了几行）。
     const tlBeforeC1bug = await timelineSnapshot(id);

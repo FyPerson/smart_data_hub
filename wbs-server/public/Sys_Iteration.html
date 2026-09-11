@@ -387,6 +387,7 @@
         .si-tl-evt.si-tl-blue { background: #dbeafe; color: #1d4ed8; }
         .si-tl-evt.si-tl-red { background: #fee2e2; color: #b91c1c; }
         .si-tl-evt.si-tl-green { background: #d1fae5; color: #047857; }
+        .si-tl-evt.si-tl-rose { background: #fce7f3; color: #be185d; }   /* 变更留痕专用（用户 2026-09-11 选 V4a：玫红实底 + ✎，与发布留痕的绿区分开） */
         .si-tl-evt.si-tl-orange { background: #fed7aa; color: #c2410c; }
         .si-tl-evt.si-tl-gray { background: #f1f5f9; color: #475569; }
         .si-tl-to { color: #94a3b8; font-size: 11px; }
@@ -400,6 +401,21 @@
            这块 <pre> 只服务"人工核对冻结原文"这一窄场景，不该按第一阅读对象的体量占位。 */
         .si-tl-release-json pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
+        /* [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件「查看改动」展开区：头行「变更对象 · 变更字段」+ 逐字段两块「修改前 / 修改后」包裹。
+           复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源，不 bump ?v=。 */
+        .si-tl-change-list { margin: 4px 0 0; padding: 6px 8px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; }
+        .si-tl-change-head { color: #374151; margin-bottom: 4px; }
+        .si-tl-change-row { padding: 4px 0; }
+        .si-tl-change-row + .si-tl-change-row { border-top: 1px dashed #e5e7eb; }   /* 566-R L1：首行前是 .si-tl-change-head，:first-of-type 不命中，改相邻选择器 */
+        .si-tl-change-field { color: #6b7280; font-weight: 600; margin-bottom: 3px; }
+        .si-tl-change-pair { display: flex; flex-wrap: wrap; gap: 6px; }
+        .si-tl-change-box { flex: 1 1 180px; min-width: 0; border-radius: 6px; padding: 4px 8px; border: 1px solid transparent; }
+        .si-tl-change-old { background: #f3f4f6; border-color: #e5e7eb; }
+        .si-tl-change-new { background: #ecfdf5; border-color: #a7f3d0; }
+        .si-tl-change-tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 3px; margin-bottom: 2px; }
+        .si-tl-change-old .si-tl-change-tag { background: #e5e7eb; color: #4b5563; }
+        .si-tl-change-new .si-tl-change-tag { background: #a7f3d0; color: #065f46; }
+        .si-tl-change-val { word-break: break-all; white-space: pre-wrap; color: #111827; }
 
         /* 通知行族已 harmonize → u-notify-row/u-nr-label/u-nr-body（base 见 components.css）。
            si-nbtn 拆为 u-btn-secondary + u-nb-btn 两类调用（底色/边框走 u-btn-secondary，u-nb-btn 仅覆盖
@@ -4227,7 +4243,14 @@
         // [开发撤回提交 方案 v1.2 §5.10] 开发撤回提交——note 型独立徽章（同 assign_overdue_eta/
         //   fast_release_* 等既有"自定义端点直写 timeline"范式），需登记三处：本表 + SI_TL_CLS +
         //   SI_TL_NOTE_OWN_LABEL_CODES（下方两处同步，改一处必须同改另两处）。
-        dev_withdraw: '撤回提交'
+        dev_withdraw: '撤回提交',
+        // [上线逾期留痕 方案 20260910 v1.2 §5.1.6·C3] event_type='note'·独立徽章——同 dev_withdraw/
+        //   release_info_edit/release_deleted 一带模式，需登记三处 + 一处脚本口径（本表 + SI_TL_CLS +
+        //   SI_TL_NOTE_OWN_LABEL_CODES + scripts/verify-sys-timeline-label-coverage.js 的
+        //   NOTE_OWN_LABEL_ACTION_CODES，四处同改）。⚠️ C0 ⑤-a 实证：**刻意不注册进**
+        //   SI_TL_RELEASE_SCOPE_LABEL/_CLS——那会被「隐藏上线单调整记录」过滤器一键隐藏，与 D2
+        //   「豁免的是输入闸不是事实」冲突，同 release_info_edit/release_deleted 两先例处置一致。
+        release_overdue_reason: '上线逾期'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -4294,6 +4317,9 @@
         //   正负"的既有取色原则），不因触发方是系统自动而非人工操作就改归其它色——对用户而言"这份授权
         //   没了"是同一件事，只是留痕文案区分成因（授权超时收回 vs 先行上线授权撤销）。
         fast_release_auth_expired: 'si-tl-red',
+        // [上线逾期留痕 方案 20260910 v1.2 §5.1.6·C3] 归 red——逾期是需要一眼识别的高关注度负面事实
+        //   （同既有 fast_release_revoke/release_deleted 等"高关注度"取色同族，非中性程序性动作）。
+        release_overdue_reason: 'si-tl-red',
         // [R-C5] 归 indigo——与既有 schedule/assign/set_release_flag/fast_release_authorize 等"程序性/
         //   描述性信息编辑"动作同族（非成功/失败/收回类语义，标题/版本号/说明被改动本身是中性事实）。
         release_info_edit: 'si-tl-indigo',
@@ -4433,7 +4459,7 @@
     // [开发撤回提交 方案 v1.2 §5.10] +dev_withdraw（撤回提交独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS
     //   处注释；与 scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES
     //   同一份口径同源，改这里必须同改那边）。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw']);
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4442,6 +4468,74 @@
     //   siRenderDrawer 从其局部 `iss.title` 传入（不在本函数里读模块级 siDetail——虽然当前只有一个调用点
     //   且 siDetail 必已同源赋值，但那是"靠调用点顺序成立"的隐式不变量；显式传参后新增第二个调用点时
     //   编译期就会暴露"这里该传谁的标题"）。只透传给 siFormatReleasePublishedSummary 做标题去重判定。
+    // [时间线改动明细 方案 20260911 v1.2 §3.2·D1/D3] 修改类事件改动明细渲染——两个写点 payload_json.changes=
+    //   [{field,old,new}]：release_info_edit（index.js PATCH /sys-releases/:id，三字段）与 edit_in_revision
+    //   （index.js POST /sys-issues/:id/edit-in-revision，十二字段）。字段标签是后端 SYS_RELEASE_EDIT_FIELD_LABEL ∪
+    //   EDIT_FIELD_LABELS 的前端副本（⚠️ 同源改两处：后端加字段必须同步这里，未登记字段落回裸字段名不隐藏，
+    //   同 SI_TL_LABEL 的 `|| key` 兜底口径）。历史行（payload_json 为 NULL 或无 changes 键）走原 summary 路径不变。
+    //   逐项校验规则（codex 565-R M5 冻结）：**只跳过**非对象或 field 非字符串的项；old/new 缺失
+    //   （undefined/null/''）显「（空）」但项保留；折叠计数按保留项计；保留项为 0 返回空串（不出折叠）。
+    //   整个渲染外层 try/catch：任何异常返回空串并 console.warn，不中断整段时间线。
+    const SI_TL_CHANGE_CODES = new Set(['release_info_edit', 'edit_in_revision']);
+    const SI_TL_CHANGE_FIELD_LABEL = {
+        title: '标题', version_tag: '版本号', release_note: '上线说明',
+        description: '描述', system_name: '所属系统', module_name: '模块', priority: '优先级', deadline: '预期完成',
+        needs_feasibility: '需可行性评估', requester_dept: '需求方部门', requester_name: '需求方姓名',
+        requester_phone: '需求方电话', source: '来源', related_correction_no: '关联修正单号'
+    };
+    const SI_TL_CHANGE_VALUE_MAX = 120;   // 展开区单值最长码点数；超出截断 + title 挂全文（码点计法同 created 行 60 字口径）
+    function siTlChangeValueHtml(field, v) {
+        // 空值判定只针对 null/undefined/空串——数字 0 是合法值（needs_feasibility=0 → 「否」；其余字段显「0」）。
+        if (v === null || v === undefined || v === '') return '<span class="si-muted">（空）</span>';
+        if (field === 'needs_feasibility') return esc(Number(v) === 1 ? '是' : '否');
+        const s = String(v);
+        const cps = [...s];
+        if (cps.length > SI_TL_CHANGE_VALUE_MAX) {
+            return `<span title="${esc(s)}">${esc(cps.slice(0, SI_TL_CHANGE_VALUE_MAX).join('') + '…')}</span>`;
+        }
+        return esc(s);
+    }
+    // 徽章：两码命中 changes 分支时统一显示「✎ 变更留痕」（玫红实底 si-tl-rose·用户 2026-09-11 在 14 个候选里选 V4a——
+    //   绿色在本时间线已是「完成/通过/发布」语义，留痕类不能撞色），登记表里的原标签（上线单信息修改 / 备注）
+    //   不动——那是三表登记守卫锁的静态口径，本处只是渲染时覆盖；「改的是什么对象」下沉到展开区头行（siTlChangeObjectText）。
+    const SI_TL_CHANGE_BADGE_LABEL = '✎ 变更留痕';
+    const SI_TL_CHANGE_BADGE_CLS = 'si-tl-rose';
+    function siTlChangeObjectText(e) {
+        if (!e) return '';
+        if (e.action_code === 'release_info_edit') {
+            // ref_id=批次 id（写点 PATCH /sys-releases/:id 落 ref_id=id）；非正整数（缺失/脏值）省略括号，不做数值强转
+            const rid = Number(e.ref_id);
+            return (Number.isInteger(rid) && rid > 0) ? `上线单信息（批次 #${rid}）` : '上线单信息';
+        }
+        if (e.action_code === 'edit_in_revision') return '迭代单内容';
+        return '';
+    }
+    // changes：[{field,old,new}]；objectText：展开区头行「变更对象」文案（可空）。
+    function siRenderTimelineChanges(changes, objectText) {
+        try {
+            if (!Array.isArray(changes)) return '';
+            const rows = [];
+            const labels = [];
+            for (const c of changes) {
+                if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.field !== 'string') continue;
+                const label = Object.prototype.hasOwnProperty.call(SI_TL_CHANGE_FIELD_LABEL, c.field)
+                    ? SI_TL_CHANGE_FIELD_LABEL[c.field] : c.field;
+                labels.push(label);
+                rows.push(`<div class="si-tl-change-row"><div class="si-tl-change-field">${esc(label)}</div>`
+                    + `<div class="si-tl-change-pair">`
+                    + `<div class="si-tl-change-box si-tl-change-old"><span class="si-tl-change-tag">修改前</span><div class="si-tl-change-val">${siTlChangeValueHtml(c.field, c.old)}</div></div>`
+                    + `<div class="si-tl-change-box si-tl-change-new"><span class="si-tl-change-tag">修改后</span><div class="si-tl-change-val">${siTlChangeValueHtml(c.field, c.new)}</div></div>`
+                    + `</div></div>`);
+            }
+            if (!rows.length) return '';
+            const objTxt = (typeof objectText === 'string' && objectText) ? `变更对象：${esc(objectText)} · ` : '';
+            const head = `<div class="si-tl-change-head">${objTxt}变更字段：${esc(labels.join('、'))}（${rows.length} 项）</div>`;
+            return `<details class="si-tl-release-json"><summary>查看改动（${rows.length} 项）</summary><div class="si-tl-change-list">${head}${rows.join('')}</div></details>`;
+        } catch (err) {
+            console.warn('[时间线] 改动明细渲染失败，已降级为不显示', err);
+            return '';
+        }
+    }
     function siRenderTimeline(list, atts, currentTitle) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
@@ -4456,8 +4550,8 @@
             const isNoteWithOwnLabel = e.event_type === 'note' && SI_TL_NOTE_OWN_LABEL_CODES.has(e.action_code);
             const key = (e.event_type === 'status_change' || e.event_type === 'release') ? (e.action_code || e.event_type)
                 : (isReleaseScope || isNoteWithOwnLabel) ? e.action_code : e.event_type;
-            const label = SI_TL_RELEASE_SCOPE_LABEL[key] || SI_TL_LABEL[key] || key;
-            const cls = SI_TL_RELEASE_SCOPE_CLS[key] || SI_TL_CLS[key] || 'si-tl-gray';
+            let label = SI_TL_RELEASE_SCOPE_LABEL[key] || SI_TL_LABEL[key] || key;
+            let cls = SI_TL_RELEASE_SCOPE_CLS[key] || SI_TL_CLS[key] || 'si-tl-gray';
             const roundTxt = (e.event_type === 'submit' && e.round_no) ? ('·第' + e.round_no + '轮') : '';
             // submit 挂本轮 delivery 附件
             let attHtml = '';
@@ -4560,6 +4654,14 @@
                 //   字符——改用 `[...e.summary]` 展开成码点数组再判长/切片/join，对齐全仓其余长度口径
                 //   （work_note 上限 1000、bug_cause_note 上限 500 均按 `[...s].length` 码点计数）。
                 summaryHtml = `<span title="${esc(e.summary)}">${esc([...e.summary].slice(0, 60).join('') + '…')}</span>`;
+            } else if (SI_TL_CHANGE_CODES.has(e.action_code) && parsedPayload && Array.isArray(parsedPayload.changes)) {
+                // [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件：摘要照旧 + 「查看改动」折叠。分支按
+                //   action_code 收窄（release_info_edit / edit_in_revision 两个写点均为 event_type='note'），
+                //   与下方 accept 行的 online_mode 分支互斥——两类事件不会共用同一行 payload。
+                //   siRenderTimelineChanges 对缺损项/异常自行降级为空串，此时该行退化为纯摘要，与历史行一致。
+                const changesHtml = siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e));
+                if (changesHtml) { label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS; }   // 有可渲染改动才换徽章；降级为空串时保持原徽章
+                summaryHtml = (e.summary ? esc(e.summary) : '') + changesHtml;
             } else if (parsedPayload && parsedPayload.online_mode != null) {
                 // [S1c 补丁 AD·AD3·预筛 L2] accept 行 online_mode 消费——config 验收通过选的 release/
                 //   direct 落在 payload_json.online_mode（index.js:6118，D11「选项写时间线」），此前前端
@@ -10455,51 +10557,154 @@
         const pendingCount = executors.filter(e => e.exec_status === 'pending').length;
         const isLast = pendingCount === 1;
         const hasNote = !!(rel.release_note && rel.release_note.trim());
+        // [C3·预判层，方案 §5.1.5] 仅【普通批次 ∧ isLast ∧ 前端本地判逾期】三条同时成立才展开理由块——
+        //   应急批次/非最后一人不展开（权威判定恒在服务端，算漏/算错由 RELEASE_OVERDUE_REASON_REQUIRED
+        //   兜底走下方统一重试上下文）。
+        const overdueDaysPredict = siReleaseOverdueApplicable(rel, isLast);
         const fields = [];
         if (isLast) {
             fields.push(note('你是最后一个确认人，点击后批次将翻「已上线」。'));
             fields.push(fTextarea('release_note', hasNote ? '上线说明（留空沿用上线单已填）' : '上线说明', '', !hasNote, hasNote ? '留空则用上线单已填值' : '必填，≤1000'));
             fields.push(fText('version_tag', '版本号（选填，留空沿用上线单已填）', ''));
+            if (overdueDaysPredict) {
+                // [C3b·Opus 预筛 L-5 收口] hintText 转义已内收在 fReleaseOverdueReasonBlock 内部（其
+                // `esc(hintText || ...)`），调用点不再重复 esc 一遍——防止 `&` 之类字符被转义两遍变
+                // 成 `&amp;amp;` 这类可见乱码。
+                fields.push(...fReleaseOverdueReasonBlock('siExecOverdueBlock', true, '', '',
+                    `较计划上线日 ${rel.planned_date || ''} 已逾期 ${overdueDaysPredict} 天，请说明逾期原因（最终以提交结果为准）。`));
+            }
         } else {
             fields.push(note('确认后还差 ' + (pendingCount - 1) + ' 人，批次仍「计划中」。'));
         }
         siModal('✅ 确认上线完成（我这部分）', fields, async v => {
-            const body = { executor_row_id: myRow.id };
+            const ctx = { executor_row_id: myRow.id };
             if (isLast) {
                 const noteVal = (v.release_note || '').trim();
                 if (!hasNote && !noteVal) { showToast('上线说明必填', 'error'); return false; }
-                if (noteVal) body.release_note = noteVal;
-                if (v.version_tag && v.version_tag.trim()) body.version_tag = v.version_tag.trim();
-            }
-            const r = await siApi('/sys-releases/' + releaseId + '/execute', { method: 'POST', body });
-            if (!r.ok) {
-                if (r.data && r.data.code === 'RELEASE_NOTE_REQUIRED') {
-                    siCloseModal();
-                    siReleaseExecuteRetryNoteModal(releaseId, myRow.id);
-                    return false;
+                if (noteVal) ctx.release_note = noteVal;
+                if (v.version_tag && v.version_tag.trim()) ctx.version_tag = v.version_tag.trim();
+                if (overdueDaysPredict) {
+                    // [C4e·codex 560 M1 收口] 预判层非严格——浏览器时钟领先服务端时会误判逾期，这里若
+                    // 硬拦必填会逼用户填一段服务端根本不需要的理由，剥夺服务端做权威判定的机会（方案
+                    // §5.1.5）。真正逾期时服务端会 409/400，走既有统一重试上下文进 siReleaseExecuteRetryModal
+                    // 严格必填（该弹层的 siCollectReleaseOverdueReasonRequired 调用未传 strict:false，
+                    // 保持默认严格）。
+                    const reason = siCollectReleaseOverdueReasonRequired('siExecOverdueBlock', v, { strict: false });
+                    if (!reason.ok) return false;
+                    ctx.overdue_reason_code = reason.code;
+                    ctx.overdue_reason_note = reason.note;
                 }
-                siApiErr(r, '确认上线失败'); return false;
             }
-            siExecuteApplyResult(r.data || {});
-            siCloseModal(); await siLoadList(); await siOpenBatchDetail(releaseId); return false;
+            return await siReleaseExecuteSubmit(releaseId, ctx);
         });
     }
-    // 并发导致前端误判自己不是最后一人的补救弹窗（方案 §4.5 第3条）：单独出一个只要求填上线说明的弹窗，
-    //   不报死错、不需要用户重新走一遍完整确认流程。
-    function siReleaseExecuteRetryNoteModal(releaseId, executorRowId) {
-        siModal('填写上线说明（你已成为最后一个确认人）', [
-            note('并发导致你成为了最后一个确认人，需先填写上线说明才能完成上线。'),
-            fTextarea('release_note', '上线说明', '', true, '必填，≤1000'),
-            fText('version_tag', '版本号（选填）', ''),
-        ], async v => {
-            const noteVal = v.release_note.trim();
-            if (!noteVal) { showToast('上线说明必填', 'error'); return false; }
-            const body = { executor_row_id: executorRowId, release_note: noteVal };
-            if (v.version_tag.trim()) body.version_tag = v.version_tag.trim();
-            const r = await siApi('/sys-releases/' + releaseId + '/execute', { method: 'POST', body });
-            if (!r.ok) { siApiErr(r, '确认上线失败'); return false; }
+    // [C3·H2 统一执行重试上下文，方案 §5.1.4] 单一提交出口——首次提交与全部补弹提交共用同一个 ctx 对象
+    //   （累计 executor_row_id/release_note/version_tag/overdue_reason_code/overdue_reason_note 五
+    //   字段），每次只补当次缺的那部分。RELEASE_NOTE_REQUIRED 与四个 RELEASE_OVERDUE_REASON_*（响应体
+    //   统一携带 overdue_reason_required===true，方案 §5.1.3a）由同一处理链接住：凡命中即关当前弹层、
+    //   带着已知的 ctx 打开 siReleaseExecuteRetryModal 补当次缺的字段，已填内容不丢。
+    async function siReleaseExecuteSubmit(releaseId, ctx) {
+        // [C3b·Opus 预筛 HIGH-1 收口] 本函数在 `await siApi(...)` 之后直接做 DOM 动作（关弹层/开重试
+        //   弹层/刷新列表/开详情），但 siModal 自身的实例令牌核对只包在 onConfirm 的调用外层
+        //   （:10767 一带 `if (siModalInstanceSeq !== myModalInstance) return;`），救不到 onConfirm
+        //   *内部*这次 await 之后的续体——可达路径：点确认→请求在途→用户关掉本弹层并开了另一个弹层→
+        //   迟到响应回来，续体在"当前已是别的弹层"的情况下继续关它/顶掉它。同 :6606/:7288/:8494/:8620
+        //   既有范式：入口先快照本弹层的实例号，await 之后、任何 DOM 动作之前核对，不一致即视为迟到
+        //   响应，静默丢弃（不重复报错——这不是本次调用失败，是"结果已经跟不上当前界面"）。
+        const modalInstanceAtStart = siModalInstanceSeq;
+        const body = { executor_row_id: ctx.executor_row_id };
+        if (ctx.release_note) body.release_note = ctx.release_note;
+        if (ctx.version_tag) body.version_tag = ctx.version_tag;
+        if (ctx.overdue_reason_code) body.overdue_reason_code = ctx.overdue_reason_code;
+        if (ctx.overdue_reason_note) body.overdue_reason_note = ctx.overdue_reason_note;
+        const r = await siApi('/sys-releases/' + releaseId + '/execute', { method: 'POST', body });
+        if (siModalInstanceSeq !== modalInstanceAtStart) return false;
+        if (r.ok) {
             siExecuteApplyResult(r.data || {});
-            siCloseModal(); await siLoadList(); await siOpenBatchDetail(releaseId); return false;
+            siCloseModal();
+            // [C3c·codex 557 合并审 M1 收口] 上面那次令牌核对只护住了 `siApi` 这一个 await——本分支
+            //   后面还有两个 await（siLoadList/siOpenBatchDetail），557 原话"预筛只护了第一个 await"，
+            //   这条链需要每个 await 之后都重核，不能核一次就当整条链都安全了。`siAuditGen` 是
+            //   siOpenBatchDetail/siRenderBatchList/siCloseBatch 共用的"批次总览面板导航令牌"（同一份
+            //   token，任何一次视图切换——打开另一批次详情/回列表/关闭整个面板——都会让它 +1，见
+            //   :9622 定义处），比"当前详情批次 id 是否仍为 releaseId"更可靠：即便用户手动重新点开了
+            //   同一个批次 A 的详情，auditGen 也会变，此时我们这次续体该做的事用户已经自己做过了，
+            //   不该再抢着刷一遍覆盖用户当下的滚动位置/展开态。这里快照的时机是 `siCloseModal()` 之后、
+            //   `await siLoadList()` 之前——siCloseModal 本身不碰 siAuditGen（同步执行，不引入新窗口）。
+            const auditGenAtClose = siAuditGen;
+            await siLoadList();
+            if (siModalInstanceSeq !== modalInstanceAtStart || siAuditGen !== auditGenAtClose) return false;
+            await siOpenBatchDetail(releaseId);
+            return false;
+        }
+        const d = r.data || {};
+        if (d.code === 'RELEASE_NOTE_REQUIRED' || d.overdue_reason_required === true) {
+            // [C3b·Opus 预筛 M-2 收口] `overdue_reason_required===true` 是四个 RELEASE_OVERDUE_REASON_*
+            //   码的统一标志位（方案 §5.1.3a），不止「完全没填」（_REQUIRED）一种——还有「填了但不合法」
+            //   的 _CODE_INVALID/_NOTE_TOO_LONG/_INVALID 三种。原实现把这四种全部吞进本分支直接重开
+            //   理由块、不报错，_REQUIRED（含 RELEASE_NOTE_REQUIRED）靠"字段本就是空的，重开就是提示"
+            //   够用，但另外三种是用户确实填了值却被判非法（如原因码不在白名单/说明超 300 字），重开后
+            //   看到的还是那份不合法输入，没有任何文字说明哪里错——不吭声直接吐同一个界面，等同无提示
+            //   重试环。故只在这两个"纯缺失"码之外才补一次 siApiErr——真正缺失的两种不需要额外 toast
+            //   （空字段本身够直观），只有"填了但不合法"的三种才需要报错文案指出具体问题。
+            if (d.code !== 'RELEASE_NOTE_REQUIRED' && d.code !== 'RELEASE_OVERDUE_REASON_REQUIRED') siApiErr(r, '确认上线失败');
+            siCloseModal();
+            siReleaseExecuteRetryModal(releaseId, ctx, d);
+            return false;
+        }
+        // 其余错误码（含 EXECUTOR_NOT_ACTIVE 代次失效等）——走 siApiErr 报错 toast，弹层保持打开、
+        // 已填内容不丢（siModal 失败分支不清空 DOM，用户核实报错内容后可手动重试或关闭）。
+        siApiErr(r, '确认上线失败');
+        return false;
+    }
+    // 统一重试弹层（方案 §5.1.4）：并发导致缺上线说明 / 逾期未带理由 / 两者依次缺（说明补齐后才轮到
+    //   服务端判逾期，两类校验在后端内核内本就是先后两道闸，不会在同一次响应里同时报出）——均落这
+    //   一个弹层，按响应体决定当次展开哪些字段，ctx 里已有的值原样回填保留（不静默丢弃已填内容）。
+    function siReleaseExecuteRetryModal(releaseId, ctx, errData) {
+        const d = errData || {};
+        const needNote = d.code === 'RELEASE_NOTE_REQUIRED';
+        // 四个 RELEASE_OVERDUE_REASON_* 响应体统一携带 overdue_reason_required===true（方案 §5.1.3a）——
+        // 不逐一分辨具体 code（REQUIRED=完全没填／CODE_INVALID・NOTE_TOO_LONG・INVALID=填了但不合法），
+        // 一律重新展开同一块理由输入；[C3b·M-2 收口] 是否额外弹 siApiErr toast 由调用方
+        // siReleaseExecuteSubmit 决定（_REQUIRED 两码不弹——空字段本身够直观，另外三种"填了但不合法"
+        // 的码弹 toast 说明具体哪里错），本函数不重复处理错误文案，只负责重开哪些输入字段。
+        const needReason = d.overdue_reason_required === true;
+        const fields = [];
+        if (needNote) {
+            fields.push(note('需先填写上线说明才能完成上线（可能是并发导致你成为了最后一个确认人）。'));
+            fields.push(fTextarea('release_note', '上线说明', ctx.release_note || '', true, '必填，≤1000'));
+            fields.push(fText('version_tag', '版本号（选填）', ctx.version_tag || ''));
+        }
+        if (needReason) {
+            // [C3b·Opus 预筛 L-5 收口] 同上——hintText 转义已内收在 fReleaseOverdueReasonBlock，此处不
+            // 再预先 esc(d.planned_date)/esc(d.released_date) 一遍。
+            const hint = (d.planned_date && d.released_date)
+                ? `较计划上线日 ${d.planned_date} 迟 ${d.overdue_days != null ? d.overdue_days : ''} 天完成上线（实际 ${d.released_date}），请填写逾期原因。`
+                : '较计划上线日已逾期，请填写逾期原因。';
+            fields.push(...fReleaseOverdueReasonBlock('siRetryOverdueBlock', true, ctx.overdue_reason_code || '', ctx.overdue_reason_note || '', hint));
+        }
+        siModal('补充信息后重试', fields, async v => {
+            const newCtx = Object.assign({}, ctx);
+            if (needNote) {
+                const noteVal = (v.release_note || '').trim();
+                if (!noteVal) { showToast('上线说明必填', 'error'); return false; }
+                newCtx.release_note = noteVal;
+                // [C3b·Opus 预筛 L-7 收口] 无条件覆盖（非"非空才写"）——`newCtx` 是从 `ctx` 浅拷贝来的，
+                // 若沿用旧写法 `if (v.version_tag && v.version_tag.trim()) newCtx.version_tag = ...`，
+                // 用户把预填的版本号清空重试时，`v.version_tag` 为空串不满足条件，`newCtx.version_tag`
+                // 会原样保留 `ctx` 里的旧值——用户在界面上清空了输入框，提交的却还是没清掉的旧版本号，
+                // 界面显示与实际提交内容不一致。trim 后为空串同样要落进 newCtx（siReleaseExecuteSubmit
+                // 里 `if (ctx.version_tag) body.version_tag = ...` 对空串天然判 falsy 跳过，不会真的把
+                // 空串发给后端，语义仍是"不传该字段"，只是这次不再让旧值偷偷续命）。
+                newCtx.version_tag = (v.version_tag || '').trim();
+            }
+            if (needReason) {
+                const reason = siCollectReleaseOverdueReasonRequired('siRetryOverdueBlock', v);
+                if (!reason.ok) return false;
+                newCtx.overdue_reason_code = reason.code;
+                newCtx.overdue_reason_note = reason.note;
+            }
+            return await siReleaseExecuteSubmit(releaseId, newCtx);
         });
     }
     // execute 响应形状（C3）：released 统一布尔（是否因本次确认触发发布），released_issue_ids 另挂新键
@@ -10525,18 +10730,129 @@
     //   定人"，选人本身已前移到弹窗环节，见方案 §4.5 第1条）。日期不变（含都为空）= 差量空，后端
     //   applyReleaseChange 直接跳过（不清通知、不写 timeline），前端弹窗文案与此逐字对齐，不写"将失效/
     //   变为过期"这类不实断言。
+    //   [C4·B 块，方案 §5.2.4] 逾期后改期须理由——只在用户**真的改变了日期**时才要求（反应式：监听
+    //   #f_planned_date 的 input/change，动态切理由块 hidden，不是"批次逾期就恒展开"）。「打开→直接
+    //   确认」（不碰日期输入框）走同值 no-op，是 C0 核查报告 ③ 点名的头号回归用例——若不分青红皂白
+    //   恒展开必填理由块，会把这个本该零摩擦的操作逼着用户瞎填一段理由才能关掉弹层，与服务端"同值
+    //   no-op 不受理由闸影响"的契约意图（零摩擦）相悖，故按"是否真改了"反应式展开，不是"批次是否
+    //   逾期"静态展开。理由字段**仅在 reasonEligible 为真时才进 fields 声明**（siModalConfirm 只收集
+    //   声明过的字段，未逾期批次压根不声明该字段——⑤组"未逾期批次不应渲染理由字段"即验此事）；一旦
+    //   进了 fields，此后不因 dirty 变化而增删该字段——只用 hidden 属性控制其可见性，不做 innerHTML
+    //   覆写（同 feedback_runtime_overwrite_of_static_text 教训：改可见性用 el.hidden，不碰 label/
+    //   hint 内容）。
+    // [C4b·L4 收口] 前端理由长度上限——与后端 RELEASE_DATE_CHANGE_REASON_MAX 同值同源（跨语言无法直接
+    //   共享常量，verify-sys-release-panel-static.js 加静态对拍断言防两侧漂移，同 SI_RELEASE_OVERDUE_
+    //   REASON_NOTE_MAX 既有先例）。
+    const SI_RELEASE_DATE_CHANGE_REASON_MAX = 200;
     function siReleaseUpdatePlannedDateModal(releaseId) {
         const rel = siBatchDetailRel || {};
-        siModal('改计划上线日期', [
-            fDate('planned_date', '计划上线日期（留空=清除）', rel.planned_date || ''),
-            note('若实际改变日期（含清除或重填），会把当前全部执行人清空、通知与确认状态一并重置，需重新「安排上线」选人；日期与现有值相同则不做任何改动。')
-        ], async v => {
-            const r = await siApi('/sys-releases/' + releaseId + '/update-planned-date', { method: 'POST', body: { planned_date: v.planned_date || '' } });
-            if (!r.ok) { siApiErr(r, '改期失败'); return false; }
+        const original = rel.planned_date || '';
+        siReleaseUpdatePlannedDateModalImpl(releaseId, {
+            original, prefill: original, overdueDaysAtOpen: siReleaseDateChangeOverdueApplicable(rel),
+            reasonPrefill: '', forceReason: false,
+        });
+    }
+    // 内部实现，supports 补弹重开（跨零点/理由被拒）：
+    //   original       —— 服务端当前真实值（跨次重试不变，dirty 判据的比较基准）
+    //   prefill        —— 本次渲染时日期输入框的初值（重试时=用户上次提交的值，保留改期意图）
+    //   overdueDaysAtOpen —— 原计划日预判逾期天数（null=未逾期，反应式理由块永不展开，对齐 §5.2.4 未逾期
+    //                        不问理由）；forceReason=true 时当作"服务端已判定必填"的天数展示用
+    //   forceReason    —— true=补弹（服务端刚 400 拒绝，权威判定已确认逾期）；决定是否严格必填
+    //                      （C4e·codex 560 M1 收口：预判层 forceReason=false 时不阻断提交，只做视觉
+    //                      提示+格式校验，见下方 reasonStrictlyRequired）
+    function siReleaseUpdatePlannedDateModalImpl(releaseId, state) {
+        const { original, prefill, overdueDaysAtOpen, reasonPrefill, forceReason } = state;
+        const reasonEligible = forceReason || !!overdueDaysAtOpen;
+        const fields = [fDate('planned_date', '计划上线日期（留空=清除）', prefill)];
+        if (reasonEligible) {
+            fields.push(fTextarea('reason', '改期原因', reasonPrefill || '', true,
+                `必填，≤${SI_RELEASE_DATE_CHANGE_REASON_MAX} 字；原计划上线日已过 ${overdueDaysAtOpen != null ? overdueDaysAtOpen : ''} 天，改期须说明原因（最终以提交结果为准）`));
+        }
+        fields.push(note('若实际改变日期（含清除或重填），会把当前全部执行人清空、通知与确认状态一并重置，需重新「安排上线」选人；日期与现有值相同则不做任何改动。'));
+        siModal('改计划上线日期', fields, async v => {
+            // [C3 同款范式] 快照本弹层实例号——⚠️ 必须在 onConfirm 回调**内部**取（此刻 siModal() 已执行完
+            // 其内部 `++siModalInstanceSeq`，取到的正是本弹层的实例号）；若在 siModal() 调用之前取，会
+            // 永远慢一拍——siModal() 自身会先自增一次，那个"之前"的旧值恒不等于本弹层实例号，下面的核对
+            // 会对首次提交也误判"已过期"，直接吞掉整个成功/失败分支（活体 Playwright 才测出的真实回归）。
+            const modalInstanceAtStart = siModalInstanceSeq;
+            const submitted = v.planned_date || '';
+            const dirty = submitted !== (original || '');
+            // [C4e·codex 560 M1 收口] 预判层（forceReason=false）不阻断提交——浏览器时钟可能领先服务端
+            // 一天，前端把"未逾期"误判成"逾期"时，若在这里硬拦会逼用户填一段服务端根本不需要的理由，
+            // 剥夺了服务端做权威判定的机会（方案 §5.1.5："预判层=体验、权威层=正确，不能只靠前端"）。
+            // 只有补弹阶段（forceReason=true，已经是服务端 400 确认过的真实逾期）且仍处于"改了新值"
+            // （dirty）状态时，才严格必填——若用户在补弹里把日期改回 original，那是一次真实的同值
+            // no-op，理由闸不该拦。
+            const reasonStrictlyRequired = forceReason && dirty;
+            const body = { planned_date: submitted };
+            // [C4f·codex 560-R M1 收口] 理由的读取/校验/赋值**全部限定在 dirty===true 时**——旧写法的
+            // `else if (v.reason && v.reason.trim())` 分支不看 dirty，用户"改日期→填 >200 字理由→又把
+            // 日期改回 original"这个序列下，理由块已被反应式监听收起（隐藏、用户看不到），但 DOM 里那段
+            // 超长文本仍在，`v.reason` 非空，该分支照样跑格式校验并 `return false`——把一次本该成功的
+            // 同值 no-op 挡在一个**不可见字段**上，用户根本不知道要改什么。dirty===false 时这次提交
+            // 语义就是"日期没变"，无论 v.reason 里残留着什么陈旧输入都不该读、不该校验、不该提交——
+            // 同值 no-op 的服务端契约（changed===false 不消费 reason）不该被前端自己的输入残留架空。
+            if (dirty) {
+                if (reasonStrictlyRequired) {
+                    const reason = (v.reason || '').trim();
+                    if (!reason) { showToast('改期原因必填', 'error'); return false; }
+                    if (reason.length > SI_RELEASE_DATE_CHANGE_REASON_MAX) { showToast(`改期原因超长（≤${SI_RELEASE_DATE_CHANGE_REASON_MAX}）`, 'error'); return false; }
+                    body.reason = reason;
+                } else if (v.reason && v.reason.trim()) {
+                    // 预判层用户已填内容（非强制但主动提供）——格式校验仍适用（超长直接拦，不把明显超限
+                    // 的输入丢给服务端再走一次网络往返）；通过后原样带上，不静默丢弃已填输入。真正是否
+                    // 需要理由、理由是否合规，由服务端权威判定。
+                    const reason = v.reason.trim();
+                    if (reason.length > SI_RELEASE_DATE_CHANGE_REASON_MAX) { showToast(`改期原因超长（≤${SI_RELEASE_DATE_CHANGE_REASON_MAX}）`, 'error'); return false; }
+                    body.reason = reason;
+                }
+            }
+            const r = await siApi('/sys-releases/' + releaseId + '/update-planned-date', { method: 'POST', body });
+            if (siModalInstanceSeq !== modalInstanceAtStart) return false;
+            if (!r.ok) {
+                const d = r.data || {};
+                // 三个 RELEASE_DATE_CHANGE_REASON_* 码统一携带 date_change_reason_required===true（方案
+                // §5.2.4）——不逐一分辨具体 code（REQUIRED=完全没填/未预判到跨零点；TOO_LONG/INVALID=填了
+                // 但不合法），一律重开理由块（静态展开，forceReason=true）并保留已选日期与已填理由；非
+                // REQUIRED 的两种额外弹 toast 说明具体哪里错（同 siReleaseExecuteRetryModal 的 M-2 收口范式）。
+                if (d.date_change_reason_required === true) {
+                    if (d.code !== 'RELEASE_DATE_CHANGE_REASON_REQUIRED') siApiErr(r, '改期失败');
+                    siCloseModal();
+                    // [C4e·codex 560 M2 收口] 补弹的 dirty 判据基准须用响应携带的 `planned_date_old`（服务端
+                    // 此刻读到的真实旧值），不能继续沿用首开时快照的 `original`——他人在本次打开与提交之间
+                    // 并发把计划日改成了别的过期日，首开时的 original 已经过期失真：若仍用它判同值，用户在
+                    // 补弹里选回"首开时看到的日期"会被误判成 dirty=false（同值），理由块隐藏不提交理由，
+                    // 服务端按它自己刚读到的真实旧值一样判逾期，再次 400，陷入重复补弹。响应没带该字段时
+                    // （理论不可达，防御性兜底）退回旧值，不整体报错。
+                    siReleaseUpdatePlannedDateModalImpl(releaseId, {
+                        original: d.planned_date_old != null ? d.planned_date_old : original,
+                        prefill: submitted, overdueDaysAtOpen: d.overdue_days != null ? d.overdue_days : overdueDaysAtOpen,
+                        reasonPrefill: v.reason || '', forceReason: true,
+                    });
+                    return false;
+                }
+                siApiErr(r, '改期失败'); return false;
+            }
             const d = r.data || {};
             showToast(d.changed ? ('计划上线日期已更新为 ' + (d.planned_date || '（已清除）') + '，执行人与通知状态已重置') : '日期未变化，无需处理', d.changed ? 'success' : 'warning');
             siCloseModal(); await siOpenBatchDetail(releaseId); return false;
         });
+        // [C4c/C4e] 反应式理由块可见性——只要 reasonEligible 恒挂监听，forceReason（补弹静态展开）不再
+        // 是例外分支：补弹时初始 prefill 多半已 dirty（否则不会撞理由闸），syncVisibility() 首次调用
+        // 即展开，效果与"静态展开"一致；但用户后续若把日期改回 original，监听器会让它收起（预判层本就
+        // 不阻断提交，补弹层同 reasonStrictlyRequired 一起变为非必填）——首开与补弹是同一套反应式逻辑，
+        // 不是两套并存的分支；`original` 由调用方传入（补弹时已按 M2 更新为服务端 planned_date_old）。
+        if (reasonEligible) {
+            const dateInput = document.getElementById('f_planned_date');
+            const reasonField = document.getElementById('f_reason');
+            const reasonGroup = reasonField && reasonField.closest('.u-form-group');
+            if (dateInput && reasonGroup) {
+                const syncVisibility = () => { reasonGroup.hidden = (dateInput.value || '') === (original || ''); };
+                syncVisibility();
+                dateInput.addEventListener('input', syncVisibility);
+                dateInput.addEventListener('change', syncVisibility);
+            }
+        }
     }
 
     // [上线单管理体验优化 R-C5·方案 §3 O3] 基本信息编辑弹窗——D3 三字段（title/version_tag/release_note），
@@ -10972,6 +11288,104 @@
         const noteEl = document.getElementById('f_completion_overrun_reason_note');
         if (codeEl) codeEl.value = '';
         if (noteEl) noteEl.value = '';
+    }
+
+    // ── [上线逾期留痕 方案 20260910 v1.2 §5.1.4/§5.1.5·C3] 逾期原因理由块——照抄 ETA/完成超期两组既有
+    //   范式（fEtaOverrunReasonBlock/fCompletionOverrunReasonBlock 一带），独立值域独立 DOM id，
+    //   不与它们混用。⚠️ 前端字面量数组必须与后端 RELEASE_OVERDUE_REASON_CODES（index.js）逐字同步——
+    //   独立静态守卫 verify-sys-release-panel-static.js 对拍两侧字面量（require 后端 _internals 导出的
+    //   真值 deepStrictEqual 本数组），任一侧漏改即判红，不依赖人工记忆同步（守卫与被测方都手写字面量
+    //   会一起过期须 require 真相源对拍，guard_static_analysis_gotchas 沉淀）。
+    const SI_RELEASE_OVERDUE_REASON_CODES = ['业务方要求延后', '值班人员变更', '环境或依赖未就绪', '通知到达晚', '其他'];
+    const SI_RELEASE_OVERDUE_REASON_NOTE_MAX = 300;
+    // 理由块字段构造——同 fEtaOverrunReasonBlock 惯例，blockId 同时充当 DOM id 前缀与 siModal 字段 key
+    //   前缀（f_${blockId}_code/f_${blockId}_note），供预判层（siExecOverdueBlock）与重试层
+    //   （siRetryOverdueBlock）各自独立实例、互不干扰（siModal 每次打开整体替换 #siMBody，两个实例
+    //   不会同时存在于 DOM，取不同 id 只是命名上更清晰、便于按名读取）。
+    //   [C3b·Opus 预筛 M-4 收口] `show` 参数与下方 siCollectReleaseOverdueReasonRequired **不是**
+    //   ETA/完成超期两组的 include/invisible 语义——那两组的收集函数会先读 `block.style.display` 判断
+    //   可见性，不可见时直接 `return { include:false }` 跳过校验（用户没被要求填，自然不校验）。本组
+    //   目前**恒 show=true**：预判层调用点（`siReleaseExecuteModal`）只在 `overdueDaysPredict` 真值
+    //   成立时才 push 本字段组，字段组不存在时校验函数根本不会被调用；重试层调用点
+    //   （`siReleaseExecuteRetryModal`）只在服务端已判定 `overdue_reason_required===true` 时才 push。
+    //   两处都靠"要不要 push 这组字段"控制展开与否，不是"push 了但先隐藏、靠 display 二次判断"。
+    //   [C4e·codex 560 M1 收口] `siCollectReleaseOverdueReasonRequired` 新增 `opts.strict`（默认
+    //   true=必填校验，两个字段缺一即拒）——**预判层**（`siReleaseExecuteModal`）改传 `strict:false`：
+    //   预判可能被浏览器时钟误判（领先服务端时把"未逾期"看成"逾期"），硬拦必填会逼用户填一段服务端
+    //   根本不需要的理由，剥夺服务端做权威判定的机会（方案 §5.1.5）。**重试层**
+    //   （`siReleaseExecuteRetryModal`）不传该参数、保持默认严格——它只在服务端已用 409/400 真实确认
+    //   "这次提交确实需要理由"之后才会被打开，此时必填没有误判空间。长度上限校验（`strict` 与否恒生效）
+    //   不受此影响——那是纯格式约束，与"是否真逾期"无关。
+    function fReleaseOverdueReasonBlock(blockId, show, prefillCode, prefillNote, hintText) {
+        const opts = SI_RELEASE_OVERDUE_REASON_CODES.map(c =>
+            `<option value="${esc(c)}" ${prefillCode === c ? 'selected' : ''}>${esc(c)}</option>`).join('');
+        // [C3b·Opus 预筛 L-5 收口] hintText 转义单点收在此处（调用方三处不再各自 esc 一遍，防重复转义
+        //   把 `&` 等字符变成 `&amp;amp;` 这类二次编码乱码）。
+        const html = `<div id="${blockId}" class="si-eta-reason-block" style="display:${show ? '' : 'none'}">
+            <div id="${blockId}-hint" class="si-eta-reason-hint">${esc(hintText || '较计划上线日已逾期，请说明逾期原因。')}</div>
+            <div class="u-form-group"><label>逾期原因 <span class="u-req">*</span></label>
+              <select id="f_${blockId}_code"><option value="">请选择</option>${opts}</select></div>
+            <div class="u-form-group"><label>逾期原因说明 <span class="u-req">*</span></label>
+              <textarea id="f_${blockId}_note" placeholder="必填，1-${SI_RELEASE_OVERDUE_REASON_NOTE_MAX}字">${esc(prefillNote || '')}</textarea></div>
+          </div>`;
+        // [C3b·Opus 预筛 L-6] `${blockId}-hint` 这个 id 当前没有任何消费者——不像 completion overrun 组
+        //   那样有 reveal/collapse 两个函数会回去改它的 textContent（那两组是"提交后服务端说要/不要"两
+        //   条回填路径，本组的预判层与重试层各自独立开一次弹层，不存在"同一个弹层内动态切换 hint 文案"
+        //   的需求）。留着这个 id 只是为了未来若要加类似回填能力时有现成挂点，非死代码——不删。
+        return [
+            { k: null, html },
+            { k: blockId + '_code', html: '' },
+            { k: blockId + '_note', html: '' },
+        ];
+    }
+    // 收集口径同 siCollectCompletionOverrunReason 的必填校验逻辑（缺一即拒并 toast），但**不做**该组的
+    // 可见性判断（见上方 fReleaseOverdueReasonBlock 处 M-4 收口说明）——两个现有调用点（预判层/重试层）
+    // 都只在"确实要展开"时才会 push 字段组进而调用本函数，不存在"字段组已渲染但当前隐藏、不该校验"
+    // 的场景。
+    // [C4e·codex 560 M1 收口] 新增 `opts.strict`（默认 true）：strict=true 时缺一即拒（重试层默认走
+    // 这条——服务端已用 409/400 真实确认需要理由，必填没有误判空间）；strict=false 时跳过"必填"这道
+    // 拦截，只做格式校验（说明超长恒拒，不论 strict）——预判层传 strict:false，理由：预判可能因浏览器
+    // 时钟领先服务端而误判逾期，此时硬拦会逼用户填一段服务端根本不需要的理由，剥夺服务端做权威判定的
+    // 机会（方案 §5.1.5「预判层=体验、权威层=正确，不能只靠前端」）。
+    function siCollectReleaseOverdueReasonRequired(blockId, v, opts) {
+        const strict = !opts || opts.strict !== false;
+        const code = (v[blockId + '_code'] || '').trim();
+        const noteText = (v[blockId + '_note'] || '').trim();
+        if (strict) {
+            if (!code) { showToast('请选择逾期原因', 'error'); return { ok: false }; }
+            if (!noteText) { showToast('请填写逾期原因说明', 'error'); return { ok: false }; }
+        }
+        if (noteText.length > SI_RELEASE_OVERDUE_REASON_NOTE_MAX) { showToast(`逾期原因说明不超过 ${SI_RELEASE_OVERDUE_REASON_NOTE_MAX} 字`, 'error'); return { ok: false }; }
+        return { ok: true, code, note: noteText };
+    }
+    // 预判层判据（方案 §5.1.5）：仅【普通批次 ∧ isLast ∧ 前端本地判逾期】三条同时成立才返回逾期天数
+    // （真值，用于展开理由块）；否则返回 null（不展开）。⚠️ 纯体验层判断——浏览器时钟可能与服务器差
+    // 一天（跨零点尤其），权威判定恒在服务端（execute 端点读回 released_at 现算，见方案 §5.1.2）；
+    // 前端算漏/算错的极端情形由 RELEASE_OVERDUE_REASON_REQUIRED 兜底走统一重试上下文
+    // （siReleaseExecuteRetryModal）。日历日比较口径与既有 siReleaseScheduleBadgeHtml 徽章同源（均走
+    // siDateOnly 本地零点比较，同日不算逾期），二者刻意不合并成一个函数——一个服务列表徽章消费单条
+    // 批次，一个服务执行弹层消费 isLast 这个额外前提，职责不同不强行复用。
+    function siReleaseOverdueApplicable(rel, isLast) {
+        if (!rel || !isLast || rel.release_kind === 'emergency') return null;
+        const planned = siDateOnly(rel.planned_date);
+        if (!planned) return null;
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const days = Math.round((today.getTime() - planned.getTime()) / 86400000);
+        return days > 0 ? days : null;
+    }
+    // [C4·B 块，方案 §5.2.4] 改期弹层预判——仅看当前 planned_date 是否已过期（siDateOnly 本地零点口径，
+    // 同日不算逾期），不看 isLast/release_kind：改期弹层与「是否最后一人执行」「是否应急批次」无关，
+    // §5.2.2 服务端契约对逾期改期一律要理由，不给应急批次例外。与 siReleaseOverdueApplicable 各服务
+    // 不同弹层职责不同，刻意不合并。权威判定恒在服务端（date('now','localtime') 现算），前端算漏/算错
+    // 由 RELEASE_DATE_CHANGE_REASON_REQUIRED 兜底走 siReleaseUpdatePlannedDateModalImpl 补弹重开。
+    function siReleaseDateChangeOverdueApplicable(rel) {
+        const planned = siDateOnly(rel && rel.planned_date);
+        if (!planned) return null;
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const days = Math.round((today.getTime() - planned.getTime()) / 86400000);
+        return days > 0 ? days : null;
     }
 
     // ============================================================

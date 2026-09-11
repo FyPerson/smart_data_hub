@@ -131,6 +131,9 @@ const relRow = (id) => get(
      FROM sys_releases WHERE id=?`, [id]
 );
 const issueRow = (id) => get(`SELECT id, status, release_id FROM sys_issues WHERE id=?`, [id]);
+// [C5·D 块] release_remove 摘要现补批次号（方案 §5.4），断言需要动态取 release_no 拼精确串——不能硬编码
+// 字面量（release_no 由服务端 nextReleaseNo() 顺序生成，跨用例递增，各块 relId 对应的批次号不固定）。
+const releaseNoOf = async (relId) => (await get(`SELECT release_no FROM sys_releases WHERE id=?`, [relId])).release_no;
 // [C4b 退场新增] 子表单行查询——批次级通知六列已无任何写路径（H1 根治），本文件的"未变/零副作用"类断言
 // 改从这里验证真正在承载状态的子表（只看在册行，removed_at IS NULL；软删后查无此行返回 undefined，
 // 供调用方判断"是否已被移出在册"）。
@@ -214,7 +217,8 @@ async function main() {
 
     const tl = await lastReleaseRemoveTimeline(issue2);
     assert.ok(tl, '[A]timeline 已写 release_remove 行');
-    assert.strictEqual(tl.summary, '执行人移出上线批次（原因：不该随本批发布）', '[A]timeline 文案含原因且不含"已重置"字样');
+    const relNoA = await releaseNoOf(relId);
+    assert.strictEqual(tl.summary, `执行人移出上线批次（原因：不该随本批发布）（批次 ${relNoA}）`, '[A]timeline 文案含原因+批次号（各自独立括号）且不含"已重置"字样');
 
     ok('[A] 执行人移单成功（剩余>0）：200 + remaining_count=1 + executor_kept=true；子表 5 号在册行 id/通知态/exec_status 全部未变（keepExecutor 保留身份）；被移单回「待上线」release_id=NULL；timeline 含原因不含"已重置"');
 
@@ -233,7 +237,8 @@ async function main() {
 
     const tl2 = await lastReleaseRemoveTimeline(issue1);
     assert.ok(tl2, '[B]timeline 已写 release_remove 行');
-    assert.strictEqual(tl2.summary, '执行人移出上线批次（原因：批次整体作废）；批次已移空，通知与执行人已重置', '[B]timeline 文案含"批次已移空，通知与执行人已重置"');
+    const relNoB = await releaseNoOf(relId);
+    assert.strictEqual(tl2.summary, `执行人移出上线批次（原因：批次整体作废）（批次 ${relNoB}）；批次已移空，通知与执行人已重置`, '[B]timeline 文案含批次号（独立括号）+"批次已移空，通知与执行人已重置"');
 
     ok('[B] 执行人移单致移空（剩余=0）：200 + executor_kept=false；通知六列/执行人两列全重置+token 换新；release_type 复位 NULL（F-4）；timeline 含"批次已移空，通知与执行人已重置"');
   }
@@ -285,6 +290,33 @@ async function main() {
     assert.strictEqual(allRowsB.length, 2, '[B-多人] 物理行仍是 2 行（软删非物理删除）');
     assert.ok(allRowsB.every(r => r.removed_at), '[B-多人] 两行物理上均已带 removed_at（全体软删，非部分）');
     ok('[B-多人] 真实 PUT executors 建两人在册后执行人移单致移空（剩余=0）：200 + executor_kept=false，5 号(actor)与 6 号(同批另一人)两行均被软删（物理行仍在，仅 removed_at 落）——坐实"移空全重置"是整批多行操作，不是只重置 actor 自己那一行留下同批其他人的行悬空未处理');
+  }
+
+  // ═══ [B-已丢弃]（C5·D 块补测）执行人移空分支带 resetDiscardSuffix——补此前从未覆盖的组合 ═══
+  //   [A]/[B]/[A-多人]/[B-多人] 均从未让"5 号 done"这条件成立，故"执行人移空"分支里
+  //   `已丢弃 N 条完成确认：...` 那截从未被断言覆盖过（C5 变异 V4 实测：把这截拿掉全套 verify-sys-
+  //   executor-remove 仍然全绿，说明这是此前就存在的断言缺口，非本次改动引入——补测锁死）。
+  {
+    const relId = await mkRelease({ title: '执行人移单-移空带丢弃确认' });
+    const issue1 = await mkIssue('feature', '待上线', { title: '丢弃确认-成员1' });
+    const issue2 = await mkIssue('feature', '待上线', { title: '丢弃确认-成员2' });
+    await addIssuesTo(relId, [issue1, issue2]);
+    const rPut = await call('PUT', `/api/sys-releases/${relId}/executors`, adminTok, { user_ids: [5, 6] });
+    assert.strictEqual(rPut.status, 200, `[B-已丢弃-fixture] PUT executors 期望 200, got ${rPut.status}`);
+    await run(`UPDATE sys_release_executors SET notify_status='sent', notified_at=datetime('now','localtime') WHERE release_id=? AND removed_at IS NULL`, [relId]);
+    // 6 号钉成 done——移空时应被如实附记"已丢弃 1 条完成确认：开发乙"
+    await run(`UPDATE sys_release_executors SET exec_status='done', executed_at=datetime('now','localtime') WHERE release_id=? AND user_id=6`, [relId]);
+    // 一次性移空两单（5 号是执行人身份，批次一步移空——remove_by_executor 分支）
+    const rB2 = await call('POST', `/api/sys-releases/${relId}/remove-issues`, dev5Tok, { issue_ids: [issue1, issue2], reason: '一次移空-带丢弃确认' });
+    assert.strictEqual(rB2.status, 200, `[B-已丢弃] 执行人移空期望 200, got ${rB2.status} ${JSON.stringify(rB2.body)}`);
+    assert.strictEqual(rB2.body.remaining_count, 0, '[B-已丢弃] remaining_count=0');
+    const relNoBDiscard = await releaseNoOf(relId);
+    const tlB2a = await lastReleaseRemoveTimeline(issue1);
+    const tlB2b = await lastReleaseRemoveTimeline(issue2);
+    const expectedSummary = `执行人移出上线批次（原因：一次移空-带丢弃确认）（批次 ${relNoBDiscard}）；批次已移空，通知与执行人已重置（已丢弃 1 条完成确认：开发乙）`;
+    assert.strictEqual(tlB2a.summary, expectedSummary, `[B-已丢弃] issue1 timeline 应含"已丢弃 1 条完成确认：开发乙"，实得="${tlB2a.summary}"`);
+    assert.strictEqual(tlB2b.summary, expectedSummary, `[B-已丢弃] issue2 timeline 应含"已丢弃 1 条完成确认：开发乙"，实得="${tlB2b.summary}"`);
+    ok('[B-已丢弃] 执行人移空分支（remove_by_executor∧批次已移空）如实附记"已丢弃 N 条完成确认"——补此前从未覆盖的"done 行+执行人移空"组合（C5 变异 V4 暴露的既存缺口，与本次批次号改动一并锁死）');
   }
 
   // ═══ [A2] M3：移单后（剩余>0，保留身份）当场继续执行 ═══
@@ -481,16 +513,17 @@ async function main() {
     const execAfterR1 = await execRow(relId, 5);
     assert.strictEqual(execAfterR1, undefined, '[E1]admin 无 reason 移单仍触发子表软删全员（回归，5 号行不再在册）');
     const tl1 = await lastReleaseRemoveTimeline(issue2);
-    assert.strictEqual(tl1.summary, '移出上线批次，通知与执行人已重置', '[E1]admin 无 reason 时 timeline 文案逐字不变（回归）');
+    const relNoE = await releaseNoOf(relId);
+    assert.strictEqual(tl1.summary, `移出上线批次（批次 ${relNoE}），通知与执行人已重置`, '[E1]admin 无 reason 时 timeline 文案补批次号，其余逐字不变（回归）');
 
     // 带 reason：timeline 含原因，其余重置语义不变。
     const r2 = await call('POST', `/api/sys-releases/${relId}/remove-issues`, adminTok, { issue_ids: [issue1], reason: '批次作废重建' });
     assert.strictEqual(r2.status, 200, `[E2]admin 带 reason 期望 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
     assert.strictEqual(r2.body.remaining_count, 0, '[E2]remaining_count=0');
     const tl2 = await lastReleaseRemoveTimeline(issue1);
-    assert.strictEqual(tl2.summary, '移出上线批次（原因：批次作废重建），通知与执行人已重置', '[E2]admin 带 reason 时 timeline 含原因');
+    assert.strictEqual(tl2.summary, `移出上线批次（原因：批次作废重建）（批次 ${relNoE}），通知与执行人已重置`, '[E2]admin 带 reason 时 timeline 含原因+批次号（独立括号）');
 
-    ok('[E] admin 回归：无 reason 移单现行完整重置语义逐字不变（timeline 文案/落库副作用）；带 reason 移单 timeline 含原因');
+    ok('[E] admin 回归：无 reason 移单现行完整重置语义不变（timeline 落库副作用逐字不变；文案本次补入批次号，C5·D 块）；带 reason 移单 timeline 含原因+批次号');
   }
 
   // ═══ [F] 批次非「计划中」→ 409 RELEASE_NOT_PLANNING（回归，两分支共用同一前置守卫）═══

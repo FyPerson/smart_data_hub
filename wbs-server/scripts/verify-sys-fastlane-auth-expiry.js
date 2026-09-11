@@ -614,7 +614,13 @@ async function main() {
     assert.strictEqual(addExpR.status, 409, `[6a-加人] 过期应 409，实得 ${addExpR.status} ${JSON.stringify(addExpR.body)}`);
     assert.strictEqual(addExpR.body.code, 'FAST_RELEASE_AUTH_EXPIRED', `[6a-加人] 确切码，实得 ${addExpR.body.code}`);
     assertAllNull(await fastReleaseRow(idAdd), '[6a-加人 409 后] 六列应已同事务清空（终结已持久化，非随 409 回滚）');
-    assert.strictEqual((await tlRowsByCode(idAdd, 'fast_release_auth_expired')).length, 1, '[6a-加人] 超时留痕应已持久化');
+    const expTlAdd = await tlRowsByCode(idAdd, 'fast_release_auth_expired');
+    assert.strictEqual(expTlAdd.length, 1, '[6a-加人] 超时留痕应已持久化');
+    // [C5·方案 §5.3] idAdd 挂牌时值班员甲（20）已被 submitCommits 挂成 pending 执行人，过期收回时集合尚未
+    // 被清空前读到该名——超时留痕须补"未确认执行人：值班员甲"（精确串，本用例只 1 人，无顿号）。
+    assert.strictEqual(expTlAdd[0].summary,
+      '先行上线授权超时未启用（次日 8:00 前未完成），已收回，转常规验收流程；未确认执行人：值班员甲',
+      `[6a-加人·C5] 超时留痕含未确认执行人姓名，实得="${expTlAdd[0].summary}"`);
     await clearDutyToday();
 
     const idRm = await bugAtChulizhong();

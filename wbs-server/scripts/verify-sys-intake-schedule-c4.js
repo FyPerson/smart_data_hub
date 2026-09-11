@@ -70,6 +70,14 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// [C1(本轮建单硬拦) collateral] 动态生成未来日期（同既有 verify-sys-* futureEst 写法，远期字面量迟早
+//   到期，勿回退硬编码）——供下方 [E] 组 edit-in-revision 多字段改动断言用，值本身不是断言目标（只关心
+//   changed 字段数），不受影响。
+function futureDateOnly(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 async function createIssue(type) {
   const r = await call('POST', '/api/sys-issues', adminTok, { intake_contract_version: 2, type, title: `${type}单`, system_name: 'BMS', source: '内部', description: '建单优化批 C1 fixture 补齐：verify 场景建单', intake_liaison_id: 13 });
@@ -113,17 +121,47 @@ async function main() {
     let row = await get('SELECT title, status FROM sys_issues WHERE id=?', [id]);
     assert.strictEqual(row.title, '改后的标题', 'title 已更新');
     assert.strictEqual(row.status, '待修改', 'edit_in_revision 不改 status（旁路）');
-    const tl = await get(`SELECT event_type, action_code, summary, operator_id FROM sys_issue_timeline WHERE issue_id=? AND action_code='edit_in_revision' ORDER BY id DESC LIMIT 1`, [id]);
+    const tl = await get(`SELECT event_type, action_code, summary, operator_id, payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='edit_in_revision' ORDER BY id DESC LIMIT 1`, [id]);
     assert.ok(tl, 'edit 写 timeline');
     assert.strictEqual(tl.event_type, 'note', 'event_type=note');
     assert.ok(tl.summary.includes('标题'), 'summary 含改动字段名（标题）');
     assert.strictEqual(Number(tl.operator_id), 5, 'operator=建单人5');
+    // [时间线改动明细 方案 20260911 v1.2 §3.3] payload_json 落结构化旧值/新值（D2 推翻 codex C4 LOW-6）
+    assert.ok(tl.payload_json, '[A2] edit_in_revision 行 payload_json 非空');
+    const tlChanges = JSON.parse(tl.payload_json).changes;
+    assert.ok(Array.isArray(tlChanges) && tlChanges.length === 1, `[A2] changes 恰 1 项，实得 ${JSON.stringify(tlChanges)}`);
+    assert.strictEqual(tlChanges[0].field, 'title', '[A2] changes[0].field=title');
+    assert.strictEqual(tlChanges[0].new, '改后的标题', '[A2] changes[0].new=新标题');
+    assert.strictEqual(tlChanges[0].old, 'feature单', `[A2·566-L2] changes[0].old 精确等于建单夹具标题「feature单」，实得 ${JSON.stringify(tlChanges[0].old)}`);
 
     // admin 改多字段 → 200 changed 含多项
     id = await mkRevision('feature', 5);
-    r = await call('POST', `/api/sys-issues/${id}/edit-in-revision`, adminTok, { priority: 'P1', description: '新描述', deadline: '2026-09-01' });
+    r = await call('POST', `/api/sys-issues/${id}/edit-in-revision`, adminTok, { priority: 'P1', description: '新描述', deadline: futureDateOnly(30) });
     assert.strictEqual(r.status, 200, 'admin 多字段 edit 200');
     assert.strictEqual(r.body.changed.length, 3, 'changed 3 字段');
+    const tl3 = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='edit_in_revision' ORDER BY id DESC LIMIT 1`, [id]);
+    const tl3Changes = JSON.parse(tl3.payload_json).changes;
+    assert.strictEqual(tl3Changes.length, 3, '[A2] 多字段编辑 changes 恰 3 项');
+    assert.deepStrictEqual(tl3Changes.map(c => c.field).sort(), ['deadline', 'description', 'priority'], '[A2] changes 字段集与 changed 一致');
+    assert.ok(tl3Changes.every(c => Object.prototype.hasOwnProperty.call(c, 'old') && Object.prototype.hasOwnProperty.call(c, 'new')), '[A2] 每项含 old/new 键');
+    // [566-L2] 逐项精确断言归一后的旧/新值（夹具：description 建单固定文案、priority/deadline 建单未传 → 旧值取库中实际值）
+    {
+      const byField = Object.fromEntries(tl3Changes.map(c => [c.field, c]));
+      assert.strictEqual(byField.description.old, '建单优化批 C1 fixture 补齐：verify 场景建单', '[A2] description.old=建单夹具文案');
+      assert.strictEqual(byField.description.new, '新描述', '[A2] description.new=新描述');
+      assert.strictEqual(byField.priority.new, 'P1', '[A2] priority.new=P1');
+      assert.ok(byField.priority.old !== 'P1' && (byField.priority.old === null || typeof byField.priority.old === 'string'), `[A2] priority.old 为库中旧值（≠P1），实得 ${JSON.stringify(byField.priority.old)}`);
+      assert.strictEqual(byField.deadline.old, null, '[A2] deadline.old=null（建单未传 deadline）');
+      assert.ok(typeof byField.deadline.new === 'string' && byField.deadline.new.startsWith(futureDateOnly(30)) && !/:\d{2}:\d{2}$/.test(byField.deadline.new), `[A2] deadline.new 为归到分的形态（以 ${futureDateOnly(30)} 开头、不带秒），实得 ${JSON.stringify(byField.deadline.new)}`);
+    }
+    // [566-L2] needs_feasibility 0→1 留痕：归一为整数 0/1（非布尔/非字符串）
+    r = await call('POST', `/api/sys-issues/${id}/edit-in-revision`, adminTok, { needs_feasibility: 1 });
+    assert.strictEqual(r.status, 200, 'needs_feasibility 0→1 200');
+    {
+      const tlF = await get(`SELECT payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='edit_in_revision' ORDER BY id DESC LIMIT 1`, [id]);
+      const ch = JSON.parse(tlF.payload_json).changes;
+      assert.deepStrictEqual(ch, [{ field: 'needs_feasibility', old: 0, new: 1 }], `[A2] needs_feasibility 留痕应为 [{field,old:0,new:1}]，实得 ${JSON.stringify(ch)}`);
+    }
 
     // 受理人(13) 编辑他人单 → 403（created_by∨admin·受理人不获）
     id = await mkRevision('feature', 5);

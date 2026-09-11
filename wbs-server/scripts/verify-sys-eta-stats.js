@@ -111,7 +111,24 @@ async function mkIssue(type, overrides = {}) {
 // bug → 处理中 → estimate → submit(no_code，0 commit) → accept：C9 免上线直翻「已上线」，最省心的
 // 通用夹具（type 对本端点统计口径无关——不参与容差判定，纯粹图它比 improvement/feature 少两步前置）。
 async function bugToReleased(overrides = {}) {
-  const id = await mkIssue('bug', overrides);
+  // [C1(本轮建单硬拦) collateral·Opus 预筛 M1 收口] 建单端点起拒绝已过期 deadline——只有 deadline
+  //   已早于今天（pastDeadline 系列用例）才需要绕开建单闸直接 SQL 回填；未来值必须仍照旧走建单请求体，
+  //   经 normalizeDeadlineDT 规范化落库为 'YYYY-MM-DD HH:MM:SS'（原实现无条件剥离 deadline 走 SQL 回填，
+  //   未规范化的纯日期字符串与生产真实落库形态不符，且与本条注释"未来值仍照旧走建单"自相矛盾）。
+  const { deadline, ...rest } = overrides;
+  const isPast = deadline !== undefined && deadline < fmtDateOnly(new Date());
+  const id = await mkIssue('bug', isPast ? rest : overrides);
+  if (isPast) {
+    // [562-M1] 回填值须落规范化形态（同 normalizeDeadlineDT 落库形态 'YYYY-MM-DD HH:MM:00'）——真实
+    //   写点产出的 deadline 恒经该函数补齐时分秒，pastDeadline() 只产出祼日期，直接落库会与生产真实
+    //   落库形态不符（同本函数上方注释"原实现……未规范化的纯日期字符串与生产真实落库形态不符"同一
+    //   精神，此前只改了未来值那半支，过期分支这半支漏改）。
+    const dt = /^\d{4}-\d{2}-\d{2}$/.test(deadline) ? `${deadline} 00:00:00` : deadline;
+    await run(`UPDATE sys_issues SET deadline = ? WHERE id = ?`, [dt, id]);
+    // 受理前断言库值形态——确保回填真落了规范化形态。
+    const rowBefore = await get(`SELECT deadline FROM sys_issues WHERE id=?`, [id]);
+    assert.strictEqual(rowBefore.deadline, dt, `[夹具-受理前] deadline 库值应已规范化为 ${dt}，实得 ${rowBefore.deadline}`);
+  }
   let r = await call('POST', `/api/sys-issues/${id}/intake-accept`, adminTok, {});
   assert.strictEqual(r.status, 200, `[夹具-受理] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
   r = await call('POST', `/api/sys-issues/${id}/assign`, adminTok, { assigned_to: 5 });

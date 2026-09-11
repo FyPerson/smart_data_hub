@@ -117,6 +117,13 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+// [C1(本轮建单硬拦) collateral] 动态生成未来日期（同既有 verify-sys-* futureEst 写法，远期字面量迟早
+//   到期，勿回退硬编码）——供下方 edit-in-revision 多字段改动断言用，值本身不是断言目标。
+function futureDateOnly(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 
 const issueRow = (id) => rawGet('SELECT * FROM sys_issues WHERE id=?', [id]);
 const timelineRows = (id, actionCode) => all('SELECT * FROM sys_issue_timeline WHERE issue_id=? AND action_code=? ORDER BY id', [id, actionCode]);
@@ -202,7 +209,7 @@ async function main() {
     const id5 = await mkIssue('开发中', { type: 'feature', needs_feasibility: 1 });
     const r5 = await call('POST', `/api/sys-issues/${id5}/edit-in-revision`, creatorTok, {
       title: '新标题-开发中', description: '新描述5', system_name: 'HRD', module_name: '模块5',
-      priority: 'P1', deadline: '2026-08-31',
+      priority: 'P1', deadline: futureDateOnly(20),
       requester_dept: '部门5', requester_name: '姓名5', requester_phone: '13800000005',
     });
     assert.strictEqual(r5.status, 200, `[①开发中] 期望 200, got ${r5.status} ${JSON.stringify(r5.body)}`);
@@ -215,7 +222,7 @@ async function main() {
     const id6 = await mkIssue('处理中', { type: 'bug' });
     const r6 = await call('POST', `/api/sys-issues/${id6}/edit-in-revision`, adminTok, {
       title: '新标题-处理中', description: '新描述6', system_name: '电子签', module_name: '模块6',
-      priority: 'P0', deadline: '2026-07-31',
+      priority: 'P0', deadline: futureDateOnly(15),
       requester_dept: '部门6', requester_name: '姓名6', requester_phone: '13800000006',
     });
     assert.strictEqual(r6.status, 200, `[①处理中] 期望 200, got ${r6.status} ${JSON.stringify(r6.body)}`);

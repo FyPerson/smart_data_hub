@@ -51,17 +51,34 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const sqlite3 = require('sqlite3');
 
 let passed = 0, failed = 0;
 const failures = [];
+// [C4e·codex 560 M3 收口] 新增 async check 支持——M3 的两组「真实执行 siReleaseExecuteRetryModal」断言
+// 需要 await 真实的 `async v => {...}` onConfirm 回调（不是手写同构逻辑复刻一份，避免复刻漂移），原
+// check() 只支持同步 fn（异步 fn() 会立即返回 pending promise，try/catch 接不住之后才抛出的断言失败，
+// 变成 unhandled rejection）。改法：fn() 返回值若是 thenable，则登记进 pending 队列延后判定，文件末尾
+// `await Promise.all(pending)` 之后才打印总分/决定退出码——同步调用点行为逐字不变（fn() 非 thenable 时
+// 走原有同步分支，无感知）。
+const pending = [];
 function check(name, fn) {
+    let result;
     try {
-        fn();
-        passed++; console.log(`  ✓ ${name}`);
+        result = fn();
     } catch (e) {
         failed++; failures.push({ name, err: e.message });
         console.log(`  ✗ ${name} — ${e.message}`);
+        return;
     }
+    if (result && typeof result.then === 'function') {
+        pending.push(result.then(
+            () => { passed++; console.log(`  ✓ ${name}`); },
+            (e) => { failed++; failures.push({ name, err: e.message }); console.log(`  ✗ ${name} — ${e.message}`); }
+        ));
+        return;
+    }
+    passed++; console.log(`  ✓ ${name}`);
 }
 
 const htmlPath = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
@@ -399,19 +416,149 @@ check('execute 请求体带 executor_row_id（取自本人在册行 id，§4.1a 
     const code = stripComments(body);
     assert.ok(/executor_row_id:\s*myRow\.id/.test(code), '未见 executor_row_id: myRow.id——必须显式传本人那一行的行 id，不能让服务端自己查一行（会丢代次保证）');
 });
-check('收到 RELEASE_NOTE_REQUIRED（并发导致误判非最后一人）时补弹专填说明弹窗重试，不报死错', () => {
-    const body = extractFunctionBody(src, 'siReleaseExecuteModal');
-    assert.ok(body.includes('RELEASE_NOTE_REQUIRED'), '未见 RELEASE_NOTE_REQUIRED 分支');
-    assert.ok(body.includes('siReleaseExecuteRetryNoteModal'), '未见补弹重试弹窗调用');
-    const retryBody = extractFunctionBody(src, 'siReleaseExecuteRetryNoteModal');
-    assert.ok(retryBody, '未提取到 siReleaseExecuteRetryNoteModal 函数体');
+check('[C3·H2 统一重试上下文改造] 收到 RELEASE_NOTE_REQUIRED / overdue_reason_required 均经 siReleaseExecuteSubmit 统一出口转入 siReleaseExecuteRetryModal 重试，不报死错（原 siReleaseExecuteRetryNoteModal 已被统一重试弹层取代，方案 §5.1.4）', () => {
+    const submitBody = extractFunctionBody(src, 'siReleaseExecuteSubmit');
+    assert.ok(submitBody, '未提取到 siReleaseExecuteSubmit 函数体（统一提交出口）');
+    const code = stripComments(submitBody);
+    assert.ok(code.includes("RELEASE_NOTE_REQUIRED"), '未见 RELEASE_NOTE_REQUIRED 分支');
+    assert.ok(code.includes('overdue_reason_required'), '未见 overdue_reason_required 分支（四个 RELEASE_OVERDUE_REASON_* 响应体统一携带该字段，方案 §5.1.3a）');
+    assert.ok(code.includes('siReleaseExecuteRetryModal'), '未见统一重试弹窗调用');
+    const retryBody = extractFunctionBody(src, 'siReleaseExecuteRetryModal');
+    assert.ok(retryBody, '未提取到 siReleaseExecuteRetryModal 函数体');
 });
-check('309-L1：siReleaseExecuteRetryNoteModal 重试请求体必含 executor_row_id（补弹重试链同样要守住 §4.1a 代次语义——不能因为走的是补救分支就漏传行 id）', () => {
-    const retryBody = extractFunctionBody(src, 'siReleaseExecuteRetryNoteModal');
-    assert.ok(retryBody, '未提取到 siReleaseExecuteRetryNoteModal 函数体');
-    const code = stripComments(retryBody);
-    assert.ok(/executor_row_id:\s*executorRowId/.test(code), '未见 executor_row_id: executorRowId——补弹重试的请求体同样必须显式带上本人那一行的行 id');
+check('[C3] siReleaseExecuteModal 与 siReleaseExecuteRetryModal 均通过 siReleaseExecuteSubmit 提交，请求体必含 executor_row_id（§4.1a 代次语义——首次/补弹两条链路同样不能漏传行 id）', () => {
+    const submitBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteSubmit') || '');
+    assert.ok(submitBody, '未提取到 siReleaseExecuteSubmit 函数体');
+    assert.ok(/executor_row_id:\s*ctx\.executor_row_id/.test(submitBody), '未见 executor_row_id: ctx.executor_row_id——统一提交出口必须显式带上 ctx 里的行 id');
+    const initBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteModal') || '');
+    assert.ok(/executor_row_id:\s*myRow\.id/.test(initBody), '首次提交的 ctx 构造未见 executor_row_id: myRow.id');
+    const retryBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteRetryModal') || '');
+    assert.ok(/Object\.assign\(\{\},\s*ctx\)/.test(retryBody), '重试弹层未见基于既有 ctx 累计构造 newCtx（Object.assign({}, ctx)）——统一重试上下文要求补弹只补当次缺的字段，不能整体重建');
 });
+check('[C3] siReleaseExecuteRetryModal 对四个 RELEASE_OVERDUE_REASON_* 一律展开理由块（按 overdue_reason_required===true 判定，不逐一分辨具体 code）且回填 ctx 已填理由（不静默丢弃）', () => {
+    const retryBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteRetryModal') || '');
+    assert.ok(retryBody, '未提取到 siReleaseExecuteRetryModal 函数体');
+    assert.ok(/d\.overdue_reason_required === true/.test(retryBody), '未见 overdue_reason_required === true 判据');
+    assert.ok(/fReleaseOverdueReasonBlock\('siRetryOverdueBlock',\s*true,\s*ctx\.overdue_reason_code \|\| ''/.test(retryBody), '理由块未见回填 ctx.overdue_reason_code（补弹时清空已填理由=方案 §7.3 变异 V5 场景，须判红）');
+});
+// [C4e·codex 560 M3 收口] 「双链均通过统一出口」原断言只查了两处字面量模式（executor_row_id 赋值/
+//   Object.assign 存在），没查两个弹层函数体内真的**调用**了 siReleaseExecuteSubmit(——"存在克隆语句"
+//   不等于"克隆结果真被提交"；且回填断言只覆盖了 overdue_reason_code 一个字段，测不出"先补说明再补
+//   理由/先补理由再补说明"两种顺序下，另一次已补齐的字段会不会在下一轮 Object.assign 之外被漏落。
+check('[C4e·M3-①] siReleaseExecuteModal 与 siReleaseExecuteRetryModal 函数体内均含 siReleaseExecuteSubmit( 调用（不是只声明了克隆语句，克隆/构造结果真的被送进统一出口）', () => {
+    const initBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteModal') || '');
+    const retryBody = stripComments(extractFunctionBody(src, 'siReleaseExecuteRetryModal') || '');
+    assert.ok(initBody && /siReleaseExecuteSubmit\(/.test(initBody), 'siReleaseExecuteModal 函数体未见 siReleaseExecuteSubmit( 调用');
+    assert.ok(retryBody && /siReleaseExecuteSubmit\(/.test(retryBody), 'siReleaseExecuteRetryModal 函数体未见 siReleaseExecuteSubmit( 调用');
+});
+console.log('— §M3-② siReleaseExecuteRetryModal 真实执行：两种补齐顺序下字段不丢失 —');
+// 沙箱真执行 siReleaseExecuteRetryModal——只 stub 掉两个"会摸真实 DOM/网络"的依赖（siModal 改成同步
+//   捕获 onConfirm 供测试直接调用、siReleaseExecuteSubmit 改成记录收到的 ctx），其余全是真实源码
+//   （note/fText/fTextarea/esc/fReleaseOverdueReasonBlock/siCollectReleaseOverdueReasonRequired/
+//   SI_RELEASE_OVERDUE_REASON_CODES/_NOTE_MAX 与 siReleaseExecuteRetryModal 本体），不手抄第二份判据。
+(function assertRetryModalFieldPreservation() {
+    // [C4f·562-R M2 收口·grabFn 自身踩坑] `src.indexOf('function ' + name + '(')` 对 `async function
+    // siReleaseExecuteSubmit(` 这类声明会命中"function"关键字本身的位置（作为"async "之后的子串），
+    // 把 "async " 前缀漏在截取范围之外——取出来的文本变成一个内部含 `await` 却没有 async 修饰的裸
+    // function 声明，`new Function(...)` 编译时报"await is only valid in async functions"。改法：
+    // 先探测紧邻的 `async function <name>(` 整段是否存在，命中则从"async"起截取，未命中再退回普通
+    // `function <name>(`——两种声明形态都要支持，不能只顾其中一种。
+    function grabFn(name) {
+        const asyncPrefix = 'async function ' + name + '(';
+        const plainPrefix = 'function ' + name + '(';
+        let i = src.indexOf(asyncPrefix);
+        if (i < 0) i = src.indexOf(plainPrefix);
+        if (i < 0) return null;
+        let d = 0, j = src.indexOf('{', i);
+        const s = i;   // 从声明起始（含 async 前缀，若有）截取，不是只从花括号开始
+        for (; j < src.length; j++) {
+            if (src[j] === '{') d++;
+            else if (src[j] === '}') { d--; if (d === 0) return src.slice(s, j + 1); }
+        }
+        return null;
+    }
+    const fnRetry = grabFn('siReleaseExecuteRetryModal');
+    const fnSubmit = grabFn('siReleaseExecuteSubmit');
+    const fnNote = grabFn('note');
+    const fnFText = grabFn('fText');
+    const fnFTextarea = grabFn('fTextarea');
+    const fnEsc = grabFn('esc');
+    const fnBlock = grabFn('fReleaseOverdueReasonBlock');
+    const fnCollect = grabFn('siCollectReleaseOverdueReasonRequired');
+    const codesLit = (src.match(/const SI_RELEASE_OVERDUE_REASON_CODES = \[[^\]]*\];/) || [''])[0];
+    const noteMaxLit = (src.match(/const SI_RELEASE_OVERDUE_REASON_NOTE_MAX = \d+;/) || [''])[0];
+    check('[M3-②前置] 依赖函数均提取成功（提不到=本组空转，不静默跳过）', () => {
+        assert.ok(fnRetry, '未提取到 siReleaseExecuteRetryModal');
+        assert.ok(fnSubmit, '未提取到 siReleaseExecuteSubmit（C4f·562-R M2：本组须纳入真实提交函数，不能只 stub 它）');
+        assert.ok(fnNote && fnFText && fnFTextarea && fnEsc && fnBlock && fnCollect, '未提取到 note/fText/fTextarea/esc/fReleaseOverdueReasonBlock/siCollectReleaseOverdueReasonRequired 之一');
+        assert.ok(codesLit && noteMaxLit, '未提取到 SI_RELEASE_OVERDUE_REASON_CODES / SI_RELEASE_OVERDUE_REASON_NOTE_MAX');
+    });
+    if (!fnRetry || !fnSubmit || !fnNote || !fnFText || !fnFTextarea || !fnEsc || !fnBlock || !fnCollect || !codesLit || !noteMaxLit) return;
+
+    // [C4f·codex 562-R M2 收口] 原写法把 siReleaseExecuteSubmit 整个 stub 成"记录收到的 ctx"——这只证明
+    //   了 siReleaseExecuteRetryModal 把 newCtx 传给了 siReleaseExecuteSubmit，不证明**真实**
+    //   siReleaseExecuteSubmit 构造请求体时有没有漏传某个字段（它自己删掉某行 `if (ctx.xxx) body.xxx=...`
+    //   这类回归，旧写法测不出，因为它压根没跑真实函数体）。改法：把真实 siReleaseExecuteSubmit 一并编译
+    //   进沙箱，只在**它自己发请求**这一个边界（siApi）stub——捕获真实构造出的请求体，返回成功响应让
+    //   它自然走完成功分支（siExecuteApplyResult/siCloseModal/siLoadList/siOpenBatchDetail 均 stub 为
+    //   无副作用空函数，只是让真实控制流跑得完，不代表它们本身被测）。siModalInstanceSeq/siAuditGen 是
+    //   siReleaseExecuteSubmit 内部读取比对的全局态，沙箱里声明为恒定值（stub 侧从不递增，天然通过
+    //   "未过期"分支，不影响我们关心的字段保留断言）。
+    function makeHarness() {
+        let capturedOnConfirm = null;
+        let submittedBody = null;
+        // eslint-disable-next-line no-new-func
+        const runRetry = new Function(
+            'showToast', 'siModal', 'siApi', 'siExecuteApplyResult', 'siCloseModal', 'siLoadList', 'siOpenBatchDetail', 'siApiErr',
+            `let siModalInstanceSeq = 0;\nlet siAuditGen = 0;\n${codesLit}\n${noteMaxLit}\n${fnEsc}\n${fnNote}\n${fnFText}\n${fnFTextarea}\n${fnBlock}\n${fnCollect}\n${fnSubmit}\n${fnRetry}\nreturn siReleaseExecuteRetryModal;`
+        )(
+            () => {},
+            (title, fields, onConfirm) => { capturedOnConfirm = onConfirm; },
+            async (url, opts) => { submittedBody = (opts && opts.body) || null; return { ok: true, data: {} }; },
+            () => {}, () => {}, async () => {}, async () => {}, () => {}
+        );
+        return {
+            invoke: async (releaseId, ctx, errData, v) => {
+                capturedOnConfirm = null; submittedBody = null;
+                runRetry(releaseId, ctx, errData);
+                assert.ok(capturedOnConfirm, 'siModal stub 未捕获到 onConfirm——siReleaseExecuteRetryModal 实现可能已改用别的调用形态');
+                await capturedOnConfirm(v);
+                assert.ok(submittedBody, 'siApi 边界未捕获到请求体——真实 siReleaseExecuteSubmit 可能未被调用到，或未走到发请求这一步');
+                return submittedBody;
+            },
+        };
+    }
+
+    check('[M3-②a] 先补说明（RELEASE_NOTE_REQUIRED）再补理由（overdue_reason_required）：真实 siReleaseExecuteSubmit 两轮构造的请求体均保留已补字段，四字段齐全', async () => {
+        const h = makeHarness();
+        const baseCtx = { executor_row_id: 42 };
+        const body1 = await h.invoke('r1', baseCtx, { code: 'RELEASE_NOTE_REQUIRED' }, { release_note: 'M3 夹具·首轮上线说明', version_tag: '' });
+        assert.strictEqual(body1.executor_row_id, 42, '第一轮请求体 executor_row_id 应为 42');
+        assert.strictEqual(body1.release_note, 'M3 夹具·首轮上线说明', '第一轮请求体应含 release_note');
+        // body1 的字段形状与内部 newCtx 一致（真实 siReleaseExecuteSubmit 逐字段 `if (ctx.xxx) body.xxx=ctx.xxx`
+        // 透传，未做额外改名/转换），拿它作第二轮的 ctx 输入等价于拿到了第一轮内部真正累积出的 newCtx。
+        const body2 = await h.invoke('r1', body1, { overdue_reason_required: true, planned_date: '2026-01-01', released_date: '2026-01-05', overdue_days: 4 },
+            { siRetryOverdueBlock_code: '业务方要求延后', siRetryOverdueBlock_note: 'M3 夹具·第二轮理由说明' });
+        assert.strictEqual(body2.executor_row_id, 42, '第二轮请求体应仍带着最初的 executor_row_id（未曾被任何一轮覆盖）');
+        assert.strictEqual(body2.release_note, 'M3 夹具·首轮上线说明', '第二轮（本轮只补理由）请求体不应丢掉第一轮已补的 release_note');
+        assert.strictEqual(body2.overdue_reason_code, '业务方要求延后', '第二轮请求体应含 overdue_reason_code');
+        assert.strictEqual(body2.overdue_reason_note, 'M3 夹具·第二轮理由说明', '第二轮请求体应含 overdue_reason_note');
+    });
+
+    check('[M3-②b] 先补理由（overdue_reason_required）再补说明（RELEASE_NOTE_REQUIRED）：真实 siReleaseExecuteSubmit 两轮构造的请求体均保留已补字段，四字段齐全（顺序颠倒同样不丢）', async () => {
+        const h = makeHarness();
+        const baseCtx = { executor_row_id: 99 };
+        const body1 = await h.invoke('r2', baseCtx, { overdue_reason_required: true, planned_date: '2026-01-01', released_date: '2026-01-06', overdue_days: 5 },
+            { siRetryOverdueBlock_code: '环境或依赖未就绪', siRetryOverdueBlock_note: 'M3 夹具·先补理由' });
+        assert.strictEqual(body1.overdue_reason_code, '环境或依赖未就绪', '第一轮请求体应含 overdue_reason_code');
+        assert.strictEqual(body1.overdue_reason_note, 'M3 夹具·先补理由', '第一轮请求体应含 overdue_reason_note');
+        const body2 = await h.invoke('r2', body1, { code: 'RELEASE_NOTE_REQUIRED' }, { release_note: 'M3 夹具·后补说明', version_tag: '' });
+        assert.strictEqual(body2.executor_row_id, 99, '第二轮请求体应仍带着最初的 executor_row_id');
+        assert.strictEqual(body2.release_note, 'M3 夹具·后补说明', '第二轮请求体应含 release_note');
+        assert.strictEqual(body2.overdue_reason_code, '环境或依赖未就绪', '第二轮（本轮只补说明）请求体不应丢掉第一轮已补的 overdue_reason_code');
+        assert.strictEqual(body2.overdue_reason_note, 'M3 夹具·先补理由', '第二轮请求体不应丢掉第一轮已补的 overdue_reason_note');
+    });
+})();
 check('cancel-schedule 收到 CONFIRM_DISCARD_DONE_REQUIRED 时补弹 done_executor_names 二次确认框，带 confirm_discard_done:true 重试', () => {
     const body = extractFunctionBody(src, 'siReleaseCancelScheduleModal');
     assert.ok(body, '未提取到 siReleaseCancelScheduleModal 函数体');
@@ -1270,7 +1417,263 @@ check('迭代单详情四处上线单标识=release_no 主显+#id 回退（防�
     //   不能渲染成空白——上面恰-3 断言已隐含，此处单独留言明确失败语义）。
 });
 
+console.log('— §⑯（C3·上线逾期留痕 方案 20260910 v1.2 §5.1.6/§5.1.4）前端不变量 —');
+check('release_overdue_reason 三表正向登记（同 release_info_edit/release_deleted/dev_withdraw 同族先例：SI_TL_CLS 无独立守卫，摘掉词条会静默降级灰徽章；Set 双向相等断言只证两处一致不证含本码）', () => {
+    const labelBody = stripComments(extractConstObjectText('SI_TL_LABEL') || '');
+    const clsBody = stripComments(extractConstObjectText('SI_TL_CLS') || '');
+    assert.ok(labelBody && /release_overdue_reason:\s*'上线逾期'/.test(labelBody), 'SI_TL_LABEL 应含 release_overdue_reason 词条');
+    assert.ok(clsBody && /release_overdue_reason:\s*'si-tl-red'/.test(clsBody), 'SI_TL_CLS 应含 release_overdue_reason 词条（缺失=运行时静默降级 si-tl-gray）');
+    assert.ok(/SI_TL_NOTE_OWN_LABEL_CODES\s*=\s*new Set\(\[[\s\S]*?'release_overdue_reason'/.test(src), 'SI_TL_NOTE_OWN_LABEL_CODES 应含 release_overdue_reason（缺失=落回通用「备注」徽章）');
+});
+check('D9/D2：release_overdue_reason 不注册进 SI_TL_RELEASE_SCOPE_LABEL/_CLS（否则会被「隐藏上线单调整记录」过滤器连带隐藏，与 D2「豁免的是输入闸不是事实」冲突——C0 ⑤-a 实证）', () => {
+    const labelM = stripComments(src).match(/const SI_TL_RELEASE_SCOPE_LABEL = \{[\s\S]*?\n {4}\};/);
+    const clsM = stripComments(src).match(/const SI_TL_RELEASE_SCOPE_CLS = \{[\s\S]*?\n {4}\};/);
+    assert.ok(labelM, '未定位到 SI_TL_RELEASE_SCOPE_LABEL 对象字面量');
+    assert.ok(clsM, '未定位到 SI_TL_RELEASE_SCOPE_CLS 对象字面量');
+    assert.ok(!labelM[0].includes('release_overdue_reason'), 'release_overdue_reason 不应出现在 SI_TL_RELEASE_SCOPE_LABEL 内（违反 D9/D2，会被隐藏过滤器连带隐藏）');
+    assert.ok(!clsM[0].includes('release_overdue_reason'), 'release_overdue_reason 不应出现在 SI_TL_RELEASE_SCOPE_CLS 内（同上）');
+});
+check('前端 SI_RELEASE_OVERDUE_REASON_CODES 字面量与后端 _internals.RELEASE_OVERDUE_REASON_CODES 真值逐字相等（写读同源对拍——守卫与被测方都手写字面量会一起过期，须 require 真相源，guard_static_analysis_gotchas 沉淀）', () => {
+    const m = /const SI_RELEASE_OVERDUE_REASON_CODES = (\[[^\]]*\]);/.exec(src);
+    assert.ok(m, '未定位到前端 SI_RELEASE_OVERDUE_REASON_CODES 字面量数组');
+    // eslint-disable-next-line no-eval
+    const frontendCodes = eval(m[1]);
+    const noop = () => {};
+    // [C3b·Opus 预筛 L-8 收口] memDb 只在本 check 内临时用来满足工厂期 deps 校验（不真的建表/写入），
+    // 但泄漏一个打开的 sqlite3 句柄仍是资源泄漏——包 try/finally 确保断言失败（assert 抛异常）时
+    // memDb 依然被关闭，不依赖"走到最后一行才 close"这种顺序假设。
+    const memDb = new sqlite3.Database(':memory:');
+    try {
+        const asyncNoop = async () => null;
+        const backendMod = require('../routes/sys-iteration')({
+            logger: { info: noop, warn: noop, error: noop, debug: noop },
+            db: memDb, dbRunAsync: asyncNoop, dbGetAsync: asyncNoop, dbAllAsync: async () => [],
+            authenticateToken: (req, res, next) => next(), requireAdmin: (req, res, next) => next(),
+            ...require('./_sys-attach-test-deps'),
+            readSystemConfig: asyncNoop, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: asyncNoop, maskPhone: (s) => s,
+        });
+        const backendCodes = backendMod._internals.RELEASE_OVERDUE_REASON_CODES;
+        assert.ok(Array.isArray(backendCodes) && backendCodes.length > 0, '后端 _internals.RELEASE_OVERDUE_REASON_CODES 未导出或为空——两侧对拍失去意义');
+        assert.deepStrictEqual(frontendCodes, backendCodes, `前端 SI_RELEASE_OVERDUE_REASON_CODES 与后端 RELEASE_OVERDUE_REASON_CODES 不相等（任一侧改了值/顺序/新增删除项未同步另一侧）：前端=${JSON.stringify(frontendCodes)} 后端=${JSON.stringify(backendCodes)}`);
+    } finally {
+        memDb.close();
+    }
+});
+check('前端 SI_RELEASE_DATE_CHANGE_REASON_MAX 字面量与后端 _internals.RELEASE_DATE_CHANGE_REASON_MAX 真值相等（同 SI_RELEASE_OVERDUE_REASON_CODES 既有对拍写法，C4b·L4 收口）', () => {
+    const m = /const SI_RELEASE_DATE_CHANGE_REASON_MAX = (\d+);/.exec(src);
+    assert.ok(m, '未定位到前端 SI_RELEASE_DATE_CHANGE_REASON_MAX 字面量');
+    const frontendMax = Number(m[1]);
+    const noop = () => {};
+    const memDb = new sqlite3.Database(':memory:');
+    try {
+        const asyncNoop = async () => null;
+        const backendMod = require('../routes/sys-iteration')({
+            logger: { info: noop, warn: noop, error: noop, debug: noop },
+            db: memDb, dbRunAsync: asyncNoop, dbGetAsync: asyncNoop, dbAllAsync: async () => [],
+            authenticateToken: (req, res, next) => next(), requireAdmin: (req, res, next) => next(),
+            ...require('./_sys-attach-test-deps'),
+            readSystemConfig: asyncNoop, COLLAB_CHAT_ADMIN_ID: 3, callDingtalkWithTokenRetry: asyncNoop, maskPhone: (s) => s,
+        });
+        const backendMax = backendMod._internals.RELEASE_DATE_CHANGE_REASON_MAX;
+        assert.strictEqual(typeof backendMax, 'number', '后端 _internals.RELEASE_DATE_CHANGE_REASON_MAX 未导出或非数值——两侧对拍失去意义');
+        assert.strictEqual(frontendMax, backendMax, `前端 SI_RELEASE_DATE_CHANGE_REASON_MAX(${frontendMax}) 与后端 RELEASE_DATE_CHANGE_REASON_MAX(${backendMax}) 不相等`);
+    } finally {
+        memDb.close();
+    }
+});
+check('siReleaseExecuteModal 预判层：仅普通批次∧isLast∧前端判逾期才展开理由块（方案 §5.1.5，应急批次/非最后一人不展开）', () => {
+    const body = stripComments(extractFunctionBody(src, 'siReleaseExecuteModal') || '');
+    assert.ok(body, '未提取到 siReleaseExecuteModal 函数体');
+    assert.ok(/siReleaseOverdueApplicable\(rel,\s*isLast\)/.test(body), '未见 siReleaseOverdueApplicable(rel, isLast) 调用——预判展开条件应复用该判据函数，不应另写一套内联条件');
+    assert.ok(/fReleaseOverdueReasonBlock\('siExecOverdueBlock'/.test(body), '未见预判层理由块渲染（fReleaseOverdueReasonBlock 调用）');
+});
+check('siReleaseOverdueApplicable：应急批次（release_kind===\'emergency\'）恒返回 null（不展开理由块）', () => {
+    assert.ok(/function siReleaseOverdueApplicable\(rel, isLast\) \{/.test(stripComments(src)), '未定位到 siReleaseOverdueApplicable 定义');
+    const body = stripComments(extractFunctionBody(src, 'siReleaseOverdueApplicable') || '');
+    assert.ok(/rel\.release_kind === 'emergency'/.test(body), '未见 release_kind===\'emergency\' 短路判据——应急批次不应参与逾期理由预判');
+});
+
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
+// ═══ [时间线改动明细 方案 20260911 v1.2 §3.3] 修改类事件「查看改动」渲染：静态登记 + 直调行为 ═══
+check('[A] SI_TL_CHANGE_CODES 含 release_info_edit / edit_in_revision 两码 + SI_TL_CHANGE_FIELD_LABEL 含上线单三字段与迭代单十二字段', () => {
+    assert.ok(/SI_TL_CHANGE_CODES\s*=\s*new Set\(\[[^\]]*'release_info_edit'[^\]]*\]\)/.test(src), 'SI_TL_CHANGE_CODES 应含 release_info_edit');
+    assert.ok(/SI_TL_CHANGE_CODES\s*=\s*new Set\(\[[^\]]*'edit_in_revision'[^\]]*\]\)/.test(src), 'SI_TL_CHANGE_CODES 应含 edit_in_revision');
+    const lbl = (src.match(/const SI_TL_CHANGE_FIELD_LABEL = \{[\s\S]*?\};/) || [''])[0];
+    assert.ok(lbl, '未提取到 SI_TL_CHANGE_FIELD_LABEL');
+    for (const f of ['title', 'version_tag', 'release_note', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone', 'source', 'related_correction_no']) {
+        assert.ok(new RegExp(`\\b${f}:\\s*'`).test(lbl), `SI_TL_CHANGE_FIELD_LABEL 缺 ${f}（后端 SYS_RELEASE_EDIT_FIELD_LABEL ∪ EDIT_FIELD_LABELS 前端副本失同源）`);
+    }
+});
+check('[A] siRenderTimeline 含 changes 分支：按 SI_TL_CHANGE_CODES 收窄 action_code ∧ Array.isArray(parsedPayload.changes) → 调 siRenderTimelineChanges，且位于 online_mode 分支之前', () => {
+    const body = stripComments(extractFunctionBody(src, 'siRenderTimeline') || '');
+    assert.ok(body, '未提取到 siRenderTimeline 函数体');
+    const iChanges = body.indexOf('SI_TL_CHANGE_CODES.has(e.action_code)');
+    const iOnline = body.indexOf('parsedPayload.online_mode != null');
+    assert.ok(iChanges > 0, '未见 SI_TL_CHANGE_CODES.has(e.action_code) 分支');
+    assert.ok(/SI_TL_CHANGE_CODES\.has\(e\.action_code\)\s*&&\s*parsedPayload\s*&&\s*Array\.isArray\(parsedPayload\.changes\)/.test(body), 'changes 分支条件应为 action_code 收窄 ∧ parsedPayload ∧ Array.isArray(changes)');
+    assert.ok(/siRenderTimelineChanges\(parsedPayload\.changes,\s*siTlChangeObjectText\(e\)\)/.test(body), 'changes 分支应调用 siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e))');
+    assert.ok(iOnline > iChanges, 'changes 分支应在 online_mode 分支之前');
+    // 徽章覆盖：有可渲染改动才换成玫红「✎ 变更留痕」（si-tl-rose，用户选 V4a；不得与 release_published 的 si-tl-green 同色），降级空串保持原徽章
+    assert.ok(/if \(changesHtml\) \{ label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS; \}/.test(body), 'changes 分支应在 changesHtml 非空时覆盖 label/cls 为变更留痕徽章');
+    assert.ok(/const SI_TL_CHANGE_BADGE_LABEL = '✎ 变更留痕';/.test(src) && /const SI_TL_CHANGE_BADGE_CLS = 'si-tl-rose';/.test(src), '变更留痕徽章常量：标签「✎ 变更留痕」+ si-tl-rose（用户 2026-09-11 选 V4a）');
+    assert.ok(/\.si-tl-evt\.si-tl-rose \{ background: #fce7f3; color: #be185d; \}/.test(src), 'si-tl-rose CSS 类应存在且为玫红实底（#fce7f3 / #be185d）');
+    assert.ok(/release_published:\s*'si-tl-green'/.test(stripComments(src)), '对照：release_published 仍为 si-tl-green，变更留痕不得与之同色');
+});
+check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ changes })）', () => {
+    const indexJsSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    const m = indexJsSrc.match(/INSERT INTO sys_issue_timeline \(issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json\)\s*VALUES \(\?, 'note', \?, 'edit_in_revision', \?, \?, \?\)`,\s*\[id, noteSummary, [^\]]*JSON\.stringify\(\{ changes \}\)\]/);
+    assert.ok(m, 'edit_in_revision INSERT 应含 payload_json 列并绑定 JSON.stringify({ changes })');
+    assert.ok(/changes\.push\(\{ field: f, old: normOld, new: normNew \}\)/.test(indexJsSrc), '幂等循环内应 changes.push({ field, old: normOld, new: normNew })（与幂等判据同源）');
+});
+{
+    // 直调行为验证：抽出 siTlChangeValueHtml + siRenderTimelineChanges + 两常量 + esc，new Function 装配执行。
+    const grabFnA = (name) => {
+        const re = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`);
+        const m = re.exec(src);
+        if (!m) return null;
+        const body = extractFunctionBody(src, name);
+        return body ? src.slice(m.index, m.index + m[0].length - 1) + body : null;
+    };
+    const fnEsc = grabFnA('esc');
+    const fnVal = grabFnA('siTlChangeValueHtml');
+    const fnRender = grabFnA('siRenderTimelineChanges');
+    const fnObj = grabFnA('siTlChangeObjectText');
+    const constLbl = (src.match(/const SI_TL_CHANGE_FIELD_LABEL = \{[\s\S]*?\};/) || [''])[0];
+    const constMax = (src.match(/const SI_TL_CHANGE_VALUE_MAX = \d+;/) || [''])[0];
+    check('[A 前置] esc / siTlChangeValueHtml / siRenderTimelineChanges / 两常量均提取成功（提不到=本组空转）', () => {
+        assert.ok(fnEsc && fnVal && fnRender && fnObj && constLbl && constMax, `提取缺失：esc=${!!fnEsc} val=${!!fnVal} render=${!!fnRender} obj=${!!fnObj} lbl=${!!constLbl} max=${!!constMax}`);
+    });
+    if (fnEsc && fnVal && fnRender && fnObj && constLbl && constMax) {
+        const warns = [];
+        // eslint-disable-next-line no-new-func
+        const built = new Function('console', `${constLbl}\n${constMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\nreturn { siRenderTimelineChanges, siTlChangeObjectText };`)({ warn: (...a) => warns.push(a) });
+        const render = built.siRenderTimelineChanges;
+        const objText = built.siTlChangeObjectText;
+        const oldVal = (h, i) => { const m = [...String(h).matchAll(/si-tl-change-old"><span class="si-tl-change-tag">修改前<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/g)]; return m[i] ? m[i][1] : undefined; };
+        const newVal = (h, i) => { const m = [...String(h).matchAll(/si-tl-change-new"><span class="si-tl-change-tag">修改后<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/g)]; return m[i] ? m[i][1] : undefined; };
+        const count = (h) => { const m = String(h).match(/查看改动（(\d+) 项）/); return m ? Number(m[1]) : null; };
+        check('[A 直调] 正常三项 → 折叠计 3，逐字段「修改前 / 修改后」两块，未登记字段落回裸字段名，头行变更对象与字段清单', () => {
+            const h = render([{ field: 'title', old: 'A', new: 'B' }, { field: 'priority', old: 'P2', new: 'P1' }, { field: 'zzz_unknown', old: 1, new: 2 }]);
+            assert.strictEqual(count(h), 3, `计数应 3，实得 ${h}`);
+            assert.ok(h.includes('标题') && h.includes('优先级') && h.includes('zzz_unknown'), '三行标签');
+            assert.strictEqual(oldVal(h, 0), 'A', `第 1 项修改前块应为 A，实得 ${oldVal(h, 0)}`);
+            assert.strictEqual(newVal(h, 0), 'B', `第 1 项修改后块应为 B，实得 ${newVal(h, 0)}`);
+            assert.strictEqual(oldVal(h, 1), 'P2'); assert.strictEqual(newVal(h, 1), 'P1');
+            assert.strictEqual(oldVal(h, 2), '1'); assert.strictEqual(newVal(h, 2), '2');
+            assert.strictEqual((h.match(/si-tl-change-old"/g) || []).length, 3, '旧值块数=有效项数');
+            assert.strictEqual((h.match(/si-tl-change-new"/g) || []).length, 3, '新值块数=有效项数');
+            assert.strictEqual((h.match(/修改前<\/span>/g) || []).length, 3, '每项各一个「修改前」标签');
+            assert.strictEqual((h.match(/修改后<\/span>/g) || []).length, 3, '每项各一个「修改后」标签');
+            assert.ok(h.includes('<div class="si-tl-change-head">变更字段：标题、优先级、zzz_unknown（3 项）</div>'), `头行变更字段清单，实得 ${h.slice(0, 220)}`);
+            const h2 = render([{ field: 'title', old: 'A', new: 'B' }], '上线单信息（批次 #5）');
+            assert.ok(h2.includes('变更对象：上线单信息（批次 #5） · 变更字段：标题（1 项）'), `头行含变更对象，实得 ${h2.slice(0, 220)}`);
+            assert.strictEqual(objText({ action_code: 'release_info_edit', ref_id: 7 }), '上线单信息（批次 #7）');
+            assert.strictEqual(objText({ action_code: 'release_info_edit' }), '上线单信息');
+            assert.strictEqual(objText({ action_code: 'release_info_edit', ref_id: 'abc' }), '上线单信息', 'ref_id 非数字省略括号');
+            assert.strictEqual(objText({ action_code: 'release_info_edit', ref_id: '12' }), '上线单信息（批次 #12）', 'ref_id 数字串按整数显示');
+            assert.strictEqual(objText({ action_code: 'release_info_edit', ref_id: 0 }), '上线单信息', 'ref_id 0 省略');
+            assert.strictEqual(objText({ action_code: 'edit_in_revision' }), '迭代单内容');
+            assert.strictEqual(objText({ action_code: 'accept' }), '');
+            const h3 = render([{ field: 'title', old: 'A', new: 'B' }], '<b>x</b>');
+            assert.ok(!h3.includes('<b>x</b>') && h3.includes('&lt;b&gt;x&lt;/b&gt;'), 'objectText 也经转义');
+        });
+        check('[A 直调] 缺损项规则：null / 非对象 / 数组 / field 非字符串 → 跳过且不计数；缺 old / 缺 new / 两者都缺 → 显「（空）」且保留计数', () => {
+            const h = render([null, 'x', 7, ['a'], { old: 1, new: 2 }, { field: 3, old: 1, new: 2 }, { field: 'title', new: 'B' }, { field: 'title', old: 'A' }, { field: 'title' }]);
+            assert.strictEqual(count(h), 3, `应保留 3 项（三种缺值），实得 ${h}`);
+            assert.strictEqual((h.match(/（空）/g) || []).length, 4, `「（空）」应出现 4 次（1+1+2），实得 ${(h.match(/（空）/g) || []).length}`);
+        });
+        check('[A 直调] 全部无效项 / 非数组 / 空数组 → 返回空串（不出折叠）', () => {
+            assert.strictEqual(render([null, 'x', { old: 1 }]), '', '全无效应空串');
+            assert.strictEqual(render('nope'), '', '非数组应空串');
+            assert.strictEqual(render([]), '', '空数组应空串');
+        });
+        check('[A 直调] 值含 <script> 与引号被转义（正文与 title 属性内都不出现原始 < 与 "）；超 120 码点含属性注入片段的值在 title 内双引号被编码；含特殊字符的未知 field 回退裸字段名也被转义', () => {
+            const long = '<script>alert(1)</script>' + 'x'.repeat(200);
+            const h = render([{ field: 'description', old: '<b>o</b>', new: long }]);
+            assert.ok(!h.includes('<script>') && !h.includes('<b>'), '不得出现原始标签');
+            assert.ok(h.includes('&lt;script&gt;') && h.includes('&lt;b&gt;'), '应为转义后的 &lt;');
+            // [566-L1] title 属性上下文：超 120 码点 + 双引号 + 属性注入片段
+            const inject = '" onmouseover="alert(1)" data-x="' + 'y'.repeat(130);
+            const h2 = render([{ field: 'description', old: '', new: inject }]);
+            assert.ok(!h2.includes('" onmouseover="'), 'title 内不得出现原始双引号形成的额外属性');
+            assert.ok(/title="&quot; onmouseover=&quot;alert\(1\)&quot; data-x=&quot;y+"/.test(h2), `title 中双引号应编码为 &quot;，实得 ${h2.slice(0, 200)}`);
+            assert.strictEqual((h2.match(/<span title=/g) || []).length, 1, '只应有一个 title span（截断分支）');
+            // [566-L1] 未知 field 回退裸字段名：特殊字符转义
+            const h3 = render([{ field: '<img src=x onerror=alert(1)>&"', old: 'a', new: 'b' }]);
+            assert.ok(!h3.includes('<img') && h3.includes('&lt;img src=x onerror=alert(1)&gt;&amp;&quot;'), `未知 field 应被转义，实得 ${h3.slice(0, 200)}`);
+            assert.strictEqual(count(h3), 1, '未知 field 项保留计数 1');
+        });
+        check('[A 直调] 超 120 码点截断 + title 挂全文；恰 120 不截；emoji 按码点计', () => {
+            const s121 = '😀'.repeat(121);
+            const h = render([{ field: 'description', old: '', new: s121 }]);
+            assert.ok(/title="(😀){121}"/.test(h), 'title 应挂全文 121 个码点');
+            assert.ok(/>(😀){120}…</.test(h), '正文应为 120 个码点 + …');
+            const s120 = 'y'.repeat(120);
+            const h2 = render([{ field: 'description', old: '', new: s120 }]);
+            assert.ok(!h2.includes('…') && !h2.includes('title="' + s120), '恰 120 不截断、不挂 title');
+        });
+        check('[A 直调] 数字 0 显「0」不显「（空）」；needs_feasibility 1→是 0→否', () => {
+            const h = render([{ field: 'module_name', old: 0, new: '' }, { field: 'needs_feasibility', old: 1, new: 0 }]);
+            assert.strictEqual(oldVal(h, 0), '0', `module_name 旧值 0 应显 0，实得 ${oldVal(h, 0)}`);
+            assert.ok(String(newVal(h, 0)).includes('（空）'), 'module_name 新值空串显「（空）」');
+            assert.strictEqual((h.match(/（空）/g) || []).length, 1, '只有 module_name 的新值空串显「（空）」');
+            assert.strictEqual(oldVal(h, 1), '是', 'needs_feasibility 1 → 是');
+            assert.strictEqual(newVal(h, 1), '否', 'needs_feasibility 0 → 否');
+        });
+        check('[A 直调] 渲染内部抛错 → 返回空串且 console.warn 一次（不中断时间线）', () => {
+            const evil = { field: 'title', get old() { throw new Error('boom'); }, new: 'x' };
+            const before = warns.length;
+            assert.strictEqual(render([evil]), '', '异常应降级空串');
+            assert.strictEqual(warns.length, before + 1, '应 console.warn 一次');
+        });
+        // ── [566-R L2] 徽章覆盖直调：装配真实 siRenderTimeline（with 作用域注入真实标签/配色登记 + 其余依赖替身）──
+        {
+            const fnTimeline = grabFnA('siRenderTimeline');
+            const grabConst = (name) => (src.match(new RegExp(`const ${name} = \\{[\\s\\S]*?\\};`)) || [''])[0];
+            const grabSet = (name) => (src.match(new RegExp(`const ${name} = new Set\\(\\[[\\s\\S]*?\\]\\);`)) || [''])[0];
+            const badgeConsts = (src.match(/const SI_TL_CHANGE_BADGE_LABEL = '[^']*';\s*\n\s*const SI_TL_CHANGE_BADGE_CLS = '[^']*';/) || [''])[0];
+            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabSet('SI_TL_CHANGE_CODES'), badgeConsts];
+            check('[A 徽章前置] siRenderTimeline + 五张登记表 + 徽章常量均提取成功', () => {
+                assert.ok(fnTimeline, '未提取到 siRenderTimeline');
+                parts.forEach((p, i) => assert.ok(p, `第 ${i} 项登记/常量未提取到`));
+            });
+            if (fnTimeline && parts.every(Boolean)) {
+                const stubs = {
+                    SI_TL_WGATE_LEGACY_SUMMARY: '__wgate__', SI_DEV_FAMILY_STATUSES: ['开发中', '处理中'],
+                    siStatusDisplay: (s) => s, siFmtDT: (s) => s, siFmtDTSec: (s) => s, siTlHideReleaseScope: false, siOpenId: 1,
+                    siFormatReleasePublishedSummary: () => ({ ok: false, brief: 'pub-brief', raw: 'raw' }), siRenderReleasePublishedCommits: () => '',
+                    console: { warn: () => {} },
+                };
+                // eslint-disable-next-line no-new-func
+                const tl = new Function('stubs', `with (stubs) { ${parts.join('\n')}\n${constLbl}\n${constMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\n${fnTimeline}\nreturn siRenderTimeline; }`)(stubs);
+                const badge = (h) => { const m = String(h).match(/<span class="si-tl-evt ([^"]+)">([^<]*)<\/span>/); return m ? { cls: m[1], label: m[2] } : null; };
+                const row = (extra) => Object.assign({ id: 1, event_type: 'note', action_code: 'edit_in_revision', summary: '编辑内容（标题）', operator_name: '示例客服B', created_at: '2026-09-11 10:00:00', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) }, extra);
+                check('[A 徽章直调] 有效 changes → 徽章覆盖为玫红「✎ 变更留痕」（si-tl-rose），edit_in_revision 与 release_info_edit 两码均如此；发布留痕不与之同色', () => {
+                    assert.deepStrictEqual(badge(tl([row()], [], '')), { cls: 'si-tl-rose', label: '✎ 变更留痕' });
+                    assert.deepStrictEqual(badge(tl([row({ action_code: 'release_info_edit', ref_id: 9, summary: '上线单信息修改（标题）' })], [], '')), { cls: 'si-tl-rose', label: '✎ 变更留痕' });
+                    assert.notStrictEqual(badge(tl([row({ event_type: 'scope_change', action_code: 'release_published', summary: 'R-1 已发布', payload_json: null })], [], '')).cls, 'si-tl-rose', '发布留痕不得用变更留痕的色');
+                    assert.ok(tl([row({ action_code: 'release_info_edit', ref_id: 9 })], [], '').includes('变更对象：上线单信息（批次 #9）'), '头行含批次对象');
+                });
+                check('[A 徽章直调] 空数组 / 全部无效项 / 历史无 changes 行 / payload 非 JSON → 保留原徽章（备注 / 上线单信息修改）', () => {
+                    const noteBadge = badge(tl([row({ payload_json: JSON.stringify({ changes: [] }) })], [], ''));
+                    assert.deepStrictEqual(noteBadge, badge(tl([row({ payload_json: null })], [], '')), '空数组与无 payload 行徽章一致');
+                    assert.notStrictEqual(noteBadge.label, '变更留痕', '空数组不得显示变更留痕');
+                    assert.notStrictEqual(badge(tl([row({ payload_json: JSON.stringify({ changes: [null, 'x'] }) })], [], '')).label, '变更留痕', '全部无效项不得显示变更留痕');
+                    assert.notStrictEqual(badge(tl([row({ payload_json: '{not json' })], [], '')).label, '变更留痕', 'payload 非 JSON 不得显示变更留痕');
+                    const rel = badge(tl([row({ action_code: 'release_info_edit', payload_json: null })], [], ''));
+                    assert.deepStrictEqual(rel, { cls: 'si-tl-indigo', label: '上线单信息修改' }, '历史 release_info_edit 行保持登记表徽章');
+                });
+                check('[A 徽章直调] 普通事件 / release_published / accept(online_mode) 不受覆盖影响', () => {
+                    assert.deepStrictEqual(badge(tl([row({ action_code: 'work_note_x', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) })], [], '')).label !== '变更留痕', true, '非两码即使带 changes 也不换徽章');
+                    const pub = badge(tl([row({ event_type: 'release', action_code: null, summary: 'x', payload_json: null })], [], ''));
+                    assert.ok(pub && pub.label !== '变更留痕', 'release 事件不换徽章');
+                    const acc = tl([row({ event_type: 'status_change', action_code: 'accept', from_status: '待验证', to_status: '已上线', payload_json: JSON.stringify({ online_mode: 'direct' }) })], [], '');
+                    assert.ok(acc.includes('上线方式') && !acc.includes('变更留痕'), 'accept 行走 online_mode 分支且不换徽章');
+                });
+            }
+        }
+    }
+}
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
     assert.ok(scripts.length > 0, '未找到内联 <script> 块');
@@ -1280,9 +1683,15 @@ check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', 
     }
 });
 
-console.log(`\n${failed === 0 ? '[全部通过]' : '[失败]'} ${passed}/${passed + failed} 项断言${failed ? `，${failed} 项失败` : ''}`);
-if (failed) {
-    console.log('失败详情：');
-    for (const f of failures) console.log(`  - ${f.name}: ${f.err}`);
-    process.exit(1);
-}
+// [C4e·codex 560 M3 收口] 等所有 async check（见上方 M3-② 两组）的 pending promise 落定后再算总分/
+// 决定退出码——本文件其余全部 check() 调用均为同步，`pending` 数组届时早已是空数组，`Promise.all([])`
+// 立即 resolve，对既有同步跑法零延迟零行为变化。
+(async () => {
+    await Promise.all(pending);
+    console.log(`\n${failed === 0 ? '[全部通过]' : '[失败]'} ${passed}/${passed + failed} 项断言${failed ? `，${failed} 项失败` : ''}`);
+    if (failed) {
+        console.log('失败详情：');
+        for (const f of failures) console.log(`  - ${f.name}: ${f.err}`);
+        process.exit(1);
+    }
+})();

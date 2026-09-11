@@ -1172,8 +1172,12 @@ async function main() {
     const row5_8rMid = await get(`SELECT exec_status FROM sys_release_executors WHERE id=?`, [row5_8r.id]);
     assert.strictEqual(row5_8rMid.exec_status, 'pending', '[8r-1]零副作用：被日期闸拦下后行仍 pending，未被烧成 done');
     // 逾期（计划日在过去）不拦：闸只拦"未到"，逾期恰恰该放行去执行
+    // ⚠️ [C2·A 块] 本用例 planned_date=前天，触发日期闸放行后紧接着触发新的「逾期理由必填」闸
+    //   （方案 v1.2 §5.1.3，普通批次逾期缺理由 409 RELEASE_OVERDUE_REASON_REQUIRED）——本组断言 F1
+    //   日期闸本身不拦逾期，与 A 块理由闸是两道独立闸门，故补齐理由参数放行，A 块专属用例矩阵见
+    //   verify-sys-release-overdue.js，不在本文件重复覆盖。
     await run(`UPDATE sys_releases SET planned_date=date('now','localtime','-2 day') WHERE id=?`, [rel8r]);
-    const r8r2 = await call('POST', `/api/sys-releases/${rel8r}/execute`, dev5Tok, { release_note: '逾期补执行', executor_row_id: row5_8r.id });
+    const r8r2 = await call('POST', `/api/sys-releases/${rel8r}/execute`, dev5Tok, { release_note: '逾期补执行', executor_row_id: row5_8r.id, overdue_reason_code: '环境或依赖未就绪', overdue_reason_note: '（占位）F1 日期闸用例，非 A 块专属覆盖' });
     assert.strictEqual(r8r2.status, 200, `[8r-2]期望 200（逾期不拦）, got ${r8r2.status} ${JSON.stringify(r8r2.body)}`);
     assert.strictEqual(r8r2.body.released, true, '[8r-2]逾期批次执行成功并真实触发发布');
     // 当日可执行（`>` 严格比较，同日不算"未到"）——另建同构单人批次设 planned_date=今天 → 200
@@ -1305,6 +1309,11 @@ async function main() {
     const tl8e = await notifyTimelineRowsByCode(rel8efg, 'release_executor_done');
     assert.strictEqual(tl8e.length, 1, '[8e]"确认完成"timeline 已写 1 条');
     assert.ok(/开发甲.*确认完成.*还差2人/.test(tl8e[0].summary), `[8e]timeline 文案含"确认完成"+"还差2人"，实际 ${tl8e[0].summary}`);
+    // [C5·D 块，方案 §5.4/§11 开放问题 3] 精确串锁批次号——上面的正则子串判据不够强，锁不住"批次号取值
+    // 查错/查漏落 undefined"这类实现坏法（正则 .* 会跨过任何插入内容），补一条精确相等断言。
+    const relNo8efg = (await get(`SELECT release_no FROM sys_releases WHERE id=?`, [rel8efg])).release_no;
+    assert.strictEqual(tl8e[0].summary, `执行人开发甲确认完成（批次 ${relNo8efg}，还差2人）`,
+      `[8e-C5] timeline 摘要精确含批次号，实得="${tl8e[0].summary}"`);
     const relNoteAfter8e = await get(`SELECT release_note FROM sys_releases WHERE id=?`, [rel8efg]);
     assert.strictEqual(relNoteAfter8e.release_note, null, '[8e] M4：非最后一人即便传了 release_note 也不落库（R-GATE 未满足，_publishReleaseCoreInTxn 未被调用，参数被静默忽略非误用）');
     ok('[8e] R-GATE 未满足：5 确认后 pending_count=2/released=false，timeline 写"确认完成（还差 N 人）"，顺带传的 release_note 未落库（M4）');

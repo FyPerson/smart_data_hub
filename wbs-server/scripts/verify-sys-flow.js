@@ -315,7 +315,11 @@ async function main() {
     //   ⚠️ 连锁改写：原 C3a「scope_change 改 status/scope_changed=1/deadline 留痕」断言已不适用——
     //   端点内逻辑保留（config 流追加时用），但 feature/improvement 被 type 守卫前置拦 409；summary 校验/deadline 留痕/M-3 等留 config 流测。
     const id6 = await seedToDevInProgress(5);   // 开发中
-    r = await call('POST', `/api/sys-issues/${id6}/scope-change`, adminTok, { summary: '加一个导出功能', deadline: '2026-09-01' });
+    // [C1(本轮建单硬拦) collateral] scope-change 的 deadline「不早于今天」校验发生在 feature 全禁 409 之前
+    //   （见 C0 核查报告 ⑦-a：本闸先于状态/类型不可达判定触发）——硬编码字面量 '2026-09-01' 已过期，
+    //   会被新闸先行拦成 400 DEADLINE_BEFORE_TODAY，掩盖本用例真正要测的 409。改用动态未来日期（同
+    //   futureEst 写法，勿回退硬编码），让请求穿过日期闸真正到达本用例要测的 type 守卫。
+    r = await call('POST', `/api/sys-issues/${id6}/scope-change`, adminTok, { summary: '加一个导出功能', deadline: futureEst(30).slice(0, 10) });
     assert.strictEqual(r.status, 409, 'scope-change feature 全禁 409, got ' + r.status);
     assert.strictEqual(r.body.code, 'SCOPE_CHANGE_DISABLED', 'feature scope-change 应 SCOPE_CHANGE_DISABLED, got ' + (r.body && r.body.code));
     const d6 = await get('SELECT status, scope_changed FROM sys_issues WHERE id=?', [id6]);

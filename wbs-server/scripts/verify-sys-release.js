@@ -506,6 +506,16 @@ async function main() {
   assert.strictEqual(hfRel.release_kind, 'emergency', '[7-①] release_kind=emergency（§6.12 emergency_display 口径，10 列之一但非"通知/执行人"字段，本身就该被设为 emergency，不参与下面的 NULL 断言组）');
   assert.strictEqual(hfRel.status, '计划中', '[7-①] 批次仍计划中（未发布）');
   assert.strictEqual(hfRel.planned_date, today, '[7-①] planned_date=建单当日（该列仍由本端点写入，C2b 未动，此处需要看守断言）');
+  // [C5b·M1 收口] release_hotfix_create timeline 摘要须就地含真实计划上线日（同事务读回 sys_releases.
+  // planned_date，不是写死的无日期固定文案）——补断言锁死，防止回退成"（计划上线：应急单=建单当日）"
+  // 这类看似自足实则没有具体日期值的假自足文案。
+  const hfHotfixTl = await get(
+    `SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND action_code='release_hotfix_create' ORDER BY id DESC LIMIT 1`,
+    [hf]);
+  assert.ok(hfHotfixTl, '[7-①-C5b] release_hotfix_create timeline 已写入');
+  const hfReleaseNo = (await get('SELECT release_no FROM sys_releases WHERE id=?', [hfIssue.release_id])).release_no;
+  assert.strictEqual(hfHotfixTl.summary, `应急建单 ${hfReleaseNo}（计划上线 ${today}，应急单=建单当日）`,
+    `[7-①-C5b] release_hotfix_create 摘要应含真实计划上线日 ${today}，实得="${hfHotfixTl.summary}"`);
   assert.strictEqual(hfRel.release_note, '紧急修复');
   // 批次级 10 列（方案 §4.2「release_assignee_* 10 列」= 上方 9 个 release_assignee_ 前缀列 + release_kind）：
   //   C2b 反模式禁双写——本端点全程不碰这 9 列（release_kind 是第 10 列，但它是批次类型标记非通知/
