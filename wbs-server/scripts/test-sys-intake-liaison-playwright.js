@@ -5,9 +5,12 @@
  * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-intake-liaison-playwright.js
  *
  * 覆盖：
- *   T1 建单弹窗结构+校验：无 #f_title 输入框 / 描述必填拦截（留空点确定→toast「描述必填」+弹窗不关）/
- *       对接人下拉默认选中「示例对接人」（本地唯一 active 受理人=13）
- *   T2 无 title 建单成功：description 首行经 esc/trim 后 = 落库 title（列表 + 详情 + DB 三处核对，非猜测）
+ *   T1 建单弹窗结构+校验：#f_title 存在且为**选填**（label 无必填星号）/ 描述必填拦截（留空点确定→toast
+ *       「描述必填」+弹窗不关）/ 对接人下拉默认选中「示例对接人」（本地唯一 active 受理人=13）
+ *       ⭐ #69（2026-09-11）：原为「无 #f_title 输入框」，随建单弹窗放出选填标题框**整条翻转**——
+ *         推翻建单优化批 C2「撤标题输入框」决策，详见 docs/local/系统迭代/系统迭代_建单优化批_方案_20260801_v1.3.md §6b 顶部标注。
+ *   T2 **不填 title** 建单成功：description 首行经 esc/trim 后 = 落库 title（列表 + 详情 + DB 三处核对，非猜测）
+ *       ——#69 后该用例语义由"后端无条件派生"变为"标题留空时的派生兜底路径"，覆盖面不变且仍是主路径。
  *   T3 详情页「对接人」行显示"示例对接人"
  *   T4 通知按钮三态（**安全改写，见下方说明**）
  *   T5 全程 0 console error
@@ -71,6 +74,13 @@ async function signAs(userId) {
 }
 
 let pass = 0, fail = 0;
+// ⭐ 夹具清理未收口清单（codex 568-#69 三轮 M-3·**采纳其反对意见**）：
+//   我原先的取舍是"清理问题只高亮打印、不改变套件成败"，理由是别让'功能红'与'夹具没清干净'混在同一个
+//   PASS/FAIL 语义里。codex 反对得有道理——只读退出码的调用方（CI / 批量回归脚本）看不见日志颜色，
+//   夹具残留的运行会被当成完全成功。其建议同时满足了我原来的顾虑：**用可区分的非零退出码**，
+//   功能失败仍是 1，清理未收口单独用 2，两者不互相覆盖（见文件末尾退出逻辑）。
+//   故本清单提到模块级作用域，供 finally 之后的退出判定读取。
+const cleanupFailures = [];
 function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } else { console.log('  ❌ ' + msg); fail++; } return cond; }
 async function shotOnFail(page, cond, name, msg) {
     if (!must(cond, msg)) {
@@ -109,6 +119,18 @@ async function main() {
     const descFull = `${descFirstLine}\n第二行不应影响标题（仅首行截取）`;
     let createdIssueId = null;
     let oaExemptIssueId = null;   // T1.5（建单优化批 C3b）独立夹具，finally 里与 createdIssueId 一并清理
+    // T2b/T2c（#69 标题放出为选填）独立夹具。
+    // ⭐ 除 id 外**另存一份描述唯一标记**（codex 568-#69 审 M-1）：id 只有在"提交后固定等待 → dbGet 查到行"
+    //   这条路走通时才会被赋值，若落库慢于固定等待、或查询本身异常，id 仍为 null 而单据**可能已经建出来**，
+    //   finally 就漏清。存下标记后 finally 可按标记补查兜底，把"清理依赖查询成功"这个隐含前提去掉。
+    //   （注：shotOnFail 内部调 must() 不抛错，故"断言失败"本身不会跳过清理——已由 T2b 变异实跑验证；
+    //     本兜底针对的是上述"id 压根没被赋值"的窗口，两者是不同的失效路径。）
+    //   ⭐ 三轮 M-1 补：另记「是否已尝试提交」。只有"提交动作确实发起过、却没拿到 id、补查也零行"这种
+    //     组合才是**清理状态未知**（可能服务端已落库而我们不知道）；用例在填表阶段就失败、根本没点提交时，
+    //     补查零行是正常的，不能报未知（否则误报会淹没真信号）。marker 不足以区分这两种情形——它在提交
+    //     之前就被赋值了。
+    let explicitTitleIssueId = null, explicitTitleDescMarker = null, explicitTitleSubmitAttempted = false;
+    let blankTitleIssueId = null, blankTitleDescMarker = null, blankTitleSubmitAttempted = false;
     let t6FeatureId = null, t6BugId = null, t6ImprovementId = null;   // T6（工期对接测试与风险等级拆分 v1.1 §3.4/§7/§6b·C5，⭐ 用户拍板批1改造B新增 improvement 分支）独立夹具
     let t7DisplayId = null;   // T7（D22 批2 状态显示改名·2026-08-06）独立夹具
 
@@ -129,13 +151,31 @@ async function main() {
             await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
             await page.waitForTimeout(200);
 
-            await shotOnFail(page, (await page.locator('#f_title').count()) === 0, 't1-no-title-field', '建单弹窗无 #f_title 输入框（标题输入框已撤）');
+            // ⭐ #69（2026-09-11 用户拍板）：建单弹窗**放出选填标题输入框**——本处断言由原「建单弹窗无
+            //   #f_title 输入框（标题输入框已撤）」**整条翻转**。原断言是建单优化批 C2「撤标题输入框」
+            //   的守卫，#69 推翻该决策后它会真判红，属必须改而非可留可不留。
+            const titleField = page.locator('#f_title');
+            await shotOnFail(page, (await titleField.count()) === 1, 't1-title-field-exists', '建单弹窗存在 #f_title 标题输入框（#69 放出为选填）');
+            // ⚠️ 同时钉住「选填」这一半：只断言"存在"挡不住有人把它误设成必填——那会退回建单优化批 C2
+            //   之前"标题必填"的老问题，也与后端 `rawTitle || deriveSysTitleFromDescription(...)` 的兜底
+            //   语义矛盾（后端允许不传，前端却拦着不让提交）。label 不含 * 即选填。
+            const titleLabel = await page.locator('label:has-text("标题")').first().textContent();
+            await shotOnFail(page, !titleLabel.includes('*'), 't1-title-optional-no-star', `标题字段 label 不含必填星号（#69 口径=选填，实得："${titleLabel.trim()}"）`);
             const descField = page.locator('#f_description');
             await shotOnFail(page, (await descField.count()) === 1, 't1-description-field-exists', '建单弹窗存在 #f_description 描述 textarea');
             const descLabel = await page.locator('label:has-text("描述")').first().textContent();
+            // 描述**仍必填**（#69 只放开标题，没动描述的主字段地位）——这条断言是防"放开标题时顺手把描述
+            //   也改成选填"，那样两个内容字段可以同时为空，后端 DESCRIPTION_REQUIRED 会拒，成为死表单。
             await shotOnFail(page, descLabel.includes('*'), 't1-description-required-star', `描述字段 label 含必填星号（实得："${descLabel.trim()}"）`);
             const descPlaceholder = await descField.getAttribute('placeholder');
-            await shotOnFail(page, descPlaceholder && descPlaceholder.includes('标题将自动取首行'), 't1-description-placeholder', `描述 placeholder 提示标题自动取首行（实得："${descPlaceholder}"）`);
+            // #69 同步：placeholder 文案由「标题将自动取首行」改为「标题留空则自动取首个非空行」——放出
+            //   输入框后派生成了"留空时"的兜底而非无条件行为；且「首个非空行」才与派生实现一致
+            //   （codex L-3：描述以空行开头时"首行"是空的，取的实为第一个非空行）。断言跟着改。
+            await shotOnFail(page, descPlaceholder && descPlaceholder.includes('标题留空则自动取首个非空行'), 't1-description-placeholder', `描述 placeholder 提示标题留空时自动取首个非空行（实得："${descPlaceholder}"）`);
+            // ⭐ D4（用户拍板「第一项就是选填项」）位置断言（codex L-2）：只断言控件存在挡不住它被挪走，
+            //   而位置是用户显式拍的口径。取弹窗内第一个 .u-form-group，要求它就是标题字段。
+            const firstGroupHasTitle = await page.locator('#siMBody .u-form-group').first().locator('#f_title').count();
+            await shotOnFail(page, firstGroupHasTitle === 1, 't1-title-is-first-field', `标题是建单弹窗第一个表单字段（D4 用户拍板口径，实得首字段含 #f_title = ${firstGroupHasTitle}）`);
 
             const liaisonSel = page.locator('#f_intake_liaison_id');
             await shotOnFail(page, (await liaisonSel.count()) === 1, 't1-liaison-field-exists', '建单弹窗存在 #f_intake_liaison_id 对接人下拉');
@@ -207,6 +247,243 @@ async function main() {
             await shotOnFail(page, intakeKvText.includes('示例对接人'), 't3-intake-liaison-name', `详情页「对接人」行显示"示例对接人"（实得："${intakeKvText.trim()}"）`);
 
             await shotOnFail(page, page._consoleErrors.length === 0, 't1t2t3-console-clean', `T1-T3 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            await page.close();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ T2b（#69·2026-09-11 新增）：**填了标题 → 沿用传入 title，不被描述首行派生覆盖**
+        //   为什么必须单独补：T2 覆盖的是"标题留空 → 派生兜底"，而 #69 真正放出的新能力是"填了就用"
+        //   这一条路径。它在后端是既有分支（`rawTitle || deriveSysTitleFromDescription(...)`，
+        //   routes/sys-iteration/index.js :7258，本次**零改动**），但此前**从无任何自动化用例覆盖**
+        //   ——建单弹窗当时根本没有标题输入框，该分支只有 API 直调才走得到。
+        //   不补这条，"后端零改动即支持"就只是读代码得到的推断，没有行为层证据；而前端「把 title 装进
+        //   body」是本次**全新代码**，更需要真实链路证明。
+        //   ⭐ 判别力设计：断言 title === 填入值 **且 ≠ 描述首行**——两种失效都会落到"title = 描述首行"
+        //     而判红：① 前端漏传/传错键（body 里没有 title）② 后端改动导致派生值覆盖传入值。
+        //   独立夹具、独立 page（不复用 T1-T4 的 createdIssueId，避免与既有断言的流程状态耦合）。
+        // ═══════════════════════════════════════════════════════════════
+        {
+            console.log('\n── T2b（#69）：填写标题 → 落库 title = 填入值（不走描述首行派生）──');
+            const page = await loginPage(browser, adminTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(500);
+
+            await page.click('button:has-text("新建迭代单")');
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+
+            // 标题与描述首行**刻意不同**，且各自唯一——若两者相同，本用例对"派生覆盖传入值"就失去判别力。
+            // ⭐⭐ 请求体捕获（本批变异自证倒逼补的判别层，详见下方 t2b-request-title-trimmed 注释）：
+            //   落库值看不出前端有没有 trim（后端 :7265 也 trim，两层冗余），要测前端实现必须看它**发出去
+            //   的请求体**。这是本用例真正对前端代码有判别力的那一条。
+            //   ⚠️ 用 URL.pathname 精确比较，不用裸 URL 结尾正则（codex 568-#69 二轮 L-3）：
+            //     原 `/\/api\/sys-issues$/` 会因**查询串**漏捕，而查询串并非本用例想排除的东西——
+            //     真正要排除的是 `/attachments` 等子路径，按 pathname 全等即可精确表达。
+            //     ⚠️ 如实声明（三轮 L-1 更正）：pathname 全等**同样不接受尾斜杠**（'/api/sys-issues/' ≠
+            //       '/api/sys-issues'），本次并未"修复尾斜杠漏捕"。这里是**刻意只支持无尾斜杠**——
+            //       前端 siApi 固定以 '/sys-issues' 拼接、不带尾斜杠，是唯一真实调用形态；若哪天契约放开
+            //       尾斜杠，这里和下面的 waitForResponse 判据要同时改。
+            //   ⚠️ 覆盖边界：本监听记录**最后一次**匹配的建单请求。本块是独立 page、仅提交一次，故不存在
+            //     覆盖问题；若将来在同一 page 内多次建单，需改用 waitForRequest 做一次性精确关联。
+            let t2bPostBody = null;
+            page.on('request', req => {
+                if (req.method() !== 'POST') return;
+                let p;
+                try { p = new URL(req.url()).pathname; } catch (_) { return; }
+                if (p !== '/api/sys-issues') return;   // 全等：排除 /api/sys-issues/:id/attachments 等子路径
+                try { t2bPostBody = JSON.parse(req.postData() || 'null'); } catch (_) { /* 非 JSON 忽略 */ }
+            });
+
+            // 唯一标记 = 时间戳 + 随机串（codex 568-#69 二轮 L-2）：单用 Date.now() 在同毫秒并发跑两份
+            //   套件时可能撞号，导致描述标记不唯一、清理时选错夹具。加随机段成本一行。
+            const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const explicitTitle = `T2b自填标题-${stamp}`;
+            // ⭐ 输入值**刻意带首尾空白**（codex 568-#69 审 L-2）：用无空白字符串测不出 trim 在不在。
+            //   ⚠️ 但要注意它能测出**什么层**（本批变异实测修正过一次错误预期，如实记下）：
+            //     删掉前端 trim 后，**落库值不会变**——后端 :7265 也 trim，会把空白抹平。变的是**请求体**。
+            //     所以带空白的输入只有配合下方 t2b-request-title-trimmed（断言请求体）才有判别力；
+            //     落库层断言在任何单层 trim 失效下都仍绿。
+            const explicitTitleTyped = `   ${explicitTitle}   `;
+            const t2bDescFirstLine = `T2b描述首行-与标题不同-${stamp}`;
+            const t2bDescFull = `${t2bDescFirstLine}\n第二行同样不参与标题`;
+            explicitTitleDescMarker = t2bDescFirstLine;   // M-1 兜底：先于提交存标记，供 finally 补查
+
+            await page.fill('#f_title', explicitTitleTyped);
+            await page.fill('#f_description', t2bDescFull);
+            await page.selectOption('#f_intake_liaison_id', String(LIAISON_ID));
+
+            // ⭐ 等建单响应而不是等固定时长（codex 568-#69 二轮 M-1 收口）：原 `waitForTimeout(800)` 下，
+            //   落库慢于 800ms 时 dbGet 查不到 → id 不登记 → finally 漏清。改为有界等待真实响应，并**直接
+            //   从响应体取 id 立即登记**，清理不再依赖"查询是否恰好赶上"。
+            //   ⚠️ 残余窗口如实列举（三轮 M-1 更正二轮"残窗仅为 id 字段异常"的说法，那句不成立）：
+            //     ① 15s 超时 → createResp 为 null；② click 抛错使 Promise.all 提前退出；③ 响应体无 id。
+            //     三者都会落到 finally 的标记补查；补查仍零行时**报「清理状态未知」并计入未收口清单**，
+            //     不再按"无夹具"静默结束（见 cleanupByIdOrMarker 的 submitAttempted 分支）。
+            explicitTitleSubmitAttempted = true;   // 置于 click 之前：点击本身抛错也算"提交可能已发出"
+            const [createResp] = await Promise.all([
+                page.waitForResponse(r => {
+                    try { return new URL(r.url()).pathname === '/api/sys-issues' && r.request().method() === 'POST'; }
+                    catch (_) { return false; }
+                }, { timeout: 15000 }).catch(() => null),
+                page.click('#siMConfirm'),
+            ]);
+            if (createResp) {
+                const respBody = await createResp.json().catch(() => null);
+                if (respBody && respBody.id) explicitTitleIssueId = respBody.id;   // 先登记，后断言
+            }
+            await page.waitForTimeout(400);   // 留给前端收尾（关弹窗 / 刷列表 / 开详情抽屉）
+
+            const t2bModalClosed = await page.locator('#siModalOverlay.open').count();
+            await shotOnFail(page, t2bModalClosed === 0, 't2b-modal-closed', '填标题后合法提交，弹窗已关闭（建单成功）');
+
+            // ⭐ 回读优先按**响应登记的 id**（codex 568-#69 三轮 M-2）：原先无条件用描述前缀查再把结果
+            //   赋回 explicitTitleIssueId，会**覆盖**响应拿到的权威 id；描述前缀一旦命中多行，dbGet 任取
+            //   一行就可能登记成别人的单，随后 finally 按 id 直删，**绕过**刚加的"命中多行不自动删"保护。
+            //   改为：有响应 id 就按 id 精确回读（并保留描述核对），只有没有 id 时才退回描述查询。
+            const t2bRow = explicitTitleIssueId
+                ? await dbGet(`SELECT id, title, description FROM sys_issues WHERE id = ?`, [explicitTitleIssueId])
+                : await dbGet(`SELECT id, title, description FROM sys_issues WHERE description LIKE ?`, [`${t2bDescFirstLine}%`]);
+            await shotOnFail(page, !!t2bRow, 't2b-db-row-created', `DB 中已建出对应单据，实得：${JSON.stringify(t2bRow)}`);
+            if (t2bRow) {
+                // ⛔ 这里**刻意不再把回读结果的 id 赋给 explicitTitleIssueId**（codex 568-#69 四轮 M-2 收口）。
+                //   原写法在"无响应 id"分支下会把描述前缀查询任取的一行登记为清理目标，finally 见到 id 就
+                //   直删，**绕过** dbAll 的多行保护；且赋值发生在归属核对**之前**，而 shotOnFail 内部不抛错，
+                //   核对失败也拦不住那次删除——等于用一条只会累计失败的断言当删除门禁，这是不成立的。
+                //   现在：清理变量**只保存响应体返回的权威 id**；没有响应 id 时，一律交给 finally 的
+                //   dbAll 补查 + 唯一性保护决定删不删。本回读只服务于断言，不再影响清理。
+                // 归属核对：确认断言比较的确实是本用例建的单（防前缀碰撞选错行后，标题断言在别人的单上
+                //   比较而给出误导性结论）。它是**断言正确性**的守卫，不兼任清理门禁。
+                await shotOnFail(page, String(t2bRow.description || '').startsWith(t2bDescFirstLine), 't2b-row-ownership',
+                    `回读到的单据描述以本轮唯一标记开头（归属核对），标记="${t2bDescFirstLine}"，实得描述首段="${String(t2bRow.description || '').slice(0, 60)}"`);
+                // [端到端断言] 证明的是"用户填的标题最终成为落库 title"这一结果，**不能定位 trim 发生在哪一层**
+                //   （codex 568-#69 二轮 L-4 修正原文案"证明前端做了 trim"的错误因果）。它真正的判别力在于
+                //   title 有没有被派生值覆盖——这一点任何单层实现都无法代偿，故仍是本用例的核心断言。
+                await shotOnFail(page, t2bRow.title === explicitTitle, 't2b-title-used-as-typed-e2e',
+                    `[端到端契约] 落库 title = 用户填入标题去首尾空白后的值（证明标题被采用、未被派生覆盖；trim 由前后端哪一层完成本条不区分），输入="${explicitTitleTyped}"，预期="${explicitTitle}"，实得="${t2bRow.title}"`);
+                // ⚠️⚠️ 判别力交底（**本条断言对前端实现没有判别力，刻意保留并如实标注**）：
+                //   落库 title 无首尾空白这件事，由**前端 trim 与后端 trim 两层**冗余保证（前端
+                //   `v.title.trim()`，后端 index.js:7265 `b.title.trim()`）。本批变异实测：单独删掉前端
+                //   trim → 本条仍绿（后端兜住）；单独删掉后端 trim → 本条也仍绿（前端兜住）。**只有两层
+                //   同时坏才会红。** 故它锁的是「端到端契约」而非任何一层的实现，不要误当作前端 trim 的守卫。
+                //   真正守前端 trim 的是下面那条 t2b-request-title-trimmed（断言对象=请求体，见其注释）。
+                await shotOnFail(page, t2bRow.title === t2bRow.title.trim(), 't2b-title-trimmed-e2e',
+                    `[端到端契约·非单层守卫] 落库 title 无首尾空白（前后端两层 trim 任一生效即满足），实得=${JSON.stringify(t2bRow.title)}`);
+                // 负向那一半：显式钉死"没有退化成派生值"。前一条断言相等时本条必然成立，写出来是为了让
+                //   失败信息直接指认"退化成了描述首行"这一具体病因，而不是只报"两个字符串不相等"。
+                await shotOnFail(page, t2bRow.title !== t2bDescFirstLine, 't2b-title-not-derived',
+                    `落库 title 未退化为描述首行（若相等说明 title 没传出去或被派生覆盖），描述首行="${t2bDescFirstLine}"，实得 title="${t2bRow.title}"`);
+            }
+
+            // ⭐⭐ 对前端实现真正有判别力的一条（断言对象=**请求体**，不是落库值）：
+            //   前端 `if (v.title && v.title.trim()) body.title = v.title.trim();` 是否真的做了 trim，
+            //   只在它发出的 JSON 里可见——落库值被后端 trim 抹平了差异（见上一条交底）。
+            //   本批变异实测：把该行改成 `if (v.title) body.title = v.title;` → **本条判红**（请求体里
+            //   title 带首尾空白），而所有落库层断言仍绿。这就是补这一层的理由。
+            await shotOnFail(page, !!t2bPostBody, 't2b-request-captured',
+                `已捕获建单请求体（后续断言的前提，未捕获说明 URL 匹配或时机有误），实得=${JSON.stringify(t2bPostBody)}`);
+            if (t2bPostBody) {
+                await shotOnFail(page, t2bPostBody.title === explicitTitle, 't2b-request-title-trimmed',
+                    `[前端守卫] 请求体 title = 去首尾空白后的值（证明前端确实 trim，输入带空白="${explicitTitleTyped}"），预期="${explicitTitle}"，实得=${JSON.stringify(t2bPostBody.title)}`);
+            }
+
+            // 渲染层核对：详情页 header 显示的是自填标题（建单成功后 siOpenDrawer 自动打开）。
+            const t2bDrawerTitle = await page.locator('#siDTitle').textContent().catch(() => '');
+            // 前置条件改用 t2bRow（四轮 M-2 连带）：explicitTitleIssueId 现在只在"拿到响应 id"时有值，
+            //   继续拿它当前置会让"响示例开发N时但单据已建出"的场景误判成断言失败，掩盖真实结论。
+            await shotOnFail(page, !!t2bRow && t2bDrawerTitle.includes(explicitTitle), 't2b-detail-title',
+                `详情页 header 显示自填标题（实得："${t2bDrawerTitle}"）`);
+
+            await shotOnFail(page, page._consoleErrors.length === 0, 't2b-console-clean',
+                `T2b 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
+            await page.close();
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ⭐ T2c（#69·codex 568-#69 审 L-2 补）：**纯空白标题 → 仍走派生兜底**
+        //   这是前端提交条件 `if (v.title && v.title.trim()) body.title = v.title.trim();` 的真实边界：
+        //   用户在标题框里敲了几个空格再提交。T2（完全不填）与 T2b（填了实内容）都覆盖不到它。
+        //   期望行为：空白被 trim 判假 → 不传 title → 后端派生 → 落库 title = 描述首个非空行。
+        //   ⚠️ 判别层交底（codex 568-#69 二轮 L-4 修正原注释的错误因果）：若条件误写成 `if (v.title)`
+        //     （非空字符串即真），空格串会被装进请求体——但**落库 title 不会变成空格**，因为后端 :7265
+        //     先 trim 再 `rawTitle || derive(...)`，空白仍会走派生。即该误写的后果**只在请求体层可见**，
+        //     由下方 t2c-request-omits-blank-title 钉住；落库层两条是端到端契约，单层误写不会让它们红。
+        // ═══════════════════════════════════════════════════════════════
+        {
+            console.log('\n── T2c（#69）：纯空白标题 → 仍走描述派生兜底 ──');
+            const page = await loginPage(browser, adminTok);
+            await page.goto(`${BASE_URL}/Sys_Iteration.html`);
+            await page.waitForLoadState('networkidle');
+            await page.waitForTimeout(500);
+
+            await page.click('button:has-text("新建迭代单")');
+            await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
+            await page.waitForTimeout(200);
+
+            // 同 T2b：真正能判前端条件写法的是请求体（纯空白时**不应出现 title 键**）。
+            let t2cPostBody = null;
+            page.on('request', req => {
+                if (req.method() !== 'POST') return;
+                let p;
+                try { p = new URL(req.url()).pathname; } catch (_) { return; }
+                if (p !== '/api/sys-issues') return;   // 同 T2b：pathname 全等，排除子路径
+                try { t2cPostBody = JSON.parse(req.postData() || 'null'); } catch (_) { /* 非 JSON 忽略 */ }
+            });
+
+            const stampC = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;   // 同 T2b：时间戳+随机段
+            const t2cDescFirstLine = `T2c描述首个非空行-${stampC}`;
+            blankTitleDescMarker = t2cDescFirstLine;   // M-1 兜底：先于提交存标记
+            await page.fill('#f_title', '    ');   // 纯空白
+            await page.fill('#f_description', `${t2cDescFirstLine}\n第二行不参与标题`);
+            await page.selectOption('#f_intake_liaison_id', String(LIAISON_ID));
+
+            // 同 T2b：等真实响应并直接登记 id（M-1 收口），不用固定时长赌落库时机。
+            blankTitleSubmitAttempted = true;   // 同 T2b：置于 click 之前
+            const [createRespC] = await Promise.all([
+                page.waitForResponse(r => {
+                    try { return new URL(r.url()).pathname === '/api/sys-issues' && r.request().method() === 'POST'; }
+                    catch (_) { return false; }
+                }, { timeout: 15000 }).catch(() => null),
+                page.click('#siMConfirm'),
+            ]);
+            if (createRespC) {
+                const respBodyC = await createRespC.json().catch(() => null);
+                if (respBodyC && respBodyC.id) blankTitleIssueId = respBodyC.id;
+            }
+            await page.waitForTimeout(400);
+
+            await shotOnFail(page, (await page.locator('#siModalOverlay.open').count()) === 0, 't2c-modal-closed',
+                '纯空白标题不影响提交（描述已填，弹窗关闭=建单成功）');
+
+            // 同 T2b（M-2）：优先按响应登记的 id 精确回读，不让描述前缀查询覆盖权威 id。
+            const t2cRow = blankTitleIssueId
+                ? await dbGet(`SELECT id, title, description FROM sys_issues WHERE id = ?`, [blankTitleIssueId])
+                : await dbGet(`SELECT id, title, description FROM sys_issues WHERE description LIKE ?`, [`${t2cDescFirstLine}%`]);
+            await shotOnFail(page, !!t2cRow, 't2c-db-row-created', `DB 中已建出对应单据，实得：${JSON.stringify(t2cRow)}`);
+            if (t2cRow) {
+                // ⛔ 同 T2b（四轮 M-2）：**不把回读 id 赋给清理变量**，清理只认响应体返回的权威 id。
+                // 归属核对（T2c 此前缺这条，四轮 M-2 指出后补齐，与 T2b 对称）。
+                await shotOnFail(page, String(t2cRow.description || '').startsWith(t2cDescFirstLine), 't2c-row-ownership',
+                    `回读到的单据描述以本轮唯一标记开头（归属核对），标记="${t2cDescFirstLine}"，实得描述首段="${String(t2cRow.description || '').slice(0, 60)}"`);
+                // ⚠️ 判别力交底（同 t2b-title-trimmed-e2e）：落库层这两条是**端到端契约**，由前端条件与
+                //   后端 `rawTitle || derive(...)` 两层冗余保证，单层变异不会红（本批已实测）。
+                await shotOnFail(page, t2cRow.title === t2cDescFirstLine, 't2c-title-derived-not-blank-e2e',
+                    `[端到端契约] 纯空白标题 → 落库 title = 描述首个非空行（而非一串空格），预期="${t2cDescFirstLine}"，实得=${JSON.stringify(t2cRow.title)}`);
+                await shotOnFail(page, !!(t2cRow.title && t2cRow.title.trim()), 't2c-title-not-whitespace-e2e',
+                    `[端到端契约] 落库 title 非空白串，实得=${JSON.stringify(t2cRow.title)}`);
+            }
+            // ⭐ 对前端条件写法真正有判别力的一条：纯空白时请求体里**不应有 title 键**。
+            //   若条件被误写成 `if (v.title)`（非空字符串即真），空格串会被装进 body → 本条判红，
+            //   而上面两条落库断言仍绿（后端 trim 后走派生，结果看不出差别）。
+            await shotOnFail(page, !!t2cPostBody, 't2c-request-captured',
+                `已捕获建单请求体，实得=${JSON.stringify(t2cPostBody)}`);
+            if (t2cPostBody) {
+                await shotOnFail(page, !('title' in t2cPostBody), 't2c-request-omits-blank-title',
+                    `[前端守卫] 纯空白标题时请求体不含 title 键（防误写成 if (v.title) 把空格串传出去），实得 title=${JSON.stringify(t2cPostBody.title)}`);
+            }
+
+            await shotOnFail(page, page._consoleErrors.length === 0, 't2c-console-clean',
+                `T2c 全程无 JS 报错（${page._consoleErrors.length} 个${page._consoleErrors.length ? ': ' + page._consoleErrors.slice(0, 2).join(' | ') : ''}）`);
             await page.close();
         }
 
@@ -662,6 +939,70 @@ async function main() {
             await dbRun(`DELETE FROM sys_issues WHERE id=?`, [oaExemptIssueId]);
             console.log(`  🧹 T1.5 测试夹具已清理（issue #${oaExemptIssueId}）`);
         }
+        // T2b/T2c（#69）夹具——与上两组同一 try/finally 收口。
+        // ⭐ codex 568-#69 审 M-1：不只按 id 清，**id 为空时按描述唯一标记补查**。id 只在"固定等待后
+        //   dbGet 查到行"这条路走通时才有值；落库慢于等待、或查询异常时 id 为 null 而单据可能已建出来，
+        //   只按 id 清就会漏。标记在提交**之前**就已存下，覆盖得到这个窗口。
+        //   （断言失败本身不跳过清理——shotOnFail 内部不抛错，已由变异实跑验证；此处防的是另一条路径。）
+        //   ⚠️ 覆盖边界如实声明（codex 568-#69 二轮 M-1 修正原注释的绝对化措辞）：本兜底**不能保证**
+        //     覆盖所有迟到落库——若提交请求在进入 finally 时尚未完成，补查仍可能查不到，随后才落库。
+        //     它把漏清窗口从"等待期内没查到就必漏"收窄到"finally 时点仍未落库才漏"，是收窄不是消灭。
+        //   下面三点是二轮 M-1 点出的真实缺陷，已修：
+        //     ① 原 `catch(() => null)` 把"查询失败"和"查无记录"混为一谈并静默退出 → 改为区分，查询失败
+        //        明确打日志并**计入失败**（清理不静默）。
+        //     ② 原来两个 await 顺序执行，T2b 清理抛错会**阻止 T2c 清理** → 改为各自独立 try/catch，
+        //        全部尝试完再统一报告。
+        //     ③ 清理失败不再无声——汇总后打印，供跑测的人看见（本套件以 PASS/FAIL 汇总收尾，清理属夹具
+        //        卫生问题，打印到位即可，不劫持业务断言的成败语义）。
+        const cleanupByIdOrMarker = async (label, id, marker, submitAttempted) => {
+            let targetId = id;
+            if (!targetId && marker) {
+                let found = null;
+                try {
+                    // 精确匹配优先（marker 是本轮唯一串，描述以它开头）——LIKE 前缀查询在极端碰撞下可能
+                    //   取到别的行，故先按等值查完整描述不可行（描述含后续行），仍用前缀但**校验唯一性**。
+                    const rows = await dbAll(`SELECT id, description FROM sys_issues WHERE description LIKE ?`, [`${marker}%`]);
+                    if (rows.length > 1) {
+                        console.log(`  ⚠️ ${label}：描述标记 "${marker}" 命中 ${rows.length} 行（预期 1），不自动删除，需人工核实：${JSON.stringify(rows.map(r => r.id))}`);
+                        cleanupFailures.push(`${label}: marker 命中 ${rows.length} 行，未清理`);
+                        return;
+                    }
+                    found = rows[0] || null;
+                } catch (e) {
+                    console.log(`  ❗ ${label}：按标记补查**失败**（非"查无记录"），夹具可能残留：${e && e.message}`);
+                    cleanupFailures.push(`${label}: 补查失败 ${e && e.message}`);
+                    return;
+                }
+                if (found) {
+                    targetId = found.id;
+                    console.log(`  ⚠️ ${label}：id 未取得但按描述标记补查到 issue #${targetId}（响示例开发N时/点击异常/落库迟到），执行兜底清理`);
+                }
+            }
+            if (!targetId) {
+                // ⭐ 三轮 M-1：零行不等于"没有夹具"。提交动作发起过、却既没拿到响应 id、补查也零行时，
+                //   服务端仍可能在此之后落库 —— 这是**清理状态未知**，必须报出来，不能按"无夹具"静默结束。
+                if (submitAttempted) {
+                    console.log(`  ❗ ${label}：已尝试提交但未取得 id，且按标记补查零行 —— **清理状态未知**（可能服务端迟于本次查询才落库），请人工核实标记 "${marker}"`);
+                    cleanupFailures.push(`${label}: 清理状态未知（已提交/无 id/补查零行），标记 ${marker}`);
+                }
+                return;
+            }
+            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [targetId]);
+            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [targetId]);
+            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [targetId]);
+            console.log(`  🧹 ${label} 测试夹具已清理（issue #${targetId}）`);
+        };
+        for (const [label, id, marker, submitAttempted] of [
+            ['T2b', explicitTitleIssueId, explicitTitleDescMarker, explicitTitleSubmitAttempted],
+            ['T2c', blankTitleIssueId, blankTitleDescMarker, blankTitleSubmitAttempted],
+        ]) {
+            // ② 独立捕获：任一夹具清理抛错都不影响其余夹具被尝试清理。
+            try { await cleanupByIdOrMarker(label, id, marker, submitAttempted); }
+            catch (e) { console.log(`  ❗ ${label} 清理抛错，夹具可能残留：${e && e.message}`); cleanupFailures.push(`${label}: 清理抛错 ${e && e.message}`); }
+        }
+        if (cleanupFailures.length) {
+            console.log(`\n  ❗❗ 夹具清理存在 ${cleanupFailures.length} 项未收口（需人工核实，勿当作"已清理干净"）：\n     - ${cleanupFailures.join('\n     - ')}`);
+        }
         // [284 号 M-3 必修] T6 两夹具此前漏清——finally 是唯一收口点，任一断言中途失败也须走到这里
         // （与上两组同一 try/finally 结构，天然覆盖失败路径，非额外新增的容错分支）。
         if (t6FeatureId) {
@@ -695,7 +1036,18 @@ async function main() {
     }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 建单优化批 C1/C2 前端 Playwright 冒烟存在失败项'); process.exit(1); }
+    // ⭐ 退出码分层（codex 568-#69 三轮 M-3）：功能失败=1（既有语义不变，优先级最高，不被清理状态覆盖）；
+    //   功能全通过但**夹具清理未收口**=2。这样"功能红"与"夹具没清干净"对只读退出码的调用方也可区分，
+    //   不会再出现"夹具残留却被当作完全成功"。
+    if (fail > 0) {
+        console.log('  ❌ 建单优化批 C1/C2 前端 Playwright 冒烟存在失败项');
+        if (cleanupFailures.length) console.log(`  ❗ 另有 ${cleanupFailures.length} 项夹具清理未收口（见上方明细）`);
+        process.exit(1);
+    }
+    if (cleanupFailures.length) {
+        console.log(`  ❗❗ 功能断言全通过，但有 ${cleanupFailures.length} 项夹具清理未收口——退出码 2（勿当作完全成功）`);
+        process.exit(2);
+    }
     console.log('  🎉 建单优化批 C1/C2 前端 Playwright 冒烟全部通过');
 }
 

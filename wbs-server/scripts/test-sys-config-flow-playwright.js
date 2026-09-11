@@ -742,8 +742,11 @@ async function main() {
         await typeSelect.selectOption('config');
         await page1.waitForTimeout(100);
         // 描述必填 + 对接人必填——留空对接人，其余填齐，提交应被前端拦（toast + 弹窗不关）
-        // [补丁 AE·AE1] 描述里嵌入本轮唯一标识——标题由描述首行自动截取生成（无独立标题输入框，见
-        //   siOpenCreate 弹层字段·:8409），故 RUN_TAG 只能靠 description 传递，回读时按它核对所有权。
+        // [补丁 AE·AE1] 描述里嵌入本轮唯一标识——本用例**不填标题**，标题由描述首行自动截取生成，故
+        //   RUN_TAG 靠 description 传递，回读时按它核对所有权。
+        //   ⚠️ #69（2026-09-11）订正：原注释写的"无独立标题输入框"已失效——建单弹窗现有选填标题框
+        //   （siOpenCreate 字段数组首项）。本用例**刻意仍不填它**，正好覆盖"留空走后端派生"这条兜底路径；
+        //   下方 fill 用 `#siMBody textarea` 选中的是描述（title 是 input 不是 textarea），选择器不受影响。
         await page1.fill('#siMBody textarea', `Playwright T1 探针：config 建单流程测试 ${RUN_TAG_MARKER}`);
         await page1.click('#siMConfirm');
         await page1.waitForTimeout(400);

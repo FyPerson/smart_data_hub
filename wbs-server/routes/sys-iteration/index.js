@@ -7250,6 +7250,14 @@ module.exports = (deps) => {
       //   端点必填**（新契约）；title 缺省时服务端按 description 首个非空行自动派生。
       //   ⚠️ 衍生建单两入口（/derive、/:id/reactivate 等独立代码路径）**完全不受影响**——自带 title、
       //   description 可空现状保留，不走本矩阵（方案 §6b.2 明文划界）。
+      //   ⭐ #69（2026-09-11 用户拍板）：「有 title」这一分支**从兼容入口转正为正式路径**——建单弹窗已放出
+      //     选填标题输入框（Sys_Iteration.html siOpenCreate 字段数组首项），用户填了就走 rawTitle。
+      //     ⚠️ 本端点代码**一行未改**（本就支持），改的只是这条注释所声称的口径：原表述"title 缺省是常态、
+      //     传 title 仅为过渡期旧缓存页/脚本保留"已失效，不删会与前端新行为并存成两套说法。
+      //     推翻的旧决策：建单优化批 §6b 复审 M-3「建单弹窗不展示 title、编辑弹窗展示可精修——两弹窗职责
+      //     不同」。新口径=建单选填（留空派生兜底）／编辑必填（见 edit-in-revision 的 TITLE_REQUIRED）。
+      //     ⚠️ title 无长度上限是**既有现状**（DDL 无 CHECK、本端点与编辑端点均不校验长度），#69 拍板不在
+      //     本项内补——放开输入框不新增风险类别（编辑入口早已可填任意长度），要治须三入口同口径统一做。
       const rawDescription = (typeof b.description === 'string' ? b.description.trim() : '');
       if (!rawDescription) {
         return res.status(400).json({ error: '描述必填', code: 'DESCRIPTION_REQUIRED' });
@@ -12809,11 +12817,13 @@ module.exports = (deps) => {
   //   [⑦]——落此文而非 fastlane 家族：edit-in-revision 本就是本文件的主体端点，source/related_correction_no
   //   两个新字段与 fastlane 授权/执行人无任何关联，按内聚归属其既有专属套件） ──
   //   SYS_CREATE_FORM_FIELDS：建单表单让用户填写/由建单流程确定值的字段全集——对照 POST /sys-issues
-  //   请求体消费点（本文件该端点全文）+ 前端 siOpenCreate 创建弹窗逐控件（Sys_Iteration.html :6341
-  //   一带 siModal 字段数组）两处核对得出，非凭空拟定。title 虽无独立输入控件（由 description 首行
-  //   自动派生，"建单优化批 C2『撤标题输入框』"），但其值仍在建单当下被确定（用户输入 description
-  //   即间接决定了 title），故计入本集合——不计入会让下方恒等式因"title 在可编辑集里却不在建单集
-  //   里"而永假。
+  //   请求体消费点（本文件该端点全文）+ 前端 siOpenCreate 创建弹窗逐控件（Sys_Iteration.html
+  //   `siModal('新建迭代单', [` 字段数组）两处核对得出，非凭空拟定。
+  //   ⭐ #69（2026-09-11）：title **已有独立输入控件**（选填，字段数组首项）——原注释"title 虽无独立输入
+  //   控件（由 description 首行自动派生，建单优化批 C2『撤标题输入框』），但其值仍在建单当下被确定"
+  //   已随建单弹窗放出标题框而失效，本集合的成员资格改由"用户直接填写"承担（比原先"间接决定"更强，
+  //   结论不变：title 恒计入本集合，否则下方恒等式会因"title 在可编辑集里却不在建单集里"而永假）。
+  //   ⚠️ 留空时仍走后端派生（:7258），故"建单当下确定其值"这一点两种路径都成立。
   //   ⚠️ [S8-S10 合并收口批 F4 收口·如实化] 本集合**不等于**该端点 `b.<key>` 全部消费点——端点还额外读取
   //   6 个"协议/结构性拒绝"字段（见下方 SYS_CREATE_PROTOCOL_REJECTED_FIELDS），它们要么是版本协议标记
   //   （intake_contract_version），要么被读取的唯一目的是拒绝（intake_required/assign_mode/assigned_to/

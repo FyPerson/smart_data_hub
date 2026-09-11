@@ -589,14 +589,20 @@ async function main() {
     const ATTACHMENT_TYPE_FIELDS = new Set(['attachments']);
     const attachmentUploadRouteRe = /router\.post\(\s*'\/sys-issues\/:id\/attachments'/;
     // 前端控件"有意不存在"的显式白名单（同 SYS_CREATE_PROTOCOL_REJECTED_FIELDS"逐项非空理由"纪律，
-    //   非泛化 OR 例外——实测运行本组时抓到真实存在的这一种：title 后端仍保留 b.title 可选兼容入口
-    //   （index.js :6241-6242 一带 rawTitle||deriveSysTitleFromDescription 自动派生），但建单优化批
-    //   C2（方案 §6b.1）已撤除主建单弹窗的标题输入框（描述接管唯一内容主字段）——前端无控件是**已拍板
-    //   的设计**，不是"删消费忘同步"式僵尸。豁免只免前端侧，后端消费点仍须存在（!bodySet.has(f) 依旧
-    //   会判红），故不会掩盖"backend 也被删"这个真正的僵尸场景。
-    const FRONTEND_CONTROL_INTENTIONALLY_ABSENT = {
-      title: '建单优化批 C2（方案 §6b.1）撤除标题输入框，描述接管唯一内容主字段，标题按描述首行自动派生（deriveSysTitleFromDescription，index.js :6242）；后端保留 b.title 为可选兼容入口（衍生/reactivate 等独立入口自带 title 但走独立代码路径，见该端点 :6235-6236 注释），主建单弹窗故意不提供显式控件，非遗漏。',
-    };
+    //   非泛化 OR 例外）。豁免只免前端侧，后端消费点仍须存在（!bodySet.has(f) 依旧会判红），故不会掩盖
+    //   "backend 也被删"这个真正的僵尸场景。
+    //   ⭐ #69（2026-09-11）：**title 已移出本白名单**，当前白名单为空。
+    //     原条目声称"建单优化批 C2（方案 §6b.1）撤除标题输入框……主建单弹窗故意不提供显式控件，非遗漏"，
+    //     在建单弹窗放出选填标题输入框后**这句话变成了假话**。
+    //     ⚠️ 必须主动移除而不是"留着也不报错"：豁免项只放宽不收紧，留着不会判红，但会**静默失去判别力**
+    //       ——title 从此绕过"前端控件必须存在"这一侧的检查，以后有人误删标题输入框，本套件照绿。
+    //       移出后 title 回到普通 JSON 字段分支（后端消费点 AND 前端控件，两侧缺一即判红），判别力恢复。
+    //     前端侧落点：Sys_Iteration.html `siModal('新建迭代单', [` 字段数组首项 `fText('title', ...)`，
+    //       由下方 extractCreateFormFrontendFields 的 `f<Xxx>('key'` 惯用形态正则识别。
+    //   保留空对象而非删除整套机制：机制本身（显式白名单 + 逐项非空理由）仍是正确范式，将来若再出现
+    //     "后端消费但前端刻意无控件"的字段可直接登记；空对象时下方 for 循环不执行、查表恒 undefined，
+    //     所有字段一律走普通 AND 判据，行为等价于"无豁免"。
+    const FRONTEND_CONTROL_INTENTIONALLY_ABSENT = {};
     for (const [k, reason] of Object.entries(FRONTEND_CONTROL_INTENTIONALLY_ABSENT)) {
       assert.ok(typeof reason === 'string' && reason.trim(), `[⑨-反向前置] 前端控件豁免字段 "${k}" 理由不应为空`);
     }
@@ -624,8 +630,23 @@ async function main() {
     const attachmentBackendPresent = attachmentUploadRouteRe.test(indexSrc);
     assert.ok(attachmentBackendPresent, '[⑨-反向前置] 应能定位独立附件上传端点 POST /sys-issues/:id/attachments（attachments 类后端消费落脚点）');
     const staleFields = computeStaleFormFieldsByCategory(I.SYS_CREATE_FORM_FIELDS, bodyKeys, frontendFields, attachmentBackendPresent);
-    assert.deepStrictEqual(staleFields, [], `[⑨-反向] SYS_CREATE_FORM_FIELDS 存在按类别映射后判"僵尸"的字段：${JSON.stringify(staleFields)}——普通 JSON 字段须后端消费点(bodyKeys)与前端控件双侧都在，attachments 类须独立上传端点与前端控件都在，白名单字段（title）只须后端消费点在，任一侧缺即需人工核实并同步`);
-    ok(`[⑨-反向] SYS_CREATE_FORM_FIELDS 全部 ${I.SYS_CREATE_FORM_FIELDS.length} 项按类别映射逐一核对：14 项普通 JSON 字段=后端消费点(bodyKeys)∧前端控件双侧都在；1 项 attachments=独立上传端点∧前端控件都在；1 项白名单(title)=后端消费点在+前端有意无控件（理由非空），零僵尸字段`);
+    assert.deepStrictEqual(staleFields, [], `[⑨-反向] SYS_CREATE_FORM_FIELDS 存在按类别映射后判"僵尸"的字段：${JSON.stringify(staleFields)}——普通 JSON 字段须后端消费点(bodyKeys)与前端控件双侧都在，attachments 类须独立上传端点与前端控件都在，白名单字段（见 FRONTEND_CONTROL_INTENTIONALLY_ABSENT）只须后端消费点在，任一侧缺即需人工核实并同步`);
+    // ⭐ #69（2026-09-11）：本行三个分项计数原为**硬编码字面量**（"14 项普通…1 项 attachments…1 项白名单(title)"），
+    //   只有总数是动态的。title 移出白名单后它会在**绿灯状态下报告一句假话**（声称白名单仍含 title）——
+    //   比判红更危险：没人会去核一条通过断言的成功文案。改为全部按真实常量现算，与 computeStaleFormFieldsByCategory
+    //   的分支划分同源（同一份 ATTACHMENT_TYPE_FIELDS / FRONTEND_CONTROL_INTENTIONALLY_ABSENT），
+    //   以后白名单增删都会自动反映，不会再出现"文案与判据各说各话"。
+    const whitelistInCreateSet = I.SYS_CREATE_FORM_FIELDS.filter(f => FRONTEND_CONTROL_INTENTIONALLY_ABSENT[f]);
+    const attachInCreateSet = I.SYS_CREATE_FORM_FIELDS.filter(f => ATTACHMENT_TYPE_FIELDS.has(f));
+    // ⚠️ codex 568-#69 审 L-1：上面两类是**独立筛选**，再用总数相减得普通字段数——只有两集合互斥时这个
+    //   算法才成立。而 computeStaleFormFieldsByCategory 用的是 if/else if **分支优先级**（attachments 优先），
+    //   同一字段同时命中两类时它只进一个分支，两边就会各说各话（重复计数 + 少算普通字段），成功文案再次失真。
+    //   当前白名单为空、不可能重叠，但这正是"以后有人往白名单里加 attachments 类字段"时的静默坑。
+    //   显式断言互斥，把隐含前提变成会判红的条件（成本一行，比事后发现文案失真便宜）。
+    const overlapCategories = attachInCreateSet.filter(f => FRONTEND_CONTROL_INTENTIONALLY_ABSENT[f]);
+    assert.deepStrictEqual(overlapCategories, [], `[⑨-反向前置] attachments 类与前端控件豁免白名单不得重叠（重叠字段：${JSON.stringify(overlapCategories)}）——computeStaleFormFieldsByCategory 按分支优先级只进 attachments 分支，而下方分项计数按两类独立相减，重叠会让两者口径不一致并使成功文案失真`);
+    const plainCount = I.SYS_CREATE_FORM_FIELDS.length - whitelistInCreateSet.length - attachInCreateSet.length;
+    ok(`[⑨-反向] SYS_CREATE_FORM_FIELDS 全部 ${I.SYS_CREATE_FORM_FIELDS.length} 项按类别映射逐一核对：${plainCount} 项普通 JSON 字段=后端消费点(bodyKeys)∧前端控件双侧都在；${attachInCreateSet.length} 项 attachments=独立上传端点∧前端控件都在；${whitelistInCreateSet.length} 项白名单${whitelistInCreateSet.length ? `(${whitelistInCreateSet.join('/')})=后端消费点在+前端有意无控件（理由非空）` : '（当前无豁免项——title 已随 #69 放出建单控件而移出）'}，零僵尸字段`);
 
     // 红灯验证【两方向，NEW-5 核心证据】：分别删后端消费点 / 删前端控件，证明 AND 判据两个方向都能抓到
     // ——旧版并集判据下，方向 A（前端孤儿控件+后端已删消费）是完全抓不到的漏洞，本次改造专防这个方向。

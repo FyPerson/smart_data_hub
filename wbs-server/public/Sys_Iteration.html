@@ -9026,10 +9026,27 @@
         const liaisonsLoaded = await siLoadIntakeLiaisons();
         if (!liaisonsLoaded) { showToast('对接人候选加载失败，请重试', 'error'); return; }
         siModal('新建迭代单', [
+            // ⭐ #69（2026-09-11 用户拍板）：标题放出为**选填**输入框，位置=字段数组首项（用户拍板「第一项
+            //   就是选填项」）。本项**推翻**建单优化批 C2（方案 §6b.1）「撤标题输入框」及其复审 M-3「建单
+            //   弹窗不展示 title、编辑弹窗展示可精修——两弹窗职责不同」的刻意决策。
+            //   改的理由：C2 防的是"标题/描述两个内容字段让人不知道该写哪个"，但实践暴露的真实缺口是**同一
+            //   单据生命周期两套规则**（建单不给填、编辑却必填 TITLE_REQUIRED）。
+            //   新口径的不对称是刻意的：建单**选填**（留空仍由后端派生兜底）／编辑**必填**（单据已存在，
+            //   title 是承重字段——列表主列/通知文案/时间线/上线单成员清单都读它，清空会破坏展示）。
+            //   后端**零改动**：POST /sys-issues 的 `rawTitle || deriveSysTitleFromDescription(...)`（index.js
+            //   :7258）本就接受传入 title——该分支原为过渡期旧缓存页/脚本保留，本次转正为正式路径（见该端点
+            //   请求矩阵注释与 SYS_CREATE_FORM_FIELDS 常量注释，两处已同步改写）。
+            //   ⚠️ title 全链**无长度上限**（DDL `title TEXT NOT NULL` 无 CHECK、建单不校验、编辑端点只判非空），
+            //   2026-09-11 用户拍板本次**不加上限**：编辑弹窗早已可填任意长度，本项不新增风险类别；真要治理
+            //   须建单/编辑/派生三入口同口径统一做，不塞进本项。
+            // ⚠️ 文案口径（codex 568-#69 审 L-3）：写「首个非空行」而非「首行」——派生实现是
+            //   `lines.find(l => l.trim().length > 0)`（index.js deriveSysTitleFromDescription），描述以空行
+            //   开头时取的是第一个**非空**行。写「首行」在那种输入下与实际行为不符，属措辞超出实作。
+            fText('title', '标题（选填）', '', false, '留空则自动取描述首个非空行（超 40 字截断加省略号）'),
             fSelectMap('type', '类型', typeOpts, typeOpts[0], SI_TYPE_LABEL),
-            // 建单优化批 C2（方案 §6b.1）：撤「标题」输入框，「描述」成为唯一内容主字段——原「标题」槽位
-            //   由「描述」接手（必填，占据表单最显眼的第二栏位置）。
-            fTextarea('description', '描述', '', true, '必填：标题将由描述首行自动截取生成（超 40 字截断+省略号）', '直接粘贴需求/bug 描述，标题将自动取首行'),
+            // 建单优化批 C2（方案 §6b.1）：「描述」是唯一**必填**内容主字段——#69 放出选填标题后该地位不变
+            //   （标题留空即由描述首行派生，描述始终是内容真相源）。
+            fTextarea('description', '描述', '', true, '必填：标题留空时将由描述首个非空行自动截取生成（超 40 字截断+省略号）', '直接粘贴需求/bug 描述，标题留空则自动取首个非空行'),
             siIntakeLiaisonFieldHtml(),
             fSelectMap('system_name', '所属系统', (META && META.bizSystems) || [], (META && META.bizSystems && META.bizSystems[0]) || '', null),
             fText('module_name', '模块（选填）', ''),
@@ -9074,9 +9091,14 @@
             // ⭐ 角色权限重构 C0（codex 审 HIGH-1）：显式声明建单契约版本。后端据此识别"旧页面取消勾选"
             //   （旧逻辑不传 intake_required 时请求体与新版逐字相同，无法区分）→ 缺失/过旧一律 400 引导强制刷新。
             //   与后端 SYS_INTAKE_CONTRACT_VERSION 必须同步改（改一处不改另一处 = 全站建单 400，属显性失败）。
-            // 建单优化批 C2（方案 §6b.2）：不再传 title——服务端按 description 首个非空行自动派生（DESCRIPTION_REQUIRED
-            //   新契约，title 缺省是本批的常态而非兼容分支）。intake_liaison_id 转数字（select value 恒为字符串）。
+            // 建单优化批 C2（方案 §6b.2）：description 必填（DESCRIPTION_REQUIRED 新契约）。
+            //   intake_liaison_id 转数字（select value 恒为字符串）。
             const body = { intake_contract_version: 2, type: v.type, description: v.description.trim(), intake_liaison_id: Number(v.intake_liaison_id), system_name: v.system_name, source: v.source, priority: v.priority };
+            // ⭐ #69：标题选填——填了才传，留空**不传**该键（后端 :7258 按 description 首个非空行派生兜底）。
+            //   刻意"留空不传"而非传空串：后端判据 `rawTitle || derive(...)` 下空串也能走到派生（trim 后为假值），
+            //   两种写法结果等价，但不传更贴合"用户没填写"的语义，且与下方 module_name/requester_* 等既有选填
+            //   字段的 `if (trim()) body.x = ...` 范式一致（同族写法统一，不留一处特例让人以为有别的用意）。
+            if (v.title && v.title.trim()) body.title = v.title.trim();
             if (v.module_name.trim()) body.module_name = v.module_name.trim();
             if (v.requester_dept.trim()) body.requester_dept = v.requester_dept.trim();
             if (v.requester_name.trim()) body.requester_name = v.requester_name.trim();
