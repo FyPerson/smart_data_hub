@@ -4654,14 +4654,23 @@
                 //   字符——改用 `[...e.summary]` 展开成码点数组再判长/切片/join，对齐全仓其余长度口径
                 //   （work_note 上限 1000、bug_cause_note 上限 500 均按 `[...s].length` 码点计数）。
                 summaryHtml = `<span title="${esc(e.summary)}">${esc([...e.summary].slice(0, 60).join('') + '…')}</span>`;
-            } else if (SI_TL_CHANGE_CODES.has(e.action_code) && parsedPayload && Array.isArray(parsedPayload.changes)) {
+            } else if (e.event_type === 'note' && SI_TL_CHANGE_CODES.has(e.action_code)) {
                 // [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件：摘要照旧 + 「查看改动」折叠。分支按
                 //   action_code 收窄（release_info_edit / edit_in_revision 两个写点均为 event_type='note'），
                 //   与下方 accept 行的 online_mode 分支互斥——两类事件不会共用同一行 payload。
-                //   siRenderTimelineChanges 对缺损项/异常自行降级为空串，此时该行退化为纯摘要，与历史行一致。
-                const changesHtml = siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e));
-                if (changesHtml) { label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS; }   // 有可渲染改动才换徽章；降级为空串时保持原徽章
-                summaryHtml = (e.summary ? esc(e.summary) : '') + changesHtml;
+                //   [用户 2026-09-11 二拍·v1.172.1] 两码**一律**换「✎ 变更留痕」徽章（同一张单上新旧两种样式并存别扭）。
+                //   无可渲染明细时按 payload 是否为空分两句（codex 567 M1）：
+                //     · payload_json 为 NULL/空 ⇒ v1.172.0 之前写入的**历史行**（两写点自 v1.172.0 起恒写 payload，
+                //       NULL 是可靠的版本边界）⇒「（历史记录，未保存修改明细）」——旧值当初未落库无法回填
+                //     · payload_json 非空但解析失败 / 无 changes 数组 / 全部缺损 ⇒ 新行数据异常 ⇒「（修改明细不可用）」，
+                //       不冒充历史
+                const changesHtml = (parsedPayload && Array.isArray(parsedPayload.changes))
+                    ? siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e)) : '';
+                label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS;
+                const noDetailNote = (e.payload_json == null || e.payload_json === '')
+                    ? '（历史记录，未保存修改明细）' : '（修改明细不可用）';
+                summaryHtml = (e.summary ? esc(e.summary) : '')
+                    + (changesHtml || `<span class="si-muted" style="margin-left:6px">${noDetailNote}</span>`);
             } else if (parsedPayload && parsedPayload.online_mode != null) {
                 // [S1c 补丁 AD·AD3·预筛 L2] accept 行 online_mode 消费——config 验收通过选的 release/
                 //   direct 落在 payload_json.online_mode（index.js:6118，D11「选项写时间线」），此前前端

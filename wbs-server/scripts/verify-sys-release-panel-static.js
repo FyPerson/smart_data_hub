@@ -1510,11 +1510,14 @@ check('[A] siRenderTimeline 含 changes 分支：按 SI_TL_CHANGE_CODES 收窄 a
     const iChanges = body.indexOf('SI_TL_CHANGE_CODES.has(e.action_code)');
     const iOnline = body.indexOf('parsedPayload.online_mode != null');
     assert.ok(iChanges > 0, '未见 SI_TL_CHANGE_CODES.has(e.action_code) 分支');
-    assert.ok(/SI_TL_CHANGE_CODES\.has\(e\.action_code\)\s*&&\s*parsedPayload\s*&&\s*Array\.isArray\(parsedPayload\.changes\)/.test(body), 'changes 分支条件应为 action_code 收窄 ∧ parsedPayload ∧ Array.isArray(changes)');
+    assert.ok(/e\.event_type === 'note' && SI_TL_CHANGE_CODES\.has\(e\.action_code\)/.test(body), 'changes 分支条件应为 note 型 ∧ action_code 收窄（v1.172.1：不再要求 payload 存在，历史行也进本分支）');
+    assert.ok(/\(parsedPayload && Array\.isArray\(parsedPayload\.changes\)\)\s*\?\s*siRenderTimelineChanges\(/.test(body), '有 changes 数组才调渲染，否则空串');
     assert.ok(/siRenderTimelineChanges\(parsedPayload\.changes,\s*siTlChangeObjectText\(e\)\)/.test(body), 'changes 分支应调用 siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e))');
     assert.ok(iOnline > iChanges, 'changes 分支应在 online_mode 分支之前');
-    // 徽章覆盖：有可渲染改动才换成玫红「✎ 变更留痕」（si-tl-rose，用户选 V4a；不得与 release_published 的 si-tl-green 同色），降级空串保持原徽章
-    assert.ok(/if \(changesHtml\) \{ label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS; \}/.test(body), 'changes 分支应在 changesHtml 非空时覆盖 label/cls 为变更留痕徽章');
+    // 徽章覆盖（v1.172.1）：两码 note 事件无条件统一为玫红「✎ 变更留痕」（si-tl-rose，用户选 V4a；不得与 release_published 的 si-tl-green 同色）；无明细时按 payload 空/非空分别追加「历史记录」/「明细不可用」说明
+    assert.ok(/label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS;/.test(body) && !/if \(changesHtml\) \{ label = /.test(body), 'changes 分支应无条件覆盖 label/cls 为变更留痕徽章（v1.172.1 用户二拍：历史行也换徽章）');
+    assert.ok(/（历史记录，未保存修改明细）/.test(body) && /（修改明细不可用）/.test(body), '无明细时应按 payload 空/非空分别追加「历史记录」/「明细不可用」两句');
+    assert.ok(/e\.payload_json == null \|\| e\.payload_json === ''/.test(body), '历史行判据=payload_json 为 NULL/空串（v1.172.0 起两写点恒写 payload，NULL 是版本边界）');
     assert.ok(/const SI_TL_CHANGE_BADGE_LABEL = '✎ 变更留痕';/.test(src) && /const SI_TL_CHANGE_BADGE_CLS = 'si-tl-rose';/.test(src), '变更留痕徽章常量：标签「✎ 变更留痕」+ si-tl-rose（用户 2026-09-11 选 V4a）');
     assert.ok(/\.si-tl-evt\.si-tl-rose \{ background: #fce7f3; color: #be185d; \}/.test(src), 'si-tl-rose CSS 类应存在且为玫红实底（#fce7f3 / #be185d）');
     assert.ok(/release_published:\s*'si-tl-green'/.test(stripComments(src)), '对照：release_published 仍为 si-tl-green，变更留痕不得与之同色');
@@ -1654,21 +1657,41 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     assert.notStrictEqual(badge(tl([row({ event_type: 'scope_change', action_code: 'release_published', summary: 'R-1 已发布', payload_json: null })], [], '')).cls, 'si-tl-rose', '发布留痕不得用变更留痕的色');
                     assert.ok(tl([row({ action_code: 'release_info_edit', ref_id: 9 })], [], '').includes('变更对象：上线单信息（批次 #9）'), '头行含批次对象');
                 });
-                check('[A 徽章直调] 空数组 / 全部无效项 / 历史无 changes 行 / payload 非 JSON → 保留原徽章（备注 / 上线单信息修改）', () => {
-                    const noteBadge = badge(tl([row({ payload_json: JSON.stringify({ changes: [] }) })], [], ''));
-                    assert.deepStrictEqual(noteBadge, badge(tl([row({ payload_json: null })], [], '')), '空数组与无 payload 行徽章一致');
-                    assert.notStrictEqual(noteBadge.label, '变更留痕', '空数组不得显示变更留痕');
-                    assert.notStrictEqual(badge(tl([row({ payload_json: JSON.stringify({ changes: [null, 'x'] }) })], [], '')).label, '变更留痕', '全部无效项不得显示变更留痕');
-                    assert.notStrictEqual(badge(tl([row({ payload_json: '{not json' })], [], '')).label, '变更留痕', 'payload 非 JSON 不得显示变更留痕');
-                    const rel = badge(tl([row({ action_code: 'release_info_edit', payload_json: null })], [], ''));
-                    assert.deepStrictEqual(rel, { cls: 'si-tl-indigo', label: '上线单信息修改' }, '历史 release_info_edit 行保持登记表徽章');
+                check('[A 徽章直调·v1.172.1] 无明细行仍换「✎ 变更留痕」徽章、不出折叠；payload NULL/空串 → 「历史记录」文案；payload 非空异常（非 JSON / 无 changes 键 / changes 非数组 / 空数组 / 全部无效）→ 「修改明细不可用」文案（567 M1）', () => {
+                    const rose = { cls: 'si-tl-rose', label: '✎ 变更留痕' };
+                    for (const [name, extra] of [['无 payload(null)', { payload_json: null }], ['空串 payload', { payload_json: '' }], ['历史 release_info_edit', { action_code: 'release_info_edit', payload_json: null }]]) {
+                        const h = tl([row(extra)], [], '');
+                        assert.deepStrictEqual(badge(h), rose, `${name}：徽章应为变更留痕`);
+                        assert.ok(h.includes('（历史记录，未保存修改明细）') && !h.includes('修改明细不可用'), `${name}：应追加历史文案`);
+                        assert.ok(!h.includes('查看改动'), `${name}：不得出现折叠`);
+                    }
+                    for (const [name, extra] of [['非 JSON', { payload_json: '{not json' }], ['无 changes 键', { payload_json: JSON.stringify({ attachment_ids: [] }) }], ['changes 非数组', { payload_json: JSON.stringify({ changes: 'x' }) }], ['空数组', { payload_json: JSON.stringify({ changes: [] }) }], ['全部无效项', { payload_json: JSON.stringify({ changes: [null, 'x'] }) }], ['release_info_edit 空数组', { action_code: 'release_info_edit', payload_json: JSON.stringify({ changes: [] }) }]]) {
+                        const h = tl([row(extra)], [], '');
+                        assert.deepStrictEqual(badge(h), rose, `${name}：徽章应为变更留痕`);
+                        assert.ok(h.includes('（修改明细不可用）') && !h.includes('历史记录'), `${name}：应追加「明细不可用」而非历史文案`);
+                        assert.ok(!h.includes('查看改动'), `${name}：不得出现折叠`);
+                    }
+                    for (const extra of [{}, { action_code: 'release_info_edit', ref_id: 3, summary: '上线单信息修改（标题）' }]) {
+                        const hNew = tl([row(extra)], [], '');
+                        assert.ok(hNew.includes('查看改动') && !hNew.includes('未保存修改明细') && !hNew.includes('明细不可用'), '有明细的行只出折叠不追加说明');
+                    }
                 });
-                check('[A 徽章直调] 普通事件 / release_published / accept(online_mode) 不受覆盖影响', () => {
-                    assert.deepStrictEqual(badge(tl([row({ action_code: 'work_note_x', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) })], [], '')).label !== '变更留痕', true, '非两码即使带 changes 也不换徽章');
-                    const pub = badge(tl([row({ event_type: 'release', action_code: null, summary: 'x', payload_json: null })], [], ''));
-                    assert.ok(pub && pub.label !== '变更留痕', 'release 事件不换徽章');
+                check('[A 徽章直调·567 M2] 普通 note / 同码非 note / release_published / accept(online_mode) 不受覆盖影响——断完整徽章对象，不只比旧标签文本', () => {
+                    const rose = { cls: 'si-tl-rose', label: '✎ 变更留痕' };
+                    const notRose = (h, name) => { const b = badge(h); assert.ok(b && b.cls !== 'si-tl-rose' && b.label !== '✎ 变更留痕' && !b.label.includes('变更留痕'), `${name}：不得被覆盖成变更留痕，实得 ${JSON.stringify(b)}`); return b; };
+                    const plain = notRose(tl([row({ action_code: 'work_note_x', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) })], [], ''), '非两码 note 带 changes');
+                    assert.deepStrictEqual(plain, { cls: 'si-tl-gray', label: '备注' }, '非两码 note 应为通用「备注」灰徽章');
+                    for (const code of ['edit_in_revision', 'release_info_edit']) {
+                        for (const et of ['status_change', 'scope_change', 'release']) {
+                            const h = tl([row({ event_type: et, action_code: code, from_status: '待修改', to_status: '待修改', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) })], [], '');
+                            notRose(h, `${code} 且 event_type=${et}`);
+                            assert.ok(!h.includes('查看改动') && !h.includes('修改明细'), `${code}/${et}：不进 changes 分支`);
+                        }
+                    }
+                    const pub = badge(tl([row({ event_type: 'scope_change', action_code: 'release_published', summary: 'R-1 已发布', payload_json: null })], [], ''));
+                    assert.deepStrictEqual(pub, { cls: 'si-tl-green', label: '发布留痕' }, 'release_published 保持绿色发布留痕');
                     const acc = tl([row({ event_type: 'status_change', action_code: 'accept', from_status: '待验证', to_status: '已上线', payload_json: JSON.stringify({ online_mode: 'direct' }) })], [], '');
-                    assert.ok(acc.includes('上线方式') && !acc.includes('变更留痕'), 'accept 行走 online_mode 分支且不换徽章');
+                    assert.ok(acc.includes('上线方式') && !acc.includes('变更留痕') && !acc.includes('si-tl-rose'), 'accept 行走 online_mode 分支且不换徽章');
                 });
             }
         }
