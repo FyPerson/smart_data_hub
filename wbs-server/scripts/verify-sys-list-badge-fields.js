@@ -76,6 +76,12 @@ const paBody = extractFunctionBody(HTML, 'siPostAcceptFlagHtml');
 //   必须同批进扫描面，否则它消费的两个新 S6 列（total/done count）对本守卫不可见（正是本守卫要防
 //   的 blocked 死分支同款漏法——新 helper 不进扫描面=守卫对它视而不见，照样全绿）。
 const flBody = extractFunctionBody(HTML, 'siFastlaneFlagHtml');
+// [已授权先行上线徽章 20260911] 同上理由——「已授权先行上线」徽章 helper 消费 type/status/
+//   fast_release_active_auth 三字段（均为既有列，本批无新增 SELECT 列），仍必须同批进扫描面：
+//   守卫的价值在于"消费集 ⊆ 供给集"这条不变量对**每一个**徽章 helper 都成立，新 helper 不进扫描面
+//   =它消费的字段对守卫不可见，将来 SELECT 若漏投影 fast_release_active_auth，本徽章会静默失效而
+//   守卫照常全绿（头部注释已四次实证同款漏法，本条是第五个 helper，加时即登记）。
+const flAuthBody = extractFunctionBody(HTML, 'siFastlaneAuthFlagHtml');
 // [上线排期三态徽章 20260827] 同上理由——「未排期／待派执行人／已排期(+逾期)」徽章 helper 消费
 //   status/release_id/release_exec_count/release_planned_date 四字段（后三者为本批新增的 release 侧
 //   派生列），必须同批进扫描面。⚠️ 本批首次加时就漏了这一步：守卫照常报"消费 38 ⊆ 供给 62"全绿，
@@ -88,9 +94,10 @@ must(!!tlBody, 'siTechLeadNotifyBadgeHtml 函数体可提取');
 must(!!preBody, 'siPrereleaseFlagHtml 函数体可提取（待上线两 flag 的唯一判定出口）');
 must(!!paBody, 'siPostAcceptFlagHtml 函数体可提取（先行上线待补验收徽章的唯一判定出口）');
 must(!!flBody, 'siFastlaneFlagHtml 函数体可提取（待先行部署 x/N 徽章的唯一判定出口）');
-if (!rowBody || !tlBody || !preBody || !paBody || !flBody || !rsBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
+must(!!flAuthBody, 'siFastlaneAuthFlagHtml 函数体可提取（已授权先行上线徽章的唯一判定出口）');
+if (!rowBody || !tlBody || !preBody || !paBody || !flBody || !flAuthBody || !rsBody) { console.log('\n=== FAIL：扫描面缺失 ==='); process.exit(1); }
 
-const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody + '\n' + flBody + '\n' + rsBody);
+const consumeSrc = stripComments(rowBody + '\n' + tlBody + '\n' + preBody + '\n' + paBody + '\n' + flBody + '\n' + flAuthBody + '\n' + rsBody);
 const consumed = new Set();
 for (const m of consumeSrc.matchAll(/\bi\.([a-z_][a-z0-9_]*)\b/g)) consumed.add(m[1]);
 must(consumed.size >= 15, `前端消费字段实抓 ${consumed.size} 个（过少=正则失配，扫描面须非空）`);

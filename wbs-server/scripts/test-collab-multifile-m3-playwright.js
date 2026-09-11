@@ -80,7 +80,7 @@ async function previewCount(page, wrapId) {
         // 打开新建协作单弹窗
         console.log('1. 建单·数据范围多文件');
         await page.click('button:has-text("新建协作单")');
-        await page.waitForSelector('#newModal.show', { timeout: 3000 });
+        await page.waitForSelector('#newModal.open', { timeout: 3000 });
         await page.waitForTimeout(200);
 
         // T1: 多选 3 文件
@@ -110,12 +110,18 @@ async function previewCount(page, wrapId) {
         expect(await previewCount(page, 'dataScopePreview') === before, 'T5 .pdf 非法扩展名 → 不入列（数量不变）');
 
         // 关闭新建弹窗
-        await page.evaluate(() => { const m = document.getElementById('newModal'); if (m) m.classList.remove('show'); });
+        await page.evaluate(() => { const m = document.getElementById('newModal'); if (m) m.classList.remove('open'); });
 
         // T6: 交付弹窗多文件（直接调 openSubmitDeliveryDialog 打开 UI，不依赖真实指派单）
         console.log('\n2. 交付结果多文件');
-        await page.evaluate(() => openSubmitDeliveryDialog(999999));
-        await page.waitForSelector('#submitDeliveryModal.show', { timeout: 3000 });
+        // ⚠️ 2026-09-11 订正：实现侧后来新增了前置断言（openSubmitDeliveryDialog 开头
+        //   `if (!currentDetail || String(currentDetail.id) !== String(id)) { toast; return; }`，
+        //   R2·Opus 预筛收窄，防"详情已切到另一单但旧模板按钮还没重渲染"竞态用错单的目标库信息），
+        //   而本处是直调、不经详情页 ⇒ 断言把弹窗挡住，T6/T7 恒超时。
+        //   修法=直调前把 currentDetail 摆成同一单；该函数对 currentDetail 只用到 .id 与可选的
+        //   .target_db_connection_id（后者有 `&&` 保护，不给即视为无目标库，不影响本组多文件断言）。
+        await page.evaluate(() => { currentDetail = { id: 999999 }; openSubmitDeliveryDialog(999999); });
+        await page.waitForSelector('#submitDeliveryModal.open', { timeout: 3000 });
         await page.waitForTimeout(200);
         await page.setInputFiles('#f_delivery_script', [sc1, sc2]);
         await page.setInputFiles('#f_delivery_data', [da1, da2]);
@@ -136,7 +142,7 @@ async function previewCount(page, wrapId) {
 
         // T8: 单文件回归——各选 1 个 → 预览各 1 项（零回归）
         console.log('\n3. 单文件回归 + FormData 顺序');
-        await page.evaluate(() => openSubmitDeliveryDialog(999998));
+        await page.evaluate((id) => { currentDetail = { id }; openSubmitDeliveryDialog(id); }, 999998);
         await page.waitForTimeout(150);
         await page.setInputFiles('#f_delivery_script', [sc1]);
         await page.setInputFiles('#f_delivery_data', [da1]);
@@ -145,7 +151,7 @@ async function previewCount(page, wrapId) {
             'T8 单文件各 1 → 预览各 1 项（零回归）');
 
         // T9: FormData 顺序——全部脚本在全部数据之前 append（对齐后端 smoke 取首脚本=上传首个）
-        await page.evaluate(() => openSubmitDeliveryDialog(999997));
+        await page.evaluate((id) => { currentDetail = { id }; openSubmitDeliveryDialog(id); }, 999997);
         await page.waitForTimeout(150);
         await page.setInputFiles('#f_delivery_script', [sc1, sc2]);
         await page.setInputFiles('#f_delivery_data', [da1, da2]);

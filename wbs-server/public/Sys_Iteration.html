@@ -2804,6 +2804,39 @@
     //   ⚠️ [S-fix 修复批·2026-08-15·5b] fast_release_my_pending（值班筛选与类型卡·S1 新增）不在本
     //   契约内——本函数徽章本体不读它，实际消费点是下方 siIsMyFastlanePending，契约行随之登记在那
     //   个函数自己的头部注释（各函数声明各自读的字段，不挂在不消费它的邻居函数上）。
+    // [已授权先行上线·2026-09-11 用户拍板] 列表徽章——补「授权之后、开发报完工之前」这段可观测性空档。
+    //   缺口还原：admin 授权后到 submit 挂牌之间，该单在列表上与普通 bug 单**毫无区别**（列表 flags 链
+    //   里没有任何授权态标识，授权状态此前只能逐单点进详情页的授权区看）；而授权是**当天时段性通道**、
+    //   跨过次日 8:00 整体收回（v1.156.0），这段时间里授权可能悄悄过期而无人察觉。
+    //   徽章条件（同下方 siFastlaneFlagHtml 的纯派生范式，不加状态标志列、不扩 status CHECK）：
+    //     type='bug' ∧ status ∈ {待处理, 处理中} ∧ fast_release_active_auth
+    //   状态集**就是授权窗口本身**（方案 D3：纯事前授权，已完工待验收的单不能补授权），与本徽章
+    //   「已授权、待完工」的语义精确对齐；与下方「待先行部署 x/N」（status='待验证'）**状态集互斥**，
+    //   同一行不会同时挂两个，视觉上构成「已授权 → 待部署」的接力，故共用 sem-fastlane 靛紫 token。
+    //   ⚠️ 刻意复用同一个 fast_release_active_auth 布尔、不自拼六列判据：该列后端算的是**可消费**语义
+    //   （残留 ∧ 未过消费窗口，见 index.js 列表 SELECT 该列的 [S1·先行上线授权超时收回] 注释），
+    //   因此**下次拉取列表时**过期授权即不再显示，无需前端另做过期判断——若改为自拼"残留"判据，过期
+    //   授权会继续显示为可用，比没有徽章更糟。
+    //   ⚠️ 措辞精确化（codex 审 M-2）：本徽章的过期消失是**随列表响应刷新**生效，不是"到点自动消失"
+    //   ——该布尔只反映**响应生成那一刻**的状态，而本页列表**无 setInterval／无轮询**（siLoadList 由
+    //   进入页面/筛选/操作后主动调用）。用户停在列表页不动时，跨过次日 8:00 那一刻屏幕上的徽章不会
+    //   自行褪去，要等下一次拉取。若将来业务要求"停留页面也须到点消失"，需另加到期重拉机制，不能靠
+    //   本判据自动达成。
+    //   ⚠️ 另需注意：自拼六列判据在本页**根本行不通**——列表 SELECT 是显式列投影，刻意不暴露
+    //   fast_release_auth_at 等六列原始字段（`i.fast_release_auth_at` 恒 undefined）。本批变异实测过：
+    //   把判据换成 `if (!i.fast_release_auth_at) return ''` 会让徽章从不显示，静默失效。
+    //   ⚠️ 新增徽章 helper 必须**同批**登记进 scripts/verify-sys-list-badge-fields.js 的扫描面，否则
+    //   守卫对它视而不见、字段漏投影也照样全绿（该守卫头部注释已记录四次同款漏法）。本次已同批登记。
+    function siFastlaneAuthFlagHtml(i) {
+        if (i.type !== 'bug') return '';
+        if (i.status !== '待处理' && i.status !== '处理中') return '';
+        // 判据口径如实说明（codex 审 20260911 订正）：这是 **Number() 转换后**的严格比较，**不是**对原始值
+        //   的 `=== 1`——它同样接受 '1' 与 true，真正挡住的是 '0' / 0 / null / undefined / '' 这些。
+        //   与下方 siFastlaneFlagHtml 及本文件其余"后端 SQL 布尔值只认 1/0"惯例同源；比裸真值判断强的地方
+        //   在于字符串 '0' 不会被误判为真（JS 里 '0' 是 truthy）。
+        if (Number(i.fast_release_active_auth) !== 1) return '';
+        return `<span class="u-status-badge sem-fastlane" style="margin-left:6px" title="已授权先行上线：待开发报完工后自动挂牌给当日值班执行人；授权于次日 8:00 自动收回">已授权先行上线</span>`;
+    }
     function siFastlaneFlagHtml(i) {
         if (i.type !== 'bug' || i.status !== '待验证') return '';
         // 严格 ===1（非真值判断）：与本文件其余"后端 SQL 布尔值只认 1/0"惯例同源（如 has_release_remove
@@ -3199,6 +3232,7 @@
                 (i.blocked ? `<span class="si-flag blocked">受阻</span>` : '') +
                 siPrereleaseFlagHtml(i) +
                 siPostAcceptFlagHtml(i) +
+                siFastlaneAuthFlagHtml(i) +
                 siFastlaneFlagHtml(i) +
                 siTechLeadNotifyBadgeHtml(i) +
                 siHeldDaysHtml(i.status, i.last_held_at);

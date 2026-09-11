@@ -8926,9 +8926,19 @@ module.exports = (deps) => {
                  END) AS executor_notify_summary,
                 -- [先行上线两步化 S6·方案 v1.8 §4-8 + 值班筛选与类型卡·S1] 徽章「待先行部署 x/N」+ 前端
                 --   「待我处理」卡（值班身份分支）消费的派生输入四列：
-                --   ① fast_release_active_auth——复用 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL 同一份字面量
-                --      常量（非另拼一份，与 :3805 一带 UPDATE WHERE 层纵深复核同源），非新增状态标志列，
-                --      方案 §2 末段"徽章条件是纯派生"要求的活跃授权布尔即由本列承担；
+                --   ① fast_release_active_auth——复用统一的授权判据常量（非另拼一份，与 :3805 一带
+                --      UPDATE WHERE 层纵深复核同源），非新增状态标志列，方案 §2 末段"徽章条件是纯派生"
+                --      要求的授权布尔即由本列承担；
+                --      ⚠️ 命名与语义不一致，如实标注（codex 审 20260911·本批只订正注释不改名）：本列名
+                --      沿用历史的 "active" 字样，但自 [S1·先行上线授权超时收回] 起**实际算的是"可消费"**
+                --      （FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL = 残留 ∧ 未过次日 8:00 消费窗口），
+                --      见下方该列本体与其 [S1] 注释。此前本行写的"复用 FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL"
+                --      是 S1 改判时漏同步的旧表述，会让读者以为本列只判残留、进而误判过期授权仍为真。
+                --      不重命名的理由：改名要动前端两个徽章 helper、值班筛选、类型卡与 badge-fields 守卫
+                --      多个消费点，收益只是名字更准，不值得夹在一个加徽章的小批里做（若将来单独立项，
+                --      连同 fast_release_my_pending 一族一起改更合算）。
+                --      ⚠️⚠️ 本段注释身处**模板字符串内部**：写注释时**禁用反引号**（会直接终止模板串导致
+                --      整个模块语法错误、服务起不来）——本次订正首版就踩了这个坑，改用双引号标注标识符。
                 --   ② fast_release_exec_total_count / ③ fast_release_exec_done_count——当前代次执行人
                 --      集合计数，复用 sysFastReleaseExecActiveWhere('fe','sys_issues.id') 相关子查询
                 --      形态（§4-10 统一谓词，禁另写一份 issue_id/removed_at 字面量）。

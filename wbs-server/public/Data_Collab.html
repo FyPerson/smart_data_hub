@@ -2967,17 +2967,40 @@
             })() : '<span style="color:#9ca3af">—</span>';
 
             // v1.77.0 数据范围说明：attachment_type='data_scope'（需求方圈定数据范围，如"A部门,B部门…"）
-            // 渲染逻辑与数据模板同款；质量校验列对齐只取 example_xlsx，data_scope 不参与
-            const dataScopeFile = (d.attachments || []).filter(
+            // 质量校验列对齐只取 example_xlsx，data_scope 不参与
+            // ⭐ 2026-09-11 hotfix（生产 #53 实证）：原实现是 `.filter(...)[0]` —— **只渲染首个**。
+            //   而本类型自 v1.77.0「多文件上传 M1/M3」起写端已是多文件：前端 `<input multiple>`（:1053）、
+            //   后端循环入库（server.js 通用 upload·≤5 个·attachment_seq 从 MAX+1 递增·**追加语义、无
+            //   supersede**，故同单多次上传的 data_scope 全部保持 active）⇒ **写端支持 N 个、读端只显示 1 个**，
+            //   开发人员看不到其余文件（生产 #53：库里 2 条 active〔附件1/附件2〕，详情页只显示 1 条）。
+            //   ⚠️ 原注释「渲染逻辑与数据模板同款」正是病根：数据模板 f_template 至今仍是单文件 input，
+            //   照抄它的单文件渲染，与 data_scope 自己的多文件写端就此失配。
+            //   ⚠️ 后端 detail 端点按 `created_at DESC` 返回（server.js:14916），而同批上传的 created_at
+            //   同秒 ⇒ 原 `[0]` 取到哪一个本就不确定。这里显式按**附件记录 id 升序**，目的是给展示一个
+            //   确定且稳定的顺序（同批上传时 id 递增，观感上即先传的在前）。
+            //   ⚠️ 措辞刻意收敛（codex 审 M-4）：不宣称"id 升序 == attachment_seq 业务上传顺序"——那是一条
+            //   本次并未证明的额外不变量（并发上传、历史导入等情形下两者是否恒等价没有依据）。若将来业务
+            //   明确要求以 attachment_seq 为准，应改为按 attachment_seq 排序、id 打破平局，并定义其缺省值规则。
+            //   ⚠️ 关联 #68「数据模板放开到至多 5 个」：那项做完后 example_xlsx 会变成同款多文件写端，
+            //   其渲染点（本段上方 templateFile 那处）**必须同步改成列出全部**，否则原样复现本 bug。
+            const dataScopeFiles = (d.attachments || []).filter(
                 a => a.attachment_type === 'data_scope' && (a.status === 'active' || !a.status)
-            )[0];
-            const dataScopeHtml = dataScopeFile ? (() => {
-                const built = buildAttachmentDownloadUrl(dataScopeFile.file_name);
-                const displayName = dataScopeFile.original_name || (dataScopeFile.file_name ? String(dataScopeFile.file_name).split('/').pop() : '数据范围说明');
-                if (!built.ok) {
-                    return `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
-                }
-                return `<a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📋 ${escapeHtml(displayName)}</a>`;
+            ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
+            const dataScopeHtml = dataScopeFiles.length ? (() => {
+                const items = dataScopeFiles.map(f => {
+                    const built = buildAttachmentDownloadUrl(f.file_name);
+                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '数据范围说明');
+                    if (!built.ok) {
+                        return `<div><span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span></div>`;
+                    }
+                    return `<div><a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📋 ${escapeHtml(displayName)}</a></div>`;
+                }).join('');
+                // 多个文件时显式标注总数：本 bug 的实际伤害是「开发人员漏掉文件」，计数让"还有没有别的"
+                //   这件事不依赖用户逐行去数。单个文件时不显示，避免给绝大多数单据添噪声。
+                const countHint = dataScopeFiles.length > 1
+                    ? `<div style="color:#6b7280;font-size:12px;margin-top:2px;">共 ${dataScopeFiles.length} 个文件</div>`
+                    : '';
+                return items + countHint;
             })() : '<span style="color:#9ca3af">—</span>';
 
             // v1.70.2 原始单据截图区块（admin 创建协作单时上传，所有角色可见）
