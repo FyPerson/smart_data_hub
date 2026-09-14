@@ -7,7 +7,7 @@
 //   H-1 submitted_at 用本次提交时间（SQL datetime now，每条独立）
 //   H-2 helper 永不抛 + 返回结构完整对象（dbAsync 缺失/异常都不崩）
 //   M-1 未比对三态来源区分（NO_TEMPLATE / NON_XLSX_TEMPLATE / XLSX_READ_FAILED）
-//   M-2 多模板取最新（ORDER BY created_at DESC, id DESC）
+//   M-2 多模板：旧缺列+新齐全仍过（回归）；#68 另加旧齐全+新缺列仍过（any-match 判别）
 //   M-3 INSERT OR IGNORE 幂等（同 seq 二次跳过 SKIPPED_EXISTING）
 //   L-1 missing_columns 纯数组 / 未比对存 NULL；snapshot 无法获取存 NULL
 //   + 核心列对齐口径（T⊆S 齐全/缺列/多列放行）+ smokeColumns 防御 + seq 递增独立记录
@@ -28,7 +28,7 @@ const all = (sql, params = []) => new Promise((res, rej) =>
     db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 
 // helper 期望的 dbAsync 接口（runAsync 返回 this 含 changes；getAsync 返回行）
-const dbAsync = { runAsync: run, getAsync: get };
+const dbAsync = { runAsync: run, getAsync: get, allAsync: all };
 
 let passed = 0;
 const ok = (msg) => { passed++; console.log(`  ✓ ${msg}`); };
@@ -256,8 +256,8 @@ async function main() {
         ok('submission_seq 1/2/3 → 3 行独立 / 各有 submitted_at（H-1：每次提交独立时间）');
     }
 
-    // ---------- M-2 多模板取最新 ----------
-    console.log('\n[多模板取最新（codex 72 M-2 稳定排序）]');
+    // ---------- M-2 多模板：#68 起为 any-match（任一可读模板 T⊆S 即齐全） ----------
+    console.log('\n[多模板 any-match（#68 D1；原 codex 72 M-2「取最新」已被推翻）]');
     {
         const reqId = 108;
         // 先插旧模板（缺列），再插新模板（齐全）——取最新应判齐全
@@ -270,10 +270,27 @@ async function main() {
             dbAsync, requestId: reqId, submitterId: 9, submitterName: '示例用户A',
             submissionSeq: 1, smokeColumns: ['订单号'], logger: quietLogger,
         });
-        // 取最新模板 t_new（只要订单号）→ 齐全；若取了旧模板会因"废弃列"判缺列
-        assert.strictEqual(r.is_columns_complete, 1, '应取最新模板判齐全');
+        // 旧缺列 + 新齐全：取最新与 any-match 都会过（回归，不是判别）
+        assert.strictEqual(r.is_columns_complete, 1, '旧缺列+新齐全 → 齐全');
         assert.strictEqual(r.reason, 'OK');
-        ok('多模板 → 取最新（created_at DESC）判齐全，不取旧模板');
+        ok('多模板回归：旧缺列 + 新齐全 → 齐全');
+    }
+    {
+        const reqId = 1082;
+        const { fileName: f1 } = writeXlsxFixture('t_old_ok.xlsx', ['订单号']);
+        await insertTemplate(reqId, f1, 't_old_ok.xlsx');
+        await new Promise(r => setTimeout(r, 1100));
+        const { fileName: f2 } = writeXlsxFixture('t_new_miss.xlsx', ['订单号', '废弃列']);
+        await insertTemplate(reqId, f2, 't_new_miss.xlsx');
+        const r = await recordQualityOnSubmit({
+            dbAsync, requestId: reqId, submitterId: 9, submitterName: '示例用户A',
+            submissionSeq: 1, smokeColumns: ['订单号'], logger: quietLogger,
+        });
+        assert.strictEqual(r.is_columns_complete, 1, '#68 判别：旧齐全+新缺列 → 仍齐全（取最新会红）');
+        assert.strictEqual(r.reason, 'OK');
+        const row = await get('SELECT expected_columns_snapshot FROM collab_quality_record WHERE collab_request_id=?', [reqId]);
+        assert.deepStrictEqual(JSON.parse(row.expected_columns_snapshot), ['订单号'], '快照跟命中的旧模板');
+        ok('#68 判别：旧齐全 + 新缺列 → any-match 仍齐全，快照为命中份');
     }
 
     // ---------- H-2 异常隔离 + 防御 ----------
@@ -306,10 +323,35 @@ async function main() {
         ok('dbAsync 缺失 → 永不抛 / 返回结构完整 {recorded:false, reason:C2_FAILED}（H-2）');
     }
 
+    // [9b] #68 codex 120-B M-3：旧路径的 allAsync 守卫（与活路径 [68f] 同款）
+    //   D1 把本路径也改成 any-match 后，它同样依赖 allAsync。只断 reason=C2_FAILED 没有判别力
+    //   （删掉守卫后内层抛错被外层 catch 成同一个 C2_FAILED），故并断：① 记名诊断 ② 零 DB 调用。
+    {
+        const warns = [];
+        const calls = [];
+        const spyLogger = { warn: (m) => warns.push(String(m)), info() {}, error() {} };
+        const spyDb = {
+            runAsync: (...a) => { calls.push('runAsync'); return run(...a); },
+            getAsync: (...a) => { calls.push('getAsync'); return get(...a); },
+            // 故意不给 allAsync —— 复刻 2026-09-14 server.js 的漏改形态
+        };
+        const r = await recordQualityOnSubmit({
+            dbAsync: spyDb,
+            requestId: 1083, submitterId: 9, submitterName: '示例用户A',
+            submissionSeq: 1, smokeColumns: ['a'], logger: spyLogger,
+        });
+        assert.strictEqual(r.reason, 'C2_FAILED', '[9b] 缺 allAsync → C2_FAILED');
+        assert.ok(warns.some(m => m.includes('dbAsync 缺失') && m.includes('allAsync')),
+            `[9b] 必须留下入口守卫记名诊断（实得 ${JSON.stringify(warns)}）`);
+        assert.deepStrictEqual(calls, [], `[9b] 守卫应在任何 DB 调用前 return（实得 ${JSON.stringify(calls)}）`);
+        ok('[9b] 旧路径缺 allAsync → 入口守卫记名拦截 + 零 DB 调用（删守卫即判红）');
+    }
+
     // [10] INSERT 异常（runAsync 抛）→ 隔离不抛，返回 C2_FAILED
     {
         const throwingDb = {
-            getAsync: get,  // 查模板正常
+            getAsync: get,
+            allAsync: all,
             runAsync: () => { throw new Error('mock DB 写爆'); },
         };
         const reqId = 111;

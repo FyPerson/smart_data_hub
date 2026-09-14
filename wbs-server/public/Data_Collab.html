@@ -1044,8 +1044,8 @@
                 </div>
                 <div class="u-form-group" id="formRow_template">
                     <label>数据模板 <span class="u-hint">（选传）</span></label>
-                    <input type="file" id="f_template" accept=".xlsx,.xls">
-                    <div class="u-hint">单个 Excel 文件（.xlsx / .xls），≤ 10MB。用于需求方以具体表格形式描述列名/示例数据，便于开发理解需求。质量校验的列对齐只比对此文件。</div>
+                    <input type="file" id="f_template" accept=".xlsx,.xls" multiple>
+                    <div class="u-hint">可多个 Excel 文件（.xlsx / .xls），每个 ≤ 10MB，本单合计最多 5 个。用于需求方以表格描述列名/示例数据。质量校验列对齐：任一模板匹配即算通过。</div>
                     <div id="templatePreview" class="file-preview"></div>
                 </div>
                 <div class="u-form-group" id="formRow_dataScope">
@@ -2949,21 +2949,23 @@
             const devEstimateRepliedHtml = (d.dev_estimated_at && devEstimateReplyLog && devEstimateReplyLog.created_at)
                 ? `<span style="margin-left:8px;color:#64748b;font-size:12px;">· 开发于 ${fmtDate(devEstimateReplyLog.created_at)} 回填</span>`
                 : '';
-            // v1.67.0 数据模板：从 attachments 拿 attachment_type='example_xlsx' 的活跃文件
-            // 取首个 active example_xlsx（admin 创建时前端仅允许单文件上传；理论上 API 直传多文件场景按 db 默认顺序取，不引入显式排序避免复杂度）
-            const templateFile = (d.attachments || []).filter(
+            // v1.67.0 数据模板；#68 放开至多 5 个：列出全部 active，按 id 升序（对齐 v1.174.0 data_scope）
+            const templateFiles = (d.attachments || []).filter(
                 a => a.attachment_type === 'example_xlsx' && (a.status === 'active' || !a.status)
-            )[0];
-            const templateHtml = templateFile ? (() => {
-                // codex 24 审 #7：用 buildAttachmentDownloadUrl 过滤 .. / 空段 / 绝对路径
-                const built = buildAttachmentDownloadUrl(templateFile.file_name);
-                const displayName = templateFile.original_name || (templateFile.file_name ? String(templateFile.file_name).split('/').pop() : '数据模板');
-                if (!built.ok) {
-                    return `<span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span>`;
-                }
-                // codex 十七审 #3：download 属性值用单引号包裹更稳（escapeHtml 已转 `&quot;`/`&#39;` 但属性边界双保险）
-                // codex 27 审 #2 一致性：URL 走 escapeHtmlAttr 防 attr 注入
-                return `<a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a>`;
+            ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
+            const templateHtml = templateFiles.length ? (() => {
+                const items = templateFiles.map(f => {
+                    const built = buildAttachmentDownloadUrl(f.file_name);
+                    const displayName = f.original_name || (f.file_name ? String(f.file_name).split('/').pop() : '数据模板');
+                    if (!built.ok) {
+                        return `<div><span style="color:#dc2626" title="附件路径非法（${escapeHtmlAttr(built.reason)}），请联系管理员">⚠️ ${escapeHtml(displayName)}</span></div>`;
+                    }
+                    return `<div><a href='${escapeHtmlAttr(built.url)}' target='_blank' rel='noopener' download='${escapeHtml(displayName)}' style='color:#166534;text-decoration:none;'>📊 ${escapeHtml(displayName)}</a></div>`;
+                }).join('');
+                const countHint = templateFiles.length > 1
+                    ? `<div style="color:#6b7280;font-size:12px;margin-top:2px;">共 ${templateFiles.length} 个文件</div>`
+                    : '';
+                return items + countHint;
             })() : '<span style="color:#9ca3af">—</span>';
 
             // v1.77.0 数据范围说明：attachment_type='data_scope'（需求方圈定数据范围，如"A部门,B部门…"）
@@ -2973,16 +2975,15 @@
             //   后端循环入库（server.js 通用 upload·≤5 个·attachment_seq 从 MAX+1 递增·**追加语义、无
             //   supersede**，故同单多次上传的 data_scope 全部保持 active）⇒ **写端支持 N 个、读端只显示 1 个**，
             //   开发人员看不到其余文件（生产 #53：库里 2 条 active〔附件1/附件2〕，详情页只显示 1 条）。
-            //   ⚠️ 原注释「渲染逻辑与数据模板同款」正是病根：数据模板 f_template 至今仍是单文件 input，
-            //   照抄它的单文件渲染，与 data_scope 自己的多文件写端就此失配。
+            //   ⚠️ 原注释「渲染逻辑与数据模板同款」正是病根：当时数据模板仍是单文件 input。
+            //   #68 已把模板改成同款多文件列出全部，本段与上方 templateFiles 渲染对齐。
             //   ⚠️ 后端 detail 端点按 `created_at DESC` 返回（server.js:14916），而同批上传的 created_at
             //   同秒 ⇒ 原 `[0]` 取到哪一个本就不确定。这里显式按**附件记录 id 升序**，目的是给展示一个
             //   确定且稳定的顺序（同批上传时 id 递增，观感上即先传的在前）。
             //   ⚠️ 措辞刻意收敛（codex 审 M-4）：不宣称"id 升序 == attachment_seq 业务上传顺序"——那是一条
             //   本次并未证明的额外不变量（并发上传、历史导入等情形下两者是否恒等价没有依据）。若将来业务
             //   明确要求以 attachment_seq 为准，应改为按 attachment_seq 排序、id 打破平局，并定义其缺省值规则。
-            //   ⚠️ 关联 #68「数据模板放开到至多 5 个」：那项做完后 example_xlsx 会变成同款多文件写端，
-            //   其渲染点（本段上方 templateFile 那处）**必须同步改成列出全部**，否则原样复现本 bug。
+            //   #68 已把上方 example_xlsx 改成列出全部（与本段同款）。
             const dataScopeFiles = (d.attachments || []).filter(
                 a => a.attachment_type === 'data_scope' && (a.status === 'active' || !a.status)
             ).sort((a, b) => (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER));
@@ -4854,15 +4855,17 @@
             EMPTY_HEADER: '数据模板第一行未读到表头，将无法用于列对齐校验，如需校验请换规范 xlsx',
             READ_FAILED: '数据模板无法解析（可能损坏或格式异常），将无法用于列对齐校验',
         };
-        function maybeWarnTemplate(tw) {
-            if (!tw || tw.ok) return;
-            // NON_XLSX：admin 有意传 pdf/png 等说明性模板，不打扰（列对齐本就不是闸门）
-            if (tw.reason === 'NON_XLSX') return;
-            const msg = TEMPLATE_WARN_MSG[tw.reason];
-            if (!msg) return;
-            // 〔通知统一 N1·D7〕同 maybeWarnMissingColumns：900ms 延时保留为视觉次序，不再依赖
-            //   页内版"单例顶替"（共享版堆叠并存）。
-            setTimeout(() => { showToast(`⚠️ ${msg}`, 'info'); }, 900);
+        function maybeWarnTemplate(tw, list) {
+            const items = Array.isArray(list) && list.length
+                ? list
+                : (tw && !tw.ok && tw.reason !== 'NON_XLSX' ? [tw] : []);
+            const msgs = items
+                .filter(x => x && !x.ok && x.reason !== 'NON_XLSX' && TEMPLATE_WARN_MSG[x.reason])
+                .map(x => x.original_name
+                    ? `${x.original_name}：${TEMPLATE_WARN_MSG[x.reason]}`
+                    : TEMPLATE_WARN_MSG[x.reason]);
+            if (!msgs.length) return;
+            setTimeout(() => { showToast(`⚠️ ${msgs.join('；')}`, 'info'); }, 900);
         }
 
         // ===== v1.71.0 Commit F: 三级转发前端 modal JS =====
@@ -6007,9 +6010,9 @@
         const COLLAB_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
         const COLLAB_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
 
-        // v1.67.0 数据模板：单文件 .xlsx/.xls，attachment_type=example_xlsx（后端 D2 已预留，本次接通前端入口）
+        // v1.67.0 数据模板；#68 放开本单合计最多 5 个 .xlsx/.xls
         // 前端限定仅 .xlsx/.xls，后端 example_xlsx 允许范围更宽（含 pdf/docx/img），UI 层拦截避免 admin 误用
-        let selectedTemplate = null;
+        let selectedTemplate = [];
         const TEMPLATE_MAX_SIZE = 10 * 1024 * 1024;
         const TEMPLATE_ALLOWED_EXTS = ['xlsx', 'xls'];
 
@@ -6403,56 +6406,18 @@
             });
         }
 
-        // v1.67.0 数据模板：单文件 .xlsx/.xls 校验 + 预览
-        // codex 十七审 #1：非法/超大分支必须清 selectedTemplate + 刷新预览，否则用户先选合法 xlsx 再选 txt
-        // 会保留旧 selectedTemplate 在提交时误传
+        // #68：数据模板多文件，复用 collectFilesInto（≤5、去重、扩展名/大小）
         function onTemplateChange(e) {
-            const f = (e.target.files || [])[0];
-            if (!f) {
-                selectedTemplate = null;
-                renderTemplatePreview();
-                return;
-            }
-            const ext = f.name.split('.').pop().toLowerCase();
-            if (!TEMPLATE_ALLOWED_EXTS.includes(ext)) {
-                showToast(`仅支持 .xlsx / .xls 格式：${f.name}`, 'error');
-                e.target.value = '';
-                selectedTemplate = null;
-                renderTemplatePreview();
-                return;
-            }
-            if (f.size > TEMPLATE_MAX_SIZE) {
-                showToast(`${f.name} 超过 10MB`, 'error');
-                e.target.value = '';
-                selectedTemplate = null;
-                renderTemplatePreview();
-                return;
-            }
-            selectedTemplate = f;
+            collectFilesInto(selectedTemplate, e.target.files, TEMPLATE_ALLOWED_EXTS, TEMPLATE_MAX_SIZE, '数据模板');
+            renderTemplatePreview();
+            e.target.value = '';
+        }
+        function removeTemplateFile(idx) {
+            selectedTemplate.splice(idx, 1);
             renderTemplatePreview();
         }
-
-        function removeTemplate() {
-            selectedTemplate = null;
-            const input = document.getElementById('f_template');
-            if (input) input.value = '';
-            renderTemplatePreview();
-        }
-
         function renderTemplatePreview() {
-            const wrap = document.getElementById('templatePreview');
-            if (!wrap) return;
-            if (!selectedTemplate) {
-                wrap.innerHTML = '';
-                return;
-            }
-            const f = selectedTemplate;
-            const sizeKB = (f.size / 1024).toFixed(1);
-            wrap.innerHTML = `<div class="file-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;">
-                <span style="font-size:1.4em;">📊</span>
-                <span class="file-name" title="${escapeHtml(f.name)}" style="flex:1;font-size:0.9em;color:#166534;">${escapeHtml(f.name)} <span style="color:#9ca3af;">(${sizeKB} KB)</span></span>
-                <button class="remove-btn" onclick="removeTemplate()" title="移除" style="background:transparent;border:0;color:#dc2626;cursor:pointer;font-size:1.1em;">×</button>
-            </div>`;
+            renderSimpleFileList(selectedTemplate, 'templatePreview', 'removeTemplateFile', '📊');
         }
 
         // 数据范围说明：多文件 .xlsx/.xls/.txt（M3：数组化 + 去重 + ≤5；清空 input.value 允许重选同名再触发）
@@ -6546,7 +6511,7 @@
             // v1.67.0 数据模板重置
             const tplInput = document.getElementById('f_template');
             if (tplInput) tplInput.value = '';
-            selectedTemplate = null;
+            selectedTemplate = [];
             renderTemplatePreview();
             // v1.77.0 数据范围说明重置
             const dsInput = document.getElementById('f_data_scope');
@@ -6685,7 +6650,7 @@
             // v1.67.0 数据模板区编辑时隐藏（不动附件，与截图一致）
             const tplRow = document.getElementById('formRow_template');
             if (tplRow) tplRow.style.display = 'none';
-            selectedTemplate = null;
+            selectedTemplate = [];
             renderTemplatePreview();
             // v1.77.0 数据范围说明区编辑时隐藏（与截图/模板一致）
             const dsRow = document.getElementById('formRow_dataScope');
@@ -6846,7 +6811,7 @@
                 // Step 3: 上传数据模板（attachment_type=example_xlsx，v1.67.0 新增）
                 // Step 4: 上传数据范围说明（attachment_type=data_scope，v1.77.0 新增）
                 // 各步独立上传：任一失败不阻塞其他；记录上传结果用于结尾 toast
-                const uploadResults = { screenshots: 0, template: false, dataScope: false, errors: [] };
+                const uploadResults = { screenshots: 0, template: 0, dataScope: false, errors: [] };
 
                 if (selectedFiles.length > 0) {
                     btn.textContent = '上传截图...';
@@ -6866,11 +6831,11 @@
                     }
                 }
 
-                if (selectedTemplate) {
+                if (selectedTemplate.length) {
                     btn.textContent = '上传数据模板...';
                     const tplFormData = new FormData();
                     tplFormData.append('attachment_type', 'example_xlsx');
-                    tplFormData.append('files', selectedTemplate);
+                    selectedTemplate.forEach(f => tplFormData.append('files', f));
                     const tplRes = await authFetch(`/api/collab/requests/${newId}/attachments`, {
                         method: 'POST',
                         body: tplFormData
@@ -6880,9 +6845,9 @@
                     if (!tplRes.ok) {
                         uploadResults.errors.push(`数据模板上传失败：${tplData.error || '请稍后重试'}`);
                     } else {
-                        uploadResults.template = true;
-                        // 取数交付质量记录 v3.0 Commit E：模板列对齐可读性预检（源头防线，只提示不拦断）
+                        uploadResults.template = (tplData.attachments || []).length;
                         uploadResults.templateWarning = tplData.template_warning || null;
+                        uploadResults.templateWarnings = tplData.template_warnings || [];
                     }
                 }
 
@@ -6908,7 +6873,7 @@
                 // 结尾 toast：拼装上传摘要
                 const summaryParts = [];
                 if (uploadResults.screenshots > 0) summaryParts.push(`${uploadResults.screenshots} 张截图`);
-                if (uploadResults.template) summaryParts.push('数据模板');
+                if (uploadResults.template > 0) summaryParts.push(`${uploadResults.template} 个数据模板`);
                 if (uploadResults.dataScope) summaryParts.push('数据范围说明');
                 const summary = summaryParts.length > 0 ? `（含 ${summaryParts.join(' + ')}）` : '';
                 if (uploadResults.errors.length > 0) {
@@ -6917,7 +6882,7 @@
                     showToast(`协作单 #${newId} 已创建${summary}`, 'success');
                 }
                 // 取数交付质量记录 v3.0 Commit E：模板列对齐可读性提醒（非阻塞，与主 toast 错开；只提示不拦断）
-                maybeWarnTemplate(uploadResults.templateWarning);
+                maybeWarnTemplate(uploadResults.templateWarning, uploadResults.templateWarnings);
                 closeNewModal();
                 loadList();
             } catch (e) {

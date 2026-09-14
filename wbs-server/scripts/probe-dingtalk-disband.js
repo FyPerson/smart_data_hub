@@ -23,13 +23,19 @@ const crypto = require('crypto');
 const sqlite3 = require('sqlite3');
 
 const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, '..', 'task_pool.db');
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || '';   // 不留默认回退值（2026-08-26 凭证泄露闭环·与 server.js 同 fail-closed 口径）
 const GETTOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
 
 const CHATID = process.env.CHATID || '';
 const OPEN_CONV_ID = process.env.OPEN_CONV_ID || '';
 
 function decryptPassword(encryptedPassword) {
+    if (Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+        console.error('[ABORT] 未设 DB_ENCRYPTION_KEY 或不足 32 字节。本脚本不提供默认回退值'
+            + '（2026-08-26 凭证泄露闭环后与 server.js 同口径 fail-closed）。'
+            + '请带与目标库一致的密钥执行：DB_ENCRYPTION_KEY=xxx node scripts/probe-dingtalk-disband.js');
+        process.exit(2);
+    }
     const parts = encryptedPassword.split(':');
     const iv = Buffer.from(parts[0], 'hex');
     const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);

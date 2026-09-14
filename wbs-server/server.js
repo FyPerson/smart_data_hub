@@ -16843,7 +16843,9 @@ app.post('/api/collab/requests/:id/submit',
                         const failedDataTotal = failedAttArr.filter(a => a.attachment_type === 'result_data').length;
                         const failedScriptTotal = failedAttArr.filter(a => a.attachment_type === 'result_script').length;
                         const qr = await collabSubmitHelpers.recordQualityForDeveloperSubmit({
-                            dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
+                            // #68 D1：helper 改 any-match 后按 allAsync 列出全部 active 模板（不再 LIMIT 1 取最新），
+                            //   三件必须同时给齐，缺 allAsync 会在 _classifyActiveExampleXlsx 抛 → 整条记录 compute_failed。
+                            dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync, allAsync: dbAllAsync },
                             requestId: id,
                             submitterId: userId,
                             submitterName: userName,
@@ -17058,7 +17060,8 @@ app.post('/api/collab/requests/:id/submit',
                     // qualityCheck 保留 compute_failed/failed 默认，不调 helper
                 } else {
                     const qr = await collabSubmitHelpers.recordQualityForDeveloperSubmit({
-                        dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync },
+                        // #68 D1：同 failed 路径——any-match 需要 allAsync 列出全部 active 模板
+                        dbAsync: { runAsync: dbRunAsync, getAsync: dbGetAsync, allAsync: dbAllAsync },
                         requestId: id,
                         submitterId: userId,
                         submitterName: userName,
@@ -20963,6 +20966,35 @@ app.post('/api/collab/requests/:id/attachments',
                 cleanupTempFiles();
                 return res.status(400).json({ error: '数据范围说明最多上传 5 个文件', code: 'DATA_SCOPE_TOO_MANY' });
             }
+            // #68：数据模板按「本单 active 总数 ≤ 5」（已有 + 本次），不是只限单次。
+            //   追加无 supersede，只靠 multer 单次 5 会让分批上传超过 5。
+            // ⚠️ 已知不变量缺口（codex 120-B M-1·用户 2026-09-14 拍板本批不修）：
+            //   本校验是**读-改-写**（COUNT 后再插入），两者之间没有事务/临界区。已有 4 份时两个
+            //   并发请求各读到 4 都能通过，最终落到 6 份 ⇒ **「总数 ≤ 5」这条冻结口径在并发下不成立**。
+            //   注意这不是照抄既有形态：同函数上方 data_scope 的上限是 `files.length > 5`，**只看单次
+            //   请求、无读-改-写**，天然没有这一面；本竞态是 #68 新开的。
+            //   不在本批修的理由：修法要把 COUNT 与整批插入放进同单串行化的临界区，而本项目是**单共享
+            //   sqlite 连接**，加事务即等于加全局互斥（见 memory feedback_shared_connection_transaction_needs_mutex
+            //   与 P3 债 collab_transaction_mutex_p3_todo），不该塞进一个功能批顺手做。
+            //   现实风险：仅 admin 可传 example_xlsx + PM2 单进程 ⇒ 触发概率极低，但概率低 ≠ 不变量成立。
+            //   已登记 PROJECT_STATUS #68 待办；届时与 data_scope/截图各上传点一并统一处置。
+            if (attachment_type === 'example_xlsx') {
+                const existRow = await dbGetAsync(
+                    `SELECT COUNT(*) AS n FROM collab_attachments
+                      WHERE collab_request_id = ?
+                        AND attachment_type = 'example_xlsx'
+                        AND (status = 'active' OR status IS NULL)`,
+                    [id]
+                );
+                const existing = (existRow && existRow.n) || 0;
+                if (existing + files.length > 5) {
+                    cleanupTempFiles();
+                    return res.status(400).json({
+                        error: `数据模板最多 5 个（本单已有 ${existing} 个，本次 ${files.length} 个）`,
+                        code: 'EXAMPLE_XLSX_TOO_MANY'
+                    });
+                }
+            }
 
             // 按 attachment_type 规则二次校验（扩展名分级 + 大小分级）
             for (const f of files) {
@@ -21054,25 +21086,24 @@ app.post('/api/collab/requests/:id/attachments',
                 }
             } catch (e) { /* ignore */ }
 
-            // 取数交付质量记录 v3.0 Commit E：example_xlsx 模板上传时列对齐可读性预检（源头防线，用户拍板）
-            //   - 只提示不拦断（贴"列对齐不是闸门"）：坏模板/非 xlsx 仍上传成功，仅带 template_warning 供前端弹非阻塞提示。
-            //   - 与 C2 旁路三态留痕互补：源头让 admin 当场知道 + C2 兜底留痕。
-            //   - 多文件批量时取本次上传的第一个 example_xlsx 预检（取数模板通常单个）。
-            let templateWarning = null;
+            // 取数交付质量记录 v3.0 Commit E + #68 D2：每个 example_xlsx 都预检，合并提示；只提示不拦断。
+            //   template_warnings = 需提示的失败项（不含 NON_XLSX）；template_warning = 数组首项（旧字段）。
+            let templateWarnings = [];
             if (attachment_type === 'example_xlsx') {
-                const tpl = inserted.find(a => a.attachment_type === 'example_xlsx');
-                if (tpl) {
+                for (const tpl of inserted.filter(a => a.attachment_type === 'example_xlsx')) {
                     const chk = collabSubmitHelpers.checkTemplateReadable(tpl.file_name, tpl.original_name);
-                    if (!chk.ok) {
-                        templateWarning = { ok: false, reason: chk.reason, original_name: tpl.original_name };
+                    if (!chk.ok && chk.reason !== 'NON_XLSX') {
+                        templateWarnings.push({ ok: false, reason: chk.reason, original_name: tpl.original_name });
                     }
                 }
             }
+            const templateWarning = templateWarnings[0] || null;
 
             res.json({
                 message: `已上传 ${inserted.length} 个附件`,
                 attachments: inserted,
-                template_warning: templateWarning,  // null=无警告；非 null=前端弹非阻塞提示（reason: NON_XLSX/EMPTY_HEADER/READ_FAILED）
+                template_warning: templateWarning,
+                template_warnings: templateWarnings,
             });
         } catch (err) {
             logger.error('上传协作单附件失败:', err);

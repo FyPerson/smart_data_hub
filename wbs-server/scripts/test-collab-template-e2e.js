@@ -5,6 +5,8 @@
  *   T1：admin 上传 .xlsx 数据模板 → 200，attachments 增加 1 条 attachment_type='example_xlsx'
  *   T2：admin 上传 .txt 非法格式 → 拒绝（multer fileFilter 或 endpoint 校验报错）
  *   T3：详情 endpoint 返回的 attachments 列表包含 example_xlsx 项，含 original_name + file_name
+ *   T4：一次上传 2 个 xlsx → 入库 2 行 + template_warnings 数组
+ *   T5：已有 3 个再传 3 个 → 400 EXAMPLE_XLSX_TOO_MANY（本单总数 ≤ 5）
  *
  * 用例独立 fixture，不污染其他 e2e。
  */
@@ -112,6 +114,55 @@ async function runTests() {
             assert(tplFile.original_name === 'detail_template.xlsx', `T3 original_name 正确`);
             assert(typeof tplFile.file_name === 'string' && tplFile.file_name.length > 0, `T3 file_name 非空（下载路径用）`);
         }
+    }
+
+    console.log('\n=== T4: 一次上传 2 个 xlsx → 入库 2 行 ===');
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        const fd = new FormData();
+        fd.append('attachment_type', 'example_xlsx');
+        fd.append('files', new Blob([Buffer.from('PK\x03\x04 a')]), 'a.xlsx');
+        fd.append('files', new Blob([Buffer.from('PK\x03\x04 b')]), 'b.xlsx');
+        const res = await fetch(`${BASE}/api/collab/requests/${ctx.id}/attachments`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${ctx.adminToken}` },
+            body: fd,
+        });
+        const body = await res.json();
+        assert(res.status === 200, `T4 200 实得 ${res.status}`);
+        assert(Array.isArray(body.attachments) && body.attachments.length === 2, `T4 入库 2 行`);
+        assert(Array.isArray(body.template_warnings), `T4 响应含 template_warnings 数组`);
+    }
+
+    console.log('\n=== T5: 已有 3 个再传 3 个 → 400 EXAMPLE_XLSX_TOO_MANY（总数上限 5）===');
+    {
+        const ctx = await fx.createPendingFixture();
+        createdFixtureIds.push(ctx.id);
+        const first = new FormData();
+        first.append('attachment_type', 'example_xlsx');
+        for (const n of ['t1.xlsx', 't2.xlsx', 't3.xlsx']) {
+            first.append('files', new Blob([Buffer.from('PK\x03\x04 ' + n)]), n);
+        }
+        const r1 = await fetch(`${BASE}/api/collab/requests/${ctx.id}/attachments`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${ctx.adminToken}` },
+            body: first,
+        });
+        assert(r1.status === 200, `T5 先传 3 个 200`);
+        const second = new FormData();
+        second.append('attachment_type', 'example_xlsx');
+        for (const n of ['t4.xlsx', 't5.xlsx', 't6.xlsx']) {
+            second.append('files', new Blob([Buffer.from('PK\x03\x04 ' + n)]), n);
+        }
+        const r2 = await fetch(`${BASE}/api/collab/requests/${ctx.id}/attachments`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${ctx.adminToken}` },
+            body: second,
+        });
+        const b2 = await r2.json();
+        assert(r2.status === 400, `T5 3+3 应 400 实得 ${r2.status}`);
+        assert(b2.code === 'EXAMPLE_XLSX_TOO_MANY', `T5 code=EXAMPLE_XLSX_TOO_MANY 实得 ${b2.code}`);
     }
 }
 

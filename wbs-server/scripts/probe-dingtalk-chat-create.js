@@ -31,7 +31,7 @@ const sqlite3 = require('sqlite3');
 
 const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, '..', 'task_pool.db');
 const MODE = (process.env.MODE || 'dry').toLowerCase();  // 'dry' | 'real'
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';  // 跟 server.js 保持一致
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || '';   // 不留默认回退值（2026-08-26 凭证泄露闭环·与 server.js 同 fail-closed 口径）
 
 const GETTOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
 const CHAT_CREATE_URL = 'https://oapi.dingtalk.com/chat/create';
@@ -41,6 +41,12 @@ const OWNER_USERID = process.env.OWNER_USERID || '';  // 群主，必须在 MEMB
 const MEMBER_USERIDS = (process.env.MEMBER_USERIDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 function decryptPassword(encryptedPassword) {
+    if (Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+        console.error('[ABORT] 未设 DB_ENCRYPTION_KEY 或不足 32 字节。本脚本不提供默认回退值'
+            + '（2026-08-26 凭证泄露闭环后与 server.js 同口径 fail-closed）。'
+            + '请带与目标库一致的密钥执行：DB_ENCRYPTION_KEY=xxx node scripts/probe-dingtalk-chat-create.js');
+        process.exit(2);
+    }
     const parts = encryptedPassword.split(':');
     const iv = Buffer.from(parts[0], 'hex');
     const encrypted = parts[1];

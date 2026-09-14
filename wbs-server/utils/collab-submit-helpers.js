@@ -629,7 +629,9 @@ const COLUMN_ALIGN_READABLE_EXTS = new Set(['.xlsx', '.xls']);
  * submit-export 主事务成功后，旁路记录取数交付质量（列对齐）。
  *
  * @param {object} ctx
- *   @param {object}  ctx.dbAsync        { runAsync, getAsync }（sqlite 异步封装）
+ *   @param {object}  ctx.dbAsync        { runAsync, getAsync, allAsync }（sqlite 异步封装）
+ *                                      ⚠️ allAsync 自 #68 起必填：列对齐改 any-match 后要列出**全部** active
+ *                                      模板（_classifyActiveExampleXlsx），不再 LIMIT 1 取最新。
  *   @param {number}  ctx.requestId      协作单 id
  *   @param {number}  ctx.submitterId    本次提交开发的 user id（endpoint 的 req.user.id，非 exporter）
  *   @param {string}  ctx.submitterName  本次提交开发名
@@ -659,67 +661,34 @@ async function recordQualityOnSubmit(ctx) {
 
     try {
         const { dbAsync, requestId, submitterId, submitterName, submissionSeq } = ctx;
-        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function') {
-            log.warn('[collab-quality] recordQualityOnSubmit: dbAsync 缺失，跳过质量记录');
+        // #68：allAsync 一并进守卫——any-match 依赖它列出全部 active 模板。漏传时这里显式记名
+        //   报 C2_FAILED，而不是让 _classifyActiveExampleXlsx 抛进外层 catch 变成含糊的
+        //   QUALITY_CHECK_FAILED（那正是本次漏改 server.js 调用点却无人拦截的原因）。
+        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function'
+            || typeof dbAsync.allAsync !== 'function') {
+            log.warn('[collab-quality] recordQualityOnSubmit: dbAsync 缺失（需 runAsync/getAsync/allAsync 三件），跳过质量记录');
             return fail('C2_FAILED');
         }
 
         // smokeColumns 防御：C1 透传可能 undefined / 非数组 → 视为 [] 空列（columns 多义，codex 71 M-2）
         const sqlCols = Array.isArray(ctx.smokeColumns) ? ctx.smokeColumns : [];
 
-        // 1. 查最新 active example_xlsx 模板（codex 72 M-2：稳定排序取最新）
-        const tpl = await dbAsync.getAsync(
-            `SELECT id, file_name, original_name FROM collab_attachments
-              WHERE collab_request_id = ?
-                AND attachment_type = 'example_xlsx'
-                AND (status = 'active' OR status IS NULL)
-              ORDER BY created_at DESC, id DESC
-              LIMIT 1`,
-            [requestId]
-        );
-
-        // 2. 据模板形态决定 T（需求列）与 is_columns_complete 三态
+        // 1. 全部 active example_xlsx（#68 D1：任一可读模板匹配即过；不再 LIMIT 1 取最新）
+        const classified = await _classifyActiveExampleXlsx(dbAsync, requestId, log, 'XLSX_READ_FAILED');
         let isComplete;        // 1 / 0 / null
         let missing = [];      // 纯数组（L-1）
         let expectedSnapshot = null;  // JSON 数组或 null（L-1）
         let reason;
 
-        if (!tpl) {
-            // 无模板：未比对（codex 72 M-1 区分来源）
+        if (classified.uncheckedReason) {
             isComplete = null;
-            reason = 'NO_TEMPLATE';
+            reason = classified.uncheckedReason;
         } else {
-            const ext = path.extname(tpl.original_name || tpl.file_name || '').toLowerCase();
-            if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
-                // 非 xlsx 模板（admin 有意传 pdf/png 等）：未比对
-                isComplete = null;
-                reason = 'NON_XLSX_TEMPLATE';
-            } else {
-                // xlsx/xls 模板：试读表头
-                let templateCols;
-                try {
-                    const abs = resolveAttachmentPath(tpl.file_name);
-                    const { header } = readXlsxHeader(abs);  // 抛 XLSX_READ_FAILED
-                    templateCols = header;
-                } catch (e) {
-                    // 读取/解析失败：未比对（codex 69 M-4 不当齐全）
-                    //   归类取舍（codex 73 L-1）：resolveAttachmentPath 抛 INVALID_ATTACHMENT_PATH（路径越界，
-                    //   内网几乎不发生——file_name 由系统生成非用户输入）也统一归 XLSX_READ_FAILED，
-                    //   不为极罕见 case 扩第八态枚举；但 log.warn 保留 e.code 让排查时能区分路径越界 vs xlsx 解析失败。
-                    isComplete = null;
-                    reason = 'XLSX_READ_FAILED';
-                    log.warn(`[collab-quality] req=${requestId} 模板读取失败(${e.code || 'ERR'})，写未比对：${e.message}`);
-                    templateCols = undefined;
-                }
-                if (templateCols !== undefined) {
-                    // 正常比对（T ⊆ S）
-                    const cmp = compareColumns(templateCols, sqlCols);
-                    isComplete = cmp.complete ? 1 : 0;
-                    missing = cmp.missing;  // 纯数组
-                    expectedSnapshot = JSON.stringify(templateCols);
-                    reason = cmp.complete ? 'OK' : 'MISSING_COLUMNS';
-                }
-            }
+            const cand = _pickAnyMatchCandidate(classified.readable, sqlCols);
+            isComplete = cand.complete;
+            missing = cand.missing;
+            expectedSnapshot = JSON.stringify(cand.cols);
+            reason = cand.complete ? 'OK' : 'MISSING_COLUMNS';
         }
 
         // 3. snapshot（L-1）：actual 始终可取（sqlCols 数组）；expected 仅正常比对时有
@@ -1105,7 +1074,8 @@ function buildQualitySummary(request, qualityRecords, returnRecords) {
 // H-2 自包：任何漏网异常都不阻断主流程；所有出口返回稳定 schema 对象。
 //
 // 入参 ctx：
-//   - dbAsync                  { runAsync, getAsync }（必填，缺失 → compute_failed）
+//   - dbAsync                  { runAsync, getAsync, allAsync }（必填，缺一 → compute_failed）
+//                              ⚠️ allAsync 自 #68 起必填：any-match 要列出全部 active 模板，不再 LIMIT 1
 //   - requestId                协作单 id
 //   - submitterId / submitterName  提交人（v1.2 §1.74 codex 79 范式：req.user 快照防 developer/exporter 语义切换）
 //   - submissionSeq            passed 路径 = activateNewVersion 后 newVer；failed 路径 = oldVer（当前版本，不自增）
@@ -1127,64 +1097,96 @@ function buildQualitySummary(request, qualityRecords, returnRecords) {
 //     persistence_status: 'recorded' | 'ignored_due_to_duplicate' | 'failed'
 //   }
 
-// 内部：模板查询 + 试读，返回 { templateCols, templateUncheckedReason }
-//   - templateCols 非 null → 正常比对（两侧都用这个列集合）
-//   - templateUncheckedReason 非 null → 模板侧前置不可比对，两侧 reason 同值（§3.2）
-async function _evaluateTemplateForDualCheck(dbAsync, requestId, logger) {
-    const tpl = await dbAsync.getAsync(
+// #68 D1：列出全部 active example_xlsx，按可读性分类。
+//   readFailReason 活路径 TEMPLATE_READ_FAILED / 旧路径 XLSX_READ_FAILED（两路径既有枚举不统一本轮）。
+async function _classifyActiveExampleXlsx(dbAsync, requestId, logger, readFailReason) {
+    if (!dbAsync || typeof dbAsync.allAsync !== 'function') {
+        throw new Error('dbAsync.allAsync 缺失');
+    }
+    const rows = await dbAsync.allAsync(
         `SELECT id, file_name, original_name FROM collab_attachments
           WHERE collab_request_id = ?
             AND attachment_type = 'example_xlsx'
             AND (status = 'active' OR status IS NULL)
-          ORDER BY created_at DESC, id DESC
-          LIMIT 1`,
+          ORDER BY id ASC`,
         [requestId]
     );
-    if (!tpl) return { templateCols: null, templateUncheckedReason: 'NO_TEMPLATE' };
-    const ext = path.extname(tpl.original_name || tpl.file_name || '').toLowerCase();
-    if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
-        return { templateCols: null, templateUncheckedReason: 'NON_XLSX_TEMPLATE' };
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return { readable: [], uncheckedReason: 'NO_TEMPLATE' };
+
+    const readable = [];
+    let sawExcel = false;
+    let sawNonExcel = false;
+    for (const tpl of list) {
+        const ext = path.extname(tpl.original_name || tpl.file_name || '').toLowerCase();
+        if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
+            sawNonExcel = true;
+            continue;
+        }
+        sawExcel = true;
+        try {
+            const abs = resolveAttachmentPath(tpl.file_name);
+            const { header } = readXlsxHeader(abs);
+            const nonEmpty = Array.isArray(header)
+                ? header.filter(h => h != null && String(h).trim() !== '')
+                : [];
+            if (!nonEmpty.length) {
+                // #68 codex 120-B L-2：空表头此前静默 continue，全空时返回的却是 *_READ_FAILED——
+                //   排查时无法区分「解析抛异常」与「读成功但表头是空的」。返回枚举按 119 号冻结口径
+                //   不动（不为此扩第八态），但诊断日志必须能分辨这两种，故这里单独记一条。
+                (logger || console).warn(
+                    `[collab-quality] req=${requestId} 模板表头为空 id=${tpl.id}（读取本身成功，非解析失败），跳过该份`
+                );
+                continue;
+            }
+            readable.push({
+                id: tpl.id,
+                cols: header,
+                original_name: tpl.original_name,
+                file_name: tpl.file_name,
+            });
+        } catch (e) {
+            (logger || console).warn(
+                `[collab-quality] req=${requestId} 模板读取失败 id=${tpl.id} (${e.code || 'ERR'})：${e.message}`
+            );
+        }
     }
-    try {
-        const abs = resolveAttachmentPath(tpl.file_name);
-        const { header } = readXlsxHeader(abs);
-        return { templateCols: header, templateUncheckedReason: null };
-    } catch (e) {
-        (logger || console).warn(`[collab-dualcheck] req=${requestId} 模板读取失败(${e.code || 'ERR'})：${e.message}`);
-        return { templateCols: null, templateUncheckedReason: 'TEMPLATE_READ_FAILED' };
-    }
+    if (readable.length) return { readable, uncheckedReason: null };
+    if (!sawExcel && sawNonExcel) return { readable: [], uncheckedReason: 'NON_XLSX_TEMPLATE' };
+    return { readable: [], uncheckedReason: readFailReason };
 }
 
-// 内部：跑 excel 侧比对（result_data 表头 vs 模板列）
-//   - resultDataAttachment 缺失 → reason='NO_RESULT_DATA'
-//   - 扩展名非 xlsx/xls → reason='NON_EXCEL_RESULT'
-//   - 读取失败 → reason='RESULT_READ_FAILED'
-//   - 成功 → 与 templateCols 跑 compareColumns
-function _evaluateExcelSide(resultDataAttachment, templateCols, requestId, logger) {
+// 可读模板里：命中 T⊆S 取 id 升序第一份；都不中取缺列最少（并列 id 升序）。
+function _pickAnyMatchCandidate(readable, actualCols) {
+    const scored = readable.map(t => {
+        const cmp = compareColumns(t.cols, actualCols);
+        return { t, complete: !!cmp.complete, missing: cmp.missing || [], n: (cmp.missing || []).length };
+    });
+    const hits = scored.filter(s => s.complete).sort((a, b) => a.t.id - b.t.id);
+    if (hits.length) {
+        return { complete: 1, missing: [], cols: hits[0].t.cols, id: hits[0].t.id };
+    }
+    scored.sort((a, b) => a.n - b.n || a.t.id - b.t.id);
+    const best = scored[0];
+    return { complete: 0, missing: best.missing, cols: best.t.cols, id: best.t.id };
+}
+
+function _readResultDataHeaders(resultDataAttachment, requestId, logger) {
     if (!resultDataAttachment || !resultDataAttachment.file_name) {
-        return { is_complete: null, missing: [], reason: 'NO_RESULT_DATA', snapshot: null };
+        return { ok: false, reason: 'NO_RESULT_DATA', cols: null };
     }
     const ext = path.extname(resultDataAttachment.original_name || resultDataAttachment.file_name || '').toLowerCase();
     if (!COLUMN_ALIGN_READABLE_EXTS.has(ext)) {
-        return { is_complete: null, missing: [], reason: 'NON_EXCEL_RESULT', snapshot: null };
+        return { ok: false, reason: 'NON_EXCEL_RESULT', cols: null };
     }
-    let excelCols;
     try {
         const abs = resolveAttachmentPath(resultDataAttachment.file_name);
         const { header } = readXlsxHeader(abs);
-        excelCols = header;
+        return { ok: true, reason: null, cols: header };
     } catch (e) {
         (logger || console).warn(`[collab-dualcheck] req=${requestId} result_data 读取失败(${e.code || 'ERR'})：${e.message}`);
-        return { is_complete: null, missing: [], reason: 'RESULT_READ_FAILED', snapshot: null };
+        return { ok: false, reason: 'RESULT_READ_FAILED', cols: null };
     }
-    // 模板已成功（templateCols 非 null 才进这里），正常比对
-    const cmp = compareColumns(templateCols, excelCols);
-    return {
-        is_complete: cmp.complete ? 1 : 0,
-        missing: cmp.missing,
-        reason: null,
-        snapshot: excelCols,
-    };
 }
 
 async function recordQualityForDeveloperSubmit(ctx) {
@@ -1200,8 +1202,15 @@ async function recordQualityForDeveloperSubmit(ctx) {
 
     try {
         const { dbAsync, requestId, submitterId, submitterName, submissionSeq, recordKind } = ctx;
-        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function') {
-            log.warn('[collab-dualcheck] recordQualityForDeveloperSubmit: dbAsync 缺失');
+        // #68：allAsync 一并进守卫（同 recordQualityOnSubmit，理由见那处注释）
+        // ⚠️ codex 120-B L-1 指出：external_skip 路径后续并不查模板，这里却仍无条件要求 allAsync，
+        //   对"只传 runAsync/getAsync 的跳过模式调用方"属于收紧。**这是有意的**——三方法统一契约
+        //   正是本次修复要立的规矩，否则又回到「某些路径不需要、于是调用方各传各的」，而这正是
+        //   2026-09-14 漏改能发生的土壤。已核当前全部调用方（server.js 两处 + 两个 verify 脚本）
+        //   均已传齐，无既有调用方被误拒；将来新增调用方一律按三件传，[68g] 静态守卫会兜住。
+        if (!dbAsync || typeof dbAsync.runAsync !== 'function' || typeof dbAsync.getAsync !== 'function'
+            || typeof dbAsync.allAsync !== 'function') {
+            log.warn('[collab-dualcheck] recordQualityForDeveloperSubmit: dbAsync 缺失（需 runAsync/getAsync/allAsync 三件）');
             return computeFailedReturn('failed');
         }
         if (recordKind !== 'passed' && recordKind !== 'failed') {
@@ -1216,26 +1225,30 @@ async function recordQualityForDeveloperSubmit(ctx) {
         //   语义不同：那些是"想比对但比不了"，这个是"结构性不需要比对"）。
         const isExternalSkip = ctx.validationMode === VALIDATION_MODES.external_skip;
 
-        const { templateCols, templateUncheckedReason } = isExternalSkip
-            ? { templateCols: null, templateUncheckedReason: null }
-            : await _evaluateTemplateForDualCheck(dbAsync, requestId, log);
+        const classified = isExternalSkip
+            ? { readable: [], uncheckedReason: null }
+            : await _classifyActiveExampleXlsx(dbAsync, requestId, log, 'TEMPLATE_READ_FAILED');
+        const templateUncheckedReason = classified.uncheckedReason;
+        const sqlCols = (ctx.sqlSmokeResult && Array.isArray(ctx.sqlSmokeResult.columns)) ? ctx.sqlSmokeResult.columns : [];
 
         // [2] SQL 侧
         //   passed 路径有 sqlSmokeResult.columns；failed 路径 → SMOKE_FAILED
         //   模板前置不可比对时（templateUncheckedReason !== null）→ SQL 侧用模板 reason（同 excel 侧）
         let sqlSide;
+        let sqlCandidateCols = null;
         if (isExternalSkip) {
             sqlSide = { is_complete: null, missing: [], reason: 'external_skipped', snapshot: null };
         } else if (recordKind === 'failed') {
             sqlSide = { is_complete: null, missing: [], reason: 'SMOKE_FAILED', snapshot: [] };
+            if (classified.readable.length) sqlCandidateCols = classified.readable[0].cols;
         } else if (templateUncheckedReason) {
             sqlSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
         } else {
-            const sqlCols = (ctx.sqlSmokeResult && Array.isArray(ctx.sqlSmokeResult.columns)) ? ctx.sqlSmokeResult.columns : [];
-            const cmp = compareColumns(templateCols, sqlCols);
+            const cand = _pickAnyMatchCandidate(classified.readable, sqlCols);
+            sqlCandidateCols = cand.cols;
             sqlSide = {
-                is_complete: cmp.complete ? 1 : 0,
-                missing: cmp.missing,
+                is_complete: cand.complete ? 1 : 0,
+                missing: cand.missing,
                 reason: null,
                 snapshot: sqlCols,
             };
@@ -1244,14 +1257,25 @@ async function recordQualityForDeveloperSubmit(ctx) {
         // [3] excel 侧
         //   external_skip → 同上，不读结果文件表头
         //   模板前置不可比对时 → excel 侧用同一个模板 reason（§3.2 两侧同值）
-        //   模板可比对时 → 跑 _evaluateExcelSide（result_data 缺失/非 excel/读失败 各自独立 reason）
+        //   模板可比对时 → 读 result_data 表头后对该侧独立 any-match（可与 SQL 命中不同模板）
         let excelSide;
         if (isExternalSkip) {
             excelSide = { is_complete: null, missing: [], reason: 'external_skipped', snapshot: null };
         } else if (templateUncheckedReason) {
             excelSide = { is_complete: null, missing: [], reason: templateUncheckedReason, snapshot: null };
         } else {
-            excelSide = _evaluateExcelSide(ctx.resultDataAttachment, templateCols, requestId, log);
+            const excelRead = _readResultDataHeaders(ctx.resultDataAttachment, requestId, log);
+            if (!excelRead.ok) {
+                excelSide = { is_complete: null, missing: [], reason: excelRead.reason, snapshot: null };
+            } else {
+                const cand = _pickAnyMatchCandidate(classified.readable, excelRead.cols);
+                excelSide = {
+                    is_complete: cand.complete ? 1 : 0,
+                    missing: cand.missing,
+                    reason: null,
+                    snapshot: excelRead.cols,
+                };
+            }
         }
 
         // [4] 归一化（§3.2 不变量）+ snapshot 序列化
@@ -1272,8 +1296,8 @@ async function recordQualityForDeveloperSubmit(ctx) {
         const excelMissingJson = excelN.is_complete === null ? null : JSON.stringify(excelN.missing);
         const sqlAttachmentId = (ctx.sqlAttachmentId === undefined || ctx.sqlAttachmentId === null) ? null : ctx.sqlAttachmentId;
         const resultAttachmentId = (ctx.resultDataAttachment && ctx.resultDataAttachment.id) || null;
-        // 模板 expected snapshot：能成功读到模板列才有
-        const expectedSnapshot = templateCols ? JSON.stringify(templateCols) : null;
+        // 模板 expected snapshot：跟 SQL 侧候选（#68 H-2）；SQL 未比对时若有可读模板取 id 升序第一份
+        const expectedSnapshot = sqlCandidateCols ? JSON.stringify(sqlCandidateCols) : null;
 
         // [6] INSERT 分流
         //   passed：INSERT OR IGNORE，唯一索引兜底幂等 → changes>0=recorded / changes=0=ignored_due_to_duplicate

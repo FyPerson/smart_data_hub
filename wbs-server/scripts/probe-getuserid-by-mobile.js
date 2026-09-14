@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const sqlite3 = require('sqlite3');
 
 const DB_PATH = process.env.DB_PATH || 'e:/数据开发与治理规范手册/wbs-server/task_pool.db';
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || '';   // 不留默认回退值（2026-08-26 凭证泄露闭环·与 server.js 同 fail-closed 口径）
 const MOBILE = process.env.MOBILE || '';
 
 if (!MOBILE) {
@@ -26,6 +26,12 @@ if (!MOBILE) {
 }
 
 function decryptPassword(encryptedPassword) {
+    if (Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+        console.error('[ABORT] 未设 DB_ENCRYPTION_KEY 或不足 32 字节。本脚本不提供默认回退值'
+            + '（2026-08-26 凭证泄露闭环后与 server.js 同口径 fail-closed）。'
+            + '请带与目标库一致的密钥执行：DB_ENCRYPTION_KEY=xxx node scripts/probe-getuserid-by-mobile.js');
+        process.exit(2);
+    }
     const parts = encryptedPassword.split(':');
     const iv = Buffer.from(parts[0], 'hex');
     const encrypted = parts[1];

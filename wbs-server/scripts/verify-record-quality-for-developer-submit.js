@@ -94,11 +94,14 @@ const IDX_SINGLE = `CREATE UNIQUE INDEX idx_qr_unique_single ON collab_quality_r
 const IDX_MULTI = `CREATE UNIQUE INDEX idx_qr_unique_multi ON collab_quality_record(collab_request_id, collab_sub_item_id, submission_seq) WHERE collab_sub_item_id IS NOT NULL AND record_kind = 'passed'`;
 
 // 适配 helper 的 dbAsync 接口
-const dbAsync = { runAsync: dbRun, getAsync: dbGet };
+const dbAsync = { runAsync: dbRun, getAsync: dbGet, allAsync: dbAll };
 const operationLogs = [];
+// #68 codex 120-B M-3：warn 原为空实现 ⇒ 任何「守卫是否真的记名拦截」的断言都无从写起，
+//   这正是 [68f] 最初没有判别力的根由。改为收集，供用例断言具体诊断文本。
+const warnLogs = [];
 const logger = {
     info:  (m) => { /* console.log('[info]', m); */ },
-    warn:  (m) => { /* console.log('[warn]', m); */ },
+    warn:  (m) => { warnLogs.push(String(m)); },
     error: (m) => { console.error('[error]', m); },
 };
 function makeCtx(overrides) {
@@ -368,6 +371,7 @@ async function main() {
         const failingDb = {
             runAsync: async () => { throw new Error('CHECK constraint failed: simulated'); },
             getAsync: dbGet,
+            allAsync: dbAll,
         };
         const tpl = writeXlsx(makeFileName('tpl_15.xlsx'), ['列A']);
         const data = writeXlsx(makeFileName('data_15.xlsx'), ['列A']);
@@ -389,6 +393,7 @@ async function main() {
         const explodingDb = {
             runAsync: dbRun,
             getAsync: async () => { throw new Error('DB connection lost'); },
+            allAsync: async () => { throw new Error('DB connection lost'); },
         };
         const r = await recordQualityForDeveloperSubmit(makeCtx({
             dbAsync: explodingDb,
@@ -418,6 +423,362 @@ async function main() {
         const row = await dbGet(`SELECT id FROM collab_quality_record WHERE collab_request_id=117`);
         assert.ok(row && row.id, `[17] insertLog 抛错时质量记录仍应落库`);
         ok('[17] ctx.insertLog 抛错 → 主函数返回稳定 schema + DB 落库正常（H-2 第 3 类兜底）');
+    }
+
+    // === #68 D1：SQL 只中甲、Excel 只中乙 → 双侧仍过；快照跟 SQL 命中份 ===
+    {
+        const tplA = writeXlsx(makeFileName('tpl_68a.xlsx'), ['列A']);
+        const tplB = writeXlsx(makeFileName('tpl_68b.xlsx'), ['列B']);
+        const data = writeXlsx(makeFileName('data_68ab.xlsx'), ['列B']);
+        await insertTemplate(168, tplA, 'tpl_68a.xlsx');
+        await insertTemplate(168, tplB, 'tpl_68b.xlsx');
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 168, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 268,
+            resultDataAttachment: { id: 368, file_name: data, original_name: 'data_68ab.xlsx' },
+        }));
+        assert.strictEqual(r.check_status, 'ok');
+        assert.strictEqual(r.sql.is_complete, 1, '[68a] SQL 命中甲');
+        assert.strictEqual(r.excel.is_complete, 1, '[68a] Excel 命中乙');
+        const row = await dbGet(`SELECT expected_columns_snapshot, missing_columns FROM collab_quality_record WHERE collab_request_id=168`);
+        assert.deepStrictEqual(JSON.parse(row.expected_columns_snapshot), ['列A'], '[68a] 快照跟 SQL 命中的甲');
+        ok('[68a] SQL 只中甲 / Excel 只中乙 → 双侧齐全，快照为甲');
+    }
+    {
+        const tplOld = writeXlsx(makeFileName('tpl_68old.xlsx'), ['列A']);
+        const tplNew = writeXlsx(makeFileName('tpl_68new.xlsx'), ['列A', '列C']);
+        const data = writeXlsx(makeFileName('data_68old.xlsx'), ['列A']);
+        await insertTemplate(169, tplOld, 'tpl_68old.xlsx');
+        await insertTemplate(169, tplNew, 'tpl_68new.xlsx');
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 169, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 269,
+            resultDataAttachment: { id: 369, file_name: data, original_name: 'data_68old.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 1, '[68b] 旧齐全+新缺列 SQL 仍过');
+        assert.strictEqual(r.excel.is_complete, 1, '[68b] Excel 同');
+        ok('[68b] 旧齐全 + 新缺列 → any-match 双侧仍齐全（取最新会红）');
+    }
+    {
+        const tplA = writeXlsx(makeFileName('tpl_68c_a.xlsx'), ['列A']);
+        const tplB = writeXlsx(makeFileName('tpl_68c_b.xlsx'), ['列B']);
+        const data = writeXlsx(makeFileName('data_68c.xlsx'), ['列C']);
+        await insertTemplate(170, tplA, 'tpl_68c_a.xlsx');
+        await insertTemplate(170, tplB, 'tpl_68c_b.xlsx');
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 170, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 270,
+            resultDataAttachment: { id: 370, file_name: data, original_name: 'data_68c.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 1, '[68c] SQL 只中甲 → 齐全');
+        assert.strictEqual(r.excel.is_complete, 0, '[68c] Excel 两侧都不中 → 缺列');
+        ok('[68c] SQL 只中甲 / Excel 全不中 → 一侧过一侧不过');
+    }
+    {
+        const tplA = writeXlsx(makeFileName('tpl_68d_a.xlsx'), ['列A', '列X']);
+        const tplB = writeXlsx(makeFileName('tpl_68d_b.xlsx'), ['列A', '列Y']);
+        const data = writeXlsx(makeFileName('data_68d.xlsx'), ['列A']);
+        await insertTemplate(171, tplA, 'tpl_68d_a.xlsx');
+        await insertTemplate(171, tplB, 'tpl_68d_b.xlsx');
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 171, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 271,
+            resultDataAttachment: { id: 371, file_name: data, original_name: 'data_68d.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 0, '[68d] 全不中');
+        const row = await dbGet(`SELECT expected_columns_snapshot, missing_columns FROM collab_quality_record WHERE collab_request_id=171`);
+        assert.deepStrictEqual(JSON.parse(row.expected_columns_snapshot), ['列A', '列X'], '[68d] 缺列数并列 → 快照取 id 升序第一份');
+        assert.deepStrictEqual(JSON.parse(row.missing_columns), ['列X'], '[68d] missing 与快照同源');
+        ok('[68d] 全不中且缺列数并列 → 快照/缺列跟 id 升序第一份');
+    }
+    {
+        const tplOk = writeXlsx(makeFileName('tpl_68e.xlsx'), ['列A']);
+        await insertTemplate(172, 'note.pdf', '说明.pdf');
+        await insertTemplate(172, tplOk, 'tpl_68e.xlsx');
+        const data = writeXlsx(makeFileName('data_68e.xlsx'), ['列A']);
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 172, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 272,
+            resultDataAttachment: { id: 372, file_name: data, original_name: 'data_68e.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 1, '[68e] 跳过 pdf，命中可读 xlsx');
+        assert.strictEqual(r.excel.is_complete, 1);
+        ok('[68e] 可读 + 不可读混合 → 跳过 pdf，按可读份 any-match');
+    }
+    // === codex 120-B M-4：[68d] 并列取 id 升序，分不出「按缺列数挑」与「永远取第一份」 ===
+    //   本条让**后插的第二份缺列更少**，只有真按缺列数排序才会选它。
+    {
+        const tplFirst = writeXlsx(makeFileName('tpl_68h_1.xlsx'), ['列A', '列X', '列Y']);  // 缺 2
+        const tplSecond = writeXlsx(makeFileName('tpl_68h_2.xlsx'), ['列A', '列Z']);        // 缺 1
+        await insertTemplate(174, tplFirst, 'tpl_68h_1.xlsx');
+        await insertTemplate(174, tplSecond, 'tpl_68h_2.xlsx');
+        const data = writeXlsx(makeFileName('data_68h.xlsx'), ['列A']);
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 174, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+            sqlAttachmentId: 274,
+            resultDataAttachment: { id: 374, file_name: data, original_name: 'data_68h.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 0, '[68h] 两份都不中 → 缺列');
+        const row = await dbGet('SELECT expected_columns_snapshot, missing_columns FROM collab_quality_record WHERE collab_request_id=174');
+        assert.deepStrictEqual(JSON.parse(row.expected_columns_snapshot), ['列A', '列Z'],
+            '[68h] 快照应取**缺列更少的第二份**（若实现永远取第一份，这里会是 [列A,列X,列Y] → 红）');
+        assert.deepStrictEqual(JSON.parse(row.missing_columns), ['列Z'], '[68h] missing 与快照同源');
+        ok('[68h] 后插模板缺列更少 → 按缺列数挑而非永远取第一份（可判红）');
+    }
+    // === codex 120-B M-4：[68e] 只覆盖非 Excel，补「坏 Excel + 可读」「空表头 + 可读」 ===
+    {
+        const broken = writeBroken(makeFileName('tpl_68i_broken.xlsx'));
+        const good = writeXlsx(makeFileName('tpl_68i_ok.xlsx'), ['列A']);
+        await insertTemplate(175, broken, 'tpl_68i_broken.xlsx');
+        await insertTemplate(175, good, 'tpl_68i_ok.xlsx');
+        const data = writeXlsx(makeFileName('data_68i.xlsx'), ['列A']);
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 175, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] }, sqlAttachmentId: 275,
+            resultDataAttachment: { id: 375, file_name: data, original_name: 'data_68i.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 1, '[68i] 坏 Excel 被跳过，命中可读份');
+        assert.strictEqual(r.sql.reason, null, '[68i] 有可读份即正常比对，不得落 TEMPLATE_READ_FAILED');
+        ok('[68i] 坏 Excel + 可读模板 → 跳过坏份按可读份 any-match（不整体判读失败）');
+    }
+    {
+        const empty = writeXlsx(makeFileName('tpl_68j_empty.xlsx'), []);   // 空表头
+        const good = writeXlsx(makeFileName('tpl_68j_ok.xlsx'), ['列A']);
+        await insertTemplate(176, empty, 'tpl_68j_empty.xlsx');
+        await insertTemplate(176, good, 'tpl_68j_ok.xlsx');
+        const data = writeXlsx(makeFileName('data_68j.xlsx'), ['列A']);
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 176, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] }, sqlAttachmentId: 276,
+            resultDataAttachment: { id: 376, file_name: data, original_name: 'data_68j.xlsx' },
+        }));
+        assert.strictEqual(r.sql.is_complete, 1, '[68j] 空表头份被跳过，命中可读份');
+        assert.ok(warnLogs.some(m => m.includes('模板表头为空') && m.includes('非解析失败')),
+            `[68j] 空表头应留下与读取异常可区分的诊断（L-2；实得 ${JSON.stringify(warnLogs.slice(-3))}）`);
+        ok('[68j] 空表头 + 可读模板 → 跳过空份 + 留下专属诊断日志');
+    }
+    // === codex 120-B M-4：全不可读时的 reason 分档（多模板形态，非单模板的 [6]/[7]）===
+    {
+        const fakePdf = makeFileName('tpl_68k.pdf');
+        fs.writeFileSync(path.join(UPLOAD_DIR, fakePdf), 'fake pdf');
+        const broken = writeBroken(makeFileName('tpl_68k_broken.xlsx'));
+        await insertTemplate(177, fakePdf, 'tpl_68k.pdf');
+        await insertTemplate(177, broken, 'tpl_68k_broken.xlsx');
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            requestId: 177, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] }, sqlAttachmentId: 277,
+            resultDataAttachment: { id: 377, file_name: 'irrelevant.xlsx', original_name: 'irrelevant.xlsx' },
+        }));
+        // 冻结口径：只有非 Excel → NON_XLSX_TEMPLATE；**有** Excel 扩展名但全读不出 → TEMPLATE_READ_FAILED
+        assert.strictEqual(r.sql.reason, 'TEMPLATE_READ_FAILED',
+            '[68k] pdf + 坏 xlsx 混合：因存在 Excel 扩展名份，应落 TEMPLATE_READ_FAILED 而非 NON_XLSX_TEMPLATE');
+        assert.strictEqual(r.excel.reason, 'TEMPLATE_READ_FAILED', '[68k] 两侧同值');
+        ok('[68k] 全不可读且含 Excel 扩展名 → 分档到 TEMPLATE_READ_FAILED（与只有非 Excel 的 [6] 可区分）');
+    }
+
+    // === #68 契约守卫：dbAsync 三件必须传齐 ===
+    //
+    // 为什么要有这一节（2026-09-14 实际漏网）：#68 D1 把列对齐改成 any-match，helper 内部
+    //   从 getAsync(LIMIT 1) 换成 **allAsync(列出全部)**。本文件的夹具 dbAsync 当场补了 allAsync
+    //   于是 24/24 全绿，但 server.js 两处真调用点没跟着补 —— 生产上每次开发提交都会在
+    //   _classifyActiveExampleXlsx 抛错 → 外层 catch → check_status='compute_failed'，
+    //   而 helper 是 H-2 永不抛的，主流程照常成功、无告警，质量记录全部悄悄写成"未比对"。
+    //   「测试为了跑通改夹具，改完忘了改真正的调用方」——夹具绿不代表调用方对，
+    //   所以下面两条断言的对象**不是 helper，而是调用方**：
+    //     [68f] 运行时：按生产形态（缺 allAsync）传 ctx，必须走显式守卫而不是含糊的兜底
+    //     [68g] 静态：直接读 server.js 源码，核每个真调用点的 dbAsync 字面量
+    {
+        // ⚠️ codex 120-B M-3 指出本条最初没有判别力：只断 compute_failed + QUALITY_CHECK_FAILED 的话，
+        //   把新增的入口守卫**整个删掉**，缺 allAsync 仍会在 _classifyActiveExampleXlsx 抛错、被外层
+        //   catch 成一模一样的返回值 ⇒ 断言分不出「守卫拦住了」和「压根没守卫」。核实成立。
+        //   改为断两件只有走守卫才成立的事：① 记名诊断文本 ② **一次 DB 调用都没发生**
+        //   （守卫在最前面 return，若退化成内层抛错，allAsync 已被调用过）。
+        warnLogs.length = 0;
+        const calls = [];
+        const spyDb = {
+            runAsync: (...a) => { calls.push('runAsync'); return dbRun(...a); },
+            getAsync: (...a) => { calls.push('getAsync'); return dbGet(...a); },
+            // 故意不给 allAsync —— 即 2026-09-14 漏改时 server.js 的真实形态
+        };
+        const r = await recordQualityForDeveloperSubmit(makeCtx({
+            dbAsync: spyDb,
+            requestId: 173, recordKind: 'passed', submissionSeq: 1,
+            sqlSmokeResult: { columns: ['列A'] },
+        }));
+        assert.strictEqual(r.check_status, 'compute_failed', '[68f] 缺 allAsync → compute_failed');
+        assert.strictEqual(r.sql.reason, 'QUALITY_CHECK_FAILED', '[68f] 两侧走 compute_failed 归一化');
+        assert.ok(warnLogs.some(m => m.includes('dbAsync 缺失') && m.includes('allAsync')),
+            `[68f] 必须留下入口守卫的记名诊断（实得 warn：${JSON.stringify(warnLogs)}）`);
+        assert.deepStrictEqual(calls, [],
+            `[68f] 守卫应在任何 DB 调用之前 return（实得调用序列 ${JSON.stringify(calls)}）`);
+        ok('[68f] 生产形态 ctx（缺 allAsync）→ 入口守卫记名拦截 + 零 DB 调用（删守卫即判红）');
+    }
+    {
+        // 纯函数：给定源码文本，返回每个调用点的 dbAsync 键集合。抽出来是为了能在内存字符串上
+        //   做变异自证（不触碰真实文件），对齐 verify-collab-validation-status-coverage 的③范式。
+        // 结构锚非行号锚。
+        //
+        // ⚠️ 首版用「调用点后固定 600 字符窗口 + 非贪婪 [^}]* 取 dbAsync 字面量」，codex 120-B M-2
+        //   指出三个假绿/漏扫口子，复核全部成立，已分别处置：
+        //     ① 窗口不认调用边界 ⇒ 当前调用**没有** dbAsync 时，会借用窗口内**后一个**调用的完整
+        //        dbAsync 判绿。→ 改为从实参 `{` 起**大括号配平**，严格限定在本次调用的实参对象内。
+        //     ② 注释里出现 `allAsync:` 会被当成真属性。→ 扫描前先把行注释/块注释整体剥成空格
+        //        （保留偏移量，报错位置仍准）。
+        //     ③ 只认 `.helper({` ⇒ 解构导入后的 `helper({` 直接调用形式完全漏扫。→ 正则改为
+        //        点号与词边界二选一。注：`count >= 2` 下界能发现"既有调用点全被改成漏扫形式"，
+        //        但发现不了"新增调用点用漏扫形式写"，故这一条必须在扫描侧修，不能只靠下界。
+        //   仍存在的边界（如实声明）：本函数按字符串/注释状态机剥注释，不识别正则字面量；
+        //   `dbAsync` 由变量或展开符提供（`dbAsync: adapter` / `...deps`）时判为无字面量 → 红，
+        //   属于"宁误报不漏报"的有意取舍。
+        const HELPERS = ['recordQualityForDeveloperSubmit', 'recordQualityOnSubmit'];
+        const REQUIRED_KEYS = ['runAsync', 'getAsync', 'allAsync'];
+
+        // 把注释替换成等长空格（偏移量不变），字符串/模板串内的 // 和 /* 不当注释
+        function stripComments(src) {
+            const out = src.split('');
+            let i = 0, q = null, inLine = false, inBlock = false;
+            while (i < src.length) {
+                const c = src[i], n = src[i + 1];
+                if (inLine) {
+                    if (c === '\n') inLine = false; else out[i] = ' ';
+                    i++; continue;
+                }
+                if (inBlock) {
+                    if (c === '*' && n === '/') { out[i] = ' '; out[i + 1] = ' '; i += 2; inBlock = false; continue; }
+                    if (c !== '\n') out[i] = ' ';
+                    i++; continue;
+                }
+                if (q) {
+                    if (c === '\\') { i += 2; continue; }
+                    if (c === q) q = null;
+                    i++; continue;
+                }
+                if (c === '"' || c === "'" || c === '`') { q = c; i++; continue; }
+                if (c === '/' && n === '/') { out[i] = ' '; out[i + 1] = ' '; i += 2; inLine = true; continue; }
+                if (c === '/' && n === '*') { out[i] = ' '; out[i + 1] = ' '; i += 2; inBlock = true; continue; }
+                i++;
+            }
+            return out.join('');
+        }
+
+        // 从 src[open] 处的 '{' 配平到对应 '}'，返回内部文本；不配平返回 null
+        function balanced(src, open) {
+            if (src[open] !== '{') return null;
+            let depth = 0, q = null;
+            for (let i = open; i < src.length; i++) {
+                const c = src[i];
+                if (q) { if (c === '\\') { i++; continue; } if (c === q) q = null; continue; }
+                if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+                if (c === '{') depth++;
+                else if (c === '}') { depth--; if (depth === 0) return src.slice(open + 1, i); }
+            }
+            return null;
+        }
+
+        // 在对象字面量文本里取**顶层**（depth 0）某属性名的位置
+        function topLevelPropPos(objText, prop) {
+            const re = new RegExp(`\\b${prop}\\s*:`, 'g');
+            let m;
+            while ((m = re.exec(objText)) !== null) {
+                let depth = 0, q = null;
+                for (let i = 0; i < m.index; i++) {
+                    const c = objText[i];
+                    if (q) { if (c === '\\') { i++; continue; } if (c === q) q = null; continue; }
+                    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+                    if (c === '{' || c === '[' || c === '(') depth++;
+                    else if (c === '}' || c === ']' || c === ')') depth--;
+                }
+                if (depth === 0) return m.index + m[0].length;
+            }
+            return -1;
+        }
+
+        function scanCallSites(rawSrc) {
+            const src = stripComments(rawSrc);
+            const sites = [];
+            for (const h of HELPERS) {
+                // 点号调用 或 解构后的直接调用，二选一
+                const re = new RegExp(`(?:\\.|\\b)${h}\\s*\\(\\s*(?=\\{)`, 'g');
+                let m;
+                while ((m = re.exec(src)) !== null) {
+                    const open = src.indexOf('{', m.index + m[0].length - 1);
+                    const argText = balanced(src, open);
+                    if (argText === null) { sites.push({ helper: h, offset: m.index, keys: [], hasLiteral: false }); continue; }
+                    const pos = topLevelPropPos(argText, 'dbAsync');
+                    if (pos < 0) { sites.push({ helper: h, offset: m.index, keys: [], hasLiteral: false }); continue; }
+                    const rest = argText.slice(pos);
+                    const braceAt = rest.search(/\S/) >= 0 && rest[rest.search(/\S/)] === '{' ? rest.search(/\S/) : -1;
+                    const dbText = braceAt >= 0 ? balanced(rest, braceAt) : null;
+                    sites.push({
+                        helper: h,
+                        offset: m.index,
+                        keys: dbText === null ? [] : REQUIRED_KEYS.filter(k => topLevelPropPos(dbText, k) >= 0),
+                        hasLiteral: dbText !== null,
+                    });
+                }
+            }
+            return sites;
+        }
+        function evaluate(src) {
+            const sites = scanCallSites(src);
+            const bad = sites.filter(s => !s.hasLiteral || s.keys.length !== REQUIRED_KEYS.length);
+            return { count: sites.length, bad };
+        }
+
+        // ① 真实 server.js
+        const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+        const real = evaluate(serverSrc);
+        assert.ok(real.count >= 2,
+            `[68g] server.js 应至少扫到 2 个质量记录调用点（实得 ${real.count}）——若确已裁撤请同步下调此下界`);
+        assert.deepStrictEqual(real.bad, [],
+            `[68g] server.js 存在 dbAsync 未传齐 ${REQUIRED_KEYS.join('/')} 的调用点：`
+            + JSON.stringify(real.bad.map(b => ({ helper: b.helper, offset: b.offset, keys: b.keys }))));
+        ok(`[68g] server.js ${real.count} 个调用点 dbAsync 均传齐 runAsync/getAsync/allAsync`);
+
+        // ② 变异自证：判绿的同时必须能判红，否则这条守卫等于没写
+        const GOOD = `x.recordQualityForDeveloperSubmit({\n  dbAsync: { runAsync: a, getAsync: b, allAsync: c },\n  requestId: id,\n});`;
+        assert.strictEqual(evaluate(GOOD).bad.length, 0, '★变异0) 完整形态应判绿');
+        const MUT_NO_ALL = GOOD.replace(', allAsync: c', '');
+        assert.strictEqual(evaluate(MUT_NO_ALL).bad.length, 1, '★变异1) 删 allAsync 应判红（复刻本次漏网）');
+        const MUT_NO_GET = GOOD.replace(', getAsync: b', '');
+        assert.strictEqual(evaluate(MUT_NO_GET).bad.length, 1, '★变异2) 删 getAsync 应判红');
+        const MUT_NO_LITERAL = GOOD.replace(/dbAsync: \{[^}]*\},\n/, '');
+        assert.strictEqual(evaluate(MUT_NO_LITERAL).bad.length, 1, '★变异3) 整个 dbAsync 字面量缺失应判红');
+        const MUT_DECOY = `x.recordQualityForDeveloperSubmit({\n  dbAsync: { runAsync: a, getAsync: b },\n  requestId: id,\n});\nother({ allAsync: c });`;
+        assert.strictEqual(evaluate(MUT_DECOY).bad.length, 1,
+            '★变异4) allAsync 只出现在**别的**对象里不算数（防"窗口里搜到字样就算过"的假绿）');
+
+        // —— 以下三组为 codex 120-B M-2 点名要求补的，正是首版固定窗口判不出的形态 ——
+        const MUT_BORROW =
+            `x.recordQualityOnSubmit({\n  requestId: id,\n});\n` +
+            `x.recordQualityForDeveloperSubmit({\n  dbAsync: { runAsync: a, getAsync: b, allAsync: c },\n});`;
+        const borrow = evaluate(MUT_BORROW);
+        assert.strictEqual(borrow.count, 2, '★变异5) 借用形态应扫到 2 个调用点');
+        assert.strictEqual(borrow.bad.length, 1,
+            '★变异5) 前一个调用**整个没有 dbAsync**，不得借用后一个调用的完整 dbAsync 判绿（首版固定窗口会假绿）');
+        assert.strictEqual(borrow.bad[0].helper, 'recordQualityOnSubmit', '★变异5) 判红的应是缺失的那一个');
+
+        const MUT_COMMENT =
+            `x.recordQualityForDeveloperSubmit({\n  // 这里以前有 allAsync: dbAllAsync，后来删了\n` +
+            `  dbAsync: { runAsync: a, getAsync: b /* allAsync: c */ },\n});`;
+        assert.strictEqual(evaluate(MUT_COMMENT).bad.length, 1,
+            '★变异6) 注释里的 allAsync:（行注释与块注释各一处）不得被当成真属性');
+
+        const MUT_DESTRUCTURED = `recordQualityForDeveloperSubmit({\n  dbAsync: { runAsync: a, getAsync: b },\n});`;
+        const de = evaluate(MUT_DESTRUCTURED);
+        assert.strictEqual(de.count, 1, '★变异7) 解构导入后的直接调用形式必须被扫到（首版只认 .helper( 会漏扫）');
+        assert.strictEqual(de.bad.length, 1, '★变异7) 且其缺 allAsync 应判红');
+
+        const MUT_NESTED_OK = `x.recordQualityForDeveloperSubmit({\n  dbAsync: { runAsync: a, getAsync: b, allAsync: c },\n  opts: { nested: { allAsync: 'decoy' } },\n});`;
+        assert.strictEqual(evaluate(MUT_NESTED_OK).bad.length, 0, '★变异8) 嵌套对象里的同名键不影响正常判绿');
+
+        ok('[68g] 变异自证 8 组：完整判绿 / 缺 allAsync·缺 getAsync·缺字面量·邻近诱饵·跨调用借用·注释伪造·解构调用 判红 + 嵌套诱饵不误报');
     }
 
     // operation_log 落痕计数（不强制断言条数，只看有写入）
