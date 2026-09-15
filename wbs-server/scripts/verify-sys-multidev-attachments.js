@@ -3,7 +3,7 @@
 //   联合 SSOT §13 验收表 S20/S32 + §16 补丁九 M-P4（round_no 遗产三件）。
 //   用法：node scripts/verify-sys-multidev-attachments.js
 //
-// 覆盖 S20（附件矩阵逐格：历史参与可下不可删 / broad_user 拒下拒删 / 兼具显式角色按角色算 / 非在册非协调人上传拒）
+// 覆盖 S20（附件矩阵逐格：历史参与可下不可删 / 历史执行人可下不可删（#78） / 兼具显式角色按角色算 / 非在册非协调人上传拒）
 // + S32 附件部分（族外状态上传/删除拒）+ round_no 遗产③（存量已绑行按新终态门规则）+ DEV∪VERIFY 上传窗口
 // （现网 isDevWorkState 只放 DEV，VERIFY 态在册可传属真实行为放宽，正向断言）+ 下载矩阵（在册/历史参与 200，
 // 无关 user 403）。单人基线场景（正向上传/下载/删除/supersede/path 安全等）在 verify-sys-attachments.js，
@@ -184,7 +184,7 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // S20②：broad_user（仅扩读来源，release_assignee_id）拒下拒删；③兼具显式角色（同时在册）按角色算
+  // S20②：历史执行人（release_assignee_id）可下不可删（#78）；③兼具显式角色（同时在册）按角色算
   // ══════════════════════════════════════════════════════════════════════
   {
     const id = await mkIssue('bug', '处理中', { releaseAssigneeId: 6 });   // dev6 是 release_assignee（扩读来源），未在 roster
@@ -193,12 +193,12 @@ async function main() {
     assert.strictEqual(r.status, 200, `S20②准备：dev8 在册上传应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
     const attId = r.body.attachments[0].id;
 
-    // dev6 仅 release_assignee_id（broad_user，仅扩读整单，非附件授权来源）→ 下载/删除均拒
+    // dev6 仅 release_assignee_id：#78 执行人读权与详情对齐，下载放行、删除仍拒
     let dl = await download(dlPath(id, attId), devTok(6));
-    assert.strictEqual(dl.status, 403, `S20②：broad_user(release_assignee) 下载应 403，实际 ${dl.status}`);
+    assert.strictEqual(dl.status, 200, `S20②：历史执行人下载应 200，实际 ${dl.status}`);
     let del = await call('DELETE', `/api/sys-issues/${id}/attachments/${attId}`, devTok(6));
     assert.strictEqual(del.status, 403, `S20②：broad_user(release_assignee) 删除应 403，实际 ${del.status}`);
-    ok('S20②：broad_user（仅 release_assignee_id 扩读来源，非在册非协调人）→ 下载/删除均 403（§5.4 footnote：仅凭它不得下载/删除）');
+    ok('S20②：#78 历史执行人（非在册非协调人）→ 下载 200 / 删除 403');
 
     // S20③：dev6 追加进 roster（兼具显式角色）→ 按在册角色算，下载放行
     await mkMember(id, 6, '开发乙', 'pending');

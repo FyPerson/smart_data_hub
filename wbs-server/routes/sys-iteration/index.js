@@ -9654,12 +9654,8 @@ module.exports = (deps) => {
       //      ——拉群讨论是开发期协调工具，判据本就窄于本端点可见集（甚至不含 intake_liaison/
       //      bugLiaison/roster/techLead），是独立于"能否查看详情"之外的"发起权"窄集，非同一可见性
       //      概念的第三落点；值班执行人只在部署时刻参与，无需加入开发期讨论群；
-      //   ② GET .../attachments/:attId/download（:12574，admin∨intake_liaison(isSysCoordinator)∨
-      //      dev-roster 在册/历史参与）——附件下载圈子本就窄于详情可见圈；且已核实**批次（batch）
-      //      发布路径的 release_executor 角色同样不在这个圈子里**（sysAttachmentRosterState 只查
-      //      sys_issue_dev_assignees，不查 sys_release_executors）——fastlane 执行人与 batch
-      //      执行人在"能否下载附件"这件事上待遇一致，不是 fastlane 特有缺口，是"执行人角色本就不
-      //      含附件下载权"的既有设计，两条部署路径同等对待；
+      //   ② GET .../attachments/:attId/download：#78 放开 batch / fastlane 执行人附件读权，
+      //      两条部署路径同等对待；上传、删除仍按原开发花名册判权。
       //   ③ GET /sys-releases/:id（批次详情，:13999，admin∨对接人∨批次执行人）——结构性不可达：
       //      fastlane 单 release_id 恒 NULL（从未进任何批次，方案 §10.1 字段契约），值班执行人不会
       //      也不需要打开这个端点看自己负责的 fastlane 单；
@@ -10086,7 +10082,7 @@ module.exports = (deps) => {
       //   放开之后，他虽然仍**下载不了**（下载端点判据独立，未放开），却能在响应里读到附件**列表**
       //   （原始文件名等元数据）。方案 §3 角色表明写技术负责人「**不看附件**」「看材料/讨论走线下」，
       //   文件名本身即材料信息，故须裁剪。
-      //   ⚠️ 判据与**附件下载端点逐字同源**（`sysAttachmentRosterState` 同一函数）——他下载不到的东西，
+      //   ⚠️ 判据与附件下载端点同源（开发花名册 + #78 执行人读权）——他下载不到的东西，
       //   就不该在详情里看到；两处用同一判据才不会再长出"列表能看见、下载 403"这类新的读端不一致。
       //   ⚠️ 不误伤：admin / 受理人（isSysCoordinator = admin ∨ 受理人）/ 在册成员 / 历史参与成员全部照旧；
       //   示例发布者若同时兼任本单开发（方案 §3 明确允许兼任），会命中 roster 分支，附件照常可见。
@@ -10098,7 +10094,11 @@ module.exports = (deps) => {
       const attActor = sysActor(req);
       const attIsCoordinator = attActor.role === 'admin' || isSysCoordinator(attActor, row.type) || isBoundLiaisonOrAdmin(attActor, row);
       const attRoster = attIsCoordinator ? null : await sysAttachmentRosterState(id, attActor.id);
-      const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical));
+      const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical))
+        || isReleaseExecutor || isFastReleaseExecutor || await sysAttachmentExecutorCanRead(row, attActor.id);
+      // #78：附件可读身份覆盖详情身份中的执行人，单独的技术负责人身份不授予附件权。
+      // isFastReleaseExecutor 有详情早退优化，兼任技术负责人/assigned_to 时可能为 false；
+      // 上面最后一项补查真实执行关系。不要把读权限并入 sysAttachmentRosterState（四个写点也消费它）。
       const outAttachments = canSeeAttachmentList ? attachments : [];
       const outSpecAttachments = canSeeAttachmentList ? specAttachments : [];
       // [执行人入口批·codex 审 MED-1 收口] release_brief 条件下发：单据可读集（建单人/在册成员/技术负责人等）
@@ -15573,14 +15573,26 @@ module.exports = (deps) => {
     }
   });
 
-  // ── GET /sys-issues/:id/attachments/:attId/download：下载（C5·§5.4 唯一权威：admin∨对接人∨在册∨历史参与；
+  // #78：仅供附件两个读入口使用；与详情执行人身份同源，包括历史 bug 单执行人。
+  async function sysAttachmentExecutorCanRead(row, userId) {
+    const uid = Number(userId);
+    if (!(uid > 0)) return false;
+    if (row.type === 'bug' && Number(row.release_assignee_id) === uid) return true;
+    if (row.release_id && await dbGetAsync(
+      'SELECT 1 FROM sys_release_executors WHERE release_id = ? AND user_id = ? AND removed_at IS NULL LIMIT 1',
+      [row.release_id, uid])) return true;
+    return row.type === 'bug' && !!(await dbGetAsync(
+      `SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe')} AND fe.user_id = ? LIMIT 1`,
+      [row.id, uid]));
+  }
+  // ── GET /sys-issues/:id/attachments/:attId/download：下载（C5 + #78：admin∨对接人∨在册∨历史参与∨执行人；
   //   下载列本身无状态限定——不再单独判"已作废非 admin 403"，契约裁定点见完成报告）+ ALLOWED_FILE_DIRS 白名单 + 二次 WHERE active ──
   router.get('/sys-issues/:id/attachments/:attId/download', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     const attId = parsePositiveId(req.params.attId);
     if (!id || !attId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
     try {
-      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
+      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id, release_id, release_assignee_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       const actor = sysActor(req);
       const isAdmin = actor.role === 'admin';
@@ -15588,7 +15600,7 @@ module.exports = (deps) => {
       //   附件列表可见性判据方向，两读端不长出"列表能看见、下载 403"的不一致）。SELECT 补 intake_liaison_id。
       const isCoordinator = isSysCoordinator(actor, row.type) || isBoundLiaisonOrAdmin(actor, row);
       const roster = await sysAttachmentRosterState(id, actor.id);
-      if (!isAdmin && !isCoordinator && !roster.active && !roster.historical) {
+      if (!isAdmin && !isCoordinator && !roster.active && !roster.historical && !await sysAttachmentExecutorCanRead(row, actor.id)) {
         return res.status(403).json({ error: '无权下载此附件', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       // 二次 WHERE：附件须属本单且 active
