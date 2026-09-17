@@ -160,12 +160,46 @@ function extractFunctionBody(src, name) {
   const blanked = blankNonCode(src);
   const start = blanked.indexOf(`function ${name}(`);
   if (start < 0) return null;
-  let i = blanked.indexOf('{', start), depth = 0, end = -1;
-  for (; i < blanked.length; i++) {
-    if (blanked[i] === '{') depth++;
-    else if (blanked[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-  }
+  const braceOpen = blanked.indexOf('{', start);
+  if (braceOpen < 0) return null;
+  const end = findMatchingBraceIndex(blanked, braceOpen, { alreadyBlanked: true });
   return end < 0 ? null : src.slice(start, end + 1);
 }
 
-module.exports = { extractFunctionBody };
+/**
+ * [长任务B·S4c·G3·2026-09-17] 从 `src` 中某个已知的左花括号位置 `openBraceIndex` 起，找到与之配对的
+ * 右花括号下标——用与 extractFunctionBody 同一套有限状态词法扫描（跳过字符串/模板字面量/正则/注释
+ * 内部的假花括号），供"不是从函数名定位、而是已经知道左花括号在哪"的调用方复用（如某个 if 块/循环体），
+ * 不必各自重新维护一份朴素深度计数（那份实现遇到块内模板字符串含 `}` 或注释含 `{` 就会数错，参见
+ * verify-sys-timeline-trace-coverage.js 改造前的教训）。
+ * @param {string} src 源码全文（或某个切片）
+ * @param {number} openBraceIndex src[openBraceIndex] 必须是 '{'
+ * @param {{alreadyBlanked?: boolean}} [opts] alreadyBlanked=true 时 src 视为已经过 blankNonCode 处理，
+ *   不再重复扫描（extractFunctionBody 内部复用同一份 blanked 文本时传 true，避免整份源码被 blankNonCode
+ *   两遍；外部调用方一般不传，用默认值对原始未处理文本安全）。
+ * @returns {number} 配对的右花括号下标；找不到（未闭合）返回 -1
+ */
+function findMatchingBraceIndex(src, openBraceIndex, opts = {}) {
+  const blanked = opts.alreadyBlanked ? src : blankNonCode(src);
+  if (blanked[openBraceIndex] !== '{') return -1;
+  let depth = 0;
+  for (let i = openBraceIndex; i < blanked.length; i++) {
+    if (blanked[i] === '{') depth++;
+    else if (blanked[i] === '}') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/**
+ * 从 `src` 中某个已知左花括号位置起，取到与之配对的右花括号（含两端）之间的原始文本——
+ * findMatchingBraceIndex 的便捷封装，直接返回切片而非下标。
+ * @param {string} src 源码全文（或某个切片）
+ * @param {number} openBraceIndex src[openBraceIndex] 必须是 '{'
+ * @returns {string|null} 找不到返回 null
+ */
+function extractBalancedBlock(src, openBraceIndex) {
+  const end = findMatchingBraceIndex(src, openBraceIndex);
+  return end < 0 ? null : src.slice(openBraceIndex, end + 1);
+}
+
+module.exports = { extractFunctionBody, findMatchingBraceIndex, extractBalancedBlock, blankNonCode };

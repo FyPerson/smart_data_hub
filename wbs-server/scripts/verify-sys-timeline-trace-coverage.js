@@ -22,6 +22,8 @@ const assert = require('assert');
 const http = require('http');
 const express = require('express');
 const sqlite3 = require('sqlite3');
+// [G3·长任务B S4c] 平衡花括号提取——跳过字符串/模板/正则/注释内部的假花括号（见 :434 一带用途注释）
+const { findMatchingBraceIndex } = require('./lib/extract-function-body.js');
 const jwt = require('jsonwebtoken');
 
 const SECRET = 'verify-sys-timeline-trace-coverage-secret';
@@ -437,9 +439,13 @@ async function main() {
     //   断 push 与 setParams.push 都在块内，且块外（到 UPDATE 之间）不再出现 setFrags.push('deadline'。
     const firstIf = sc.indexOf('if (scopeChangeDeadlineChanges.length) {');
     assert.ok(firstIf >= 0, '[静态·C4b③] 未找到首个 if (scopeChangeDeadlineChanges.length) {');
+    // [G3·长任务B S4c·2026-09-17] 原朴素深度计数逐字符统计花括号，不区分字符串/模板字面量/注释——
+    //   块内若出现模板字符串含裸 `}`（如 `${…}还剩 } 才对`这类说明性拼接）或注释里写了 `{`，计数会被
+    //   带偏（提前收尾/越界吞并后续代码），"提取成功≠边界正确"同 verify-sys-release-panel-static.js 头部
+    //   :90-108 一带记录的同款风险。改用共享 lib（scripts/lib/extract-function-body.js）的有限状态词法
+    //   扫描——跳过字符串/模板/正则/注释内部的假花括号，只让真代码态字符参与深度计数。
     const braceOpen = sc.indexOf('{', firstIf);
-    let depth = 0, braceClose = -1;
-    for (let i = braceOpen; i < sc.length; i++) { if (sc[i] === '{') depth++; else if (sc[i] === '}') { depth--; if (depth === 0) { braceClose = i; break; } } }
+    const braceClose = findMatchingBraceIndex(sc, braceOpen);
     assert.ok(braceClose > braceOpen, '[静态·C4b③] 首个 if 块花括号不平衡');
     const ifBlock = sc.slice(braceOpen, braceClose + 1);
     assert.ok(ifBlock.includes("setFrags.push('deadline = ?')") && ifBlock.includes('setParams.push(dlValue)'), '[静态·C4b③] SET 片段（setFrags.push deadline + setParams.push dlValue）必须在首个 if (scopeChangeDeadlineChanges.length) 的块**内**');
@@ -447,6 +453,56 @@ async function main() {
     assert.ok(between.indexOf("setFrags.push('deadline") === -1, '[静态·C4b③] if 块之后到 UPDATE 之间不得再出现 deadline 的 SET 构造（防「空 if + 块外无条件 push」）');
     assert.ok(braceClose < sc.indexOf('const upd = await dbRunAsync'), '[静态·C4b③] 首个 if 块须在 UPDATE 之前');
     ok('[静态·C4b③] scope-change：构造函数赋值 → 同一变量同时门控 SET 片段与新 INSERT（参数位引用同一变量）');
+
+    // ══════════════════════════════════════════════════════════════════════
+    // [G3·长任务B S4c·2026-09-17] mutated 反例——纯合成最小片段（不改动任何生产文件），证明改用共享 lib
+    // （findMatchingBraceIndex）前后确有判别力差异：改造前的朴素深度计数逐字符统计花括号、不区分代码/
+    // 字符串/模板/注释，遇到"块内模板字符串含裸 }"与"注释含裸 {"两类输入会分别数错（提前收尾 / 提取
+    // 失败），改造后（有限状态词法扫描剥掉字符串/模板/注释后再计数）两类输入都能取到正确边界。
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      // 反例①：块内模板字符串含裸 } ——旧版朴素计数会被模板文本里的 } 带偏，提前在 doStuff() 之前收尾。
+      const fixtureA = "if (x.length) {\n" +
+        "  const label = `还剩 ${x.length} } 项`;\n" +
+        "  doStuff();\n" +
+        "}\nconst after = 1;";
+      const openA = fixtureA.indexOf('{');
+      const newCloseA = findMatchingBraceIndex(fixtureA, openA);
+      assert.ok(newCloseA >= 0, '[G3 mutated①] 新版（共享 lib）应能在含模板字符串裸 } 的片段里找到收尾 }');
+      const newBlockA = fixtureA.slice(openA, newCloseA + 1);
+      assert.ok(newBlockA.includes('doStuff()') && !newBlockA.includes('const after'),
+        `[G3 mutated①] 新版应恰好取到含 doStuff() 的完整块、不越界吞并块外代码，实得 ${JSON.stringify(newBlockA)}`);
+      // 旧版朴素深度计数（照抄改造前 :440-442 逐字符实现，仅用于本对照，非生产代码路径）。
+      let depthA = 0, legacyCloseA = -1;
+      for (let i = openA; i < fixtureA.length; i++) {
+        if (fixtureA[i] === '{') depthA++;
+        else if (fixtureA[i] === '}') { depthA--; if (depthA === 0) { legacyCloseA = i; break; } }
+      }
+      const legacyBlockA = legacyCloseA >= 0 ? fixtureA.slice(openA, legacyCloseA + 1) : null;
+      assert.ok(!legacyBlockA || !legacyBlockA.includes('doStuff()'),
+        `[G3 mutated①] 旧版朴素计数应在此漏检（被模板字符串内的裸 } 带偏提前收尾，取不到 doStuff()）——若此断言失败说明旧版行为已意外改变，需重估 G3 是否仍必要，旧版实得 ${JSON.stringify(legacyBlockA)}`);
+
+      // 反例②：注释含裸 { ——旧版朴素计数会被注释文本里的 { 带偏，多欠一层深度，导致提取失败（找不到收尾）。
+      const fixtureB = "if (x.length) {\n" +
+        "  /* 说明：这里的 " + "{" + " 只是举例，不是代码 */\n" +
+        "  doStuff();\n" +
+        "}\nfunction unrelated() { return 1; }\n";
+      const openB = fixtureB.indexOf('{');
+      const newCloseB = findMatchingBraceIndex(fixtureB, openB);
+      assert.ok(newCloseB >= 0, '[G3 mutated②] 新版（共享 lib）应能在含注释裸 { 的片段里找到收尾 }');
+      const newBlockB = fixtureB.slice(openB, newCloseB + 1);
+      assert.ok(newBlockB.includes('doStuff()') && !newBlockB.includes('unrelated'),
+        `[G3 mutated②] 新版应恰好取到含 doStuff() 的完整块、不吞并块外的 unrelated 函数，实得 ${JSON.stringify(newBlockB)}`);
+      let depthB = 0, legacyCloseB = -1;
+      for (let i = openB; i < fixtureB.length; i++) {
+        if (fixtureB[i] === '{') depthB++;
+        else if (fixtureB[i] === '}') { depthB--; if (depthB === 0) { legacyCloseB = i; break; } }
+      }
+      assert.strictEqual(legacyCloseB, -1,
+        `[G3 mutated②] 旧版朴素计数应在此漏检（被注释内的裸 { 带偏，多欠一层深度导致提取失败/越界），若此断言失败说明旧版行为已意外改变，需重估 G3 是否仍必要，旧版实得收尾下标=${legacyCloseB}`);
+
+      ok('[G3·长任务B S4c] mutated 反例：块内模板字符串含裸 }/注释含裸 { 两类输入，新版（共享 lib 状态机）均取到正确边界，旧版朴素深度计数在同输入下分别"提前收尾漏掉块尾代码"与"提取失败"');
+    }
     const newCodes = { estimate_eta: "'estimate', ?, 'estimate_eta'", feasibility_change: "'feasibility', ?, 'feasibility_change'", assign_eta: "?, ?, ?, 'assign_eta'", scope_change_deadline: "'scope_change', ?, 'scope_change_deadline'" };
     for (const [code, frag] of Object.entries(newCodes)) {
       const n = src.split(frag).length - 1;

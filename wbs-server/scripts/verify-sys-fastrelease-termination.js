@@ -517,6 +517,11 @@ async function main() {
     assertAllNull(rowAfterReturn, '[5-前置] 打回后六列应已清空');
     await estimateFuture(id);   // 打回清空 ETA，重新填才能再次 submit
     const beforeTl = await timelineCount(id);
+    // [codex 588 L1] 提交前先记 MAX(id)——下方按 id > 该值精确圈出"这次 submit 新增的行"，逐条核对
+    // action_code/event_type，而不只看总数（总数断言只能证明"新增了 2 条"，证不出"恰好是逐人行+镜像行
+    // 这两条，且不是别的巧合组合"）。
+    const beforeMaxIdRow = await get(`SELECT COALESCE(MAX(id), 0) AS m FROM sys_issue_timeline WHERE issue_id=?`, [id]);
+    const beforeMaxId = beforeMaxIdRow.m;
     // 仍带 direct_release=true（legacy payload 兼容负例的另一实例）——若拆分支不干净（旧闸残留任一处
     // 未删），本条会以 409 的形式红；若挂牌闸误把"已终结"当"仍活跃"，本条会以"多插了一行
     // sys_fast_release_executors"的形式红。
@@ -529,8 +534,27 @@ async function main() {
     assert.strictEqual(rowAfterSubmit.online_source, null, '[5] online_source 应仍为空（未曾走已上线）');
     const feRows = await all('SELECT id FROM sys_fast_release_executors WHERE issue_id=?', [id]);
     assert.strictEqual(feRows.length, 0, `[5] 授权已终结，挂牌闸不应触发：sys_fast_release_executors 应恰 0 行，实得 ${feRows.length}`);
-    assert.strictEqual(await timelineCount(id), beforeTl + 1, '[5] timeline 恰新增 1 条（runWGate 镜像行；无挂牌行、无直上拒绝行）');
-    ok('[5]（语义重定义）终结后 submit（含 direct_release=true legacy payload）：正常 200 进入「待验证」+ 零挂牌（isActiveFastReleaseAuth 因 fast_release_auth_at 已被终结清空而判 false）+ timeline 恰新增 1 条 runWGate 镜像行');
+    // [长任务B·S1·2026-09-17] submit CAS 成功后新增一条「逐人完成」真实时间线行（action_code=
+    //   dev_submit_done/dev_no_code，方案 时间线逐人完成事件_20260916_v1.1 §4 A1），与本条既有的
+    //   runWGate 镜像行并存不去重（B3 语义分工：逐人行=提交当时动作快照，runWGate 行=全单状态变化）——
+    //   本用例的 submit 会天然多写这一条，+1→+2（改前=1）。
+    assert.strictEqual(await timelineCount(id), beforeTl + 2, '[5] timeline 恰新增 2 条（逐人完成行 + runWGate 镜像行；无挂牌行、无直上拒绝行）');
+    // [codex 588 L1] 精确圈出本次 submit 新增的行（id > beforeMaxId），逐条核对身份，不止核对总数。
+    // 本用例是 bug 单人团队正常前进（非 feature 的三种 skip 变体），runWGate 镜像行的 mirrorActionCode
+    // 恒为 null（index.js runWGate 内 mirrorActionCode 只在 feature 的三条 skip 分支才被赋值，见该函数
+    // :4040/:4084/:4103/:4110 一带），故镜像行判据是 event_type='status_change' ∧ action_code IS NULL。
+    const newRows = await all(`SELECT id, event_type, action_code FROM sys_issue_timeline WHERE issue_id=? AND id > ? ORDER BY id`, [id, beforeMaxId]);
+    assert.strictEqual(newRows.length, 2, `[5] 精确圈定新增行应恰 2 条，实得 ${newRows.length}（${JSON.stringify(newRows)}）`);
+    const perDevRows = newRows.filter((r) => r.action_code === 'dev_submit_done');
+    const mirrorRows = newRows.filter((r) => r.event_type === 'status_change' && r.action_code === null);
+    assert.strictEqual(perDevRows.length, 1, `[5] 新增行中 action_code='dev_submit_done' 的逐人完成行应恰 1 条，实得 ${perDevRows.length}（${JSON.stringify(newRows)}）`);
+    // [codex 589 LOW-1] 逐人完成行不仅按 action_code 过滤，还须精确核对其 event_type='note'（同
+    // verify-sys-perdev-done.js [C9·LOW-1] 同款收紧——避免"恰好有条 action_code 撞名但 event_type
+    // 不对的行"被误当逐人行放过）。
+    assert.strictEqual(perDevRows.length === 1 && perDevRows[0].event_type, 'note', `[5·LOW-1] 逐人完成行 event_type 应精确为 'note'，实得 ${perDevRows[0] && perDevRows[0].event_type}`);
+    assert.strictEqual(mirrorRows.length, 1, `[5] 新增行中 event_type='status_change' ∧ action_code IS NULL 的 runWGate 镜像行应恰 1 条，实得 ${mirrorRows.length}（${JSON.stringify(newRows)}）`);
+    assert.ok(perDevRows[0].id < mirrorRows[0].id, `[5] 逐人完成行 id 应早于 runWGate 镜像行 id（B5 顺序），实得逐人行 id=${perDevRows[0].id}，镜像行 id=${mirrorRows[0].id}`);
+    ok('[5]（语义重定义）终结后 submit（含 direct_release=true legacy payload）：正常 200 进入「待验证」+ 零挂牌（isActiveFastReleaseAuth 因 fast_release_auth_at 已被终结清空而判 false）+ timeline 恰新增 2 条（逐人完成行 + runWGate 镜像行，逐条身份+顺序精确核对，非仅总数）');
   }
 
   // ══════════════════════════ [6]（组B·S2 订正）直上消费（fastlane 例外路径）→ 消费记录逐列完整保留 ══════════════════════════

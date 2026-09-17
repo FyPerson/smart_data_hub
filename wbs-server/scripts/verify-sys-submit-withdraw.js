@@ -418,7 +418,13 @@ async function main() {
     const { issueId, daId, tok, latestEventId } = await mkCommitsSubmitted('bug', '处理中', 5, { bugCauseNote: bugCauseNoteFixture, workNote: workNoteFixture });
     const commitsBefore = await commitsOf(daId);
     must(commitsBefore.length === 2, `[CAS 后效果夹具] 提交时应有 2 条 commit 行，实得=${commitsBefore.length}`);
+    // [codex 589 采纳] 把成员 round_no 显式置为非 NULL 值（3）再撤回——原用例 round_no 恒为夹具默认的
+    //   NULL，"tlRow.round_no === memberBefore.round_no" 在 NULL===NULL 时也成立，测不出"真的透传了
+    //   非 NULL 值"这类回归（比如误写成恒 NULL 的实现，本判据照样绿）。NULL 兼容性保留在下方 [S4a
+    //   round_no 透传] 独立小节单测。
+    await run(`UPDATE sys_issue_dev_assignees SET round_no=3 WHERE id=?`, [daId]);
     const memberBefore = await memberRowOf(issueId, 5);
+    must(memberBefore.round_no === 3, `[CAS 后效果夹具] 显式置 round_no=3 应生效，实得=${memberBefore.round_no}`);
     must(memberBefore.resolved_at !== null, `[CAS 后效果夹具] 提交后 resolved_at 应非空`);
     // [M3 回填] 撤回前独立读一次 delivery_rev（走详情端点，与撤回端点内部 computeDeliveryRev 同源
     // 实现——不直接调用内部函数，走真实 HTTP 响应，逼近真实前端读到的值），供下方与审计快照逐字核对。
@@ -458,6 +464,11 @@ async function main() {
     // 夹具明明填了却没验），不再只验存在性/双勾。
     const tlRow = await get(`SELECT * FROM sys_issue_timeline WHERE issue_id=? AND action_code='dev_withdraw' ORDER BY id DESC LIMIT 1`, [issueId]);
     must(!!tlRow && tlRow.event_type === 'note', `[CAS 后效果] 应写一条 event_type='note' + action_code='dev_withdraw' 的 timeline 行`);
+    // [长任务B·S4a·#64③收口] 撤回行时间线自足——ref_id/round_no 两列应随撤回行一并落库（同 S1 逐人
+    //   完成事件同款范式）。判别力提示：若撤回 INSERT 漏写这两列（回退成旧的 6 占位符版本），本组两条
+    //   断言应翻红（ref_id/round_no 读回 undefined/null，与期望的 daId/memberBefore.round_no 不等）。
+    must(tlRow.ref_id === daId, `[审计完整性·S4a] dev_withdraw 行 ref_id 应等于本实例 id，期望=${daId}，实得=${tlRow.ref_id}`);
+    must(tlRow.round_no !== undefined && tlRow.round_no === memberBefore.round_no && tlRow.round_no === 3, `[审计完整性·S4a] dev_withdraw 行 round_no 应等于成员行 round_no(=3，非 NULL 兼容偶然通过)，期望=3，实得=${tlRow.round_no}`);
     const auditPayload = tlRow ? JSON.parse(tlRow.payload_json) : {};
     must(auditPayload.dev_status_before === 'code_submitted', `[审计快照] dev_status_before 应为 code_submitted，实得=${auditPayload.dev_status_before}`);
     must(auditPayload.withdrawn_event_id === latestEventId, `[审计快照] withdrawn_event_id 应等于令牌值，实得=${auditPayload.withdrawn_event_id}`);
@@ -476,6 +487,22 @@ async function main() {
     // [M1 回填] 探针在真撤回、真删表之前跑一次——终检段跑在全部 deleteIssueFully 之后是恒真断言（空表
     // 上 P1-P16 必然全绿），本处对着刚发生过 commit 行删除+CAS 的真实非空库状态验一次 P2「pending 配对」。
     await selfCertifyProbes('[CAS 后效果段内探针]');
+    await deleteIssueFully(issueId);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // [codex 589 采纳·NULL 兼容] round_no 透传 NULL 场景独立小节——上方【CAS 后效果】改为显式置 3 后，
+  //   这里单测保留"成员行 round_no 本就是 NULL（未建过轮次）时撤回行同样应透传 NULL，不伪造成 0/其它
+  //   占位值"这条兼容性，两个场景合起来覆盖 round_no 的非 NULL/NULL 两态。
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const { issueId, daId, tok, latestEventId } = await mkCommitsSubmitted('bug', '处理中', 5);
+    const memberBefore = await memberRowOf(issueId, 5);
+    must(memberBefore.round_no === null, `[S4a round_no 透传·NULL 兼容夹具] 未显式设置时成员行 round_no 应为 NULL，实得=${memberBefore.round_no}`);
+    const r = await call('POST', `/api/sys-issues/${issueId}/submit/withdraw`, tok, { reason: 'NULL round_no 兼容性测试', expected_submit_event_id: latestEventId });
+    must(r.status === 200, `[S4a round_no 透传·NULL 兼容] 撤回应 200，实得=${r.status} ${JSON.stringify(r.body)}`);
+    const tlRow = await get(`SELECT round_no FROM sys_issue_timeline WHERE issue_id=? AND action_code='dev_withdraw' ORDER BY id DESC LIMIT 1`, [issueId]);
+    must(!!tlRow && tlRow.round_no === null, `[S4a round_no 透传·NULL 兼容] 成员行 round_no 为 NULL 时，撤回行应透传为 NULL（不伪造占位值），实得=${tlRow && tlRow.round_no}`);
     await deleteIssueFully(issueId);
   }
 

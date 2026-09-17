@@ -53,6 +53,9 @@ const path = require('path');
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
 const acorn = require('acorn'); // [S5 甲2] extractFunctionBody 交叉验证。⚠️ [S5b·Opus 预筛 M3] 本仓第 6 处消费点（collab-validation-status-coverage / db-connections-writers 硬 require，badge-alias / external-source-playwright try 降级）——acorn 此前一直是 eslint 传递依赖被提升，本次 S5 首次显式写进 devDependencies 是补旧债，不是新引入
+// [长任务B·S4c 补充] 逐人完成 else-if 分支体结构锚提取——用共享 lib 的有限状态词法扫描（跳过字符串/
+// 模板/注释内的假花括号），不重造一份朴素深度计数。
+const { findMatchingBraceIndex } = require('./lib/extract-function-body.js');
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -131,6 +134,19 @@ function stripComments(code) {
     return code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
+// [长任务B S4c2·codex 590 裁定 M6] 抽出纯函数：先取 <style> 标签内容，剥 CSS 注释 /* … */（不是 JS
+//   注释——CSS 没有 // 行注释语法，只剥块注释），再 matchAll 出全部 `.si-tl-evt.si-tl-<色名> { … }`
+//   规则。原判据直接对整份 HTML 全文 matchAll，若某条规则被整行 CSS 注释掉（`/* .si-tl-evt.si-tl-teal
+//   {...} */`），纯字符匹配的正则完全不理解"这是注释"，会照样把注释里的文本当成一条真实规则算进
+//   结果——"删规则"的活体变异用字符串替换成空串能骗过这条判据，但更贴近真实误操作的"顺手注释掉"
+//   不会被发现。改为先剥 CSS 注释再扫描，正向断言与 MED-4a/b/c 三条变异对照组共用同一份实现，不复刻。
+function extractTimelineBadgeRules(fullSrc) {
+    const styleMatch = fullSrc.match(/<style[^>]*>([\s\S]*?)<\/style>/);
+    const styleBody = styleMatch ? styleMatch[1] : '';
+    const noComments = styleBody.replace(/\/\*[\s\S]*?\*\//g, '');
+    return [...noComments.matchAll(/\.si-tl-evt\.si-tl-([a-z]+)\s*\{\s*background:\s*(#[0-9a-fA-F]{6});\s*color:\s*#[0-9a-fA-F]{6};\s*\}/g)];
+}
+
 // 取 `const <name> = {` 起花括号平衡的对象字面量全文（照 verify-sys-fastlane-panel-static.js 同款范式·
 // S10 预筛拦截 B1 三表正向断言专用）。
 function extractConstObjectText(name) {
@@ -182,6 +198,211 @@ function guardConditionBefore(body, marker) {
 // 范围：本文件内实际调用 extractFunctionBody(src, 目标函数名字面量)（含经由内部小工具 grabFnA 间接
 // 调用的形态）覆盖到的全部目标函数名，去重后取集合——不是固定 26 这个预估数，以本文件当前实际调用点
 // 为准（多点位重复调用同一函数名只登记一次，比对一次即可，重复调用不改变该函数体在源码里的边界）。
+// [G1·长任务B S4c2·codex 590 裁定·2026-09-17] grabFnA 非字面量调用的豁免判定——acorn 结构级重写，
+//   替代原 regex + 手写括号平衡的启发式实现。
+//   ⚠️ 改造前两版遗留的问题：587-R M1 版按「参数文本字面等于 'name'」纯文本相等放行（任意位置的
+//   `grabFnA(name)` 都会被放过）；S4c 版加了"循环体内、参数恰为循环变量"的结构判据，但①循环的
+//   `right`（被遍历的是什么）完全不检查——`for (const name of ['x'])` 这种遍历**任意内联数组**的循环
+//   同样会被判豁免，而这个数组的内容从未被证明是"已审计过的合法目标函数名清单"；②仍是正则+手写括号
+//   计数，字符串字面量里出现裸 `{`/`}` 会打乱计数；③不识别"循环体内嵌套函数用同名参数遮蔽循环变量"
+//   这种情况——遮蔽后该函数体内的 `name` 已是另一个绑定，不该继续豁免。
+//   本版全部改用 acorn 真实语法树：豁免须同时满足——① 调用落在某个 `for (const <var> of <right>) {…}`
+//   循环体内；② `<right>` 必须是本文件登记的目标枚举标识符 G1_GRAB_FN_A_LOOP_TARGETS（不接受任意内联
+//   数组字面量，见下方常量定义）；③ 从循环体顶层到该调用之间，若途经任何嵌套函数（声明/表达式/箭头）
+//   用同名参数遮蔽了循环变量，则该函数体内的调用不再豁免。
+const G1_GRAB_FN_A_LOOP_TARGETS_NAME = 'G1_GRAB_FN_A_LOOP_TARGETS';
+// eslint-disable-next-line no-unused-vars
+const G1_GRAB_FN_A_LOOP_TARGETS = ['esc', 'siTlChangeValueHtml', 'siRenderTimelineChanges', 'siTlChangeObjectText', 'siRenderTimeline', 'siTlChangesHtml'];
+function paramDeclaresName(paramNode, name) {
+    if (!paramNode) return false;
+    if (paramNode.type === 'Identifier') return paramNode.name === name;
+    if (paramNode.type === 'AssignmentPattern') return paramDeclaresName(paramNode.left, name);
+    if (paramNode.type === 'RestElement') return paramDeclaresName(paramNode.argument, name);
+    if (paramNode.type === 'ObjectPattern') return (paramNode.properties || []).some((p) => paramDeclaresName(p.value || p.argument, name));
+    if (paramNode.type === 'ArrayPattern') return (paramNode.elements || []).some((el) => paramDeclaresName(el, name));
+    return false;
+}
+function walkAllAcornNodes(node, visit) {
+    if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+    visit(node);
+    for (const key in node) {
+        if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+        const val = node[key];
+        if (Array.isArray(val)) { for (const item of val) walkAllAcornNodes(item, visit); }
+        else if (val && typeof val === 'object' && typeof val.type === 'string') walkAllAcornNodes(val, visit);
+    }
+}
+// [长任务B S4c3·codex 591-R M4] 把「G1 枚举标识符是否指向本文件模块级声明」与「循环变量是否被内层
+//   同名声明遮蔽」统一改成真实作用域链解析，替代旧版「按名字字符串相等就信」（枚举名）与「只查函数
+//   参数遮蔽」（循环变量）两处过窄判据。591-R 报告的绕过面：① 局部同名 `const G1_GRAB_FN_A_LOOP_TARGETS`
+//   在内层函数/块里重新声明后替换遍历目标——旧版只比对 Identifier.name 字符串，不管它实际绑定的是
+//   模块级那份还是局部重声明的那份，一律放行；② 循环体内 `const name = ...` 块级声明 / 嵌套
+//   `for (const name of ...)` 用同名变量遮蔽外层循环变量——旧版 `collectExemptGrabFnACallStarts` 只识别
+//   "嵌套函数用同名参数遮蔽"这一种遮蔽形态，块级声明与嵌套 for-of 两种遮蔽形态视而不见。
+//
+// collectPatternNames：从任意绑定模式（Identifier/ObjectPattern/ArrayPattern/AssignmentPattern/
+//   RestElement）里递归收集全部被声明的标识符名，供作用域帧收集变量名与函数参数名共用。
+function collectPatternNames(pat, names) {
+    if (!pat) return;
+    if (pat.type === 'Identifier') { names.add(pat.name); return; }
+    if (pat.type === 'ObjectPattern') {
+        for (const p of pat.properties) collectPatternNames(p.type === 'RestElement' ? p.argument : p.value, names);
+        return;
+    }
+    if (pat.type === 'ArrayPattern') { for (const el of pat.elements) { if (el) collectPatternNames(el, names); } return; }
+    if (pat.type === 'AssignmentPattern') { collectPatternNames(pat.left, names); return; }
+    if (pat.type === 'RestElement') { collectPatternNames(pat.argument, names); return; }
+}
+// 收集一个 BlockStatement 直接子语句里声明的名字（const/let 变量 + 具名函数声明）——只看直接子语句，
+// 不下探嵌套块/函数（那些各自另起一帧，遮蔽判定按帧链逐层核对，不需要在这里合并）。
+function collectLocalScopeNames(blockNode) {
+    const names = new Set();
+    for (const stmt of blockNode.body || []) {
+        if (stmt.type === 'VariableDeclaration' && (stmt.kind === 'const' || stmt.kind === 'let')) {
+            for (const d of stmt.declarations) collectPatternNames(d.id, names);
+        } else if (stmt.type === 'FunctionDeclaration' && stmt.id) {
+            names.add(stmt.id.name);
+        }
+    }
+    return names;
+}
+// [长任务B S4c3·codex 591-R2 M4b·主会话亲核订正] `var` 是函数作用域（不是块作用域）——此前函数帧只收
+// 参数名+函数自身 id，函数体内（含任意深度嵌套的 if/for/while/switch/try 等块，但**不含**嵌套函数，
+// 那些各自另起自己的 var 作用域）出现的 `var` 声明完全没有被计入函数帧，导致"函数内嵌套函数体内的
+// var 遮蔽外层枚举/循环变量"这类遮蔽形态判据视而不见。递归收集时遇到 FunctionDeclaration/
+// FunctionExpression/ArrowFunctionExpression 立即停止下探（那是另一个函数的作用域边界）。
+function collectVarNamesInFunctionBody(node, names) {
+    if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+    if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') return;
+    if (node.type === 'VariableDeclaration' && node.kind === 'var') {
+        for (const d of node.declarations) collectPatternNames(d.id, names);
+    }
+    for (const key in node) {
+        if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range' || key === '__scopeChain' || key === '__ownFrame') continue;
+        const val = node[key];
+        if (Array.isArray(val)) { for (const item of val) collectVarNamesInFunctionBody(item, names); }
+        else if (val && typeof val === 'object' && typeof val.type === 'string') collectVarNamesInFunctionBody(val, names);
+    }
+}
+// annotateScopeChains：整棵 AST 只走一次，给每个节点挂 `__scopeChain`（从最外层非 Program 作用域到
+// 最内层、按嵌套顺序排列的 Set 数组；不含 Program 顶层本身——模块级声明天然不算"遮蔽"）。ForOfStatement
+// 额外挂 `__ownFrame`，指向它自己那个循环变量专属的 Set 对象引用（用于后续区分"这就是外层目标循环
+// 自己的绑定"还是"被更内层同名声明顶替"）。
+function annotateScopeChains(programAst) {
+    function visit(node, scopeStack) {
+        if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+        node.__scopeChain = scopeStack;
+        let nextStack = scopeStack;
+        if (node.type === 'BlockStatement') {
+            nextStack = scopeStack.concat([collectLocalScopeNames(node)]);
+        } else if (node.type === 'ForOfStatement' || node.type === 'ForInStatement') {
+            const frame = new Set();
+            if (node.left.type === 'VariableDeclaration') { for (const d of node.left.declarations) collectPatternNames(d.id, frame); }
+            node.__ownFrame = frame;
+            nextStack = scopeStack.concat([frame]);
+        } else if (node.type === 'ForStatement') {
+            const frame = new Set();
+            if (node.init && node.init.type === 'VariableDeclaration') { for (const d of node.init.declarations) collectPatternNames(d.id, frame); }
+            nextStack = scopeStack.concat([frame]);
+        } else if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+            const frame = new Set();
+            for (const p of node.params) collectPatternNames(p, frame);
+            if (node.id) frame.add(node.id.name);
+            // [S4c3·M4b] var 提升到函数顶层，须计入函数自己的帧（不下探嵌套函数，见函数头注）。
+            collectVarNamesInFunctionBody(node.body, frame);
+            nextStack = scopeStack.concat([frame]);
+        } else if (node.type === 'CatchClause' && node.param) {
+            const frame = new Set();
+            collectPatternNames(node.param, frame);
+            nextStack = scopeStack.concat([frame]);
+        } else if (node.type === 'SwitchStatement') {
+            // [S4c3·M4b] switch 的全部 case 共享**一个**词法作用域帧（ECMAScript 语义：没有花括号包裹的
+            // case 分支不各自另起块作用域，`case 'a': const x=1; case 'b': const y=2;` 里 x/y 同属一帧）。
+            // 若某个 case 分支自己又用花括号包成 BlockStatement，那个花括号会照既有 BlockStatement 分支
+            // 另起自己的帧，这里只收集"直接挂在 case.consequent 数组里、没有额外花括号包裹"的声明。
+            const frame = new Set();
+            for (const c of node.cases) {
+                for (const stmt of c.consequent) {
+                    if (stmt.type === 'VariableDeclaration' && (stmt.kind === 'const' || stmt.kind === 'let')) {
+                        for (const d of stmt.declarations) collectPatternNames(d.id, frame);
+                    } else if (stmt.type === 'FunctionDeclaration' && stmt.id) {
+                        frame.add(stmt.id.name);
+                    }
+                }
+            }
+            nextStack = scopeStack.concat([frame]);
+        }
+        for (const key in node) {
+            if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range' || key === '__scopeChain' || key === '__ownFrame') continue;
+            const val = node[key];
+            if (Array.isArray(val)) { for (const item of val) visit(item, nextStack); }
+            else if (val && typeof val === 'object' && typeof val.type === 'string') visit(val, nextStack);
+        }
+    }
+    visit(programAst, []);
+}
+// 判定某节点处引用的标识符 name 是否被其祖先作用域链中的任意一帧遮蔽（用于 G1 枚举标识符——祖先链
+// 里只要有任何一帧含同名声明，就说明该处引用解析到的不是模块级顶层声明，而是局部重声明）。
+function isNameShadowedAtNode(node, name) {
+    return (node.__scopeChain || []).some((frame) => frame.has(name));
+}
+// 收集"确实豁免"的 grabFnA(loopVar) 调用起点——loopVarFrame 是外层目标循环自己那个变量帧的**引用**
+// （非按名字比较）：对 bodyNode 内每个 grabFnA(<loopVar 同名标识符>) 调用，从其 __scopeChain 由内向外
+// 找第一个含 loopVar 名字的帧；只有这个"最近绑定帧"恰好就是 loopVarFrame 本身（引用相等）才算真的
+// 引用外层目标循环变量——嵌套函数参数遮蔽 / 块级 `const <loopVar>` 遮蔽 / 嵌套同名 for-of 遮蔽，
+// 无论哪种，最近绑定帧都会是那个更内层的新帧而非 loopVarFrame，天然判红，不用逐种遮蔽形态分别写判据。
+function collectExemptGrabFnACallStarts(bodyNode, loopVar, loopVarFrame, exemptStarts) {
+    walkAllAcornNodes(bodyNode, (n) => {
+        if (n.type !== 'CallExpression' || n.callee.type !== 'Identifier' || n.callee.name !== 'grabFnA') return;
+        if (n.arguments.length !== 1 || n.arguments[0].type !== 'Identifier' || n.arguments[0].name !== loopVar) return;
+        const chain = n.__scopeChain || [];
+        let nearestFrame = null;
+        for (let i = chain.length - 1; i >= 0; i--) {
+            if (chain[i].has(loopVar)) { nearestFrame = chain[i]; break; }
+        }
+        if (nearestFrame === loopVarFrame) exemptStarts.add(n.start);
+    });
+}
+function findNonExemptGrabFnACalls(cleanSrc) {
+    let ast;
+    try {
+        ast = acorn.parse(cleanSrc, { ecmaVersion: 'latest', allowReturnOutsideFunction: true });
+    } catch (e) {
+        ast = null;   // fail-closed 兜底见下方
+    }
+    if (!ast) {
+        // 解析失败——不静默放行，退回按纯文本抓取全部 grabFnA(...) 调用参数文本，一律计入违规。
+        const bad = [];
+        for (const gm of cleanSrc.matchAll(/grabFnA\(\s*([^)]*)\)/g)) {
+            const argText = gm[1].trim();
+            if (!/^'[^']+'$/.test(argText)) bad.push(argText);
+        }
+        return bad;
+    }
+    annotateScopeChains(ast);   // [S4c3·M4] 先给整棵树挂作用域链，下面两处判据都要用它来解析真实绑定
+    const exemptStarts = new Set();
+    walkAllAcornNodes(ast, (node) => {
+        if (node.type !== 'ForOfStatement' || node.left.type !== 'VariableDeclaration') return;
+        const decl = node.left.declarations[0];
+        if (!decl || decl.id.type !== 'Identifier') return;
+        // [S4c3·M4] 枚举标识符须字面上是 G1_GRAB_FN_A_LOOP_TARGETS，**且**该处引用未被任何祖先作用域
+        // 里的同名局部重声明遮蔽——否则它实际绑定的是局部替换的数组，不是本文件登记的模块级枚举。
+        const isTargetEnum = node.right.type === 'Identifier' && node.right.name === G1_GRAB_FN_A_LOOP_TARGETS_NAME
+            && !isNameShadowedAtNode(node, G1_GRAB_FN_A_LOOP_TARGETS_NAME);
+        if (!isTargetEnum) return;
+        collectExemptGrabFnACallStarts(node.body, decl.id.name, node.__ownFrame, exemptStarts);
+    });
+    const bad = [];
+    walkAllAcornNodes(ast, (node) => {
+        if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.callee.name !== 'grabFnA') return;
+        const arg = node.arguments[0];
+        if (arg && arg.type === 'Literal' && typeof arg.value === 'string') return;   // 字面量字符串，天然安全
+        if (exemptStarts.has(node.start)) return;   // 结构上确认落在登记枚举的循环体内、参数恰为该循环变量、未被遮蔽
+        bad.push(arg && arg.type === 'Identifier' ? arg.name : (arg ? cleanSrc.slice(arg.start, arg.end) : '(无参)'));
+    });
+    return bad;
+}
+let __selfCleanForG1Mutation = null;   // 供文末 [G1] mutated 反例复用，避免重新 readFile+stripComments
 const EXTRACT_FN_BODY_TARGET_NAMES = (() => {
     const names = new Set();
     const re1 = /extractFunctionBody\(\s*(?:src|mutated|indexJsSrc)\s*,\s*'([^']+)'\s*\)/g;
@@ -189,6 +410,13 @@ const EXTRACT_FN_BODY_TARGET_NAMES = (() => {
     const selfSrc = fs.readFileSync(__filename, 'utf8');
     // [S5b-4] 在**剥注释后**的文本上扫：注释里写的示例（如 grabFnA('…')）会被当成目标名「…」→ acorn 找不到而假红
     const selfClean = stripComments(selfSrc);
+    // [长任务B S4c2·codex 590 裁定] findNonExemptGrabFnACalls 已改为 acorn 真实解析——喂给它的必须是
+    //   **原始**源码（含真注释/真正则字面量），不能是 stripComments() 的产物：本文件体量大、含多处
+    //   正则字面量，naive 的 `//`/`/* */` 剥离正则会把正则字面量内部的 `//` 序列误当行注释切断，
+    //   产出语法上不再合法的 JS（acorn.parse 直接抛「Unterminated regular expression」），
+    //   findNonExemptGrabFnACalls 内部的 try/catch 会静默退化到旧版纯文本兜底、完全绕过新判据——
+    //   这条踩坑已实测复现，改存原始 selfSrc（真解析器自己正确跳过注释，不需要也不能预先剥离）。
+    __selfCleanForG1Mutation = selfSrc;
     let mm;
     while ((mm = re1.exec(selfClean))) names.add(mm[1]);
     while ((mm = re2.exec(selfClean))) names.add(mm[1]);
@@ -212,7 +440,7 @@ const EXTRACT_FN_BODY_TARGET_NAMES = (() => {
     for (const [txt, expected] of Object.entries(EXPECTED_NON_LITERAL)) {
         if (countOf(txt) !== expected) throw new Error('[S6a] 动态传名形态「' + txt + '」的调用次数应恰 ' + expected + '，实得 ' + countOf(txt) + '——新增动态传名调用不进交叉验证集合，禁止');
     }
-    const grabDynamic = [...selfClean.matchAll(/grabFnA\(\s*([^)]*)\)/g)].map(m => m[1].trim()).filter(a => !/^'[^']+'$/.test(a) && a !== 'name');
+    const grabDynamic = findNonExemptGrabFnACalls(selfSrc);
     if (grabDynamic.length) throw new Error('[S6a] grabFnA 出现非字面量调用（不进交叉验证集合）：' + JSON.stringify(grabDynamic));
     // 只认循环体内真的调用了 extractFunctionBody(src, fn) 的循环（本文件另有"这些函数应已删除"的负向 fn 循环，不相干）
     let extractLoops = 0;
@@ -2857,10 +3085,549 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     assert.ok(!/si-tl-release-scope/.test(a.cls), `scope_change_deadline 不应带可隐藏 class，实得 class="${a.cls}"`);
                     assert.deepStrictEqual(badge(tl([row5], [], '')), { cls: 'si-tl-orange', label: '范围变更' }, 'scope_change_deadline 徽章应为「范围变更」（保留原徽章，B 类不覆盖）');
                 });
+
+                // ══════════════════════════════════════════════════════════════════════
+                // [长任务B·S3-A·时间线逐人完成事件_方案_20260916_v1.1] 「开发逐人完成」前端不变量
+                // ══════════════════════════════════════════════════════════════════════
+                check('[S3-A] dev_submit_done/dev_no_code 三表正向登记（连文案）+ CLS 归 si-tl-teal', () => {
+                    const labelBody = stripComments(extractConstObjectText('SI_TL_LABEL') || '');
+                    const clsBody = stripComments(extractConstObjectText('SI_TL_CLS') || '');
+                    assert.ok(labelBody && /dev_submit_done:\s*'开发完成·代码已提交'/.test(labelBody), 'SI_TL_LABEL 应含 dev_submit_done 词条且文案精确');
+                    assert.ok(labelBody && /dev_no_code:\s*'开发完成·无代码交付'/.test(labelBody), 'SI_TL_LABEL 应含 dev_no_code 词条且文案精确');
+                    assert.ok(clsBody && /dev_submit_done:\s*'si-tl-teal'/.test(clsBody), 'SI_TL_CLS dev_submit_done 应归 si-tl-teal');
+                    assert.ok(clsBody && /dev_no_code:\s*'si-tl-teal'/.test(clsBody), 'SI_TL_CLS dev_no_code 应归 si-tl-teal');
+                    // [Opus 预筛 S3·MED-2·长任务B S4c·2026-09-17] 原判据 `/SI_TL_NOTE_OWN_LABEL_CODES\s*=\s*new
+                    //   Set\(\[[\s\S]*?'dev_submit_done'/` 是懒惰匹配、终点不是 Set 字面量真正的收尾 `]);`——
+                    //   若从 Set 里删掉 'dev_submit_done'，只要文件里**其它地方**（如 :4989 一带某分支判据）还
+                    //   出现字符串 'dev_submit_done'，这条正则仍会命中（越界匹配到 Set 外），假绿。改用
+                    //   grabSet（本文件既有小工具，:2138 一带，终点锚定该 Set 字面量真正的 `]);`）切出精确
+                    //   范围，再在这个范围内断言，不给"删码后靠别处同名字符串蒙混过关"留空子。
+                    const noteOwnBody = stripComments(grabSet('SI_TL_NOTE_OWN_LABEL_CODES') || '');
+                    assert.ok(noteOwnBody, '未提取到 SI_TL_NOTE_OWN_LABEL_CODES Set 字面量');
+                    assert.ok(/'dev_submit_done'/.test(noteOwnBody), 'NOTE_OWN 应含 dev_submit_done（缺失=落回通用「备注」徽章）');
+                    assert.ok(/'dev_no_code'/.test(noteOwnBody), 'NOTE_OWN 应含 dev_no_code（同上）');
+                });
+                check('[S3-A] .si-tl-evt.si-tl-teal 色族本体存在 + 全部 .si-tl-evt.si-tl-* 底色两两不重复（S3b 活体变异会临时删掉这条 CSS 规则验证本断言真有判别力）', () => {
+                    // [Opus 预筛 S3·MED-3·长任务B S4c·2026-09-17] 原判据只手写 4 个既有色族（gray/rose/green/
+                    //   amber）逐个比对——本文件实际已有 9 个 .si-tl-evt.si-tl-* 色族（另 5 个 amber 之外的
+                    //   indigo/blue/red/orange 未被覆盖），新增色族与那 5 个之一撞色不会被这条判据发现（假绿）。
+                    //   改用 matchAll 抓全部规则，断 background 值集合 size===规则条数（两两不重复）这一条更强
+                    //   的不变量，天然覆盖任意新增色族，不必每加一色就手改一遍白名单。
+                    // [长任务B S4c2·codex 590 M6] 改用 extractTimelineBadgeRules（先取 <style> 内容 + 剥 CSS
+                    //   注释再扫描），与下方 MED-4a/b/c 三条活体变异共用同一份实现。
+                    const rules = extractTimelineBadgeRules(src);
+                    assert.ok(rules.length >= 9, `.si-tl-evt.si-tl-* 色族规则应至少 9 条（本文件当前已知色族数），实得 ${rules.length}`);
+                    const teal = rules.find(m => m[1] === 'teal');
+                    assert.ok(teal, '未定位到 .si-tl-evt.si-tl-teal CSS 规则');
+                    assert.strictEqual(teal[2].toLowerCase(), '#ccfbf1', `si-tl-teal 背景色应为 #ccfbf1，实得 ${teal[2].toLowerCase()}`);
+                    const bgSet = new Set(rules.map(m => m[2].toLowerCase()));
+                    assert.strictEqual(bgSet.size, rules.length, `全部 .si-tl-evt.si-tl-* 背景色应两两不重复，实得 ${rules.length} 条规则只有 ${bgSet.size} 个不同底色，重复色值会导致时间线不同性质的事件在视觉上无法区分——规则清单：${JSON.stringify(rules.map(m => [m[1], m[2]]))}`);
+                });
+                // ══════════════════════════════════════════════════════════════════════
+                // [Opus 预筛 S3·MED-4·长任务B S4c·2026-09-17] 三处"活体变异对照组"——上面两条 check 的注释
+                // 分别写了"S3b 活体变异会临时删掉这条 CSS 规则验证本断言真有判别力"这类承诺，但从未真正落地
+                // 成自动化 check（只是口头承诺）。补三条真变异（同 :1276「活体变异对照组①」范式：对真实 src
+                // 做字符串替换模拟改坏，再用同一套判据函数复跑，断言判据确实翻红），逐条钉死。
+                // ══════════════════════════════════════════════════════════════════════
+                check('活体变异对照组·MED-4a：删掉 .si-tl-evt.si-tl-teal 这条 CSS 规则——上方色族存在性 + 计数断言须判红', () => {
+                    const tealRuleText = ".si-tl-evt.si-tl-teal { background: #ccfbf1; color: #0f766e; }   /* 逐人完成专用（用户 2026-09-17 在示例页 V1-V9 中选 V1 teal 实底：与 amber/gray/rose/green/red/blue/indigo 全不撞·方案 20260916 v1.1 D10）*/";
+                    assert.ok(src.includes(tealRuleText), '变异替换未命中原文——teal CSS 规则文本已漂移，需同步本条变异对照组');
+                    // [长任务B S4c2·codex 590 M6] 断"规则数 = 原数 - 1 且缺 teal"（相对不变量），不再断固定
+                    //   数字 8——固定数字每加一色都要手改一遍，相对断言天然跟着基线走。改用
+                    //   extractTimelineBadgeRules 与正向 check 共用同一份实现。
+                    const rulesBefore = extractTimelineBadgeRules(src);
+                    const mutated = src.replace(tealRuleText, '');
+                    const rulesMutated = extractTimelineBadgeRules(mutated);
+                    assert.strictEqual(rulesMutated.length, rulesBefore.length - 1, `删掉 teal 规则后应恰比原数少 1 条（原 ${rulesBefore.length} 条），实得 ${rulesMutated.length}——说明规则提取对"删规则"这类变异不敏感`);
+                    assert.ok(!rulesMutated.some(m => m[1] === 'teal'), '删掉 teal 规则后不应再找到 teal 色族——若仍找到说明判据未真正扫描变异后的文本');
+                });
+                check('活体变异对照组·MED-4a2：把 teal 规则整行用 /* … */ 注掉（不删除文本本体）——extractTimelineBadgeRules 剥 CSS 注释后应视同"该规则不存在"，判红', () => {
+                    const tealRuleText = ".si-tl-evt.si-tl-teal { background: #ccfbf1; color: #0f766e; }   /* 逐人完成专用（用户 2026-09-17 在示例页 V1-V9 中选 V1 teal 实底：与 amber/gray/rose/green/red/blue/indigo 全不撞·方案 20260916 v1.1 D10）*/";
+                    assert.ok(src.includes(tealRuleText), '变异替换未命中原文——teal CSS 规则文本已漂移，需同步本条变异对照组');
+                    const rulesBefore = extractTimelineBadgeRules(src);
+                    // 整条规则本体（不含其后已有的说明性注释）包在一对新的 /* … */ 里，模拟"顺手注释掉一条规则"
+                    // 这种不删文本、只让它对渲染失效的真实误操作。
+                    const tealRuleBodyOnly = ".si-tl-evt.si-tl-teal { background: #ccfbf1; color: #0f766e; }";
+                    const mutated = src.replace(tealRuleBodyOnly, `/* ${tealRuleBodyOnly} */`);
+                    const rulesMutated = extractTimelineBadgeRules(mutated);
+                    assert.strictEqual(rulesMutated.length, rulesBefore.length - 1, `注掉 teal 规则后应恰比原数少 1 条（原 ${rulesBefore.length} 条），实得 ${rulesMutated.length}——若仍等于原数，说明判据把注释文本当成了真实规则`);
+                    assert.ok(!rulesMutated.some(m => m[1] === 'teal'), '注掉 teal 规则后不应再找到 teal 色族——若仍找到说明未真正剥离 CSS 注释');
+                });
+                check('活体变异对照组·MED-4b：从 SI_TL_NOTE_OWN_LABEL_CODES 删掉 dev_submit_done/dev_no_code 两码——上方 NOTE_OWN 断言须判红', () => {
+                    const before = "'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);";
+                    assert.ok(src.includes(before), '变异替换未命中原文——SI_TL_NOTE_OWN_LABEL_CODES 尾部文本已漂移，需同步本条变异对照组');
+                    const mutated = src.replace(before, "'dev_withdraw', 'release_overdue_reason']);");
+                    const noteOwnMutatedRaw = (mutated.match(new RegExp('const SI_TL_NOTE_OWN_LABEL_CODES = new Set\\(\\[[\\s\\S]*?\\]\\);')) || [''])[0];
+                    assert.ok(noteOwnMutatedRaw, '变异后仍应能提取到 SI_TL_NOTE_OWN_LABEL_CODES Set 字面量本体（否则本条对照组自身失效）');
+                    const noteOwnMutated = stripComments(noteOwnMutatedRaw);
+                    assert.ok(!/'dev_submit_done'/.test(noteOwnMutated), '删码后不应再含 dev_submit_done——若仍含说明判据未真正扫描变异后的文本');
+                    assert.ok(!/'dev_no_code'/.test(noteOwnMutated), '删码后不应再含 dev_no_code——同上');
+                });
+                check('活体变异对照组·MED-4c：篡改 SI_TL_LABEL 的 dev_submit_done 文案——上方精确文案断言须判红', () => {
+                    const before = "dev_submit_done: '开发完成·代码已提交'";
+                    assert.ok(src.includes(before), '变异替换未命中原文——SI_TL_LABEL dev_submit_done 文案已漂移，需同步本条变异对照组');
+                    const mutated = src.replace(before, "dev_submit_done: '开发完成'");
+                    // extractConstObjectText（本文件既有小工具）内部固定读模块级 `src`，不接受传参切任意文本
+                    // ——改用同款正则（花括号平衡）直接在 mutated 文本上重新抽取，逻辑与 extractConstObjectText
+                    // 一致，不改动既有工具函数签名以免影响其它调用点。
+                    const grabConstFromText = (text, name) => {
+                        const startRe = new RegExp(`const\\s+${name}\\s*=\\s*\\{`);
+                        const m = startRe.exec(text);
+                        if (!m) return null;
+                        let depth = 0, i = m.index + m[0].length - 1;
+                        const start = i;
+                        for (; i < text.length; i++) {
+                            if (text[i] === '{') depth++;
+                            else if (text[i] === '}') { depth--; if (depth === 0) return text.slice(start, i + 1); }
+                        }
+                        return null;
+                    };
+                    const mutatedLabelBody = stripComments(grabConstFromText(mutated, 'SI_TL_LABEL') || '');
+                    assert.ok(mutatedLabelBody, '变异后仍应能提取到 SI_TL_LABEL 对象字面量本体（否则本条对照组自身失效）');
+                    assert.ok(!/dev_submit_done:\s*'开发完成·代码已提交'/.test(mutatedLabelBody), '篡改文案后不应再匹配精确文案正则——若仍匹配说明判据未真正扫描变异后的文本');
+                });
+                check('[S3-A] 前后端 D9「原因摘要上限」常量同值（跨文件对拍，防漂移）', () => {
+                    // [Opus 预筛 S3·LOW-12·长任务B S4c·2026-09-17] 原正则 `/NAME = (\d+)/` 未锚 `const` 前缀、
+                    //   未剥注释——若未来某处注释里写了"曾经是 PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = 60"这类
+                    //   历史说明文字（且该文字排在真实声明之前），match() 只取第一个命中，会把注释里的旧数字
+                    //   误认成当前值。改为剥注释后锚 `const NAME = (\d+)` 精确定位真实声明。
+                    const indexJsSrc = stripComments(fs.readFileSync(path.resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8'));
+                    const mBack = indexJsSrc.match(/const PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = (\d+)/);
+                    const mFront = stripComments(src).match(/const SI_PERDEV_REASON_BRIEF_MAX = (\d+)/);
+                    assert.ok(mBack, '未在 index.js 定位到 const PERDEV_DONE_SUMMARY_MAX_CODEPOINTS 声明');
+                    assert.ok(mFront, '未在 Sys_Iteration.html 定位到 const SI_PERDEV_REASON_BRIEF_MAX 声明');
+                    assert.strictEqual(mFront[1], mBack[1], `前后端 D9 摘要上限应同值，后端=${mBack[1]} 前端=${mFront[1]}`);
+                });
+                check('活体变异对照组·LOW-12：index.js 里若在真实声明之前混入一条含旧数字的注释——锚 const 前缀的判据不应被注释里的数字带偏', () => {
+                    const realIndexJsSrc = fs.readFileSync(path.resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+                    const decl = 'const PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = 80;';
+                    assert.ok(realIndexJsSrc.includes(decl), '变异替换未命中原文——PERDEV_DONE_SUMMARY_MAX_CODEPOINTS 声明文本已漂移，需同步本条变异对照组');
+                    // 在真实声明之前插入一条“注释里恰好出现旧数字”的干扰文本（模拟未来有人写迁移说明）。
+                    const mutated = realIndexJsSrc.replace(decl, '// 历史值：PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = 60（v1.0 曾用值，现已废弃）\n  ' + decl);
+                    const oldStyleMatch = mutated.match(/PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = (\d+)/);
+                    assert.strictEqual(oldStyleMatch[1], '60', '本条对照组前提失败——旧版无锚正则应命中注释里的干扰数字 60（若不是 60，说明干扰文本构造方式已不适配，需重写变异样例）');
+                    const newStyleMatch = stripComments(mutated).match(/const PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = (\d+)/);
+                    assert.ok(newStyleMatch, '剥注释 + 锚 const 前缀后仍应定位到真实声明');
+                    assert.strictEqual(newStyleMatch[1], '80', `剥注释 + 锚 const 前缀应取到真实声明值 80（不受注释里的干扰数字影响），实得 ${newStyleMatch[1]}`);
+                });
+                // [长任务B S4c2·codex 590 裁定 M7] 原判据是两条纯文本正则（`payload\.mode\b` / `\.mode\s*===`）——
+                //   只认字面拼出的属性访问与 `===` 判断这两种具体写法，绕过面明显：计算属性 `payload['mode']`
+                //   （不含 `.mode` 三个连续字符）、解构 `const {mode} = perDevPayload`（同样不含 `.mode`）都能
+                //   写文本上完全绕开这两条正则却达到同样的"读 mode 字段"效果。改用 acorn 解析分支体，收集
+                //   perDevPayload/parsedPayload 及其别名（`const x = perDevPayload;` 链式追踪），判红：
+                //   ① 对别名的 MemberExpression 访问属性名为 'mode'（点号或计算属性字面量均算）；
+                //   ② 任意 ObjectPattern 解构模式含 'mode' 键（不限定来源，分支体内出现即算，保守但足够窄）。
+                // [长任务B S4c3·codex 591-R M6·主会话亲核订正] 别名追踪此前只认"声明时初始化为另一别名"
+                // 这一种形态（`const x = perDevPayload;`），漏了两类：① 先声明后裸赋值（`let x;
+                // x = perDevPayload;`）——AssignmentExpression 完全未被扫描；② 链式赋值
+                // （`a = b = perDevPayload;`，AST 里是 `a = (b = perDevPayload)` 嵌套结构）——链上
+                // 每一环都该被认成别名，不只是最内层。另外根别名集合缺 `payload`（本分支体内同样常见的
+                // 别名字面量）。terminalAssignmentTargetName/collectChainLeftNames 把"简单 `=` 赋值链"
+                // 展开：前者找到链条最终指向的标识符名（若链尾不是裸标识符则返回 null，不深入更复杂的
+                // 表达式），后者收集链上全部左值标识符名——链尾一旦命中已知别名，链上全部左值都追加为
+                // 别名。两者都在下方 while(changed) 定点循环里反复跑，跟 VariableDeclaration 分支一样
+                // 不要求声明/赋值的书写顺序。
+                function terminalAssignmentTargetName(node) {
+                    let cur = node;
+                    while (cur && cur.type === 'AssignmentExpression' && cur.operator === '=') cur = cur.right;
+                    return cur && cur.type === 'Identifier' ? cur.name : null;
+                }
+                function collectChainLeftNames(node, out) {
+                    let cur = node;
+                    while (cur && cur.type === 'AssignmentExpression' && cur.operator === '=') {
+                        if (cur.left.type === 'Identifier') out.push(cur.left.name);
+                        cur = cur.right;
+                    }
+                }
+                function findModeReadViolations(branchBody) {
+                    let ast;
+                    try {
+                        ast = acorn.parse(`function __siPerDevGuardWrap() ${branchBody}`, { ecmaVersion: 'latest' });
+                    } catch (e) {
+                        return { parseError: e.message };
+                    }
+                    const aliasNames = new Set(['perDevPayload', 'parsedPayload', 'payload']);
+                    let changed = true;
+                    while (changed) {
+                        changed = false;
+                        walkAllAcornNodes(ast, (node) => {
+                            if (node.type === 'VariableDeclaration' && (node.kind === 'const' || node.kind === 'let')) {
+                                for (const decl of node.declarations) {
+                                    if (decl.id.type !== 'Identifier' || !decl.init) continue;
+                                    if (decl.init.type === 'Identifier') {
+                                        if (aliasNames.has(decl.init.name) && !aliasNames.has(decl.id.name)) {
+                                            aliasNames.add(decl.id.name);
+                                            changed = true;
+                                        }
+                                        continue;
+                                    }
+                                    // [S4c3·M6b·主会话亲核订正] 声明的 init 本身就是一条赋值链
+                                    // （`let b; const a = b = perDevPayload;`——a 的 init 是
+                                    // AssignmentExpression `b = perDevPayload`，不是裸 Identifier，
+                                    // 上面那条分支永远匹配不上）。沿链找到链尾，链尾命中已知别名时，
+                                    // 声明左侧标识符（a）与链上全部左值（b 等）一并登记为别名——不能
+                                    // 只指望"链上内层那条 AssignmentExpression 会被独立访问到"去顺带
+                                    // registerb，那条路径确实会注册 b，但注册不了 a（a 是 declarator
+                                    // 的左值，不出现在任何 AssignmentExpression.left 里）。
+                                    if (decl.init.type === 'AssignmentExpression' && decl.init.operator === '=') {
+                                        const terminalName = terminalAssignmentTargetName(decl.init);
+                                        if (terminalName && aliasNames.has(terminalName)) {
+                                            const leftNames = [decl.id.name];
+                                            collectChainLeftNames(decl.init, leftNames);
+                                            for (const name of leftNames) {
+                                                if (!aliasNames.has(name)) { aliasNames.add(name); changed = true; }
+                                            }
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+                            if (node.type === 'AssignmentExpression' && node.operator === '=') {
+                                const terminalName = terminalAssignmentTargetName(node);
+                                if (terminalName && aliasNames.has(terminalName)) {
+                                    const leftNames = [];
+                                    collectChainLeftNames(node, leftNames);
+                                    for (const name of leftNames) {
+                                        if (!aliasNames.has(name)) { aliasNames.add(name); changed = true; }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    const violations = [];
+                    walkAllAcornNodes(ast, (node) => {
+                        if (node.type === 'MemberExpression' && node.object.type === 'Identifier' && aliasNames.has(node.object.name)) {
+                            const propName = !node.computed && node.property.type === 'Identifier' ? node.property.name
+                                : (node.computed && node.property.type === 'Literal' ? node.property.value : null);
+                            if (propName === 'mode') violations.push(`${node.object.name}.mode（属性访问，:${node.start}）`);
+                        }
+                        if (node.type === 'ObjectPattern') {
+                            for (const prop of node.properties) {
+                                if (prop.type === 'RestElement' || !prop.key) continue;
+                                const keyIsMode = (prop.key.type === 'Identifier' && prop.key.name === 'mode')
+                                    || (prop.key.type === 'Literal' && prop.key.value === 'mode');
+                                if (keyIsMode) violations.push(`解构模式含 mode 键（:${node.start}）`);
+                            }
+                        }
+                    });
+                    return { violations };
+                }
+                function extractPerDevBranchBody() {
+                    const condMarker = "e.action_code === 'dev_submit_done' || e.action_code === 'dev_no_code'";
+                    const condIdx = src.indexOf(condMarker);
+                    assert.ok(condIdx >= 0, '未定位到逐人完成 else-if 条件文本——结构锚已漂移，需同步本条检查');
+                    const braceOpen = src.indexOf('{', condIdx);
+                    assert.ok(braceOpen >= 0, '未定位到逐人完成 else-if 分支体起始花括号');
+                    const braceClose = findMatchingBraceIndex(src, braceOpen);
+                    assert.ok(braceClose > braceOpen, '逐人完成 else-if 分支体花括号不平衡');
+                    return src.slice(braceOpen, braceClose + 1);
+                }
+                check('[Opus 预筛 S3 补充·S4c2 改写为 AST 判据] 逐人完成 else-if 分支体（结构锚提取）不得读 perDevPayload/parsedPayload 别名的 mode 字段——严格按 e.action_code 分派，D9 既有注释警示"单标志双语义"（dev_events 的 payload.mode 取值 commits/no_code 与本分支 e.action_code 取值 dev_submit_done/dev_no_code 字面同名场景不同）', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    assert.ok(branchBody.includes('perDevPayload'), '结构锚定位错误——提取到的分支体应含 perDevPayload（本分支的核心变量），否则说明切错了块，需重核锚点');
+                    const { violations, parseError } = findModeReadViolations(branchBody);
+                    assert.ok(!parseError, `逐人完成分支体 acorn 解析失败（结构锚可能切到了不完整/不合法的片段）：${parseError}`);
+                    assert.strictEqual(violations.length, 0, `逐人完成分支体不应读取 payload 别名的 mode 字段（点号/计算属性/解构任一形态），实得：${JSON.stringify(violations)}`);
+                });
+                check('活体变异对照组·M7-①：分支体内混入 perDevPayload.mode 判断（点号访问）——上方 AST 判据须判红', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    assert.ok(branchBody.includes(anchorText), '变异注入点文本未命中——perDevPayload 声明文本已漂移，需同步本条变异对照组');
+                    const mutatedBranchBody = branchBody.replace(anchorText, "if (perDevPayload && perDevPayload.mode === 'commits') { /* 误判分支 */ }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('perDevPayload.mode')), `点号访问 perDevPayload.mode 应判红，实得 ${JSON.stringify(violations)}`);
+                });
+                check('活体变异对照组·M7-②：分支体内混入 perDevPayload[\'mode\']（计算属性，旧版纯文本正则漏检）——上方 AST 判据须判红', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    const mutatedBranchBody = branchBody.replace(anchorText, "if (perDevPayload && perDevPayload['mode'] === 'commits') { /* 误判分支 */ }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('perDevPayload.mode')), `计算属性 perDevPayload['mode'] 应判红，实得 ${JSON.stringify(violations)}`);
+                });
+                check('活体变异对照组·M7-③：分支体内混入 `const {mode} = perDevPayload;`（解构，旧版纯文本正则漏检）——上方 AST 判据须判红', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    const mutatedBranchBody = branchBody.replace(anchorText, "if (perDevPayload) { const { mode } = perDevPayload; void mode; }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('解构模式含 mode 键')), `解构 {mode} = perDevPayload 应判红，实得 ${JSON.stringify(violations)}`);
+                });
+                check('活体变异对照组·S4c3·M6-①：赋值别名 `let x; x = perDevPayload; if (x.mode === \'commits\') {}`（旧版只认声明时初始化为别名，裸赋值完全扫不到）——上方 AST 判据须判红', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    assert.ok(branchBody.includes(anchorText), '变异注入点文本未命中——perDevPayload 声明文本已漂移，需同步本条变异对照组');
+                    const mutatedBranchBody = branchBody.replace(anchorText, "let __m6x; __m6x = perDevPayload; if (__m6x && __m6x.mode === 'commits') { /* 误判分支 */ }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('__m6x.mode')), `裸赋值别名 __m6x = perDevPayload 之后的 __m6x.mode 应判红，实得 ${JSON.stringify(violations)}`);
+                });
+                check('活体变异对照组·S4c3·M6-②：链式赋值别名 `let a, b; a = b = perDevPayload; a.mode`（旧版只展开单层赋值，链式赋值完全扫不到）——上方 AST 判据须判红', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    const mutatedBranchBody = branchBody.replace(anchorText, "let __m6a, __m6b; __m6a = __m6b = perDevPayload; if (__m6a && __m6a.mode === 'commits') { /* 误判分支 */ }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('__m6a.mode')), `链式赋值别名 __m6a = __m6b = perDevPayload 之后的 __m6a.mode 应判红，实得 ${JSON.stringify(violations)}`);
+                    assert.ok(!violations.some(v => v.includes('__m6b.mode')), '本例未读 __m6b.mode，不应凭空出现该项（防误报污染判红理由）');
+                });
+                check('活体变异对照组·S4c3·M6b：声明+链式组合别名 `let b; const a = b = perDevPayload; a.mode`（VariableDeclarator 的 init 直接是赋值链，此前只认 init 为裸 Identifier，a 从未被登记）——须判红，且违规项明确含 a.mode', () => {
+                    const branchBody = extractPerDevBranchBody();
+                    const anchorText = 'const perDevPayload = ';
+                    const mutatedBranchBody = branchBody.replace(anchorText, "let __m6bb; const __m6ba = __m6bb = perDevPayload; if (__m6ba && __m6ba.mode === 'commits') { /* 误判分支 */ }\n                " + anchorText);
+                    const { violations } = findModeReadViolations(mutatedBranchBody);
+                    assert.ok(violations && violations.some(v => v.includes('__m6ba.mode')), `声明+链式组合别名 __m6ba 之后的 __m6ba.mode 应判红，实得 ${JSON.stringify(violations)}`);
+                });
+                {
+                    // 隔离直调 harness——同上方 tl/tlHidden 装配范式，额外注入 SI_PERDEV_REASON_BRIEF_MAX
+                    // 常量（逐人完成分支引用它，tl 原装配未含此常量会 ReferenceError）。
+                    const constPerDevMax = (src.match(/const SI_PERDEV_REASON_BRIEF_MAX = \d+;/) || [''])[0];
+                    check('[S3-A 前置] SI_PERDEV_REASON_BRIEF_MAX 常量提取成功（提不到=本组空转）', () => {
+                        assert.ok(constPerDevMax, '未提取到 SI_PERDEV_REASON_BRIEF_MAX 常量声明');
+                    });
+                    if (constPerDevMax) {
+                        // eslint-disable-next-line no-new-func
+                        const tlPerDev = new Function('stubs', `with (stubs) { ${parts.join('\n')}\n${constLbl}\n${constMax}\n${constPerDevMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\n${fnChangesHtml}\n${fnTimeline}\nreturn siRenderTimeline; }`)(stubs);
+                        // 真实 esc() 的可调用引用（复用 grabFnA 抓到的源码本体，非手抄一份转义逻辑——防
+                        // 复刻漂移：若真实 esc() 未来改行为，这里的期望值自动跟着变，不需要人工同步改）。
+                        // eslint-disable-next-line no-new-func
+                        const escFn = new Function(`${fnEsc}\nreturn esc;`)();
+                        const mkPerDevRow = (actionCode, payloadJsonOverride, extra) => Object.assign({
+                            id: 300, event_type: 'note', action_code: actionCode,
+                            summary: actionCode === 'dev_no_code' ? '开发完成：开发甲 无代码交付：测试原因' : '开发完成：开发甲 代码已提交',
+                            operator_name: '开发甲', created_at: '2026-09-17 10:00:00',
+                            payload_json: payloadJsonOverride === undefined ? JSON.stringify(Object.assign({
+                                dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9,
+                                mode: actionCode === 'dev_no_code' ? 'no_code' : 'code_submitted',
+                                submitted_at: '2026-09-17 09:59:00',
+                                ...(actionCode === 'dev_no_code' ? { no_code_reason: '测试原因' } : {}),
+                            })) : payloadJsonOverride,
+                        }, extra);
+                        check('[S3-A 直调] dev_submit_done/dev_no_code 徽章正确（teal + 精确文案）', () => {
+                            assert.deepStrictEqual(badge(tlPerDev([mkPerDevRow('dev_submit_done')], [], '')), { cls: 'si-tl-teal', label: '开发完成·代码已提交' });
+                            assert.deepStrictEqual(badge(tlPerDev([mkPerDevRow('dev_no_code')], [], '')), { cls: 'si-tl-teal', label: '开发完成·无代码交付' });
+                        });
+                        check('[S3-A 直调] 逐人行不带 si-tl-release-scope class（D3 不依赖 #67 可隐藏集合）；反例：同 payload 改 scope_change+HIDABLE 码验证 class 断言有判别力', () => {
+                            const a = firstItemAttrs(tlPerDev([mkPerDevRow('dev_submit_done')], [], ''));
+                            assert.ok(a, '逐人行未渲染出 si-tl-item');
+                            assert.ok(!/si-tl-release-scope/.test(a.cls), `逐人行不应带可隐藏 class，实得 class="${a.cls}"`);
+                            assert.strictEqual(String(tlPerDev([mkPerDevRow('dev_submit_done')], [], '')).indexOf('si-tl-release-scope'), -1, '整串渲染结果不应出现 si-tl-release-scope 字样');
+                            const hiddenRow = { id: 301, event_type: 'scope_change', action_code: 'release_add', summary: '加入上线单 R-1', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-17 10:00:00' };
+                            const b = firstItemAttrs(tlPerDev([hiddenRow], [], ''));
+                            assert.ok(b && /si-tl-release-scope/.test(b.cls), `对照组 release_add 应带可隐藏 class（否则本组 class 断言恒真无判别力），实得 class="${b && b.cls}"`);
+                        });
+                        check('[S3-A 直调·D9 边界] 恰 80 码点不截断且正文含全文无省略号；81 码点截断为 80+省略号', () => {
+                            const exact80 = '甲'.repeat(80);
+                            const h80 = tlPerDev([mkPerDevRow('dev_no_code', JSON.stringify({ dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9, mode: 'no_code', submitted_at: '2026-09-17 09:59:00', no_code_reason: exact80 }))], [], '');
+                            assert.ok(h80.includes(`：${exact80}`) && !h80.includes('…'), `恰 80 码点不应截断、不应出现省略号，实得 ${h80}`);
+                            assert.ok(!h80.includes('<details'), '恰 80 码点不应产出展开区');
+                            const over81 = '乙'.repeat(81);
+                            const h81 = tlPerDev([mkPerDevRow('dev_no_code', JSON.stringify({ dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9, mode: 'no_code', submitted_at: '2026-09-17 09:59:00', no_code_reason: over81 }))], [], '');
+                            const expectedChunk = Array.from(over81).slice(0, 80).join('') + '…';
+                            assert.ok(h81.includes(`：${expectedChunk}`), `81 码点应截断为 80+省略号，实得 ${h81}`);
+                            assert.ok(h81.includes('<details class="si-tl-perdev-reason">') && h81.includes(`<pre>${over81}</pre>`), `81 码点应产出 si-tl-perdev-reason 展开区并含完整 81 码点原文，实得 ${h81}`);
+                        });
+                        check('[S3-A 直调·D9 转义] 危险片段（<script>/引号/&/换行）→ 正文摘要与展开区 pre 各自独立转义，整串无原始 <script>；title 路径同样精确转义且不含 reason 文本', () => {
+                            const evilPrefix = '<script>"x"&\'y\'</script>\n第二行';
+                            const evilReason = evilPrefix + 'a'.repeat(60);   // 总长 > 80，确保①触发展开区②截断后的摘要仍完整含危险片段
+                            const h = tlPerDev([mkPerDevRow('dev_no_code', JSON.stringify({ dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9, mode: 'no_code', submitted_at: '2026-09-17 09:59:00', no_code_reason: evilReason }))], [], '');
+                            assert.ok(!h.includes('<script>'), '整串不应出现原始 <script>');
+                            assert.strictEqual((h.match(/&lt;script&gt;/g) || []).length, 2, `正文摘要与展开区 pre 应各自恰含 1 处 &lt;script&gt;（共 2 处），实得 ${h}`);
+                            // evilPrefix 含 "x"（2 个双引号）与 'y'（2 个单引号），每处出现各占 2 个转义字符，
+                            // 正文摘要 + 展开区 pre 共 2 处出现 ⇒ 各自 2 × 2 = 4。
+                            assert.strictEqual((h.match(/&quot;/g) || []).length, 4, '正文与 pre 应各自含 2 处 &quot;（共 4 处，"x" 两个双引号 × 2 处出现）');
+                            assert.strictEqual((h.match(/&#39;/g) || []).length, 4, '正文与 pre 应各自含 2 处 &#39;（共 4 处，\'y\' 两个单引号 × 2 处出现）');
+                            assert.ok((h.match(/&amp;/g) || []).length >= 2, '正文与 pre 应各自含 &amp;');
+                            // title 路径：姓名含引号/尖括号/&，期望值由真实 esc() 计算得出（防手抄期望值出错）。
+                            const evilName = '张"三"<b>&';
+                            const hName = tlPerDev([mkPerDevRow('dev_submit_done', JSON.stringify({ dev_user_id: 5, dev_user_name: evilName, dev_assignee_id: 9, mode: 'code_submitted', submitted_at: '2026-09-17 09:59:00' }))], [], '');
+                            // ⚠️ 不能用泛化的 /title="([^"]*)"/：整行渲染还含 si-tl-time 外层 div 的
+                            // title（siFmtDTSec(created_at)），它排在正文 span 之前会被先命中——精确锚定
+                            // 「不带 class 的 <span title=...>」这个逐人行专属特征。
+                            const titleMatch = hName.match(/<span title="([^"]*)">/);
+                            assert.ok(titleMatch, '应产出 title 属性');
+                            const expectedTitle = escFn(evilName + ' · 代码已提交 · 2026-09-17 09:59:00');
+                            assert.strictEqual(titleMatch[1], expectedTitle, `title 应精确转义（由真实 esc() 计算得出的期望值），实得 ${titleMatch[1]}`);
+                            assert.ok(!titleMatch[1].includes('原因'), 'title 不应含 no_code 原因相关文本（本例 code_submitted 天然无原因，仅证明 title 只含姓名·模式·时刻三段）');
+                        });
+                        check('[S3-A 直调·D9 单码点 emoji 边界] 81 个单码点 emoji（非 ZWJ 组合）截断切口无 U+FFFD', () => {
+                            const emoji81 = '😀'.repeat(81);
+                            const h = tlPerDev([mkPerDevRow('dev_no_code', JSON.stringify({ dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9, mode: 'no_code', submitted_at: '2026-09-17 09:59:00', no_code_reason: emoji81 }))], [], '');
+                            assert.ok(!h.includes('�'), '截断切口不应出现 U+FFFD 替换字符（说明按码点而非 UTF-16 码元截断）');
+                            assert.ok(h.includes('😀'.repeat(80) + '…'), '正文应含恰 80 个完整 emoji + 省略号');
+                        });
+                        // [codex 589 采纳·D9 补充] 前端配对用例——恰 80 个单码点 emoji 不截断（同后端
+                        // verify-sys-perdev-done.js [C8·D9·emoji] 的前端等价物，用非 BMP 字符反证"按码点
+                        // 而非 UTF-16 code unit 数上限"这条纪律，若实现误用 .length 会在此处提前截断）。
+                        check('[S3-A 直调·D9 单码点 emoji 边界] 恰 80 个单码点 emoji 不截断（前端与后端 C8·D9·emoji 配对用例）', () => {
+                            const emoji80 = '😀'.repeat(80);
+                            const h = tlPerDev([mkPerDevRow('dev_no_code', JSON.stringify({ dev_user_id: 5, dev_user_name: '开发甲', dev_assignee_id: 9, mode: 'no_code', submitted_at: '2026-09-17 09:59:00', no_code_reason: emoji80 }))], [], '');
+                            assert.ok(h.includes(`：${emoji80}`) && !h.includes('…'), `恰 80 个单码点 emoji 不应截断、不应出现省略号，实得 ${h}`);
+                            assert.ok(!h.includes('<details'), '恰 80 个单码点 emoji 不应产出展开区');
+                        });
+                        check('[S3-A 直调] payload 降级四态：null/非 JSON/裸字符串 JSON/缺关键键 → 正文等于 esc(summary)，不抛、不出现 undefined 字样', () => {
+                            const cases = [
+                                ['payload_json=null', null],
+                                ['非 JSON', '不是JSON'],
+                                ['裸字符串 JSON', '"裸字符串"'],
+                                ['缺 submitted_at', JSON.stringify({ dev_user_name: '张三' })],
+                            ];
+                            for (const [name, pj] of cases) {
+                                const row = mkPerDevRow('dev_submit_done', pj);
+                                const h = tlPerDev([row], [], '');
+                                assert.ok(h.includes(escFn(row.summary)), `${name}：正文应等于 esc(summary)，实得 ${h}`);
+                                assert.ok(!h.includes('undefined'), `${name}：不应出现 undefined 字样，实得 ${h}`);
+                            }
+                        });
+                    }
+                }
+                // ══════════════════════════════════════════════════════════════════════
+                // [长任务B·S4a·#64③收口] dev_withdraw 时间线自足——harness 直调渲染（复用 `tl`，
+                //   同上方各组直调纪律，不新起一套装配）。escFnA 本地重建（复用 fnEsc 源码文本，
+                //   tlPerDev 块内的 escFn 此处已出块作用域，不能跨块引用）。
+                // eslint-disable-next-line no-new-func
+                const escFnA = new Function(`${fnEsc}\nreturn esc;`)();
+                check('[S4a] dev_withdraw 行：正文含「撤回提交 #<id>」尾注、不带 si-tl-release-scope、payload 非对象时回退 summary', () => {
+                    const withdrawRow = { id: 400, event_type: 'note', action_code: 'dev_withdraw', ref_id: 9, round_no: 1, summary: '开发撤回提交：commit 记录填错了', operator_name: '开发甲', created_at: '2026-09-17 11:00:00', payload_json: JSON.stringify({ withdrawn_event_id: 88, commits: [{ commit_id: 1, component: 'backend', commit_ref: 'r-1' }] }) };
+                    const h = tl([withdrawRow], [], '');
+                    assert.ok(h.includes('撤回提交 #88'), `正文应含尾注「撤回提交 #88」，实得 ${h}`);
+                    const a = firstItemAttrs(h);
+                    assert.ok(a, 'dev_withdraw 行未渲染出 si-tl-item');
+                    assert.ok(!/si-tl-release-scope/.test(a.cls), `dev_withdraw 行不应带可隐藏 class，实得 class="${a.cls}"`);
+                    assert.ok(h.includes('si-tl-withdraw-detail'), '带 commits 快照时应产出 si-tl-withdraw-detail 展开区');
+                    // payload 非对象（数组/裸字符串/缺 withdrawn_event_id）三态一律回退 esc(summary)，不抛、不出现 undefined。
+                    for (const [name, pj] of [['数组', '[1,2]'], ['裸字符串', '"x"'], ['缺 withdrawn_event_id', JSON.stringify({ commits: [] })]]) {
+                        const row = Object.assign({}, withdrawRow, { payload_json: pj });
+                        const h2 = tl([row], [], '');
+                        assert.ok(h2.includes(escFnA(row.summary)), `${name}：正文应回退为 esc(summary)，实得 ${h2}`);
+                        assert.ok(!h2.includes('undefined'), `${name}：不应出现 undefined 字样，实得 ${h2}`);
+                        assert.ok(!h2.includes('si-tl-withdraw-detail'), `${name}：不应产出展开区`);
+                    }
+                });
+                // [codex 589 MED-2] commits 快照单重转义——map 内不再各自 esc(comp)/esc(ref)，改在
+                //   <pre> 处统一 esc(commitLines) 一次；含 `&`/`<`/`>`/引号/换行的字段值应恰好转义一次，
+                //   反转义（escFnA 的逆操作，用 HTML 实体表逐个替换回来）后应逐字等于原始拼接文本，且不
+                //   应出现 `&amp;amp;` 这种双重转义的痕迹。
+                check('[codex 589 MED-2] dev_withdraw commits 快照单重转义（非双重）', () => {
+                    const specialChars = { component: 'back&end<x>', commit_ref: 'r-1 "quoted"\nline2' };
+                    const row = { id: 405, event_type: 'note', action_code: 'dev_withdraw', ref_id: 9, round_no: 1, summary: '开发撤回提交', operator_name: '开发甲', created_at: '2026-09-17 11:05:00', payload_json: JSON.stringify({ withdrawn_event_id: 89, commits: [specialChars] }) };
+                    const h = tl([row], [], '');
+                    assert.ok(!h.includes('&amp;amp;'), `不应出现双重转义痕迹 &amp;amp;，实得 ${h}`);
+                    const preMatch = h.match(/<pre>([\s\S]*?)<\/pre>/);
+                    assert.ok(preMatch, `应产出 <pre> 展开区，实得 ${h}`);
+                    const originalConcat = `${specialChars.component}: ${specialChars.commit_ref}`;
+                    assert.strictEqual(preMatch[1], escFnA(originalConcat), `<pre> 内文本应恰为单重 esc(原始拼接文本)，实得 ${JSON.stringify(preMatch[1])}，期望 ${JSON.stringify(escFnA(originalConcat))}`);
+                });
+                // [codex 589 LOW-2] withdrawn_event_id 只接受正安全整数（number）或纯数字正整数字符串——
+                //   空串/空白/0/负数/非数字文本六分支逐一断言回退 esc(summary)，不出现尾注/展开区。
+                check('[codex 589 LOW-2·S4c3 附] withdrawn_event_id 非法值十分支应回退 esc(summary)（不显示尾注/展开区）', () => {
+                    const baseRow = { id: 406, event_type: 'note', action_code: 'dev_withdraw', ref_id: 9, round_no: 1, summary: '开发撤回提交：xyz', operator_name: '开发甲', created_at: '2026-09-17 11:06:00' };
+                    // [长任务B S4c3·codex 591-R 附] 原六分支 + 新增四例：1.5（非整数 number）、true（布尔，
+                    //   typeof 既非 number 也非 string）、9007199254740993（字面量在 JS 里已舍入为
+                    //   9007199254740992，仍非安全整数——Number.isSafeInteger 判 false）、'1e3'（字符串但
+                    //   非纯数字形态，/^[0-9]+$/ 判不匹配）——四例按当前实现均应回退，非新行为，纯补覆盖面。
+                    const invalidIds = ['', '   ', 0, -5, 'abc', '-1', 1.5, true, 9007199254740993, '1e3'];
+                    for (const invalidId of invalidIds) {
+                        const row = Object.assign({}, baseRow, { payload_json: JSON.stringify({ withdrawn_event_id: invalidId, commits: [{ component: 'x', commit_ref: 'y' }] }) });
+                        const h = tl([row], [], '');
+                        assert.ok(h.includes(escFnA(baseRow.summary)), `withdrawn_event_id=${JSON.stringify(invalidId)}：应回退为 esc(summary)，实得 ${h}`);
+                        assert.ok(!/撤回提交 #/.test(h), `withdrawn_event_id=${JSON.stringify(invalidId)}：不应出现尾注，实得 ${h}`);
+                        assert.ok(!h.includes('si-tl-withdraw-detail'), `withdrawn_event_id=${JSON.stringify(invalidId)}：不应产出展开区`);
+                    }
+                    // 合法边界：字符串形式的正整数（前导空白应被 trim 后接受）应正常显示尾注
+                    const validRow = Object.assign({}, baseRow, { payload_json: JSON.stringify({ withdrawn_event_id: ' 42 ', commits: [] }) });
+                    const hValid = tl([validRow], [], '');
+                    assert.ok(hValid.includes('撤回提交 #42'), `withdrawn_event_id=" 42 "（trim 后为合法正整数字符串）应显示尾注，实得 ${hValid}`);
+                });
+                // ══════════════════════════════════════════════════════════════════════
+                // [长任务B·S4b·#84 子项收口] 改期行批次号口径统一为业务编号——harness 直调（复用 `tl`）。
+                // ══════════════════════════════════════════════════════════════════════
+                check('[S4b] release_date_change/release_info_edit 展开区头行：payload 带 release_no → 业务编号（不含「批次 #」）；历史行（无 release_no）→ 回退「批次 #<id>」', () => {
+                    const withRelNo = { id: 401, event_type: 'scope_change', action_code: 'release_date_change', ref_id: 9, summary: '上线计划日期变更：2026-09-20 → 2026-09-25（批次 R-20260917-1）', operator_name: '示例客服B', created_at: '2026-09-17 12:00:00', payload_json: JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25', release_no: 'R-20260917-1', changes: [{ field: 'planned_date', old: '2026-09-20', new: '2026-09-25' }] }) };
+                    const hWith = tl([withRelNo], [], '');
+                    assert.ok(hWith.includes('上线批次（批次 R-20260917-1）'), `带 release_no 应显业务编号，实得 ${hWith.match(/变更对象：[^<]*/) || hWith}`);
+                    assert.ok(!/批次 #\d/.test(hWith), `带 release_no 时不应再出现「批次 #数字」内部 id 口径，实得 ${hWith}`);
+                    const withoutRelNo = Object.assign({}, withRelNo, { id: 402, payload_json: JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25', changes: [{ field: 'planned_date', old: '2026-09-20', new: '2026-09-25' }] }) });
+                    const hWithout = tl([withoutRelNo], [], '');
+                    assert.ok(hWithout.includes('上线批次（批次 #9）'), `无 release_no（历史行）应回退内部 id 口径，实得 ${hWithout.match(/变更对象：[^<]*/) || hWithout}`);
+                    // [长任务B·S4b2·2026-09-17] release_info_edit 同款处——后端（PATCH /sys-releases/:id
+                    //   :18171 一带）已补 release_no 键，带该键时应与 release_date_change 同款显业务编号；
+                    //   历史行（无该键，改造前写入）仍回退内部 id 口径，两态都要覆盖。
+                    const infoEditWithRelNo = { id: 403, event_type: 'note', action_code: 'release_info_edit', ref_id: 11, summary: '上线单信息修改（标题）', operator_name: '示例客服B', created_at: '2026-09-17 12:01:00', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }], release_no: 'R-20260917-2' }) };
+                    const hInfoWith = tl([infoEditWithRelNo], [], '');
+                    assert.ok(hInfoWith.includes('上线单信息（批次 R-20260917-2）'), `release_info_edit 带 release_no 应显业务编号，实得 ${hInfoWith.match(/变更对象：[^<]*/) || hInfoWith}`);
+                    assert.ok(!/批次 #\d/.test(hInfoWith), `release_info_edit 带 release_no 时不应再出现「批次 #数字」，实得 ${hInfoWith}`);
+                    const infoEditHistory = { id: 404, event_type: 'note', action_code: 'release_info_edit', ref_id: 11, summary: '上线单信息修改（标题）', operator_name: '示例客服B', created_at: '2026-09-17 12:01:00', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) };
+                    const hInfoHistory = tl([infoEditHistory], [], '');
+                    assert.ok(hInfoHistory.includes('上线单信息（批次 #11）'), `release_info_edit 历史行（无 release_no）应回退内部 id 口径，实得 ${hInfoHistory.match(/变更对象：[^<]*/) || hInfoHistory}`);
+                });
             }
         }
     }
 }
+// ⚠️ 本组两条 check 刻意不在源码里写出连续的字面量 "grabFnA(name)"（含本注释、check 名、断言消息全部
+//   避开）——本文件自身也会被 EXTRACT_FN_BODY_TARGET_NAMES 的自扫正则当成"selfClean"扫描一遍，若这里
+//   直接写出该连续字面量，会把测试夹具自己的文本也当成一次真实非豁免调用而在 IIFE 阶段抢先报错（同
+//   :195 一带"注释里写例子会被当真"同款坑，字符串字面量同理不被 stripComments 剥除）。改用拼接组装
+//   注入串，源码文本层面不出现该连续字面量。
+const G1_FN_TOKEN = 'grabFnA';
+check('[G1·长任务B S4c] 动态参数 grabFnA 结构定位豁免——循环体外的裸调用必须判红（旧版按文本相等的豁免会静默放行）', () => {
+    assert.ok(__selfCleanForG1Mutation, '未捕获到 selfClean（IIFE 未按预期执行，无法做 mutated 反例）');
+    const mutated = __selfCleanForG1Mutation + "\nconst name = 'evil'; " + G1_FN_TOKEN + "(name);\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `循环体外的裸动态调用应被判定为非豁免，实得 ${JSON.stringify(bad)}——说明结构定位豁免已失效，退化回旧版纯文本判据`);
+});
+check('[G1·长任务B S4c2] 动态参数 grabFnA（结构匹配 for (const name of G1_GRAB_FN_A_LOOP_TARGETS) { … } 循环体内、遍历已登记枚举）应正确豁免', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { " + G1_FN_TOKEN + "(name); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(!bad.includes('name'), `循环体内、遍历已登记枚举的动态调用不应被误判为违规，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·长任务B S4c2·codex 590 M5-①] for-of 遍历非登记枚举（内联数组字面量 [\'x\']，非 G1_GRAB_FN_A_LOOP_TARGETS）——循环体内调用不应被豁免，必须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of ['x']) { " + G1_FN_TOKEN + "(name); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `遍历非登记枚举（内联数组字面量）的循环体内调用应判红，实得 ${JSON.stringify(bad)}——若不判红，说明豁免仍接受任意内联数组，未真正绑定登记标识符`);
+});
+check('[G1·长任务B S4c2·codex 590 M5-②] 循环体内字符串字面量含裸花括号 "{" 不应干扰豁免判定（acorn 真实解析，非旧版括号计数启发式）', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { const noise = 'a{b'; " + G1_FN_TOKEN + "(name); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(!bad.includes('name'), `字符串内裸花括号不应导致豁免判定失效，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·长任务B S4c2·codex 590 M5-③] 循环体内嵌套函数用同名参数遮蔽循环变量——该函数内部的调用不应被豁免，必须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { const wrap = (name) => { " + G1_FN_TOKEN + "(name); }; wrap('z'); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `嵌套函数同名参数遮蔽循环变量后，其内部调用不应被豁免，实得 ${JSON.stringify(bad)}`);
+});
+// [S4c3·codex 591-R M4] 三组新增反例：枚举标识符/循环变量的「按名字字符串相等」旧判据在此三种遮蔽
+// 形态下都会误判豁免，改成作用域链解析（annotateScopeChains + isNameShadowedAtNode/collectExemptGrabFnACallStarts
+// 的最近绑定帧比对）后，三组必须全部判红。
+check('[G1·S4c3·M4-①] 局部同名枚举替换：内层函数用同名 const 局部重声明 G1_GRAB_FN_A_LOOP_TARGETS 顶替遍历目标（旧版按名字字符串相等会误信为模块级枚举）——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\n(function(){ const " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + " = ['evil']; for (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { " + G1_FN_TOKEN + "(name); } })();\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `枚举标识符被内层同名局部声明遮蔽后不应再被当成模块级枚举豁免，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·S4c3·M4-②] 循环体内块级同名声明遮蔽循环变量（`const name` 直接写在循环体里，非嵌套函数）——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { const name = 'z'; " + G1_FN_TOKEN + "(name); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `循环体内块级 const 同名重声明遮蔽循环变量后，其后调用不应被豁免，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·S4c3·M4-③] 嵌套同名 for-of 遮蔽外层循环变量（内层 for-of 遍历非登记枚举、变量名与外层同名）——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { for (const name of ['z']) { " + G1_FN_TOKEN + "(name); } }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `嵌套同名 for-of 遮蔽外层循环变量后，内层调用不应被豁免，实得 ${JSON.stringify(bad)}`);
+});
+// [长任务B S4c3·codex 591-R2 M4b·主会话亲核订正] 三组新增反例——`var`（函数作用域，含嵌套块内但不
+// 下探嵌套函数）与 `switch` 各 case 共享一帧这两类词法帧盲区，此前完全没有对应帧，遮蔽会被漏判。
+check('[G1·S4c3·M4b-①] 登记循环体内的嵌套函数中，函数体嵌套块内 `var name` 遮蔽外层循环变量（var 是函数作用域，须计入该函数自己的帧，不是块帧）——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { const wrap = () => { if (true) { var name = 'evil'; } " + G1_FN_TOKEN + "(name); }; wrap(); }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `嵌套函数体内块级 var 声明（函数作用域）遮蔽外层循环变量后，其后调用不应被豁免，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·S4c3·M4b-②] 内层函数用 `var` 重声明 G1_GRAB_FN_A_LOOP_TARGETS 顶替遍历目标（同 M4-① 但用 var 而非 const，验证函数帧的 var 收集路径，非块帧的 const/let 路径）——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\n(function(){ var " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + " = ['evil']; for (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { " + G1_FN_TOKEN + "(name); } })();\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `枚举标识符被内层 var 重声明遮蔽后不应再被当成模块级枚举豁免，实得 ${JSON.stringify(bad)}`);
+});
+check('[G1·S4c3·M4b-③] switch 各 case 共享同一词法帧——case 内裸写（无花括号包裹）的 `const name` 遮蔽外层循环变量——须判红', () => {
+    const mutated = __selfCleanForG1Mutation + "\nfor (const name of " + G1_GRAB_FN_A_LOOP_TARGETS_NAME + ") { switch (1) { case 1: const name = 'z'; " + G1_FN_TOKEN + "(name); break; } }\n";
+    const bad = findNonExemptGrabFnACalls(mutated);
+    assert.ok(bad.includes('name'), `switch case 内裸写的 const 同名声明（无花括号，与其它 case 共享同一词法帧）遮蔽外层循环变量后，其后调用不应被豁免，实得 ${JSON.stringify(bad)}`);
+});
 check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', () => {
     const scripts = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
     assert.ok(scripts.length > 0, '未找到内联 <script> 块');

@@ -894,7 +894,10 @@ function extractSetLiteralStrings(text, constName) {
 //   且**不**登记进 SI_TL_RELEASE_SCOPE_LABEL/_CLS——C0 ⑤-a 实证会被「隐藏上线单调整记录」过滤器连带
 //   隐藏）后升级为独立 display key 'release_overdue_reason'，本文件同步补登记（两处必须逐字同步，
 //   见下方 [预筛 MED-5] 双向核对断言）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason']);
+// [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] +dev_submit_done/+dev_no_code——
+//   开发逐人完成两码，Sys_Iteration.html 已同步三处登记（SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES），本文件同步补登记（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1131,7 +1134,21 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   为何选两条显式 INSERT 而非条件表达式：candidatesFor 对 '?' 占位只认字面量/null/X||null/具名 function 体内
 //   字面量赋值的标识符，路由回调是箭头函数，三元或条件标识符会走到 findEnclosingFunctionBody throw（2026-09-17 核实）。
 //   码表 docs/local/系统迭代/时间线写入点码表_20260810.md 已同步追记。
-const EXPECTED_INSERT_SITE_COUNT = 58;
+// [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 A1] 58 → 60：`POST /sys-issues/:id/submit`
+//   的 CAS 成功后新增「开发逐人完成」留痕，写法比照长任务A 乙4 先例——**两条显式字面量 INSERT 分支**
+//   （`if (targetDevStatus === 'no_code') { ... action_code='dev_no_code' ... } else { ...
+//   action_code='dev_submit_done' ... }`），非单条 `?` 占位回填运行时表达式。
+//   ⚠️ [S2 口径变更·2026-09-17 主会话裁定] 首版曾用单条 INSERT + `?` 占位绑定
+//   `perDevDone.actionCode`（运行时表达式），candidatesFor→resolvePropertyLiterals→
+//   findEnclosingFunctionBody 认不出这种"箭头函数路由回调 + 具名 helper 返回对象属性"形态，会抛出
+//   未捕获异常（`findEnclosingFunctionBody: ... 启发式失效`）——与本文件 1131-1132 行既有注释预告的
+//   同一类限制（路由回调是箭头函数）。裁定明确**不加白名单/不扩展解析器**绕过，而是让 index.js 侧改
+//   两条显式字面量分支，与长任务A 乙4 处置口径一致：解析器只认字面量/null/X||null/具名 function 体内
+//   字面量赋值标识符，两条分支各自字面量 `'dev_no_code'`/`'dev_submit_done'` 均可直接解析。
+//   两码已按 D10 逐字登记进 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES（Sys_Iteration.html）
+//   与本文件 NOTE_OWN_LABEL_ACTION_CODES（上方 SI_TL_NOTE_OWN_LABEL_CODES 双向核对已通过）。
+//   码表 docs/local/系统迭代/时间线写入点码表_20260810.md 已同步登记（见该文件本批新增条目）。
+const EXPECTED_INSERT_SITE_COUNT = 60;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

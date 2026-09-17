@@ -10203,6 +10203,68 @@ module.exports = (deps) => {
   const SUBMIT_SELF_TESTED_KEY = 'self_tested';
   const SUBMIT_TEST_ENV_DEPLOYED_KEY = 'test_env_deployed';
 
+  // ============================================================
+  // [长任务B·S1·时间线逐人完成事件_方案_20260916_v1.1 §3 D8/D10] 「开发逐人完成」真实时间线行——
+  //   补的是"多开发场景下时间线读不出每个人各自完成过程"这个缺口：既有 `dev_withdraw`（撤回，:11416
+  //   一带）是"动作写真实行"的既有范式，本方案把"首次提交成功"也纳入同一范式。
+  //   语义分工（D10/B3，前端 S2 落地时复述）：**逐人行=提交当时的动作快照**（谁、什么模式、什么时刻、
+  //   若无代码交付原因是什么），**整单流转行=全单状态变化**（runWGate 内部写的 status_change/submit 等
+  //   行）——两者并存，不去重、不互相替代。B5 顺序要求逐人行先于其触发的整单流转行落库，故写点必须放
+  //   在 `POST /sys-issues/:id/submit` 的 CAS UPDATE 成功之后、`runWGate(...)` 调用之前（本文件下方
+  //   写点注释另有引用）。
+  //   本函数是纯函数（不碰数据库），只做「payload/action_code/summary 构造 + mode↔action_code 一致性
+  //   校验」，供写点调用，也供 S3 verify 直接单测"不一致组合应被拒"（mismatch 会 throw，不静默纠正）。
+  //   ⚠️ 在已经打开的 CAS 事务里只是多一条 INSERT，不新增事务入口、不新增连接使用者、不触碰
+  //   sysBeginImmediate/sysCommit/sysRollback/sysTxnMutex 任何一环。
+  // ============================================================
+  const PERDEV_DONE_ACTION_CODE = Object.freeze({ code_submitted: 'dev_submit_done', no_code: 'dev_no_code' });
+  const PERDEV_DONE_SUMMARY_MAX_CODEPOINTS = 80;   // D9：**no_code 原因摘要**上限 80 码点（计数对象是原因片段，不是拼接后的整条 summary——codex 588 M1 定口径），省略号「…」不计入该 80；前端 SI_PERDEV_REASON_BRIEF_MAX 同值
+
+  // D9：按 Unicode 码点截断摘要（Array.from 逐码点切分，避免代理对/emoji 被从中点截断成半个字符）。
+  function truncatePerDevDoneSummary(text) {
+    const chars = Array.from(String(text || ''));
+    if (chars.length <= PERDEV_DONE_SUMMARY_MAX_CODEPOINTS) return chars.join('');
+    return chars.slice(0, PERDEV_DONE_SUMMARY_MAX_CODEPOINTS).join('') + '…';
+  }
+
+  // D8 payload 冻结结构（六键：dev_user_id/dev_user_name/dev_assignee_id/mode/submitted_at/
+  // no_code_reason(仅 no_code 时)）+ D10 命名——写侧唯一构造入口。`mode` 与 `actionCode` 分开传入
+  // （而非在函数内部互相推导）是刻意设计：production 调用点两者天然一致（同一次判定的两个投影），
+  // 但分开传参才能让 S3 verify 直接构造"mode='code_submitted' 却传 actionCode='dev_no_code'"这类
+  // 不一致组合，验证本函数确会 fail-closed 拒绝，而不是静默按其中一个字段纠正另一个。
+  function buildPerDevDonePayload({ mode, actionCode, devUserId, devUserName, devAssigneeId, submittedAt, noCodeReason }) {
+    if (mode !== 'code_submitted' && mode !== 'no_code') {
+      throw new SysTransitionError(500, 'PERDEV_DONE_MODE_INVALID', `逐人完成事件 mode 非法：${mode}`);
+    }
+    const expectedActionCode = PERDEV_DONE_ACTION_CODE[mode];
+    if (actionCode !== expectedActionCode) {
+      throw new SysTransitionError(500, 'PERDEV_DONE_ACTION_CODE_MISMATCH',
+        `逐人完成事件 action_code 与 mode 不一致：mode=${mode} 期望 action_code=${expectedActionCode}，实得=${actionCode}`);
+    }
+    if (mode === 'no_code' && (typeof noCodeReason !== 'string' || !noCodeReason)) {
+      throw new SysTransitionError(500, 'PERDEV_DONE_NO_CODE_REASON_MISSING', 'no_code 模式的逐人完成事件缺失 no_code_reason（内部错误）');
+    }
+    // [Opus 预筛 S1·3b] 冻结表三个必填键写侧必须齐全——缺任一键 JSON.stringify 会静默丢键、产出违反契约的行
+    //   且零报错（fail-open）。这里 fail-closed：缺键抛 500 让事务整体回滚（B6a），S3 verify 直调本函数断言「缺键必抛」。
+    if (!Number.isInteger(devUserId) || typeof devUserName !== 'string' || !devUserName || !Number.isInteger(devAssigneeId)
+        || typeof submittedAt !== 'string' || !submittedAt) {
+      throw new SysTransitionError(500, 'PERDEV_DONE_REQUIRED_KEY_MISSING',
+        `逐人完成事件必填键缺失或类型不符：dev_user_id=${devUserId} dev_user_name=${devUserName} dev_assignee_id=${devAssigneeId} submitted_at=${submittedAt}`);
+    }
+    const payload = {
+      dev_user_id: devUserId,
+      dev_user_name: devUserName,   // 完成者**在册时的姓名快照**（成员行 user_name 列，人事后改名不回溯）。⚠️ 本端点 actor 恒等于完成者（assertDevMember 按 actor.id 查），方案 574-H3 的「admin 代提」路径当前不存在；若未来开放代提，本键天然正确（Opus 预筛 S1·4 订正）
+      dev_assignee_id: devAssigneeId,
+      mode,
+      submitted_at: submittedAt,    // 575-M3：CAS 成功后同事务读回的 resolved_at，非 INSERT 时另取的 now()
+    };
+    if (mode === 'no_code') payload.no_code_reason = noCodeReason;   // D9：原文全文快照，不预转义
+    const summary = mode === 'code_submitted'
+      ? `开发完成：${devUserName} 代码已提交`
+      : `开发完成：${devUserName} 无代码交付：${truncatePerDevDoneSummary(noCodeReason)}`;
+    return { actionCode, payload, summary };
+  }
+
   const COMMIT_COMPONENTS = ['frontend', 'backend'];   // 与 sys_issue_dev_commits.component 的 DDL CHECK 同源（附录C）
 
   // ============================================================
@@ -10688,6 +10750,60 @@ module.exports = (deps) => {
         if (!upd || upd.changes !== 1) {
           await sysRollback();
           return res.status(409).json({ error: '已提交过或状态已变', code: 'INVALID_STATUS' });
+        }
+
+        // [长任务B·S1·时间线逐人完成事件_方案_20260916_v1.1 §4 A1/A5·D8/D10] 写一条真实的「逐人完成」
+        // 时间线行——CAS 成功之后、`runWGate`（下方 §6.2 步骤5，写整单状态流转行）之前，同事务同连接
+        // 内插入，满足 B5「逐人行先于其触发的整单流转行落库」。语义分工（B3）：这条行=**提交当时的动作
+        // 快照**（谁、什么模式、什么时刻、若无代码交付原因是什么），下面 runWGate 内部可能写的整单流转
+        // 行=**全单状态变化**——两者并存、不去重、不互相替代，是既有 `dev_withdraw`（:11416 一带，撤回
+        // 写真实行）同一范式的延伸，不是新发明的机制。
+        // ⚠️ 提交时刻取值（575-M3 定案）：**禁止**在这里再取一次 `datetime('now')`（会与上面 CAS UPDATE
+        // 写入的 resolved_at 跨秒不一致），也**禁止**用 UPDATE 前的 `memberRow.resolved_at`（那时为空、
+        // 且 memberRow 是 CAS 之前 assertDevMember 查到的旧快照）——必须在 CAS 成功后**同事务读回**
+        // 实际落库的 resolved_at 作为 submitted_at；顺带同一条语句读 round_no（memberRow 本身不带该列，
+        // assertDevMember 的 SELECT 未取它，见 :3438 一带）。读回为空视为内部错误，抛出让外层 catch 走
+        // sysRollback 整体回滚（B6a：事务提交前失败→零新增行），不静默放行留一条无时刻的假记录。
+        const perDevDoneSnapshot = await dbGetAsync(
+          `SELECT resolved_at, round_no FROM sys_issue_dev_assignees WHERE id = ?`,
+          [memberRow.id]
+        );
+        if (!perDevDoneSnapshot || !perDevDoneSnapshot.resolved_at) {
+          throw new SysTransitionError(500, 'PERDEV_DONE_RESOLVED_AT_MISSING',
+            '逐人完成事件读回 resolved_at 为空（内部错误：CAS 刚成功写入该值，此刻理应非空）');
+        }
+        const perDevDone = buildPerDevDonePayload({
+          mode: targetDevStatus,
+          actionCode: PERDEV_DONE_ACTION_CODE[targetDevStatus],
+          devUserId: memberRow.user_id,
+          devUserName: memberRow.user_name,   // 在册时姓名快照（非 actor.name）：本端点 actor 恒为完成者本人，admin 代提路径当前不存在（见 buildPerDevDonePayload 注释）
+          devAssigneeId: memberRow.id,
+          submittedAt: perDevDoneSnapshot.resolved_at,
+          noCodeReason: targetDevStatus === 'no_code' ? parsed.noCodeReason : undefined,
+        });
+        // [Opus 预筛 S1·9a] action_code 写成**两条显式字面量 INSERT 分支**而非 `?` 绑定运行时表达式——
+        //   verify-sys-timeline-label-coverage 是静态解析器，对箭头函数路由回调内的表达式绑定会在
+        //   findEnclosingFunctionBody 处 throw，只能靠白名单放行；白名单一旦存在该站点的码怎么改守卫都
+        //   看不见（放宽集合让负向断言静默失效）。与长任务 A 乙4 的处置先例同款（多 8 行换守卫判别力不降级）。
+        //   两分支的 actionCode 与 buildPerDevDonePayload 校验过的 perDevDone.actionCode 必须一致，此处再断一次防两处漂移。
+        // [Opus 预筛 S1·9c/9d] ref_id 在本行=dev_assignee_id（本表 ref_id 已有 release_id / dev_event_id 两种语义，
+        //   凡按 ref_id 查询务必叠 action_code）；round_no 直接透传成员行存量值（2026-08-12 ALTER 之前建的实例该列为
+        //   NULL，逐人行随之为 NULL）——它只是列级冗余、不进 D8 payload 契约，读侧不得依赖它非空。
+        const perDevDoneRow = [id, perDevDone.summary, memberRow.id, perDevDoneSnapshot.round_no, actor.id, actor.name, JSON.stringify(perDevDone.payload)];
+        if (targetDevStatus === 'no_code') {
+          if (perDevDone.actionCode !== 'dev_no_code') throw new SysTransitionError(500, 'PERDEV_DONE_ACTION_CODE_MISMATCH', '逐人完成事件分支与 action_code 不一致（no_code）');
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'dev_no_code', ?, ?, ?, ?, ?)`,
+            perDevDoneRow
+          );
+        } else {
+          if (perDevDone.actionCode !== 'dev_submit_done') throw new SysTransitionError(500, 'PERDEV_DONE_ACTION_CODE_MISMATCH', '逐人完成事件分支与 action_code 不一致（code_submitted）');
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'dev_submit_done', ?, ?, ?, ?, ?)`,
+            perDevDoneRow
+          );
         }
 
         // §6.2 步骤4：mode=commits → INSERT 行（trim 已入库；自然键查重：同实例+component+ref 重复→400）
@@ -11306,6 +11422,16 @@ module.exports = (deps) => {
           `SELECT id, component, commit_ref FROM sys_issue_dev_commits WHERE dev_assignee_id = ? ORDER BY id ASC`,
           [memberRow.id]
         );
+        // [长任务B·S4a·#64③收口] 撤回行时间线自足——同 S1 逐人完成事件（:10767 一带）同款做法，同事务读回
+        // 本实例 round_no，随撤回行一起落 ref_id/round_no 两列（该两列早已存在于 sys_issue_timeline，S1 已
+        // 用过；不改 payload_json 结构，只加不减）。memberRow 本身不带 round_no（assertDevMember 的 SELECT
+        // 未取该列，见 :3438 一带），round_no 全程不随本次撤回变化（CAS 只改 dev_status/resolved_at/
+        // no_code_reason），任意时刻读均可，此处与 currentCommitRows 同批读，不额外增加事务往返次序风险。
+        const withdrawRoundNoRow = await dbGetAsync(
+          `SELECT round_no FROM sys_issue_dev_assignees WHERE id = ?`,
+          [memberRow.id]
+        );
+        const withdrawRoundNo = withdrawRoundNoRow ? withdrawRoundNoRow.round_no : null;
         const auditPayload = {
           delivery_rev_before: deliveryRevBefore,
           dev_assignee_id: memberRow.id,
@@ -11412,9 +11538,9 @@ module.exports = (deps) => {
         //    无 DDL CHECK，零迁移）。payload_json = §5.9 冻结的审计快照（写入前已构造好，未被后续任何
         //    写操作污染——commits 字段是删除前读到的真实行，非删除后的空集合）。
         await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
-           VALUES (?, 'note', ?, 'dev_withdraw', ?, ?, ?)`,
-          [id, `开发撤回提交：${reason}`, Number(actor.id) || null, actor.name || null, JSON.stringify(auditPayload)]
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'dev_withdraw', ?, ?, ?, ?, ?)`,
+          [id, `开发撤回提交：${reason}`, memberRow.id, withdrawRoundNo, Number(actor.id) || null, actor.name || null, JSON.stringify(auditPayload)]
         );
 
         const deliveryRevAfter = await computeDeliveryRev(id);
@@ -18042,7 +18168,13 @@ module.exports = (deps) => {
         //   sys_release_audit.changes_json 按 DDL 注释与 472-MED-2 新增 CHECK（json_type(changes_json)
         //   = 'array' ∧ json_array_length > 0）明确要求是**裸数组** [{field,old,new}]，不是包一层对象。
         //   此前误把同一份 {changes} 对象形态塞进两处，changes_json 撞新 CHECK 500——现分列两个变量。
-        const timelinePayloadJson = JSON.stringify({ changes });
+        // [长任务B·S4b2·#84 子项收口·2026-09-17] +release_no——与 release_date_change（applyReleaseChange
+        //   :16989 一带）同款契约，供前端 siTlChangeObjectText 展开区头行显业务编号而非内部 id（S4b 已把
+        //   前端判据统一为「优先读 payload.release_no」，本批只补这一处后端缺口，不再新起分支）。beforeRow
+        //   是本请求最早一次 `SELECT * FROM sys_releases WHERE id = ?`（:18093），同事务内该行 release_no
+        //   全程不变（本端点只改 title/version_tag/release_note 三列，CAS WHERE 未含 release_no），直接复用
+        //   不再重查——同 applyReleaseChange 内 `rel.release_no` 复用同一份行的纪律一致。
+        const timelinePayloadJson = JSON.stringify({ changes, release_no: beforeRow.release_no || null });
         const changesArrayJson = JSON.stringify(changes);
         for (const mid of memberIds) {
           await dbRunAsync(
@@ -21635,6 +21767,10 @@ module.exports = (deps) => {
     resolveActiveSysIntakeLiaisons,
     recordSysIntakeNotify,
     buildSysIntakeMarkdown,
+    // [长任务B·S1·时间线逐人完成事件_方案_20260916_v1.1 §3 D8/D10] 逐人完成事件纯函数——verify 直调
+    // 真实逻辑做"不一致组合应被拒"单元断言（mode/actionCode mismatch→throw），防复刻漂移。
+    PERDEV_DONE_ACTION_CODE,
+    buildPerDevDonePayload,
     deriveSysTitleFromDescription,
     SYS_NOTIFY_INTAKE_STATUSES,
     SYS_REQUIRED_TABLES,

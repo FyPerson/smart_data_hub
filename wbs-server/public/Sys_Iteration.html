@@ -388,6 +388,7 @@
         .si-tl-evt.si-tl-red { background: #fee2e2; color: #b91c1c; }
         .si-tl-evt.si-tl-green { background: #d1fae5; color: #047857; }
         .si-tl-evt.si-tl-rose { background: #fce7f3; color: #be185d; }   /* 变更留痕专用（用户 2026-09-11 选 V4a：玫红实底 + ✎，与发布留痕的绿区分开） */
+        .si-tl-evt.si-tl-teal { background: #ccfbf1; color: #0f766e; }   /* 逐人完成专用（用户 2026-09-17 在示例页 V1-V9 中选 V1 teal 实底：与 amber/gray/rose/green/red/blue/indigo 全不撞·方案 20260916 v1.1 D10）*/
         .si-tl-evt.si-tl-orange { background: #fed7aa; color: #c2410c; }
         .si-tl-evt.si-tl-gray { background: #f1f5f9; color: #475569; }
         .si-tl-to { color: #94a3b8; font-size: 11px; }
@@ -400,6 +401,19 @@
         /* max-height 240→150（发布留痕降噪批）：原文里对人有意义的字段已被上方结构化小表逐个透出，
            这块 <pre> 只服务"人工核对冻结原文"这一窄场景，不该按第一阅读对象的体量占位。 */
         .si-tl-release-json pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
+        /* [长任务B·S2b·Opus 预筛 LOW-6] 逐人完成 no_code 原因展开区——专名 class（不复用
+           .si-tl-release-json，那是发布留痕专用命名），规则逐条复制自上方 .si-tl-release-json 三条
+           （纯 CSS 拷贝，非 @extend——本页面无预处理器）。 */
+        .si-tl-perdev-reason { display: inline; }
+        .si-tl-perdev-reason summary { cursor: pointer; color: #374151; }
+        .si-tl-perdev-reason summary:hover { color: #1e293b; }
+        .si-tl-perdev-reason pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
+        /* [长任务B·S4a·#64③收口] 撤回提交行——commit 快照展开区，专名 class（不复用 .si-tl-perdev-reason，
+           那是逐人完成 no_code 原因专用命名），规则逐条复制自 .si-tl-perdev-reason 三条（纯 CSS 拷贝）。 */
+        .si-tl-withdraw-detail { display: inline; }
+        .si-tl-withdraw-detail summary { cursor: pointer; color: #374151; }
+        .si-tl-withdraw-detail summary:hover { color: #1e293b; }
+        .si-tl-withdraw-detail pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
         /* [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件「查看改动」展开区：头行「变更对象 · 变更字段」+ 逐字段两块「修改前 / 修改后」包裹。
            复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源，不 bump ?v=。 */
@@ -4291,7 +4305,12 @@
         //   SI_TL_RELEASE_SCOPE_LABEL/_CLS——本码用这里的独立徽章即可；D2「豁免的是输入闸不是事实」
         //   要求它始终可见，这由「note 型 + 未登记可隐藏白名单」保证，与标签表无关。同
         //   release_info_edit/release_deleted 两先例处置一致。
-        release_overdue_reason: '上线逾期'
+        release_overdue_reason: '上线逾期',
+        // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] 开发逐人完成——note 型独立徽章
+        //   （同 dev_withdraw 一带模式），两码分开（D10：`dev_submit_done`=有代码提交、`dev_no_code`=无
+        //   代码交付），需登记三处：本表 + SI_TL_CLS + SI_TL_NOTE_OWN_LABEL_CODES（下方两处同步，改一处
+        //   必须同改另两处）+ scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES。
+        dev_submit_done: '开发完成·代码已提交', dev_no_code: '开发完成·无代码交付'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -4371,8 +4390,17 @@
         // [开发撤回提交 方案 v1.2 §5.10] 归 amber——警示但非错误：开发自查主动收回，不是被验收/对接
         //   测试判定拒绝那种负面动作（那些归 red），也非纯程序性动作（那些归 indigo），与既有
         //   completion_overrun_reason/liaison_test_skip_* "值得留意但非负面判定"语义同族。
-        dev_withdraw: 'si-tl-amber'
+        dev_withdraw: 'si-tl-amber',
+        // [长任务B·S2·方案 D10] 开发逐人完成两码——归 **si-tl-teal**（用户 2026-09-17 在示例页 V1-V9 九个候选里
+        // 选 V1 teal 实底：与既有 amber/gray/rose/green/red/blue/indigo 全不撞，形态与页内其他实底徽章一致；
+        // D10 要求不与绿色「发布留痕」/玫红「变更留痕」撞色）。两码同色族，靠标签文字区分模式。
+        dev_submit_done: 'si-tl-teal', dev_no_code: 'si-tl-teal'
     };
+    // [长任务B·S2b·Opus 预筛 LOW-4·方案 D9] no_code 原因摘要上限——具名常量取代裸 `80`，与后端
+    // routes/sys-iteration/index.js 的 `PERDEV_DONE_SUMMARY_MAX_CODEPOINTS`（同为 80）同源同值但物理
+    // 分属前后端两份源码，不共享同一处定义（前后端本就不共用运行时）；跨文件同值由
+    // verify-sys-release-panel-static.js 的正则抓取两处字面量断言相等，防未来只改一处漂移。
+    const SI_PERDEV_REASON_BRIEF_MAX = 80;
     // 上线体统一重构 C2b（199 审 MED-3）：release_add/release_remove/release_date_change/release_schedule_cancel/
     //   release_published 五个 action_code 全部落 event_type='scope_change'（§6.13），此前 siRenderTimeline 的
     //   key 计算只对 status_change/release 两个 event_type 优先识别 action_code，scope_change 恒落回通用
@@ -4534,7 +4562,10 @@
     // [开发撤回提交 方案 v1.2 §5.10] +dev_withdraw（撤回提交独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS
     //   处注释；与 scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES
     //   同一份口径同源，改这里必须同改那边）。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason']);
+    // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] +dev_submit_done/dev_no_code（开发
+    //   逐人完成两码独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS 处注释；同源纪律同上，已同步改
+    //   scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES）。
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4640,20 +4671,28 @@
     //   不动——那是三表登记守卫锁的静态口径，本处只是渲染时覆盖；「改的是什么对象」下沉到展开区头行（siTlChangeObjectText）。
     const SI_TL_CHANGE_BADGE_LABEL = '✎ 变更留痕';
     const SI_TL_CHANGE_BADGE_CLS = 'si-tl-rose';
-    function siTlChangeObjectText(e) {
+    function siTlChangeObjectText(e, payloadObj) {
         if (!e) return '';
-        if (e.action_code === 'release_info_edit') {
-            // ref_id=批次 id（写点 PATCH /sys-releases/:id 落 ref_id=id）；非正整数（缺失/脏值）省略括号，不做数值强转
+        // [长任务B·S4b·#84 子项收口·2026-09-17 用户拍板] 批次号口径统一为业务编号——展开区头行「批次」
+        //   优先显示 payload_json.release_no（R-YYYYMMDD-N 业务编号），只有该键缺失（历史行/尚未补该键的
+        //   写点）才回退显示内部 id（加「#」前缀区分两种口径，不让读者把内部 id 误当业务编号）。本地闭包
+        //   函数（不提到顶层）——本文件多处 harness 靠 `grabFnA('siTlChangeObjectText')` 只抽取整段函数体做
+        //   隔离装配，提到顶层会引入新符号导致既有装配串 ReferenceError（本批不改任何既有 check 装配）。
+        //   release_date_change 写点（applyReleaseChange :16989 一带）与 release_info_edit 写点
+        //   （PATCH /sys-releases/:id :18171 一带，S4b2·`45aa844` 已补 release_no）均已落 payload.release_no；
+        //   只有两者之前的历史行（payload 缺该键）才回退 id 显示。
+        const batchText = (label) => {
+            const relNo = (payloadObj && typeof payloadObj === 'object' && typeof payloadObj.release_no === 'string' && payloadObj.release_no)
+                ? payloadObj.release_no : null;
+            if (relNo) return `${label}（批次 ${relNo}）`;
+            // 回退口径：ref_id=批次内部 id；非正整数（缺失/脏值）省略括号，不做数值强转
             const rid = Number(e.ref_id);
-            return (Number.isInteger(rid) && rid > 0) ? `上线单信息（批次 #${rid}）` : '上线单信息';
-        }
+            return (Number.isInteger(rid) && rid > 0) ? `${label}（批次 #${rid}）` : label;
+        };
+        if (e.action_code === 'release_info_edit') return batchText('上线单信息');
         if (e.action_code === 'edit_in_revision') return '迭代单内容';
         // [#67 A8·2026-09-16] 补本次纳入的两码——不补会让展开区头行「变更对象」为空（codex 568 R3）。
-        if (e.action_code === 'release_date_change') {
-            // ref_id=批次 id（写点 applyReleaseChange 的 delta.planned_date_changed 分支已落 ref_id）
-            const rid = Number(e.ref_id);
-            return (Number.isInteger(rid) && rid > 0) ? `上线批次（批次 #${rid}）` : '上线批次';
-        }
+        if (e.action_code === 'release_date_change') return batchText('上线批次');
         // assign_overdue_eta 该码**不写 ref_id**，故不拼批次号（拼了会渲染出「批次 #NaN」）
         if (e.action_code === 'assign_overdue_eta') return '预计完成时间';
         // [乙4·2026-09-17 B6] 六处漏网写点各自的展开区头行「变更对象」文案；均不写 ref_id，不拼批次号。
@@ -4747,13 +4786,13 @@
         if (hasChangesKey) {
             // 分支 1：changes 键存在 → 只认它。判据是「实际渲染结果非空」而非「数组长度 > 0」（568-R M4）。
             changesHtml = Array.isArray(payloadObj.changes)
-                ? siRenderTimelineChanges(payloadObj.changes, siTlChangeObjectText(e)) : '';
+                ? siRenderTimelineChanges(payloadObj.changes, siTlChangeObjectText(e, payloadObj)) : '';
         } else if (payloadObj) {
             // 分支 2：changes 键不存在 ∧ 该码有旧版适配器登记 → 读旧键拼 changes 形状渲染（A9）。
             const legacyAdapt = SI_TL_CHANGE_LEGACY_ADAPTER[e.action_code];
             if (typeof legacyAdapt === 'function') {
                 const adapted = legacyAdapt(payloadObj);
-                if (adapted) changesHtml = siRenderTimelineChanges(adapted, siTlChangeObjectText(e));
+                if (adapted) changesHtml = siRenderTimelineChanges(adapted, siTlChangeObjectText(e, payloadObj));
             }
         }
         if (changesHtml) return { html: changesHtml, kind: 'ok' };
@@ -4880,6 +4919,110 @@
                 //   （cancel_consult 的两个写点未必含 (idN)），正则不命中时是安全 no-op，非本条断言范围。
                 const folded = e.summary.replace(/\(id\d+\)/, '');
                 summaryHtml = `<span title="${esc(e.summary)}">${esc(folded)}</span>`;
+            } else if (e.event_type === 'note' && (e.action_code === 'dev_submit_done' || e.action_code === 'dev_no_code')) {
+                // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B2/B3·D9/D10] 「开发逐人完成」渲染。
+                //   语义分工（B3）：本行=**提交当时的动作快照**（谁、什么模式、什么时刻，no_code 时还有
+                //   原因）；与同一次提交可能触发的整单流转行（runWGate 写的 status_change/submit 等镜像行）
+                //   **并存，不去重、不互相替代**——两者各自独立成行（写点见 index.js POST
+                //   /sys-issues/:id/submit 内 buildPerDevDonePayload 调用处注释，B5：逐人行先于其触发的
+                //   整单流转行落库）。
+                //   本分支**不依赖 #67 的可隐藏集合**（D3：逐人完成不归可隐藏集合）——SI_TL_HIDABLE_SCOPE_CODES
+                //   只判 `event_type==='scope_change'`（见 siTlIsHidableScope），note 型天然不带
+                //   si-tl-release-scope class，不会被「隐藏批次编排记录」勾选项连带隐藏。
+                //   按 action_code 分派解析（D9）：payload 非对象或缺 dev_user_name/submitted_at 关键字段
+                //   （历史脏数据/未来 schema 漂移）一律静默回退到 esc(e.summary)，不报错、不显告警——同本
+                //   函数其余分支的降级精神（§6.6b 不伪造）。
+                //   ⚠️ **严格按 e.action_code 分派，不读 payload.mode 判分支**——本行 payload 冻结的
+                //   `mode` 字段取值是 `code_submitted`/`no_code`（D8），与 sys_issue_dev_events 那边
+                //   `mode` 取值 `commits`/`no_code`（用于区分"有代码提交"与"无代码交付"两种交付形态）
+                //   **字面同名但值域不同**，是单标志双语义的又一实例——本分支不复用任何"读
+                //   payload.mode==='commits' 才如何如何"的既有判据（那是给 dev_events 消费方写的），
+                //   完成者/模式文案一律由 e.action_code（'dev_submit_done'/'dev_no_code'）决定。
+                //   ⚠️ **amend 后本行不改写**（方案 D8 拍板：修正提交零新增行、不改历史行）——本行显示的
+                //   永远是**提交当时**的模式/时刻/原因快照，若之后走 `/submit/amend` 切换了模式（如
+                //   commits→no_code），当前交付区（成员表/dev_events 最新事件）可能与本行展示不一致，
+                //   这是设计内行为，不是渲染 bug。
+                // [长任务B·S2b·Opus 预筛 LOW-7] 前置显式排除数组——同 siTlChangesHtml（:4756）「非 null、
+                // 非数组的对象」判据形态，`typeof [] === 'object'` 会让数组悄悄混进后续 `.dev_user_name`
+                // 等属性访问（恒 undefined，本可被判据挡在外面而非靠属性访问的 undefined 副作用挡住）。
+                const perDevPayload = (parsedPayload && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload))
+                    ? parsedPayload : null;
+                const perDevPayloadValid = !!perDevPayload
+                    && typeof perDevPayload.dev_user_name === 'string' && perDevPayload.dev_user_name
+                    && typeof perDevPayload.submitted_at === 'string' && perDevPayload.submitted_at;
+                if (!perDevPayloadValid) {
+                    summaryHtml = e.summary ? esc(e.summary) : '';
+                } else {
+                    const perDevModeText = e.action_code === 'dev_no_code' ? '无代码交付' : '代码已提交';
+                    const perDevWhenText = siFmtDT(perDevPayload.submitted_at);
+                    // D9：正文摘要上限 SI_PERDEV_REASON_BRIEF_MAX 码点（Array.from 按码点截断，省略号不
+                    // 计入该上限）；no_code 原因原文超过上限才加 <details> 展开区显示全文，恰好等于上限
+                    // 不截断、不产出展开区。
+                    // [长任务B·S2b·Opus 预筛 LOW-5/LOW-6] 展开区**不嵌进** `<span title=...>` 内部——
+                    // <details>/<summary>/<pre> 是块级/交互元素，塞进 title 属性字符串里毫无意义（title
+                    // 只能显示纯文本悬浮提示，标签会被当字面量转义显示，且 details 的点击展开在 title
+                    // 悬浮态下根本不可交互）；span 只包"姓名 · 模式 · 时刻"这段短文本，`perDevReasonHtml`
+                    // （含前导「：摘要」与可能的 details）拼在 span **之后**。展开区改专名 class
+                    // `si-tl-perdev-reason`（不复用 `si-tl-release-json`——那是发布留痕专用命名，语义不同
+                    // 的两处复用同一 class 会让未来样式调整互相牵连），CSS 见 :397 一带同款规则副本。
+                    let perDevReasonHtml = '';
+                    if (e.action_code === 'dev_no_code' && typeof perDevPayload.no_code_reason === 'string' && perDevPayload.no_code_reason) {
+                        const reasonChars = Array.from(perDevPayload.no_code_reason);
+                        const reasonOverLimit = reasonChars.length > SI_PERDEV_REASON_BRIEF_MAX;
+                        const reasonBrief = reasonOverLimit ? (reasonChars.slice(0, SI_PERDEV_REASON_BRIEF_MAX).join('') + '…') : perDevPayload.no_code_reason;
+                        // 正文摘要与展开区原文两条路径各自独立 esc（D9），不复用同一份转义结果。
+                        perDevReasonHtml = reasonOverLimit
+                            ? `：${esc(reasonBrief)}<details class="si-tl-perdev-reason"><summary>查看完整原因</summary><pre>${esc(perDevPayload.no_code_reason)}</pre></details>`
+                            : `：${esc(reasonBrief)}`;
+                    }
+                    // title 只挂完成者/模式/时刻（与正文同源内容，独立 esc 一遍——D9），no_code 原因全文
+                    // 已在展开区，title 不重复挂一遍避免悬浮提示过长。span 只包这三段，展开区在 span 外。
+                    const perDevPlain = perDevPayload.dev_user_name + ' · ' + perDevModeText + ' · ' + perDevWhenText;
+                    summaryHtml = `<span title="${esc(perDevPlain)}">${esc(perDevPayload.dev_user_name)} · ${esc(perDevModeText)} · ${esc(perDevWhenText)}</span>${perDevReasonHtml}`;
+                }
+            } else if (e.event_type === 'note' && e.action_code === 'dev_withdraw') {
+                // [长任务B·S4a·#64③收口] 撤回提交行时间线自足——原实现只走通用 esc(e.summary)，payload 的
+                //   withdrawn_event_id/commits 快照都不渲染，人工核对时看不出"撤回的是哪一条、当时带了
+                //   哪些 commit"。严格按 action_code 分派（同 dev_submit_done/dev_no_code 分支纪律），
+                //   payload 非对象/缺 withdrawn_event_id 关键字段（历史脏数据/未来 schema 漂移）一律静默
+                //   回退到 esc(e.summary)，不报错、不显告警。
+                const withdrawPayload = (parsedPayload && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload))
+                    ? parsedPayload : null;
+                // [codex 589 LOW-2] withdrawn_event_id 只接受正安全整数（number）或纯数字正整数字符串——
+                //   空串/空白/0/负数/非数字文本（历史脏数据/未来 schema 漂移）一律判无效，静默回退 esc(e.summary)。
+                const withdrawEventIdRaw = withdrawPayload ? withdrawPayload.withdrawn_event_id : undefined;
+                const withdrawEventIdValid = (typeof withdrawEventIdRaw === 'number')
+                    ? (Number.isSafeInteger(withdrawEventIdRaw) && withdrawEventIdRaw > 0)
+                    : (typeof withdrawEventIdRaw === 'string' && /^[0-9]+$/.test(withdrawEventIdRaw.trim()) && withdrawEventIdRaw.trim() !== '' && Number(withdrawEventIdRaw.trim()) > 0 && Number.isSafeInteger(Number(withdrawEventIdRaw.trim())));
+                const withdrawPayloadValid = !!withdrawPayload && withdrawEventIdValid;
+                if (!withdrawPayloadValid) {
+                    summaryHtml = e.summary ? esc(e.summary) : '';
+                } else {
+                    // 显示用规整值——number 原样转字符串，字符串形态去首尾空白后展示（避免"# 42 "带空格）。
+                    const withdrawEventIdDisplay = (typeof withdrawEventIdRaw === 'number')
+                        ? String(withdrawEventIdRaw) : withdrawEventIdRaw.trim();
+                    // commits 快照——非空数组才给展开区（复用 .si-tl-withdraw-detail，见 :404 一带 CSS）；
+                    //   历史行/无代码交付撤回（commits 恒为空数组）不产出展开区。commitLines 只拼原文
+                    //   （不 esc），转义统一放到下方唯一一条 summaryHtml 赋值语句内的 `esc(commitLines)`——
+                    //   [codex 589 MED-2] 原实现 map 内先 esc(comp)/esc(ref) 再在外层 `<pre>${esc(...)}`
+                    //   又 esc 一次，`&`/`<`/`"` 等字符经历双重转义（如 `a&b` 显示成 `a&amp;b`）。
+                    const withdrawCommits = Array.isArray(withdrawPayload.commits) ? withdrawPayload.commits : [];
+                    const commitLines = withdrawCommits.map(c => {
+                        const comp = c && c.component != null ? String(c.component) : '';
+                        const ref = c && c.commit_ref != null ? String(c.commit_ref) : '';
+                        return `${comp}: ${ref}`;
+                    }).join('\n');
+                    // [codex 590 M1 硬门铺路] summaryHtml 赋值语句本身必须字面含 esc(——不再经预构建局部
+                    //   变量（withdrawMainText/withdrawNote/withdrawCommitsHtml）间接转义再拼接。正文=原
+                    //   summary（含理由）+ 小字尾注「（撤回提交 #<withdrawn_event_id>）」+（非空 commits 才有
+                    //   的）展开区，三段各自独立 esc（同 perDev 分支纪律，不共用一份转义结果）；
+                    //   [长任务B S4c3·codex 591-R H1] withdrawCommits.length 本身是数字计数、非用户输入，
+                    //   理论上无 XSS 风险——但静态守卫已彻底删除 `.length` 的全局豁免（该豁免此前是"混合
+                    //   拼接绕过硬门"的根因之一），展示处统一改成显式 `esc(String(...))`，与守卫新判据
+                    //   （任何 `.length` 访问一律按普通属性读取处理）对齐，不再依赖"这条是安全数字"的
+                    //   特例豁免。
+                    summaryHtml = `${e.summary ? esc(e.summary) : ''}<span style="color:#9ca3af;font-size:11px;">（撤回提交 #${esc(withdrawEventIdDisplay)}）</span>${withdrawCommits.length > 0 ? `<details class="si-tl-withdraw-detail"><summary>查看撤回前 commit（${esc(String(withdrawCommits.length))}）</summary><pre>${esc(commitLines)}</pre></details>` : ''}`;
+                }
             } else if (SI_TL_CHANGE_CODES.has(e.action_code)
                        && SI_TL_CHANGE_CODES.get(e.action_code) === e.event_type) {
                 // [时间线改动明细 方案 20260911 v1.2 §3.2 + #67 A5/§6.2·2026-09-16 + 乙4·2026-09-17 B3/B4]
