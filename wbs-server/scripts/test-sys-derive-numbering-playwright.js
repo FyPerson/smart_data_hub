@@ -44,8 +44,9 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const ENV_JWT_SECRET = process.env.JWT_SECRET || null;   // .env 里的真实值——server 从 wbs-server 目录正常启动时用它
-const FALLBACK_JWT_SECRET = 'default_secret_key_change_me';   // server.js:45 源码字面量兜底值
+// [codex 573-M1] 这读的是**本脚本进程最终生效**的 JWT_SECRET（dotenv 加载后；若外部已注入则为注入值），
+//   不等同于「.env 文件里的值」——两者在有外部注入时会不同，故变量名与日志都不写「.env值」。
+const ENV_JWT_SECRET = process.env.JWT_SECRET || null;
 
 const db = new sqlite3.Database(DB_PATH);
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
@@ -55,7 +56,16 @@ const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => 
 // 〔现场探针实测发现，2026-08-15〕本次外部 server:3000 实际以 cwd=仓库根启动
 // （`"C:\...\node.exe" wbs-server/server.js`），server.js:31 `require('dotenv').config()`
 // 不带 path 参数、按 **process.cwd()** 解析 .env——仓库根无 .env 文件，dotenv 静默 no-op，
-// 该进程的 JWT_SECRET 因此落回源码字面量兜底值 FALLBACK_JWT_SECRET，而非 wbs-server/.env
+// 该进程的 JWT_SECRET 因此落回源码里的硬编码兜底值，而非 wbs-server/.env。
+// ⚠️ [#82 2026-09-16] **这条路径已关闭，兜底候选随之删除**：① #76 把 server.js 的 JWT_SECRET 改成
+//   fail-closed（缺失即拒启，不再落回任何字面量）；② #82 把 server.js 那行 dotenv 绑到 `__dirname`，
+//   从任何 cwd 启动都读 wbs-server/.env。
+//   ⚠️ [codex 573-M1 采纳] 但**不能因此断言「要么用 .env 真值、要么起不来，无第三种」**——dotenv
+//   默认**不覆盖**进程里已存在的环境变量，所以 PM2 的 env 注入 / 系统环境变量 / 父进程传入的值
+//   都会优先于 .env 文件内容生效。准确说法是：server 用的是「进程最终生效的 JWT_SECRET」，缺失才拒启；
+//   .env 只是其中一个来源。故下方探活机制**仍有实际用途**——外部注入导致 server 与本脚本拿到
+//   不同 secret 时，靠它给出清晰失败信息，而不是让断言以「token 无效」的模糊形态失败。
+//   下方探活机制**保留**（单候选也值得探活：secret 对不上时能给出清晰失败信息），只是候选两个减为一个。
 // 里配置的真实值。本文件加载 wbs-server/.env（同 test-sys-detail-ux-playwright.js 既有注释
 // "必须加载 .env"）对"从 wbs-server 目录正常启动"的 server 才是对的——那是这条既定规则的
 // 适用前提，这次现场实例的启动方式是例外，不代表规则错。两边硬编码其一都会在另一种启动方式下
@@ -74,13 +84,13 @@ async function resolveWorkingJwtSecret(candidates, adminRow) {
         const probeTok = jwt.sign({ id: adminRow.id, username: adminRow.username, display_name: adminRow.display_name, role: adminRow.role }, secret, { expiresIn: '5m' });
         try {
             const res = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${probeTok}` } });
-            tried.push(`${secret === ENV_JWT_SECRET ? '.env值' : '兜底字面量'}→HTTP${res.status}`);
+            tried.push(`脚本进程有效密钥→HTTP${res.status}`);
             if (res.ok) return secret;
         } catch (e) {
-            tried.push(`${secret === ENV_JWT_SECRET ? '.env值' : '兜底字面量'}→探活请求异常:${e && e.message}`);
+            tried.push(`脚本进程有效密钥→探活请求异常:${e && e.message}`);
         }
     }
-    throw new Error(`两个候选 JWT_SECRET 均无法通过 /api/auth/me 探活（${tried.join('；')}）——server:3000 是否在跑，或用了第三种 secret？`);
+    throw new Error(`JWT_SECRET 无法通过 /api/auth/me 探活（${tried.join('；')}）——server:3000 是否在跑？本脚本进程与 server 进程最终生效的 JWT_SECRET 是否一致？（注意 PM2/系统环境变量会覆盖 .env 文件）`);
 }
 // [S13 收口 MED 追-2②] 反向探针（探针双向证明纪律）：只测"两个候选之一能通过"不够——万一 server
 // 端点本身从不校验签名（例如中间件被绕过/降级成只信 payload 不验签名），任何 token 都会 200，
@@ -132,7 +142,7 @@ async function mkIssue(title, status, extra = {}) {
     try {
         const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!admin) throw new Error('库中无 active admin 用户，无法造 token');
-        const JWT_SECRET = await resolveWorkingJwtSecret([ENV_JWT_SECRET, FALLBACK_JWT_SECRET], admin);
+        const JWT_SECRET = await resolveWorkingJwtSecret([ENV_JWT_SECRET], admin);
         // [S13 收口 MED 追-2②] 反向探针：明摆着错的 secret 必须被拒（非 200），证明 /api/auth/me 真的在
         // 验签——不是随便什么 token 都放行，让上面挑出来的 JWT_SECRET 真正有"确实是它"的证明力。
         const wrongSecretStatus = await probeWrongSecretRejected(admin);

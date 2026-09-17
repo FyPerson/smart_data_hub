@@ -482,9 +482,21 @@ async function main() {
     //   assign 事件本身）。/assign 端点的超时指派留痕折叠进 event_type='assign' 那条主行的 summary
     //   （见 index.js "[组A·2.3]" 注释），按 event_type + summary LIKE 精确查这一行。
     const tl = await get(
-      `SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign' AND summary LIKE '%超时指派%' ORDER BY id DESC LIMIT 1`, [id]);
+      `SELECT summary, action_code, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign' AND summary LIKE '%超时指派%' ORDER BY id DESC LIMIT 1`, [id]);
     assert.ok(tl && tl.summary && tl.summary.includes('超时指派'), `[M7-正] event_type='assign' 且含"超时指派"的 timeline 行应存在，实得 ${JSON.stringify(tl)}`);
+    // [S4a·A4·#67 六写点补齐] 附带变更类 changes——超时重填分支 old 应有值（受理自动生成的 pastEta，到分）。
+    assert.strictEqual(tl.action_code, 'assign_eta', `[S4a-M7-正] action_code 应为 assign_eta，实得 ${tl.action_code}`);
+    assert.ok(tl.payload_json, `[S4a-M7-正] payload_json 应非空，实得 ${JSON.stringify(tl.payload_json)}`);
+    const m7p = JSON.parse(tl.payload_json);
+    assert.deepStrictEqual(Object.keys(m7p), ['changes'], `[S4a-M7-正] payload 恰含 changes 一键，实得 ${JSON.stringify(Object.keys(m7p))}`);
+    assert.strictEqual(m7p.changes.length, 1, `[S4a-M7-正] changes 恰一项，实得 ${JSON.stringify(m7p.changes)}`);
+    const m7ch = m7p.changes[0];
+    assert.deepStrictEqual(Object.keys(m7ch).sort(), ['field', 'new', 'old'], `[S4a-M7-正] changes[0] 恰 {field,old,new} 三键，实得 ${JSON.stringify(m7ch)}`);
+    assert.strictEqual(m7ch.field, 'dev_estimated_at', '[S4a-M7-正] field=dev_estimated_at');
+    assert.strictEqual(m7ch.old, pastEta.slice(0, 16), `[S4a-M7-正] old 应是超时重填前旧值的分钟粒度，期望 ${pastEta.slice(0, 16)} 实得 ${m7ch.old}`);
+    assert.strictEqual(m7ch.new, futureVal, `[S4a-M7-正] new 应是本次提交的新值，期望 ${futureVal} 实得 ${m7ch.new}`);
     ok('[M7] ⭐ ETA 来自真实受理链路+DB 置过期模拟拖延：受理自动生成 ETA → 指派被拖延过期 → /assign 不带新值 400 零副作用；带未来值 200+写入+timeline"超时指派"+真实指派落地');
+    ok('[S4a-M7-正] ⭐【#67 六写点补齐】/assign 超时重填分支：action_code=assign_eta + payload {changes:[{field,old,new}]} 三键齐全，old 为超时前旧值到分');
 
     // ★对照组：ETA 未过期时 /assign 不要求必填（证明必填闸只对"已过期"生效，非逢指派必填，与 [R4] 对称）
     const id2 = await mkIssue('bug', nowStrForFixture());
@@ -497,6 +509,13 @@ async function main() {
     const row2 = await issueRow(id2);
     assert.strictEqual(row2.dev_estimated_at, acceptedEta2, '[M7-对照] ETA 原样保留（未过期，不触发必填闸也不覆盖）');
     ok('[M7-对照] ★受理自动生成的 ETA 仍未过期时，/assign 不带新值照常 200（必填闸只对"已过期"生效，非逢指派必填，与 [R4] 同款对照）');
+    // [S4a·C3 负向] 普通指派（无 ETA 变化）⇒ action_code IS NULL AND payload_json IS NULL——原 INSERT 逐字不动。
+    const tl2 = await get(
+      `SELECT action_code, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign' ORDER BY id DESC LIMIT 1`, [id2]);
+    assert.ok(tl2, '[S4a-M7-对照] assign timeline 行应存在');
+    assert.strictEqual(tl2.action_code, null, `[S4a-M7-对照] 普通指派 action_code 应为 NULL，实得 ${JSON.stringify(tl2.action_code)}`);
+    assert.strictEqual(tl2.payload_json, null, `[S4a-M7-对照] 普通指派 payload_json 应为 NULL，实得 ${JSON.stringify(tl2.payload_json)}`);
+    ok('[S4a-M7-对照] ⭐【#67 负向】无 ETA 变化的普通指派 ⇒ action_code/payload_json 均 NULL（原 INSERT 逐字不动）');
 
     // [M7-填值]【MED-2·口径收窄改造，2026-08-12 主会话裁定】未过期格但现值非空（id3 先经 intake-accept
     //   自动生成过 ETA）：指派操作者显式提供新值 → 显式拒绝 409 ETA_NOT_EXPIRED（不再是旧口径的"用户值
@@ -542,10 +561,22 @@ async function main() {
     assert.strictEqual(row4.dev_estimated_at, `${filledVal}:00`, `[M7-填值-NULL] ⭐ 库内值应等于指派操作者提交的值，实得 ${row4.dev_estimated_at}`);
     assert.strictEqual(row4.status, '处理中', '[M7-填值-NULL] 真实指派已落地（bug: 待处理→处理中）');
     const tl4 = await get(
-      `SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign' AND summary LIKE '%人工设定%' ORDER BY id DESC LIMIT 1`, [id4]);
+      `SELECT summary, action_code, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='assign' AND summary LIKE '%人工设定%' ORDER BY id DESC LIMIT 1`, [id4]);
     assert.ok(tl4 && tl4.summary && !tl4.summary.includes('超时指派') && !tl4.summary.includes('人工更新'),
       `[M7-填值-NULL] timeline 应含"人工设定"、不含"超时指派"/"人工更新"（现值 NULL 是首次设定，非过期触发也非覆盖旧值），实得 ${JSON.stringify(tl4)}`);
     ok('[M7-填值-NULL] ⭐【MED-1/MED-5】现值为 NULL（首次设定）时指派操作者显式提供值 → 200 写入生效，timeline 记"人工设定"，与 [M7-填值] 的"非空→409"分支成对');
+    // [S4a·A4·#67 六写点补齐] 人工设定分支（old=null，首次设定）——不伪造旧值。
+    assert.strictEqual(tl4.action_code, 'assign_eta', `[S4a-M7-填值-NULL] action_code 应为 assign_eta，实得 ${tl4.action_code}`);
+    assert.ok(tl4.payload_json, `[S4a-M7-填值-NULL] payload_json 应非空，实得 ${JSON.stringify(tl4.payload_json)}`);
+    const m7np = JSON.parse(tl4.payload_json);
+    assert.deepStrictEqual(Object.keys(m7np), ['changes'], `[S4a-M7-填值-NULL] payload 恰含 changes 一键，实得 ${JSON.stringify(Object.keys(m7np))}`);
+    const m7nch = (m7np.changes || [])[0];
+    assert.ok(m7nch, `[S4a-M7-填值-NULL] changes[0] 应存在，实得 ${JSON.stringify(m7np)}`);
+    assert.deepStrictEqual(Object.keys(m7nch).sort(), ['field', 'new', 'old'], `[S4a-M7-填值-NULL] changes[0] 恰三键，实得 ${JSON.stringify(m7nch)}`);
+    assert.strictEqual(m7nch.field, 'dev_estimated_at', '[S4a-M7-填值-NULL] field=dev_estimated_at');
+    assert.strictEqual(m7nch.old, null, `[S4a-M7-填值-NULL] old 必须是 null（首次设定，不伪造旧值），实得 ${JSON.stringify(m7nch.old)}`);
+    assert.strictEqual(m7nch.new, filledVal, `[S4a-M7-填值-NULL] new 应是本次提交值，期望 ${filledVal} 实得 ${m7nch.new}`);
+    ok('[S4a-M7-填值-NULL] ⭐【#67 六写点补齐】/assign 人工设定分支：action_code=assign_eta + payload old=null（首次设定不伪造旧值）');
   }
 
   // ══════════════════════════ [R] §2.3 超时指派——/reassign 端点 ══════════════════════════
@@ -601,14 +632,45 @@ async function main() {
     assert.ok(r.body.eta && r.body.eta.overdue_assign === true, `[R3] 响应应含 eta.overdue_assign=true，实得 ${JSON.stringify(r.body.eta)}`);
     assert.strictEqual(r.body.eta.source, 'overdue', `[R3] eta.source 应为 overdue（双向对：voluntary 侧由 [R-填值-NULL] 断言），实得 ${r.body.eta.source}`);
     const row = await issueRow(id);
-    assert.notStrictEqual(row.dev_estimated_at, expiredVal, '[R3] 库内值已更新');
+    // ⚠️ [581-R M2] 原先这里只断「库内值 ≠ 过期旧值」，**没断它等于本次期望的新时间**——
+    //   若库被写成 NULL 或别的时刻，而 payload/摘要都正确，本组照样全绿（codex 581-R 指出，成立）。
+    //   ⇒ 按生产的**入库序列化契约**精确断言：normalizeSysDatetime 返回 `YYYY-MM-DD HH:MM:00`
+    //   （index.js:2612 注释「D4：入库到秒」，且 :2605 的 D10 只认秒位省略或 '00'），
+    //   请求体传的是分钟级 futureVal ⇒ 库内应恰为 `${futureVal}:00`。
+    //   不在测试里重算 normalizeSysDatetime（那是抄生产逻辑），而是按它的**声明契约**取期望值。
+    assert.strictEqual(row.dev_estimated_at, `${futureVal}:00`,
+      `[R3·581-R M2] 库内 ETA 应恰为本次提交值补秒后的形态，期望 ${futureVal}:00 实得 ${JSON.stringify(row.dev_estimated_at)}`);
+    assert.notStrictEqual(row.dev_estimated_at, expiredVal, '[R3] 库内值已更新（与上面的精确断言互为双向对照：一条防"没更新"，一条防"更新成错值"）');
     assert.strictEqual(await timelineCount(id), beforeTlCount + 1, '[R3] 新增恰 1 条 timeline 行（本端点此前从未写过 timeline，这是它第一个写点）');
     // [LOW-8] 精确定位——不依赖"latestTimeline=ORDER BY id DESC LIMIT 1 就是我要的那行"这个隐式前提。
     //   /reassign 的 ETA 留痕走独立行：event_type='note'、action_code='assign_overdue_eta'
     //   （见 index.js "[MED-2·收口]" 注释），按这两列精确查，而非信任"最新一条"。
     const tl = await get(
-      `SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' AND action_code='assign_overdue_eta' ORDER BY id DESC LIMIT 1`, [id]);
+      `SELECT summary, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' AND action_code='assign_overdue_eta' ORDER BY id DESC LIMIT 1`, [id]);
     assert.ok(tl && tl.summary && tl.summary.includes('超时指派'), `[R3] event_type='note'∧action_code='assign_overdue_eta' 的 timeline 行应存在且含"超时指派"，实得 ${JSON.stringify(tl)}`);
+    // ── [#67 C7·2026-09-16] 本写点自 #67 B2 起写 payload_json（此前恒 NULL，一条断言都没有）──
+    //   前端 §6.2 分支 1 只认 `changes`，故这里锁死它的**结构**与**取值同源**两件事。
+    assert.ok(tl.payload_json, `[R3·#67 B2] payload_json 应非空（B2 起本写点写结构化载荷），实得 ${JSON.stringify(tl.payload_json)}`);
+    const p3 = JSON.parse(tl.payload_json);
+    assert.deepStrictEqual(Object.keys(p3), ['changes'], `[R3·#67 B2] payload 恰含 changes 一键，实得 ${JSON.stringify(Object.keys(p3))}`);
+    assert.ok(Array.isArray(p3.changes) && p3.changes.length === 1, `[R3·#67 B2] changes 恰一个元素（只改 ETA 一个字段），实得 ${JSON.stringify(p3.changes)}`);
+    const ch3 = p3.changes[0];
+    assert.deepStrictEqual(Object.keys(ch3).sort(), ['field', 'new', 'old'].sort(), `[R3·#67 B2] changes[0] 恰 {field,old,new} 三键，实得 ${JSON.stringify(ch3)}`);
+    assert.strictEqual(ch3.field, 'dev_estimated_at', '[R3·#67 B2] field=dev_estimated_at（前端按此键取中文名「预计完成时间」）');
+    //   ⚠️ **同源断言**（feedback_write_read_same_semantic）：不在测试里重算一遍 truncToMinute——
+    //   那等于把生产逻辑抄一份，抄错了两边一起错。改断「摘要里那两个槽位上的值就是 payload 里这两个值」。
+    //   ⚠️ [578-L1 订正] 原写法用两条 `summary.includes(值)`，**只证字符串出现、不证槽位**——
+    //   把摘要里的新旧值**对调**，两条 includes 与下面的精确值断言**照样全过**（codex 578-L1 指出，成立）。
+    //   改断**有序片段**「重填为 X（原值 Y）」。同时把措辞收窄：本条验证的是**本用例**的值与位置一致，
+    //   不宣称"证明了所有路径永远同源"（原注释那句承诺过强）。
+    // ⚠️ [578-R L] 措辞收窄：这条断的是**本夹具**（先置一个 20 分钟前的 ETA 再改派）**预期**旧值非空，
+    //   不声称"overdue 分支在所有生产条件下旧值恒非空"——那个不变量本材料没有完整证据。
+    assert.ok(ch3.old, `[R3·#67 B2] 本过期夹具预期旧值非空（先置过期 ETA 再改派），实得 ${JSON.stringify(ch3.old)}`);
+    assert.ok(tl.summary.includes(`重填为 ${ch3.new}（原值 ${ch3.old}）`),
+      `[R3·#67 B2] 摘要应含有序片段「重填为 <payload.new>（原值 <payload.old>）」——对调新旧值时本条会红，两条独立 includes 不会，summary=${tl.summary} payload=${JSON.stringify([ch3.old, ch3.new])}`);
+    //   再钉一层「值确实是这次这两个」：旧值取自 expiredVal（秒级）、新值取自 futureVal（分钟级请求体）
+    assert.strictEqual(ch3.old, expiredVal.slice(0, 16), `[R3·#67 B2] old 应是过期旧值的分钟粒度，期望 ${expiredVal.slice(0, 16)} 实得 ${ch3.old}`);
+    assert.strictEqual(ch3.new, futureVal, `[R3·#67 B2] new 应是本次提交的新值，期望 ${futureVal} 实得 ${ch3.new}`);
     const rosterRows = await all('SELECT user_id FROM sys_issue_dev_assignees WHERE issue_id=? AND removed_at IS NULL', [id]);
     assert.strictEqual(rosterRows.length, 2, '[R3] roster 真实变化（member_ids 差量同时生效，非只顾 ETA 忽略主流程）');
     ok('[R3] 既有 ETA 已过期 + 填未来时刻 → 200，库值更新 + 新增 1 条 timeline"超时指派" + roster 差量同时落地');
@@ -656,7 +718,23 @@ async function main() {
     assert.strictEqual(rowAfter.dev_estimated_at, `${filledVal}:00`, `[R-填值-NULL] ⭐ 库内值应等于改派操作者提交的值，实得 ${rowAfter.dev_estimated_at}`);
     assert.strictEqual(await timelineCount(id), beforeTlCount + 1, '[R-填值-NULL] 新增恰 1 条 timeline 行（本端点的 ETA 留痕写点）');
     const tl = await get(
-      `SELECT summary FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' AND action_code='assign_overdue_eta' ORDER BY id DESC LIMIT 1`, [id]);
+      `SELECT summary, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='note' AND action_code='assign_overdue_eta' ORDER BY id DESC LIMIT 1`, [id]);
+    // ── [#67 C7/B3·2026-09-16] 首次设定分支（旧值恒空）：`old` 必须是 **null**，不伪造旧值 ──
+    //   这是方案 §3.1「前后值对照」判据的**登记例外**：本分支旧值当初本就不存在，展开区由前端既有
+    //   siTlChangeValueHtml 渲染成「（空）」。⚠️ `old` 键**必须在**（值为 null ≠ 缺键）——前端适配器
+    //   对"缺键"判数据损坏，这里虽走 changes 分支不经适配器，键齐仍是写端契约的一部分。
+    assert.ok(tl && tl.payload_json, `[R-填值-NULL·#67 B2] payload_json 应非空，实得 ${JSON.stringify(tl && tl.payload_json)}`);
+    const pN = JSON.parse(tl.payload_json);
+    const chN = (pN.changes || [])[0];
+    assert.ok(chN, `[R-填值-NULL·#67 B2] changes[0] 应存在，实得 ${JSON.stringify(pN)}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(chN, 'old'), `[R-填值-NULL·#67 B3] old 键必须存在（值为 null ≠ 缺键），实得 ${JSON.stringify(chN)}`);
+    assert.strictEqual(chN.old, null, `[R-填值-NULL·#67 B3] 首次设定分支 old 必须是 null（**不伪造旧值**：库里本来就没有旧 ETA），实得 ${JSON.stringify(chN.old)}`);
+    assert.strictEqual(chN.field, 'dev_estimated_at', '[R-填值-NULL·#67 B2] field=dev_estimated_at');
+    assert.strictEqual(chN.new, filledVal, `[R-填值-NULL·#67 B2] new 应是本次提交的值，期望 ${filledVal} 实得 ${chN.new}`);
+    // [578-L1] 同样改**有序片段**，锁住值所在的槽位（首次设定分支的文案是「填写为 X」，无「原值」段）
+    assert.ok(tl.summary.includes(`填写为 ${chN.new}`),
+      `[R-填值-NULL·#67 B2] 摘要应含有序片段「填写为 <payload.new>」，summary=${tl.summary} new=${chN.new}`);
+    assert.ok(!/原值/.test(tl.summary), `[R-填值-NULL·#67 B3] 首次设定的 summary 不该出现「原值」字样（与 payload.old=null 一致），实得 ${tl.summary}`);
     assert.ok(tl && tl.summary && tl.summary.includes('人工设定') && !tl.summary.includes('超时指派') && !tl.summary.includes('人工更新'),
       `[R-填值-NULL] timeline 应含"人工设定"、不含"超时指派"/"人工更新"（现值 NULL 是首次设定，非过期触发也非覆盖旧值），实得 ${JSON.stringify(tl)}`);
     ok('[R-填值-NULL] ⭐【HIGH-1】真实 /return 清空 ETA → /reassign 带值 → 200+库内写入+timeline"人工设定"（CAS 由 `= ?` 改 `IS ?` 后修复，验证真实触发链路而非 DB 直接造态）');
@@ -1159,6 +1237,103 @@ async function main() {
     assert.ok(looped && looped.ok !== false && String(looped.value || looped).startsWith('2026-08-22 17:00'),
       `[A1闭环] 预填值提交路径经 normalizeDeadlineDT 应合法且保持 17:00（实得 ${JSON.stringify(looped)}）`);
     ok('[A1] 精度 A 案六断言：纯日期预填 T17:00 生效 + 带时分/显式00:00/空/脏值四反例原样 + 提交闭环合法');
+  }
+
+  // ══════════════════════════ [S4a] #67 六写点补齐——/estimate 变更留痕 changes（C3 库层实证）══════════════════════════
+  //   夹具同 verify-sys-effort-c7.js 的 seedToDev 范式：建单→受理（liaisonTok）→(feature/improvement 补 OA)→
+  //   assign（dev=5）→ 显式清空受理自动生成的 dev_estimated_at（组 A 行为已由本文件 [M]/[H1] 覆盖，这里
+  //   要的是干净 null 基线，测 /estimate 自己的变更留痕语义）。
+  let s4aSeq = 0;
+  async function seedS4aDevIssue(type, needsFeasibility) {
+    s4aSeq++;
+    const payload = {
+      intake_contract_version: 2, type, title: `S4a-估时-${type}-${s4aSeq}`, system_name: 'BMS', source: '内部',
+      description: 'S4a #67 六写点补齐 verify 场景建单', intake_liaison_id: 13,
+    };
+    if (type === 'feature' || type === 'improvement') payload.needs_feasibility = needsFeasibility;
+    let r = await call('POST', '/api/sys-issues', adminTok, payload);
+    assert.strictEqual(r.status, 201, `[S4a 夹具] 建单 201, got ${r.status} ${JSON.stringify(r.body)}`);
+    const id = r.body.id;
+    const acc = (type === 'feature' || type === 'improvement') ? { risk_level: '二级' } : {};
+    r = await call('POST', `/api/sys-issues/${id}/intake-accept`, liaisonTok, acc);
+    assert.strictEqual(r.status, 200, `[S4a 夹具] 受理 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    if (type === 'feature' || type === 'improvement') {
+      r = await call('POST', `/api/sys-issues/${id}/set-oa-number`, adminTok, { oa_number: String(30260700 + s4aSeq).padStart(10, '3') });
+      assert.strictEqual(r.status, 200, `[S4a 夹具] 补 OA 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    }
+    r = await call('POST', `/api/sys-issues/${id}/assign`, liaisonTok, { assigned_to: 5 });
+    assert.strictEqual(r.status, 200, `[S4a 夹具] assign 200, got ${r.status} ${JSON.stringify(r.body)}`);
+    await run(`UPDATE sys_issues SET intake_liaison_id = 999999, dev_estimated_at = NULL WHERE id = ?`, [id]);
+    return id;
+  }
+  async function latestEstimateTl(id) {
+    return get(`SELECT action_code, payload_json FROM sys_issue_timeline WHERE issue_id=? AND event_type='estimate' ORDER BY id DESC LIMIT 1`, [id]);
+  }
+  {
+    // [S4a-估时-1] 首次（old=null）：nf=0 feature，ETA + 工期均首次写入 → changes 恰两项，old 均 null。
+    const id1 = await seedS4aDevIssue('feature', 0);
+    const estS4a1 = fmtLocalNoSec(addDays(new Date(), 20));
+    let r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: estS4a1, estimated_effort_days: 2 });
+    assert.strictEqual(r.status, 200, `[S4a-估时-1] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    let tl = await latestEstimateTl(id1);
+    assert.strictEqual(tl.action_code, 'estimate_eta', `[S4a-估时-1] action_code 应为 estimate_eta，实得 ${tl.action_code}`);
+    let p = JSON.parse(tl.payload_json);
+    assert.deepStrictEqual(Object.keys(p), ['changes'], `[S4a-估时-1] payload 恰含 changes 一键，实得 ${JSON.stringify(Object.keys(p))}`);
+    assert.strictEqual(p.changes.length, 2, `[S4a-估时-1] 首次应恰两项变化，实得 ${JSON.stringify(p.changes)}`);
+    for (const ch of p.changes) assert.deepStrictEqual(Object.keys(ch).sort(), ['field', 'new', 'old'], `[S4a-估时-1] 每项恰三键，实得 ${JSON.stringify(ch)}`);
+    const dateCh1 = p.changes.find(c => c.field === 'dev_estimated_at');
+    const effCh1 = p.changes.find(c => c.field === 'estimated_effort_days');
+    assert.ok(dateCh1 && effCh1, `[S4a-估时-1] 应含 dev_estimated_at 与 estimated_effort_days 两个字段，实得 ${JSON.stringify(p.changes)}`);
+    assert.strictEqual(dateCh1.old, null, '[S4a-估时-1] dev_estimated_at 首次 old 应为 null');
+    assert.strictEqual(dateCh1.new, estS4a1, `[S4a-估时-1] dev_estimated_at new 应为 ${estS4a1}，实得 ${dateCh1.new}`);
+    assert.strictEqual(effCh1.old, null, '[S4a-估时-1] estimated_effort_days 首次 old 应为 null');
+    assert.strictEqual(effCh1.new, 2, `[S4a-估时-1] estimated_effort_days new 应为 2，实得 ${effCh1.new}`);
+    ok('[S4a-估时-1] ⭐【#67 六写点补齐】/estimate 首次：action_code=estimate_eta + changes 两项（ETA/工期）old 均 null');
+
+    // [S4a-估时-2] 更新：两字段都变 → changes 恰两项，old 为上一次落库值。
+    const estS4a2 = fmtLocalNoSec(addDays(new Date(), 21));
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: estS4a2, estimated_effort_days: 3 });
+    assert.strictEqual(r.status, 200, `[S4a-估时-2] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    tl = await latestEstimateTl(id1);
+    p = JSON.parse(tl.payload_json);
+    assert.strictEqual(tl.action_code, 'estimate_eta', `[S4a-估时-2] action_code 应为 estimate_eta，实得 ${tl.action_code}`);
+    assert.strictEqual(p.changes.length, 2, `[S4a-估时-2] 更新应恰两项变化，实得 ${JSON.stringify(p.changes)}`);
+    assert.deepStrictEqual(p.changes.map(c => c.field).sort(), ['dev_estimated_at', 'estimated_effort_days'], `[S4a-估时-2] 两项 field 应恰为 dev_estimated_at + estimated_effort_days，实得 ${JSON.stringify(p.changes.map(c => c.field))}`);
+    const dateCh2 = p.changes.find(c => c.field === 'dev_estimated_at');
+    const effCh2 = p.changes.find(c => c.field === 'estimated_effort_days');
+    assert.strictEqual(dateCh2.old, estS4a1, `[S4a-估时-2] dev_estimated_at old 应为上次值 ${estS4a1}，实得 ${dateCh2.old}`);
+    assert.strictEqual(dateCh2.new, estS4a2, `[S4a-估时-2] dev_estimated_at new 应为 ${estS4a2}，实得 ${dateCh2.new}`);
+    assert.strictEqual(effCh2.old, 2, `[S4a-估时-2] estimated_effort_days old 应为上次值 2，实得 ${effCh2.old}`);
+    assert.strictEqual(effCh2.new, 3, `[S4a-估时-2] estimated_effort_days new 应为 3，实得 ${effCh2.new}`);
+    ok('[S4a-估时-2] ⭐【#67 六写点补齐】/estimate 更新：changes 两项，old 为上一次落库值');
+
+    // [S4a-估时-3] 只改工期（日期不变）：changes 应恰一项，只含 estimated_effort_days（同值 no-op 判据双字段各自判定）。
+    r = await call('POST', `/api/sys-issues/${id1}/estimate`, devTok, { dev_estimated_at: estS4a2, estimated_effort_days: 4 });
+    assert.strictEqual(r.status, 200, `[S4a-估时-3] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    tl = await latestEstimateTl(id1);
+    p = JSON.parse(tl.payload_json);
+    assert.strictEqual(tl.action_code, 'estimate_eta', `[S4a-估时-3] action_code 应为 estimate_eta，实得 ${tl.action_code}`);
+    assert.strictEqual(p.changes.length, 1, `[S4a-估时-3] 只改工期应恰一项变化，实得 ${JSON.stringify(p.changes)}`);
+    assert.strictEqual(p.changes[0].field, 'estimated_effort_days', `[S4a-估时-3] 唯一变化字段应为 estimated_effort_days，实得 ${JSON.stringify(p.changes[0])}`);
+    assert.strictEqual(p.changes[0].old, 3, `[S4a-估时-3] old 应为上次值 3，实得 ${p.changes[0].old}`);
+    assert.strictEqual(p.changes[0].new, 4, `[S4a-估时-3] new 应为 4，实得 ${p.changes[0].new}`);
+    ok('[S4a-估时-3] ⭐【#67 六写点补齐】/estimate 只改工期（日期未变）：changes 恰一项 estimated_effort_days，dev_estimated_at 不进（真正未变）');
+
+    // [S4a-估时-4] bug 单带存量工期（非适用类型脏值）只改 ETA ⇒ changes 只含 ETA，不含 estimated_effort_days。
+    const idBug = await seedS4aDevIssue('bug');
+    await run(`UPDATE sys_issues SET estimated_effort_days = 5 WHERE id = ?`, [idBug]);   // 模拟存量脏值（bug 无 API 写点）
+    const estBug = fmtLocalNoSec(addDays(new Date(), 15));
+    r = await call('POST', `/api/sys-issues/${idBug}/estimate`, devTok, { dev_estimated_at: estBug });
+    assert.strictEqual(r.status, 200, `[S4a-估时-4] 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
+    tl = await latestEstimateTl(idBug);
+    p = JSON.parse(tl.payload_json);
+    assert.strictEqual(p.changes.length, 1, `[S4a-估时-4] bug 单只改 ETA 应恰一项变化，实得 ${JSON.stringify(p.changes)}`);
+    assert.strictEqual(p.changes[0].field, 'dev_estimated_at', `[S4a-估时-4] 唯一变化字段应为 dev_estimated_at，实得 ${JSON.stringify(p.changes[0])}`);
+    assert.strictEqual(p.changes[0].old, null, '[S4a-估时-4] dev_estimated_at 首次 old 应为 null');
+    assert.strictEqual(p.changes[0].new, estBug, `[S4a-估时-4] new 应为 ${estBug}，实得 ${p.changes[0].new}`);
+    const bugRow = await get('SELECT estimated_effort_days FROM sys_issues WHERE id=?', [idBug]);
+    assert.strictEqual(bugRow.estimated_effort_days, 5, '[S4a-估时-4] bug 单存量脏工期列本身未被本次 UPDATE 覆盖（effortApplicable=false 时 SET 不含该列）');
+    ok('[S4a-估时-4] ⭐【#67 六写点补齐】bug 单带存量工期脏值只改 ETA ⇒ changes 只含 dev_estimated_at，非适用类型工期不进（§5.1 空值规则）');
   }
 
   server.close();

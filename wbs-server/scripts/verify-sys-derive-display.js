@@ -564,6 +564,8 @@ console.log('\n═══ [XSS-406-L1] 编号值插入 HTML 属性/onclick 前必
     function siPrereleaseFlagHtml() { return ''; }
     function siPostAcceptFlagHtml() { return ''; }
     function siFastlaneFlagHtml() { return ''; }
+    // [2026-09-17 长任务 A S4d 顺带] 列表行模板 02f093c（「已授权先行上线」徽章）新增的 helper 未在此登记 ⇒ 沙箱 ReferenceError 整个守卫崩（既有红，非本批引入；随全家回归一并补桩）。
+    function siFastlaneAuthFlagHtml() { return ''; }
     // [上线排期三态徽章 20260827] 行模板新增的徽章 helper——本沙箱只验派生编号显示，与排期徽章无关，
     //   故以空实现打桩（同上方三个 flag helper 的既有处理）。⚠️ 不打桩会 ReferenceError 让整个守卫崩，
     //   而不是给出可读的断言失败——新增行模板 helper 时必须同批在此登记。
@@ -666,6 +668,8 @@ console.log('\n═══ [407-L1] siSafeIdAttr 契约收紧：空串/布尔/十�
     function siPrereleaseFlagHtml() { return ''; }
     function siPostAcceptFlagHtml() { return ''; }
     function siFastlaneFlagHtml() { return ''; }
+    // [2026-09-17 长任务 A S4d 顺带] 列表行模板 02f093c（「已授权先行上线」徽章）新增的 helper 未在此登记 ⇒ 沙箱 ReferenceError 整个守卫崩（既有红，非本批引入；随全家回归一并补桩）。
+    function siFastlaneAuthFlagHtml() { return ''; }
     // [上线排期三态徽章 20260827] 行模板新增的徽章 helper——本沙箱只验派生编号显示，与排期徽章无关，
     //   故以空实现打桩（同上方三个 flag helper 的既有处理）。⚠️ 不打桩会 ReferenceError 让整个守卫崩，
     //   而不是给出可读的断言失败——新增行模板 helper 时必须同批在此登记。

@@ -32,7 +32,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 // [codex 478 LOW-1 收口] 平台管理员**按 username 解析**，不硬编码 id。
 //   被测逻辑（siIsPlatformAdmin）只以用户名白名单判定，探针若硬编码 id=1 是"平台管理员"，一旦部署

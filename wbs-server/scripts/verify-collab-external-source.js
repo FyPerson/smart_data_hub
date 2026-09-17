@@ -77,8 +77,26 @@ const REAL_DB = path.join(ROOT, 'task_pool.db');
 const TEMP_DB = path.join(os.tmpdir(), `collab-external-source-test-${process.pid}.db`);
 const WRAPPER_PATH = path.join(__dirname, '_test-it-asset-ledger-server-wrapper.js'); // 通用重定向 wrapper，非 IT 资产专属
 const UNIT_COLLAB_ROOT = path.join(os.tmpdir(), `collab-ext-src-unit-${process.pid}`);
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
+//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
+//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
+//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
+  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
+  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
+  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
+  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
+  process.exit(1);
+}
+// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
+//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
+//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
+if (!/^[!-~]+$/.test(ENCRYPTION_KEY) || Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
+  process.exit(1);
+}
 // 〔H1·codex 07 质量审〕上传根 uploads/collab 没有独立隔离（不改 server.js，先例如此）——旧版
 // 清理按"id ≥ 900000 全局扫描删除"理论上可能误删同一区间内的真实附件目录（虽然实际生产单号
 // 远小于 900000，但"理论上可能"就该堵）。改三件套：①随机取 base（每次运行不同，降低"假设

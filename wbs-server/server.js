@@ -50,7 +50,14 @@ const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const ARCHIVE_DIR = path.join(__dirname, 'archive');
 
 // 环境配置
-require('dotenv').config();
+// [#82 2026-09-16] 显式指定 .env 路径，不再依赖 process.cwd()。原写法 `config()` 按 cwd 解析：
+//   从 wbs-server/ 启动能读到，但以 `node wbs-server/server.js`（cwd=仓库根）启动时仓库根无 .env
+//   ⇒ dotenv 静默 no-op。该场景 2026-08-15 现场实测发生过（见
+//   scripts/test-sys-derive-numbering-playwright.js 的历史注释），过去的后果是 JWT_SECRET 落回
+//   硬编码回退值；#76 把它改成 fail-closed 后，后果变为「从仓库根启动直接拒启」。根治=绑 __dirname,
+//   与 scripts/ 下全部脚本的既有范式一致（它们一直写 `{ path: path.join(__dirname, '..', '.env') }`）。
+//   生产不受影响：PM2 的 pm_cwd 已是 E:\Task_Pool\wbs-server（2026-09-16 `pm2 jlist` 实测）。
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 // ==================== 日志级别控制 ====================
 const LOG_LEVELS = { ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3 };
@@ -64,7 +71,30 @@ const logger = {
 };
 
 // JWT配置
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+// [#76 2026-09-16] JWT_SECRET fail-closed。原先回退到一个硬编码默认值，而 scripts/sync-to-github.ps1
+//   的脱敏映射表**没有覆盖这个值**（表里只有 DB 密钥与 admin 口令——2026-09-16 逐条核实），也就是说
+//   它随 server.js 原样进了公开镜像仓。env 一旦没加载，server 就用这个「公开可查的固定值」签发与
+//   校验 token，任何人都能伪造管理员 token —— 是实打实的认证绕过面，不是单纯的"坏样板"。
+//   ⚠️ 与 DB 密钥情况相反，别把两者的结论混用：DB 那个常量有脱敏规则（2026-05-14 起），
+//      是否进过公开镜像**未经证实**；JWT 这个没有规则，进了。
+//   2026-08-26 凭证泄露闭环只把 DB_ENCRYPTION_KEY 改成 fail-closed（见本文件 2784 行），JWT_SECRET
+//   当时没动（[[feedback_pattern_sweep_not_symptom_list]] 同款复发：修了症状没扫模式）。
+// ⚠️ 这里**刻意不设 32 字节长度阈值**，别顺手"对齐 DB_ENCRYPTION_KEY 的 <32 判据"——本地与生产
+//   现行 JWT_SECRET 都是 25 字节（2026-09-16 前置探针实测），加阈值会让生产启动直接失败。
+//   长度偏短是另一件事：轮换要让全部在用 token 失效（所有人重新登录），属需单独拍板的运维动作，
+//   已作为独立条目登记，不在本次改动范围内。
+// ⚠️ 判据只拒「缺失 / 纯空白 / 占位字面量」，**不对 JWT_SECRET 本身做 trim**——trim 会改变真实签名
+//   密钥，让所有在用 token 立即失效。占位黑名单刻意不含那个旧默认值：写进来等于再留一份坏样板。
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET
+    || JWT_SECRET.trim() === ''
+    || ['undefined', 'null', 'changeme', 'change_me'].includes(JWT_SECRET.trim().toLowerCase())) {
+    console.error('[FATAL] 环境变量 JWT_SECRET 未设置、为纯空白、或仍是占位值。');
+    console.error('        ⚠️ 若本服务已有在用登录态：请恢复原密钥，不要生成新值——换密钥会让所有人被踢下线。');
+    console.error('        仅首次初始化时才生成: openssl rand -base64 48');
+    console.error('        写入 wbs-server/.env 后重启。拒绝以公开默认密钥签发 token。');
+    process.exit(1);
+}
 const JWT_EXPIRES_IN = '8h';  // 登录有效期8小时
 
 // ==================== 业务常量定义 ====================
@@ -321,7 +351,11 @@ function requireCollabQualityDualCheckSchemaReady(req, res, next) {
 }
 
 
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'issue_tracker_webhook_key';
+// [#82 2026-09-16] 同族回退值清除（与 #76 的 DB/JWT 两把同理）：硬编码默认值随源码进公开镜像，
+//   env 缺失时等于「webhook 签名密钥人人可知」。此处不 fail-closed 拒启——webhook 是可选入口，
+//   缺配置时应当是「该入口不可用」而非「整个服务起不来」，故留空值，**并在 requireWebhookSecret
+//   里补了一道「未配置即 503」的前置检查**（见该函数注释：空串会让空头绕过比较）。
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
 // Ensure directories exist
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
@@ -13215,8 +13249,22 @@ app.post('/api/issues/:id/create-chat', authenticateToken, requireIssueSchemaRea
 });
 
 // codex C5 M-3：webhook secret 校验抽独立中间件，挂在 requireIssueSchemaReady **之前**——
-//   未授权请求始终先被 401 拦截，不暴露 schema 初始化状态（503+detail），保持 401 鉴权语义优先于 503。
+//   未授权请求始终先被拦截，不暴露 schema 初始化状态，保持鉴权语义优先于 schema 状态。
+// ⚠️ [codex 573-L1 采纳] 原文写的是「始终先被 **401** 拦截」，自 #82 加入「未配置即 503」后这句不再准确：
+//   现在是 —— 未配置 → 503（通用文案）；已配置但凭据无效 → 401；**两者都在 schema 检查之前结束**，
+//   原注释要守的「鉴权先于 schema」性质不变。代价是未授权方能区分「入口未配置」与「凭据错误」
+//   这一位状态信息；已把响应文案改为不提具体配置键，真实原因只进服务端日志。
 function requireWebhookSecret(req, res, next) {
+    // [#82 2026-09-16] ⚠️ 这道未配置检查**必须在比较之前**，不能省：下面是直接字符串比较，
+    //   若 WEBHOOK_SECRET 为空串（env 未设置），攻击者只要发一个**空的** `x-webhook-secret:` 头，
+    //   `'' !== ''` 即为假 ⇒ 直接放行。即「缺配置」会从"该入口不可用"变成"人人可用"，
+    //   比清除前的硬编码回退值更糟（那时至少还得知道那个字面量）。故缺配置一律拒绝该入口，
+    //   用 503 而非 401：这是服务端未配置，不是调用方凭据错误，也不因此让整个服务拒启
+    //   （webhook 是可选入口，与 JWT_SECRET/DB_ENCRYPTION_KEY 那两把的 fail-closed 拒启口径有意不同）。
+    if (!WEBHOOK_SECRET) {
+        logger.error('[webhook] 拒绝请求：WEBHOOK_SECRET 未配置，该入口不可用');
+        return res.status(503).json({ error: 'Webhook 入口暂不可用' });
+    }
     if (req.headers['x-webhook-secret'] !== WEBHOOK_SECRET) {
         return res.status(401).json({ error: '无效的 Webhook 密钥' });
     }

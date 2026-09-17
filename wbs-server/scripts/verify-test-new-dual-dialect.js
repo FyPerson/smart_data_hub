@@ -8,8 +8,26 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
-const KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
+//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
+//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
+//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
+const KEY = process.env.DB_ENCRYPTION_KEY;
+if (!KEY || KEY.length < 32) {
+  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
+  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
+  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
+  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
+  process.exit(1);
+}
+// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
+//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
+//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
+if (!/^[!-~]+$/.test(KEY) || Buffer.byteLength(KEY, 'utf8') < 32) {
+  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
+  process.exit(1);
+}
 
 function dec(s) {
     const p = s.split(':');

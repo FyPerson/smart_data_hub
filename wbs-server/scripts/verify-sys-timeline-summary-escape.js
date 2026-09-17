@@ -99,8 +99,16 @@ check('summaryHtml 赋值语句实抓 ≥ 8 条（过少=状态机/marker 失配
     assert.ok(assignments.length >= 8, `实抓 ${assignments.length} 条`);
 });
 
-check('全部 summaryHtml 赋值语句均含 esc( 子串（未转义分支会判红，逐条点名）', () => {
-    const unescaped = assignments.filter(a => !a.stmt.includes('esc('));
+// [2026-09-17 长任务 A 乙4 S4b] siRenderTimeline 新增 baseSummaryHtml（在 if/else 链之前算好、已 esc 的摘要前缀），
+//   A/B 类配对分支的五条赋值以它为源拼接（不再各自写 esc(e.summary)）。⇒ 判据扩为「含 esc( 或含 baseSummaryHtml」，
+//   并**另加一条** check 锁住 baseSummaryHtml 自身定义必须两个分支都经 esc——否则「认它为已转义源」就是空头支票。
+check('baseSummaryHtml 定义本身两个分支都经 esc(（它是 A/B 类分支五条赋值的转义源）', () => {
+    const m = fnBody.match(/const baseSummaryHtml = \(e\.event_type === 'estimate' && e\.summary\)\s*\? esc\('预计完成：' \+ e\.summary\)\s*: \(e\.summary \? esc\(e\.summary\) : ''\);/);
+    assert.ok(m, 'baseSummaryHtml 定义应恰为「estimate 分支 esc(前缀+summary) : (summary ? esc(summary) : \'\')」——形态变了要重审转义面');
+    assert.strictEqual((fnBody.match(/const baseSummaryHtml =/g) || []).length, 1, 'baseSummaryHtml 只应定义一次');
+});
+check('全部 summaryHtml 赋值语句均含 esc( 子串或以 baseSummaryHtml 为源（未转义分支会判红，逐条点名）', () => {
+    const unescaped = assignments.filter(a => !a.stmt.includes('esc(') && !/\bbaseSummaryHtml\b/.test(a.stmt));
     if (unescaped.length > 0) {
         const detail = unescaped.map(a => `第 ${a.idx} 字符处：${a.stmt.slice(0, 120)}${a.stmt.length > 120 ? '…' : ''}`).join('\n    ');
         throw new Error(`${unescaped.length} 条赋值语句未见 esc(，存在未转义拼接 innerHTML 的风险：\n    ${detail}`);
@@ -114,13 +122,17 @@ check('全部 summaryHtml 赋值语句均含 esc( 子串（未转义分支会判
 //   已各自 esc）以裸 `${var}` 形式插值是合法的，不在动态字段清单内故放行——只揪"原始未转义字段直接插值"。
 function stripEscCalls(s) {
     // 平衡括号剥去每个 esc( ... ) 调用（含嵌套），替换成空串。
+    // [S6a·codex 587-R M3] 括号计数跳过字符串/模板字面量内部（\`esc('(') + e.summary\` 原先会把后面的裸字段一起吞掉）。
     let out = '', i = 0;
     while (i < s.length) {
         if (s.startsWith('esc(', i)) {
-            let depth = 0, j = i + 3;   // 指向 '('
+            let depth = 0, j = i + 3, q = null;   // j 指向 '('；q=当前所在引号
             for (; j < s.length; j++) {
-                if (s[j] === '(') depth++;
-                else if (s[j] === ')') { depth--; if (depth === 0) { j++; break; } }
+                const ch = s[j];
+                if (q) { if (ch === '\\') { j++; continue; } if (ch === q) q = null; continue; }
+                if (ch === "'" || ch === '"' || ch === '\x60') { q = ch; continue; }
+                if (ch === '(') depth++;
+                else if (ch === ')') { depth--; if (depth === 0) { j++; break; } }
             }
             i = j;   // 跳过整个 esc(...) 调用
         } else { out += s[i]; i++; }
@@ -135,6 +147,20 @@ function residualUnescapedInterpolations(stmt) {
     for (const m of residue.matchAll(/\$\{([^}]*)\}/g)) {
         if (RAW_DYNAMIC_FIELD_RE.test(m[1])) bad.push(m[0]);
     }
+    // [2026-09-17 长任务 A S4d2·codex 586 M] 加号拼接同样是裸插值：`summaryHtml = baseSummaryHtml + e.summary` 剥 esc 后没有
+    //   ${} 也没被上面抓到（变异 E1/E2 实证全绿）。补扫残留里「+ <动态字段>」与「<动态字段> +」两种形态；
+    //   条件位置的动态字段（如 `e.summary ? esc(e.summary) : ''` 剥 esc 后剩 `e.summary ?  : ''`）不含相邻加号，不误判。
+    const CONCAT_RE = /\+\s*(e\.\w+|folded|translated|info\.\w+|a\.\w+)\b|\b(e\.\w+|folded|translated|info\.\w+|a\.\w+)\s*\+/g;
+    for (const m of residue.matchAll(CONCAT_RE)) bad.push('+拼接:' + m[0].trim());
+    // [S6a·codex 587-R M3] 加号判据仍可被括号 \`+ (e.summary)\` 与三元 \`e.summary ? e.summary : x\` 绕过 ⇒ 改为：
+    //   剥 esc 后残留里**任何**动态字段出现都判红，唯一豁免是「条件位」——紧跟 \`?\`（三元判断）或 \`&&\`/\`||\` 之前的守卫位
+    //   （如 \`e.summary ? esc(e.summary) : ''\` 剥后剩 \`e.summary ?  : ''\`，第一处是条件位放行、第二处已被剥掉）。
+    //   三元的**分支位**（\`? e.summary :\` / \`: e.summary\`）不在豁免内 ⇒ 判红。
+    //   [S6a-2] 条件位的准确定义＝「表达式首个 ? 之前的整段」（含 \`(e.summary && e.summary.length > 60) ?\` 这类复合条件）；
+    //   只扫 ? 之后的分支段（无 ? 则扫全段）；已作为 \${} 插值报过的不重复报（先把 \${…} 摘掉再扫裸引用）。
+    const qi = residue.indexOf('?');
+    const branchPart = (qi >= 0 ? residue.slice(qi) : residue).replace(/\$\{[^}]*\}/g, '');
+    for (const m of branchPart.matchAll(/\b(e\.\w+|folded|translated|info\.\w+|a\.\w+)\b/g)) bad.push('裸引用:' + m[0]);
     return bad;
 }
 check('[M1 加固·表达式级] 剥离 esc(...) 后残留 ${...} 插值不得引用原始动态字段（拦混合拼接）', () => {
@@ -145,6 +171,19 @@ check('[M1 加固·表达式级] 剥离 esc(...) 后残留 ${...} 插值不得�
         const detail = mixed.map(x => `第 ${x.a.idx} 字符处残留未转义插值 ${JSON.stringify(x.bad)}：${x.a.stmt.slice(0, 140)}${x.a.stmt.length > 140 ? '…' : ''}`).join('\n    ');
         throw new Error(`${mixed.length} 条赋值语句剥 esc 后仍有原始动态字段裸插值（混合拼接·XSS 面）：\n    ${detail}`);
     }
+});
+check('★对照组·S4d2：加号拼接 `baseSummaryHtml + changesHtmlA + e.summary` / `+ e.operator_name` 应被判红；纯 `baseSummaryHtml + changesHtmlA` 与条件位 `e.summary ? esc(e.summary) : \'\'` 不误判', () => {
+    assert.ok(residualUnescapedInterpolations('summaryHtml = baseSummaryHtml + changesHtmlA + e.summary;').length > 0, '加号拼接 e.summary 应判红');
+    assert.ok(residualUnescapedInterpolations('summaryHtml = baseSummaryHtml + changesHtmlA + e.operator_name;').length > 0, '加号拼接 e.operator_name 应判红');
+    assert.ok(residualUnescapedInterpolations("summaryHtml = e.summary + '<b>x</b>';").length > 0, '动态字段在加号左侧也应判红');
+    assert.strictEqual(residualUnescapedInterpolations('summaryHtml = baseSummaryHtml + changesHtmlA;').length, 0, '纯预转义变量拼接不应误判');
+    assert.strictEqual(residualUnescapedInterpolations("summaryHtml = e.summary ? esc(e.summary) : '';").length, 0, '条件位动态字段不应误判');
+    assert.strictEqual(residualUnescapedInterpolations("summaryHtml = esc('预计完成：' + e.summary);").length, 0, 'esc 内部的加号不应误判（已被剥掉）');
+    // [S6a·587-R M3 三组反例]
+    assert.ok(residualUnescapedInterpolations('summaryHtml = baseSummaryHtml + (e.summary);').length > 0, '括号包裹的裸字段应判红');
+    assert.ok(residualUnescapedInterpolations('summaryHtml = e.summary ? e.summary : baseSummaryHtml;').length > 0, '三元分支位的裸字段应判红（条件位豁免不覆盖分支位）');
+    assert.ok(residualUnescapedInterpolations("summaryHtml = esc('(') + e.summary;").length > 0, "esc('(') 内的字符串括号不得吞掉后续裸字段");
+    assert.strictEqual(residualUnescapedInterpolations("summaryHtml = (e.summary && e.summary.length > 60) ? esc(e.summary) : '';").length, 0, '&& 前的守卫位不应误判');
 });
 check('★对照组：混合拼接 `${esc(a)} ${e.summary}` 应被 M1 加固判红（证明非恒真）', () => {
     const mixedStmt = 'summaryHtml = `<span>${esc(e.operator_name)} ${e.summary}</span>`;';

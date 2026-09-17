@@ -12,7 +12,7 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const T_ADMIN = jwt.sign({ id: 1, username: 'admin', role: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
 
 const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'));

@@ -43,7 +43,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 // codex 220 L-4：原硬编码指向某次会话的临时目录，会话结束即失效——失败截图会静默写失败（目录不存在）
 // 且无从查阅。改用系统临时目录下固定子目录，每次运行前 mkdirSync recursive 确保存在。
 const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');

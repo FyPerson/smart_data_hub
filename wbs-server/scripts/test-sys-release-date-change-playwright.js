@@ -52,7 +52,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-date-change-playwright-shots');
 const TITLE_PREFIX = 'RELDC-';
 
@@ -170,6 +170,12 @@ function calendarDayDiff(laterDayStr, earlierDayStr) {
 // 明文点名的反模式（"精确清单"不是"过滤条件足够精确"，是"物理上只登记本轮真造出来的 id"）。
 const createdReleaseIds = [];
 const createdIssueIds = [];
+// [S4c·⑬ 局部清理面·主会话 2026-09-17 裁定] sys_issue_dev_assignees 不在既有五表清单内——/estimate 的
+// 鉴权 assertDevMember（index.js:3435-3444）硬依赖该表存在一条在册行，与 sys_issues.assigned_to 无关；
+// 该表 FK 未启用级联（全仓未开 PRAGMA foreign_keys=ON，server.js:1533/:12216），故本组自建自删自核：
+// 记下本组唯一一行的 id + 所属 issue_id，finally 里先于外层五表清理执行 DELETE + 局部残留核验。
+let devAssigneeId13 = null;
+let devAssigneeIssueId13 = null;
 // ── 夹具 helper（同 test-sys-release-overdue-playwright.js 同款范式）────────────────────────────
 async function mkRelease(adminTok, title, extra = {}) {
     const r = await fetchJson('/api/sys-releases', adminTok, { method: 'POST', body: { title } });
@@ -762,6 +768,500 @@ async function dateChangeTimeline(relId) {
             await page.close();
         }
 
+        // ── ⑫ [#67 C6·2026-09-16] 改期行的**展开区 DOM 实证**（本组是 #67 在浏览器层的唯一落点）──
+        //   为什么加在本文件而不新建脚本：本文件已有一套**经过 H1 变异自证的精确清理清单**
+        //   （createdReleaseIds/createdIssueIds + 逐表残留核验），而 #67 要验的改期行正是本文件的
+        //   夹具天然会产生的。新建脚本要把清理面重新实现一遍，那正是
+        //   feedback_shared_dir_test_cleanup_precise_list 警告的"半个清理"高发处。
+        //   方案 C6 指定的脚本就是本文件。
+        //   ⚠️ 与 S2 守卫的分工：守卫是**隔离装配直调真实 siRenderTimeline**（证明渲染函数本身对
+        //   各种数据形态都对），本组证明的是**真实页面把真实 payload 喂进了那个函数**——两层都要。
+        {
+            console.log('\n── ⑫ [#67 C6] 改期行展开区 DOM：✎ 徽章 + 变更对象头行 + 计划上线日期 旧→新 ──');
+            const oldDate12 = pastDateStr(3);
+            const newDate12 = futureDateStr(6);
+            const relId12 = await mkRelease(adminTok, `${TITLE_PREFIX}C6展开区`, { plannedDate: oldDate12 });
+            const issueId12 = await mkIssue(`${TITLE_PREFIX}成员-C6展开区`);
+            await addIssueTo(adminTok, relId12, issueId12);
+            // 走真实端点改期（带理由，因旧值已过期）——UI 路径由 ①③ 覆盖，本组专注渲染
+            const r12 = await fetchJson(`/api/sys-releases/${relId12}/update-planned-date`, adminTok,
+                { method: 'POST', body: { planned_date: newDate12, reason: 'C6 展开区 DOM 实证' } });
+            must(r12.status === 200, `⑫ 前置：改期应 200，实得 ${r12.status} ${JSON.stringify(r12.body)}`);
+            const relNo12 = (await dbGet('SELECT release_no FROM sys_releases WHERE id=?', [relId12]) || {}).release_no;
+            const tl12 = await dateChangeTimeline(relId12);
+            must(tl12.length === 1, `⑫ 前置：应恰 1 条 release_date_change，实得 ${tl12.length}`);
+            const p12 = JSON.parse(tl12[0].payload_json || 'null');
+            must(p12 && Array.isArray(p12.changes) && p12.changes.length === 1,
+                `⑫ 前置：#67 B1 应已写 changes（库层），实得 ${JSON.stringify(p12 && p12.changes)}`);
+
+            const page12 = await loginPage(browser, adminTok);
+            await page12.goto(`${BASE_URL}/Sys_Iteration.html?issue=${issueId12}`);
+            await page12.waitForLoadState('networkidle');
+            await page12.waitForTimeout(500);
+
+            // 按**写点保证的 summary 文本**定位改期行——不用徽章文本：S2 起徽章被无条件覆盖为
+            //   「✎ 变更留痕」，拿旧文案「上线单改期」定位会得到 0 条（c2b2 的同款回归已一并修正）。
+            const DC12 = '上线计划日期变更：';
+            const rowInfo12 = await page12.$$eval('.si-tl-item', (els, key) => els
+                .filter((e) => e.textContent.includes(key))
+                .map((e) => {
+                    const evt = e.querySelector('.si-tl-evt');
+                    const det = e.querySelector('details.si-tl-release-json');
+                    const head = e.querySelector('.si-tl-change-head');
+                    const rows = [...e.querySelectorAll('.si-tl-change-row')].map((r) => ({
+                        field: (r.querySelector('.si-tl-change-field') || {}).textContent || null,
+                        old: (r.querySelector('.si-tl-change-old .si-tl-change-val') || {}).textContent || null,
+                        neu: (r.querySelector('.si-tl-change-new .si-tl-change-val') || {}).textContent || null,
+                    }));
+                    return {
+                        evtLabel: evt ? evt.textContent.trim() : null,
+                        evtCls: evt ? evt.className : null,
+                        hasDetails: !!det,
+                        detailsOpen: det ? det.open : null,
+                        summaryText: det && det.querySelector('summary') ? det.querySelector('summary').textContent.trim() : null,
+                        headText: head ? head.textContent.trim() : null,
+                        rows,
+                        rowText: e.textContent.replace(/\s+/g, ' ').trim(),
+                        note: e.textContent.includes('修改明细不可用') || e.textContent.includes('历史记录，未保存修改明细'),
+                    };
+                }), DC12);
+            await shotOnFail(page12, rowInfo12.length === 1, 'c6-row-present',
+                `⑫ 页面时间线应恰有 1 条改期行（按 summary 定位），实得 ${rowInfo12.length} —— 为 0 则下面全是空转`);
+            const row12 = rowInfo12[0] || {};
+            await shotOnFail(page12, row12.evtLabel === '✎ 变更留痕', 'c6-badge',
+                `⑫ 改期行徽章应被覆盖为「✎ 变更留痕」（#67 A5 进 changes 分支），实得「${row12.evtLabel}」`);
+            await shotOnFail(page12, /si-tl-rose/.test(String(row12.evtCls)), 'c6-badge-cls',
+                `⑫ 徽章类应含 si-tl-rose（玫红，不与 release_published 的绿撞色），实得「${row12.evtCls}」`);
+            await shotOnFail(page12, row12.hasDetails === true, 'c6-details-present',
+                '⑫ 改期行应出现「查看改动」折叠（#67 B1 写了 changes ⇒ 前端 §6.2 分支 1 展开）');
+            await shotOnFail(page12, row12.detailsOpen === false, 'c6-details-closed',
+                '⑫ 折叠默认收起（与既有 release_published 折叠一致，不抢占版面）');
+            await shotOnFail(page12, /查看改动（1 项）/.test(String(row12.summaryText)), 'c6-details-summary',
+                `⑫ 折叠摘要应为「查看改动（1 项）」，实得「${row12.summaryText}」`);
+            await shotOnFail(page12, row12.note === false, 'c6-no-note',
+                '⑫ 正常展开时不得出现「修改明细不可用」/「历史记录，未保存修改明细」任何一句');
+            // 头行（A8）：改期码拼批次号
+            // [578-M3] 批次号要**精确等于本次夹具的批次**——原写法 `批次 #\d+` 匹配任意数字，
+            //   头行挂错批次发现不了。
+            // ⚠️ **按实现的真相断，不按建议的字面断**：codex 578-M3 说「头行批次号应与实际 release_no
+            //   精确对应」，但核到实现（Sys_Iteration.html A8）拼的是 **`ref_id` = 批次内部数字 id**，
+            //   不是 `release_no`（业务编号）。首版照建议写成比对 release_no，实测红出了这个差异：
+            //   头行显「批次 #1464」而 summary 显「批次 R-20260916-13」。
+            // ⚠️ **同时登记一处既有不一致**（非本批引入、交审查裁定）：同一条时间线行里，
+            //   summary 用**业务编号** `release_no`、展开区头行用**内部 id** —— 用户会看到两个不同的
+            //   "批次号"。这是 v1.172.0 就有的口径（`release_info_edit` 那支同样拼内部 id，
+            //   见 :4611），A8 只是沿用既有模式，方案 A8 也是这么写的。
+            await shotOnFail(page12, String(row12.headText || '').includes(`变更对象：上线批次（批次 #${relId12}）`), 'c6-head-object',
+                `⑫ 展开区头行应落 A8 的改期分支且批次号**精确等于本批次 id** #${relId12}（A8 拼 ref_id，非 release_no=${relNo12}），实得「${row12.headText}」`);
+            // [578-R risks2 / 578-R2 L1] 这两条要分开：库里的 summary 文本 **和** 页面那一行的 DOM 文本。
+            //   ⚠️ **声明范围**（578-R2 L1 又收窄了一次）：`textContent` **包含隐藏后代的文本** ⇒ 它只能
+            //   证明「**匹配事件行的 DOM 文本包含业务编号**」，**不能**证明编号"实际显示"给用户看到。
+            //   要证明那个，得定位摘要的实际显示节点再查可见性——本组不做，故措辞收到 DOM 文本层面。
+            //   ⭐ 另记一条 codex 578-R2 对我的**纠正**：我原先在材料里把这条断言的价值**评低了**
+            //   （说它「定位成功即意味着 summary 已渲染，故近乎恒真」）——**不对**：定位用的前缀
+            //   「上线计划日期变更：」与业务编号是**两个不同条件**，「保留前缀但遗漏/改错编号」
+            //   能通过定位却被本条捕获 ⇒ 独立判别力**高于**我原来的论证。已为此跑了针对性变异
+            //   （只删 summary 里的批次号段、保留前缀）：定位器照样成功，本条与库层那条**各红一次**。
+            await shotOnFail(page12, tl12[0].summary.includes(`批次 ${relNo12}`), 'c6-summary-relno-db',
+                `⑫ 库层对照：summary 用的是**业务编号** ${relNo12}，实得「${tl12[0].summary}」`);
+            await shotOnFail(page12, String(row12.rowText || '').includes(`批次 ${relNo12}`), 'c6-summary-relno-dom',
+                `⑫ **DOM 文本层**对照：该事件行的 DOM 文本里应含业务编号「批次 ${relNo12}」（与头行的内部 id 在 DOM 文本层面并存——**不等于**已证明用户看见），实得「${String(row12.rowText || '').slice(0, 120)}」`);
+            await shotOnFail(page12, /变更字段：计划上线日期（1 项）/.test(String(row12.headText)), 'c6-head-fields',
+                `⑫ 头行字段清单应是 A2 的中文名「计划上线日期」，实得「${row12.headText}」`);
+            // 明细行**逐单元格**核对（不在整页 text 里 includes——summary 里就有这两个日期，
+            //   整页 includes 会恒真，这是 codex 577-R 在守卫侧抓过的同一个假绿形态）
+            await shotOnFail(page12, row12.rows && row12.rows.length === 1, 'c6-rows-count',
+                `⑫ 展开区应恰 1 行明细，实得 ${row12.rows && row12.rows.length}`);
+            const cell12 = (row12.rows || [])[0] || {};
+            await shotOnFail(page12, cell12.field === '计划上线日期', 'c6-cell-field',
+                `⑫ 明细行字段名应是「计划上线日期」，实得「${cell12.field}」`);
+            await shotOnFail(page12, cell12.old === oldDate12, 'c6-cell-old',
+                `⑫ 「修改前」单元格应是旧日期 ${oldDate12}，实得「${cell12.old}」`);
+            await shotOnFail(page12, cell12.neu === newDate12, 'c6-cell-new',
+                `⑫ 「修改后」单元格应是新日期 ${newDate12}，实得「${cell12.neu}」`);
+            // 与库层同源：DOM 显示的两个值必须等于 payload.changes[0] 里的两个值
+            await shotOnFail(page12, cell12.old === p12.changes[0].old && cell12.neu === p12.changes[0].new, 'c6-dom-db-same',
+                `⑫ DOM 显示值应与库里 payload.changes[0] **逐值相等**（写端→读端同源），DOM=${JSON.stringify([cell12.old, cell12.neu])} DB=${JSON.stringify([p12.changes[0].old, p12.changes[0].new])}`);
+            // ── [578-M3] **真的点开折叠**再验一遍 ──
+            //   上面所有明细断言读的是 textContent，而 `<details>` **收起时 textContent 依然可读**
+            //   ⇒ 展开交互失效、明细被样式永久隐藏、或「修改前/修改后」标题缺失，那些断言照样全过
+            //   （codex 578-M3 指出，成立）。这里点开 summary，断 open 翻转 + 单元格**实际可见** +
+            //   两个标题在位。
+            await page12.click(`.si-tl-item:has-text("${DC12}") details.si-tl-release-json summary`);
+            await page12.waitForTimeout(250);
+            const opened12 = await page12.$$eval('.si-tl-item', (els, key) => {
+                const row = els.find((e) => e.textContent.includes(key));
+                if (!row) return null;
+                const det = row.querySelector('details.si-tl-release-json');
+                const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden' && el.getClientRects().length > 0;
+                const cell = row.querySelector('.si-tl-change-row');
+                return {
+                    open: det ? det.open : null,
+                    rowVisible: vis(cell),
+                    fieldVisible: vis(row.querySelector('.si-tl-change-field')),
+                    oldVisible: vis(row.querySelector('.si-tl-change-old .si-tl-change-val')),
+                    newVisible: vis(row.querySelector('.si-tl-change-new .si-tl-change-val')),
+                    tags: [...row.querySelectorAll('.si-tl-change-tag')].map((t) => t.textContent.trim()),
+                };
+            }, DC12);
+            await shotOnFail(page12, opened12 && opened12.open === true, 'c6-opened',
+                `⑫ 点击「查看改动」后 details.open 应翻为 true，实得 ${JSON.stringify(opened12 && opened12.open)}`);
+            // ⚠️ [578-R L] 措辞收窄：本条查的是**常见隐藏与布局**（display / visibility / 有布局矩形），
+            //   **不等于**"像素层面可读"——`opacity:0`、裁剪、父级 overflow 裁切、零字号、被遮挡都可能漏过。
+            //   不为穷举这些假设加检查，但声明范围要准（codex 578-R L）。
+            await shotOnFail(page12, opened12 && opened12.rowVisible && opened12.fieldVisible && opened12.oldVisible && opened12.newVisible, 'c6-cells-visible',
+                `⑫ 展开后明细行与三个单元格应通过**常见隐藏与布局可见性检查**（display/visibility/有布局矩形；不含 opacity/裁剪/遮挡），实得 ${JSON.stringify(opened12)}`);
+            await shotOnFail(page12, opened12 && opened12.tags.length === 2 && opened12.tags[0] === '修改前' && opened12.tags[1] === '修改后', 'c6-cell-tags',
+                `⑫ 两个单元格标题应按序为「修改前」「修改后」，实得 ${JSON.stringify(opened12 && opened12.tags)}`);
+
+            // A3/A4 语义：改期行不带可隐藏 class（S1 的核心语义，这里在真实页面再证一次）
+            const dcHidable12 = await page12.$$eval('.si-tl-item.si-tl-release-scope', (els, key) => els.filter((e) => e.textContent.includes(key)).length, DC12);
+            await shotOnFail(page12, dcHidable12 === 0, 'c6-not-hidable',
+                `⑫ 改期行**不带** si-tl-release-scope（#67 A3：改期是对外承诺变更、不属批次编排），实得 ${dcHidable12} 条带了`);
+            // ── [578-risks1] **勾选过滤器后改期行仍可见** ──
+            //   这条本该由 c2b2 的 G3 覆盖，但那段因 `:553` 夹具债（排班 2032 撞 F1 闸）跑不到
+            //   ⇒ 在**能跑**的本文件把它关掉。只断「带 class 的行全被藏」不足以证明改期没被藏
+            //   （改期行已不带该 class、天然不在那个选择器里），必须**正面**断它仍可见。
+            const hasToggle12 = await page12.locator('label:has-text("隐藏批次编排记录")').count();
+            await shotOnFail(page12, hasToggle12 > 0, 'c6-toggle-present',
+                '⑫ 时间线区应出现「隐藏批次编排记录」过滤开关（本单确有 release_add 事件）');
+            const scopeBefore12 = await page12.locator('.si-tl-release-scope').count();
+            await shotOnFail(page12, scopeBefore12 > 0, 'c6-scope-rows-present',
+                `⑫ 前置：应存在至少 1 条可隐藏的批次编排记录，实得 ${scopeBefore12} —— 为 0 则下面的过滤断言是空转`);
+            // ── [579-R3 rec3] 勾选**之前**先断初始态：复选框未勾选 ∧ 编排行全部可见 ──
+            //   这样本组走的是完整的**关闭 → 开启 → 关闭**三态：否则若复选框初始就是勾选的，
+            //   后面的 `uncheck` 才是第一次状态变化，而"勾选生效"那半其实没验到。
+            // ⚠️ [S4e 修正] `sampleAfter` 的定义**必须在初始态采样之前**——我加初始态断言时
+            //   把它用在了 `const` 声明之前，实跑直接 TDZ 报错
+            //   `Cannot access 'sampleAfter' before initialization`（一次真实的即时反馈：
+            //   语法检查 `node --check` 过得去、跑起来才炸）。故整块上移。
+            // [578-R2 L2] 原先是 `waitForTimeout(250)` 后**一次性采样**——若过滤涉及异步重绘/过渡，
+            //   可能在未稳定时**假红**。改为**有超时上限的轮询**：
+            // ⚠️ [579-R2 rec7] 但要说准：轮询**遇首次满足即退出**，只证明「条件曾在超时内成立」，
+            //   **不能**保证之后不再变错——原注释里"也可能在最终错误态出现前先通过"那句反过来写成了
+            //   轮询能避免它，是过强的保证，已删。
+            //   条件一满足就停（同步实现下第一轮即返回，不增加耗时），超时则拿**最后一次真实快照**
+            //   去断言（失败信息仍是真实快照，不是"轮询超时"这种无信息报错）。
+            const sampleAfter = (els, key) => {
+                const hidden = (el) => {
+                    const cs = getComputedStyle(el);
+                    return cs.display === 'none' || cs.visibility === 'hidden' || el.getClientRects().length === 0;
+                };
+                const scopeRows = els.filter((e) => e.classList.contains('si-tl-release-scope'));
+                const dcRows = els.filter((e) => e.textContent.includes(key));
+                const dcRow = dcRows[0];
+                const det = dcRow ? dcRow.querySelector('details.si-tl-release-json') : null;
+                const cell = dcRow ? dcRow.querySelector('.si-tl-change-row') : null;
+                return {
+                    scopeTotal: scopeRows.length,
+                    scopeStillShown: scopeRows.filter((e) => !hidden(e)).length,
+                    dcMatched: dcRows.length,
+                    dcShown: dcRows.filter((e) => !hidden(e)).length,
+                    // [578-R2 rec] 外层行可见**不等于**明细还展开着——外层里还有摘要文本，
+                    //   收起/藏掉明细它照样通过。故过滤后**单独**再查一次 details.open 与明细单元格。
+                    dcDetailsOpen: det ? det.open : null,
+                    dcCellShown: cell ? !hidden(cell) : null,
+                    // [579-R4 rec3] 行标识也放进**同一次采样**——原先它是独立的 $$eval，
+                    //   轮询等不到它 ⇒ 「数量先恢复、身份稍后恢复」时会提前退出再报错（假红）。
+                    scopeTexts: scopeRows.map((e) => e.textContent.replace(/\s+/g, ' ').trim()).sort(),
+                };
+            };
+            const cb12 = page12.locator('label:has-text("隐藏批次编排记录") input[type="checkbox"]');
+            await shotOnFail(page12, (await cb12.isChecked()) === false, 'c6-toggle-initially-unchecked',
+                '⑫ 初始态：过滤开关应**未勾选**（否则下面"勾选→隐藏"这半验的不是真的状态变化）');
+            const before12 = await page12.$$eval('.si-tl-item', sampleAfter, DC12);
+            await shotOnFail(page12, before12.scopeStillShown === scopeBefore12, 'c6-scope-initially-visible',
+                `⑫ 初始态：${scopeBefore12} 条编排行应全部可见，实得可见 ${before12.scopeStillShown} 条`);
+            // [579-R3 rec6 / 579-R4 M] 采集编排行的**行文本多重集**（变量名也用 Texts 而非 Ids——codex 579-R5 rec6：避免维护者再把它误读成事件身份）——纯数量相等证不出"原有的那些行
+            //   回来了"：等量**替换成别的事件**照样通过数量与可见性检查。
+            // ⚠️ **能力边界（579-R4 指出，如实写明）**：这比较的是**文本多重集**，**不是事件身份集合**。
+            //   `.si-tl-item` 在生产渲染里**没有任何稳定标识属性**（只有 class 与可选 style，
+            //   见 Sys_Iteration.html 的 si-tl-item 模板）⇒ DOM 侧拿不到事件 id。
+            //   ⇒ 两条**文本完全相同**的编排行互换，本条**检测不到**；空白归一化还会合并"仅空白不同"
+            //   的文本。**不为了测试给生产渲染加 data-id**（那是渲染输出变更、超出 #67 范围）。
+            //   变异 X1 只证明「能检测那一次文本替换」，不证明任意身份替换都能检测。
+            const scopeTextsBefore12 = before12.scopeTexts;
+            await cb12.check();
+            // ⚠️ [578-R M-new1] 勾选后的判断**不能只看元素自身的 display**：若过滤器改成隐藏
+            //   **时间线父容器**，改期行自身仍是 `display:block` ⇒ 旧写法 `dcVisible12 === 1` 照样通过，
+            //   而用户其实什么都看不到（codex 578-R 指出，成立）。改为：
+            //   · 编排行断的是「**已隐藏**」这个结果（自身 display:none **或** 无布局矩形），
+            //     不限定必须由自身 display:none 实现；
+            //   · 改期行断「文本匹配总数恰 1」**且**那一行通过与展开时同一套可见性检查（含布局矩形）。
+            let after12 = await page12.$$eval('.si-tl-item', sampleAfter, DC12);
+            // ⚠️ [579-R3 L1] `scopeTotal === scopeBefore12` **必须也进轮询成功条件**——它原先只在
+            //   最终断言里。若异步重绘**暂时**移除了编排行而其他条件已满足，轮询会**立即退出**，
+            //   然后因数量不足报错，等不到行恢复 ⇒ 假红（与"用轮询消除时序假红"的初衷相反）。
+            const afterOk = (x) => x && x.scopeTotal === scopeBefore12 && x.scopeStillShown === 0
+                && x.dcMatched === 1 && x.dcShown === 1
+                && x.dcDetailsOpen === true && x.dcCellShown === true;
+            for (let t = 0; t < 30 && !afterOk(after12); t += 1) {
+                await page12.waitForTimeout(100);
+                after12 = await page12.$$eval('.si-tl-item', sampleAfter, DC12);
+            }
+            // ⚠️ [579-R2 rec6] 只断「可见数为 0」**不够**：若过滤实现是**把编排行从 DOM 里删掉**，
+            //   这个条件同样成立 ⇒ 先断**勾选后采样时编排行总数与勾选前相同**，再断可见数为 0。
+            // ⚠️ [579-R4 L 订正] 原先写"删掉就再也恢复不了"——**不成立**（删掉 DOM 行后完全可以从
+            //   保留的数据重新渲染）。而且"数量相等"本身只证明**采样那一刻数量没变**，
+            //   并不证明节点从未被删除过。本条要的是「过滤=隐藏而非移除」这个**当前实现口径**，
+            //   不是"DOM 节点必须持久存在"这种更强的需求。
+            await shotOnFail(page12, after12.scopeTotal === scopeBefore12, 'c6-filter-not-remove',
+                `⑫ 勾选后编排行应**仍在 DOM 里**（隐藏 ≠ 删除），勾选前 ${scopeBefore12} 条、勾选后 ${after12.scopeTotal} 条`);
+            await shotOnFail(page12, after12.scopeStillShown === 0, 'c6-filter-hides',
+                `⑫ 勾选后 ${after12.scopeTotal} 条批次编排记录应全部**不可见**（自身 display:none 或无布局矩形皆可），实得仍可见 ${after12.scopeStillShown} 条`);
+            await shotOnFail(page12, after12.dcMatched === 1, 'c6-datechange-matched-one',
+                `⑫ 勾选后按 summary 文本匹配的改期行应仍恰 1 条（防出现隐藏的重复行），实得 ${after12.dcMatched} 条`);
+            await shotOnFail(page12, after12.dcShown === 1, 'c6-datechange-still-visible',
+                `⑫ 勾选「隐藏批次编排记录」后改期行**仍通过可见性检查**（#67 A3 的核心语义；过滤器若改成隐藏父容器，本条会红而只看自身 display 的写法不会），实得可见 ${after12.dcShown} 条（应为 1）`);
+            // [578-R2 rec] 过滤后明细应**仍展开且仍可见**——上面那条只证明"外层行没被藏"，
+            //   外层里还有摘要文本，收起或藏掉明细它照样通过。
+            await shotOnFail(page12, after12.dcDetailsOpen === true, 'c6-datechange-details-still-open',
+                `⑫ 勾选过滤器后改期行的折叠应**保持展开**（本组上一步点开过），实得 ${JSON.stringify(after12.dcDetailsOpen)}`);
+            await shotOnFail(page12, after12.dcCellShown === true, 'c6-datechange-cell-still-visible',
+                `⑫ 勾选过滤器后明细单元格应**仍通过可见性检查**，实得 ${JSON.stringify(after12.dcCellShown)}`);
+
+            // ── [579-R2 M1] **取消勾选后恢复**——这是此前整条链上唯一没验的方向 ──
+            //   codex 579-R2 原话：「关闭态**初始渲染**不能证明**已经隐藏的现有 DOM 在取消勾选后恢复**。
+            //   若开关处理器只执行隐藏、关闭时不恢复，所示渲染层两态检查与浏览器单向勾选检查仍可通过。」
+            //   说得对：`siToggleTlReleaseScope(hide)` 现在写的是 `el.style.display = hide ? 'none' : ''`
+            //   （会恢复），但若有人改成 `if (hide) el.style.display = 'none'`，**本轮之前所展示的
+            //   单向检查无法捕获**（渲染层两态测的是**初始渲染**、浏览器层只点了一次勾选）。
+            //   ⚠️ [579-R4 L] 原先写"当前所有断言都抓不住"——那与**现在已经存在的**恢复断言自相矛盾，
+            //   措辞已按"修正前的单向检查无法捕获"订正。故补反向交互。
+            //   不新增夹具，复用同一页面与同一套采样/轮询。
+            await cb12.uncheck();
+            let restored12 = await page12.$$eval('.si-tl-item', sampleAfter, DC12);
+            // [579-R4 rec3] **标识一致也纳入轮询成功条件**——否则"数量先恢复、文本稍后恢复"时
+            //   轮询会提前退出，再在最终断言里报错（假红）。
+            const restoredOk = (x) => x && x.scopeTotal === scopeBefore12 && x.scopeStillShown === scopeBefore12
+                && x.dcMatched === 1 && x.dcShown === 1 && x.dcDetailsOpen === true && x.dcCellShown === true
+                && JSON.stringify(x.scopeTexts) === JSON.stringify(scopeTextsBefore12);
+            for (let t = 0; t < 30 && !restoredOk(restored12); t += 1) {
+                await page12.waitForTimeout(100);
+                restored12 = await page12.$$eval('.si-tl-item', sampleAfter, DC12);
+            }
+            await shotOnFail(page12, restored12 && restored12.scopeTotal === scopeBefore12, 'c6-restore-not-remove',
+                `⑫ 取消勾选后编排行数量应不变，勾选前 ${scopeBefore12} 条、取消后 ${restored12 && restored12.scopeTotal} 条`);
+            await shotOnFail(page12, restored12 && restored12.scopeStillShown === scopeBefore12, 'c6-restore-visible',
+                `⑫ **取消勾选后原先被隐藏的 ${scopeBefore12} 条编排行应全部恢复可见**（只隐藏不恢复的实现在这里会红），实得可见 ${restored12 && restored12.scopeStillShown} 条`);
+            // ⚠️ [579-R3 M1] **轮询成功条件里的每一项都要有对应的最终断言**——`restoredOk` 含
+            //   `dcMatched === 1`，但我原先的最终断言漏了它 ⇒ 若取消勾选后出现「一条可见改期行 +
+            //   一条隐藏的重复改期行」，轮询会耗尽超时，而随后所有恢复断言**仍会通过**（codex 579-R3
+            //   指出，成立）。补上，并把这条当纪律：afterOk / restoredOk 的每个条件逐一对应。
+            await shotOnFail(page12, restored12 && restored12.dcMatched === 1, 'c6-restore-datechange-matched-one',
+                `⑫ 取消勾选后按 summary 匹配的改期行应仍恰 1 条（防出现隐藏的重复行），实得 ${restored12 && restored12.dcMatched} 条`);
+            await shotOnFail(page12, restored12 && restored12.dcShown === 1, 'c6-restore-datechange-visible',
+                `⑫ 取消勾选后改期行当然仍可见，实得 ${restored12 && restored12.dcShown} 条`);
+            // [579-R3 rec6 / 579-R4 M+rec3] 行文本多重集前后一致——数量相等证不出"原有的那些行回来了"。
+            //   取值来自**与上面同一次采样**（不再另发 $$eval），故它也受轮询等待。
+            const scopeTextsAfter12 = restored12 && restored12.scopeTexts;
+            await shotOnFail(page12, JSON.stringify(scopeTextsAfter12) === JSON.stringify(scopeTextsBefore12), 'c6-restore-same-rows',
+                `⑫ 取消勾选后编排行的**行文本多重集**应与勾选前一致（比纯数量强；但**不是**事件身份比对——DOM 无稳定标识，同文本行互换检测不到），前=${JSON.stringify(scopeTextsBefore12)} 后=${JSON.stringify(scopeTextsAfter12)}`);
+            await shotOnFail(page12, restored12 && restored12.dcDetailsOpen === true && restored12.dcCellShown === true, 'c6-restore-details-open',
+                `⑫ 取消勾选后改期行的明细应仍展开且可见，实得 ${JSON.stringify(restored12 && { open: restored12.dcDetailsOpen, cell: restored12.dcCellShown })}`);
+            await page12.close();
+        }
+
+        // ── ⑬ [S4c·#67 C4a] estimate 行浏览器实证：真实两次估时 → 徽章/展开区/可见性断言 ──────────
+        //   本组局部扩清理面（主会话 2026-09-17 裁定，方案 1）：/estimate 鉴权（assertDevMember，
+        //   routes/sys-iteration/index.js:3435-3444）唯一判据是 sys_issue_dev_assignees 存在一条
+        //   `issue_id=? AND user_id=? AND removed_at IS NULL` 的在册行，**不看** sys_issues.assigned_to
+        //   （核实过：设 assigned_to 列不能满足鉴权，走 /assign 会引入该表之外的额外副作用面，故不走
+        //   /assign，改为 SQL 直接 INSERT 一行满足鉴权，本组自建自删自核，见文件顶部 devAssigneeId13 声明
+        //   与下方 finally 里先于外层五表清理执行的局部清理）。
+        //   /estimate 端点本身的写点已核（index.js:14319-14364 + writeDevEstimatedFirstSnapshot:3211-3216）：
+        //   只有 sys_issues UPDATE + sys_issue_timeline INSERT 两处，均已在既有五表清单内；
+        //   dispatchSysNotify 现网 isAutoNotifyEnabled 恒 false（:20302-20306），早返回不写库——无第三张
+        //   清单外的表需要收，不再扩清理面。
+        {
+            console.log('\n── ⑬ [S4c·#67 C4a] estimate 行浏览器实证：两次估时 → 徽章/展开区/可见性 ──');
+            const DEV_ID_13 = 8;   // 示例开发A——与 test-sys-eta-generation-playwright.js 既有测试同一「测试开发」身份
+            // [S4c2·Opus 预筛 M1] 日期**现算**不钉死（memory feedback_tests_decouple_wall_clock）：/estimate 唯一时间闸是
+            //   estMin >= assignedMin（assigned_at=本组刚写的 now），钉死绝对日期在其之后必红。取 now+21d / now+23d 的 10:00，
+            //   日期分量不同以维持展开区两栏与 isEtaValueChangedForNotify 语义；mkIssue 不写 deadline ⇒ 容差闸不适用，与日期无关。
+            const fmtEta13 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 10:00`;
+            const plusDays13 = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d; };
+            const eta1_13 = fmtEta13(plusDays13(21));
+            const eta2_13 = fmtEta13(plusDays13(23));
+
+            // 前置：造一个「已加入批次」的迭代单——只为让「隐藏批次编排记录」过滤开关渲染出来（该开关
+            // 仅当本单确有 release_add 一类可隐藏事件才出现，siRenderDrawer :3946 hasReleaseScopeTl），
+            // 批次本身走既有五表清理清单（createdReleaseIds），不额外扩清理面。
+            const relId13 = await mkRelease(adminTok, `${TITLE_PREFIX}估时展示`);
+            const issueId13 = await mkIssue(`${TITLE_PREFIX}成员-估时展示`);
+            await addIssueTo(adminTok, relId13, issueId13);   // 要求 status='待上线'（mkIssue 默认值），此刻满足
+            // 加单后手工把单据推进到 W06「开发中」态并补 assigned_at（/estimate 的 SF.isW06Allowed('estimate',
+            // 'feature','开发中') 与 assignedMin 前置都要）——不经 /assign，避免其额外写点。
+            await dbRun(`UPDATE sys_issues SET status='开发中', assigned_at=datetime('now','localtime') WHERE id=?`, [issueId13]);
+            const devUser13 = await dbGet('SELECT display_name FROM users WHERE id=?', [DEV_ID_13]);
+            must(!!devUser13, `⑬ 前置：测试开发用户 id=${DEV_ID_13} 应存在，实得 ${JSON.stringify(devUser13)}`);
+            if (!devUser13) throw new Error(`⑬ 前置中断：测试开发用户 id=${DEV_ID_13} 不存在（must 不中断，避免下一行 TypeError 掩盖人话）`);   // [S4c2·L3]
+            const devAssigneeIns13 = await dbRun(
+                // [S4c2·Opus 预筛 M2] 夹具形态改为生产可达：生产里 is_primary=1 只由迁移写且必与 sys_issues.assigned_to 同在，
+                //   其余在册行恒 is_primary=0 + round_no=正整数（addOrReaddMembers/assertValidRoundNo）——本组 assigned_to 恒 NULL，故用 0/1。
+                `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, round_no, dev_status) VALUES (?, ?, ?, 0, 1, 'pending')`,
+                [issueId13, DEV_ID_13, devUser13.display_name]
+            );
+            devAssigneeId13 = devAssigneeIns13.lastID;
+            devAssigneeIssueId13 = issueId13;
+            const devTok13 = await signAs(DEV_ID_13);
+
+            // 真实端点：首次估时 + 更新估时（两次都走库层真实 /estimate，不伪造响应）。
+            const r13a = await fetchJson(`/api/sys-issues/${issueId13}/estimate`, devTok13, { method: 'POST', body: { dev_estimated_at: eta1_13, estimated_effort_days: 3 } });
+            must(r13a.status === 200, `⑬ 前置：首次估时应 200，实得 ${r13a.status} ${JSON.stringify(r13a.body)}`);
+            const r13b = await fetchJson(`/api/sys-issues/${issueId13}/estimate`, devTok13, { method: 'POST', body: { dev_estimated_at: eta2_13, estimated_effort_days: 5 } });
+            must(r13b.status === 200, `⑬ 前置：更新估时应 200，实得 ${r13b.status} ${JSON.stringify(r13b.body)}`);
+
+            const tl13 = await dbAll(`SELECT summary, payload_json FROM sys_issue_timeline WHERE issue_id=? AND action_code='estimate_eta' ORDER BY id`, [issueId13]);
+            must(tl13.length === 2, `⑬ 前置：库层应恰 2 条 estimate_eta timeline，实得 ${tl13.length}`);
+
+            const page13 = await loginPage(browser, devTok13);
+            await page13.goto(`${BASE_URL}/Sys_Iteration.html?issue=${issueId13}`);
+            await page13.waitForLoadState('networkidle');
+            await page13.waitForTimeout(500);
+
+            // 定位 estimate 行：不用徽章文本（A 类恒被覆盖为「✎ 变更留痕」，且改期行也用同一徽章）——
+            //   用 estimate 事件类型专属前缀「预计完成：」定位（B3，baseSummaryHtml），该前缀是紧跟在
+            //   .si-tl-evt 徽章 span 之后的纯文本节点（不在 <details><summary> 里），故取
+            //   `evt.nextSibling` 的文本节点值做前缀匹配，同时记录该行在全部 .si-tl-item 中的下标
+            //   （供随后精确点击「查看改动」，不用 :has-text 文本匹配——第二条行的「修改前」单元格文本
+            //   恰好也含第一条的新值，纯文本匹配会撞车）。
+            const EST_PREFIX_13 = '预计完成：';
+            const rowInfo13 = await page13.$$eval('.si-tl-item', (els, prefix) => {
+                const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden' && el.getClientRects().length > 0;
+                const esc4re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const results = [];
+                for (let i = 0; i < els.length; i++) {
+                    const e = els[i];
+                    const body = e.querySelector('.si-tl-body');
+                    const evt = body ? body.querySelector('.si-tl-evt') : null;
+                    const prefixNode = evt ? evt.nextSibling : null;
+                    const prefixText = (prefixNode && prefixNode.nodeType === 3) ? prefixNode.textContent : '';
+                    if (!prefixText.startsWith(prefix)) continue;
+                    const det = e.querySelector('details.si-tl-release-json');
+                    const rows = [...e.querySelectorAll('.si-tl-change-row')].map((r) => ({
+                        field: (r.querySelector('.si-tl-change-field') || {}).textContent || null,
+                        old: (r.querySelector('.si-tl-change-old .si-tl-change-val') || {}).textContent || null,
+                        neu: (r.querySelector('.si-tl-change-new .si-tl-change-val') || {}).textContent || null,
+                    }));
+                    results.push({
+                        idx: i,
+                        evtLabel: evt ? evt.textContent.trim() : null,
+                        evtCls: evt ? evt.className : null,
+                        prefixText,
+                        prefixOccurrences: (e.textContent.match(new RegExp(esc4re(prefix), 'g')) || []).length,
+                        hasDetails: !!det,
+                        detailsOpen: det ? det.open : null,
+                        summaryText: det && det.querySelector('summary') ? det.querySelector('summary').textContent.trim() : null,
+                        note: e.textContent.includes('修改明细不可用'),
+                        rowVisibleBeforeOpen: vis(e),
+                        rows,
+                    });
+                }
+                return results;
+            }, EST_PREFIX_13);
+            await shotOnFail(page13, rowInfo13.length === 2, '13-rows-present',
+                `⑬ 页面时间线应恰有 2 条 estimate 行（按「预计完成：」前缀定位），实得 ${rowInfo13.length} —— 非 2 则下面全是空转`);
+            const first13 = rowInfo13[0] || {};
+            const second13 = rowInfo13[1] || {};
+
+            // ── 第一条（首次）──
+            await shotOnFail(page13, first13.evtLabel === '✎ 变更留痕', '13-badge-1',
+                `⑬ 第一条徽章应为「✎ 变更留痕」，实得「${first13.evtLabel}」`);
+            await shotOnFail(page13, /si-tl-rose/.test(String(first13.evtCls)), '13-badge-cls-1',
+                `⑬ 第一条徽章类应含 si-tl-rose，实得「${first13.evtCls}」`);
+            await shotOnFail(page13, first13.prefixText === EST_PREFIX_13 + eta1_13, '13-prefix-1',
+                `⑬ 第一条应以「${EST_PREFIX_13}${eta1_13}」开头，实得「${first13.prefixText}」`);
+            await shotOnFail(page13, first13.prefixOccurrences === 1, '13-prefix-once-1',
+                `⑬ 第一条「预计完成：」应恰出现 1 次，实得 ${first13.prefixOccurrences}`);
+            await shotOnFail(page13, first13.hasDetails === true && first13.detailsOpen === false, '13-details-1',
+                `⑬ 第一条应出现默认收起的「查看改动」折叠，实得 hasDetails=${first13.hasDetails} open=${first13.detailsOpen}`);
+            await shotOnFail(page13, /查看改动（2 项）/.test(String(first13.summaryText)), '13-summary-1',
+                `⑬ 第一条折叠摘要应为「查看改动（2 项）」，实得「${first13.summaryText}」`);
+            await shotOnFail(page13, first13.note === false, '13-no-note-1', '⑬ 第一条不应出现「修改明细不可用」');
+            await shotOnFail(page13, first13.rows && first13.rows.length === 2, '13-rows-count-1',
+                `⑬ 第一条展开区应恰 2 行明细，实得 ${first13.rows && first13.rows.length}`);
+            const c13a1 = (first13.rows || [])[0] || {};
+            const c13a2 = (first13.rows || [])[1] || {};
+            await shotOnFail(page13, c13a1.field === '预计完成时间' && c13a1.old === '（空）' && c13a1.neu === eta1_13, '13-cell-1-1',
+                `⑬ 第一条明细行 1 应为「预计完成时间」（空）→${eta1_13}，实得 ${JSON.stringify(c13a1)}`);
+            await shotOnFail(page13, c13a2.field === '预计工期（人日）' && c13a2.old === '（空）' && c13a2.neu === '3', '13-cell-1-2',
+                `⑬ 第一条明细行 2 应为「预计工期（人日）」（空）→3，实得 ${JSON.stringify(c13a2)}`);
+
+            // ── 第二条（更新）──
+            // [S4c2·Opus 预筛 L1] 徽章/折叠初始态对第二条同样断（否则「只给首条命中行换徽章」的错误实现能穿过）
+            await shotOnFail(page13, second13.evtLabel === '✎ 变更留痕', '13-badge-2',
+                `⑬ 第二条徽章应为「✎ 变更留痕」，实得「${second13.evtLabel}」`);
+            await shotOnFail(page13, /si-tl-rose/.test(String(second13.evtCls)), '13-badge-cls-2',
+                `⑬ 第二条徽章类应含 si-tl-rose，实得「${second13.evtCls}」`);
+            await shotOnFail(page13, second13.hasDetails === true && second13.detailsOpen === false, '13-details-2',
+                `⑬ 第二条应出现默认收起的「查看改动」折叠，实得 hasDetails=${second13.hasDetails} open=${second13.detailsOpen}`);
+            await shotOnFail(page13, second13.note === false, '13-no-note-2', '⑬ 第二条不应出现「修改明细不可用」');
+            await shotOnFail(page13, second13.prefixText === EST_PREFIX_13 + eta2_13, '13-prefix-2',
+                `⑬ 第二条应以「${EST_PREFIX_13}${eta2_13}」开头，实得「${second13.prefixText}」`);
+            await shotOnFail(page13, second13.prefixOccurrences === 1, '13-prefix-once-2',
+                `⑬ 第二条「预计完成：」应恰出现 1 次，实得 ${second13.prefixOccurrences}`);
+            await shotOnFail(page13, /查看改动（2 项）/.test(String(second13.summaryText)), '13-summary-2',
+                `⑬ 第二条折叠摘要应为「查看改动（2 项）」，实得「${second13.summaryText}」`);
+            await shotOnFail(page13, second13.rows && second13.rows.length === 2, '13-rows-count-2',
+                `⑬ 第二条展开区应恰 2 行明细，实得 ${second13.rows && second13.rows.length}`);
+            const c13b1 = (second13.rows || [])[0] || {};
+            const c13b2 = (second13.rows || [])[1] || {};
+            await shotOnFail(page13, c13b1.field === '预计完成时间' && c13b1.old === eta1_13 && c13b1.neu === eta2_13, '13-cell-2-1',
+                `⑬ 第二条明细行 1 应为「预计完成时间」${eta1_13}→${eta2_13}，实得 ${JSON.stringify(c13b1)}`);
+            await shotOnFail(page13, c13b2.field === '预计工期（人日）' && c13b2.old === '3' && c13b2.neu === '5', '13-cell-2-2',
+                `⑬ 第二条明细行 2 应为「预计工期（人日）」3→5，实得 ${JSON.stringify(c13b2)}`);
+
+            // ── 真的点开折叠，逐单元格核对可见性（同 ⑫ 组纪律：收起时 textContent 依然可读，
+            //   必须实际点开再查 display/visibility/布局矩形）──
+            async function openAndCheckEstimateRow13(idx) {
+                const rowLoc = page13.locator('.si-tl-item').nth(idx);
+                await rowLoc.locator('details.si-tl-release-json summary').click();
+                await page13.waitForTimeout(200);
+                return rowLoc.evaluate((e) => {
+                    const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden' && el.getClientRects().length > 0;
+                    const det = e.querySelector('details.si-tl-release-json');
+                    const cells = [...e.querySelectorAll('.si-tl-change-row')];
+                    return {
+                        open: det ? det.open : null,
+                        rowCount: cells.length,
+                        allVisible: cells.length > 0 && cells.every((c) => vis(c)
+                            && vis(c.querySelector('.si-tl-change-field'))
+                            && vis(c.querySelector('.si-tl-change-old .si-tl-change-val'))
+                            && vis(c.querySelector('.si-tl-change-new .si-tl-change-val'))),
+                    };
+                });
+            }
+            const opened13a = await openAndCheckEstimateRow13(first13.idx);
+            await shotOnFail(page13, opened13a.open === true, '13-opened-1', `⑬ 第一条点击后 details.open 应为 true，实得 ${JSON.stringify(opened13a.open)}`);
+            await shotOnFail(page13, opened13a.allVisible === true, '13-visible-1', `⑬ 第一条展开后明细行与三单元格应通过可见性检查，实得 ${JSON.stringify(opened13a)}`);
+            const opened13b = await openAndCheckEstimateRow13(second13.idx);
+            await shotOnFail(page13, opened13b.open === true, '13-opened-2', `⑬ 第二条点击后 details.open 应为 true，实得 ${JSON.stringify(opened13b.open)}`);
+            await shotOnFail(page13, opened13b.allVisible === true, '13-visible-2', `⑬ 第二条展开后明细行与三单元格应通过可见性检查，实得 ${JSON.stringify(opened13b)}`);
+
+            // ── 勾选「隐藏批次编排记录」后两条估时行仍应可见（estimate 不在可隐藏集合，A3/A4 语义）──
+            const hasToggle13 = await page13.locator('label:has-text("隐藏批次编排记录")').count();
+            await shotOnFail(page13, hasToggle13 > 0, '13-toggle-present',
+                '⑬ 前置：本单已加入批次（release_add），过滤开关应出现');
+            const cb13 = page13.locator('label:has-text("隐藏批次编排记录") input[type="checkbox"]');
+            await cb13.check();
+            await page13.waitForTimeout(250);
+            const afterToggle13 = await page13.$$eval('.si-tl-item', (els, prefix) => {
+                const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden' && el.getClientRects().length > 0;
+                return els.filter((e) => {
+                    const body = e.querySelector('.si-tl-body');
+                    const evt = body ? body.querySelector('.si-tl-evt') : null;
+                    const pn = evt ? evt.nextSibling : null;
+                    const pt = (pn && pn.nodeType === 3) ? pn.textContent : '';
+                    return pt.startsWith(prefix);
+                }).map((e) => vis(e));
+            }, EST_PREFIX_13);
+            await shotOnFail(page13, afterToggle13.length === 2 && afterToggle13.every(Boolean), '13-visible-after-toggle',
+                `⑬ 勾选「隐藏批次编排记录」后两条估时行仍应可见，实得 ${JSON.stringify(afterToggle13)}`);
+
+            await page13.close();
+        }
+
     } catch (e) {
         console.error('❌ 测试执行异常：' + (e && e.stack || e));
         fail++;
@@ -782,6 +1282,29 @@ async function dateChangeTimeline(relId) {
                 fail++;
                 failDetails.push('浏览器关闭异常（不影响后续库清理继续执行）：' + (closeErr && closeErr.message));
                 console.error('❌ 浏览器关闭异常：' + (closeErr && closeErr.message));
+            }
+        }
+        // [S4c·⑬ 局部清理面·主会话 2026-09-17 裁定] sys_issue_dev_assignees 不在既有五表清单内——先于
+        // 下方外层五表清理执行：DELETE 本组唯一一行、按 issue_id 精确核验残留=0，另起一行打印（不并入
+        // 下方五表 residual JSON，不改外层五表数组本身，见文件顶部 devAssigneeId13/devAssigneeIssueId13 声明）。
+        if (devAssigneeId13 !== null) {
+            try {
+                await dbRun('DELETE FROM sys_issue_dev_assignees WHERE id=?', [devAssigneeId13]);
+                const devAssigneeResidual13 = await dbGet(
+                    'SELECT COUNT(*) c FROM sys_issue_dev_assignees WHERE issue_id=?', [devAssigneeIssueId13]
+                );
+                const c13 = devAssigneeResidual13 ? devAssigneeResidual13.c : -1;
+                if (c13 !== 0) {
+                    fail++;
+                    failDetails.push(`⑬ 局部清理：sys_issue_dev_assignees(issue_id=${devAssigneeIssueId13}) 残留应为 0，实得 ${c13}`);
+                    console.error(`❌ ⑬ 局部残留核验未通过：sys_issue_dev_assignees(issue_id=${devAssigneeIssueId13}) = ${c13}`);
+                } else {
+                    console.log(`🧹 ⑬ 局部残留核验通过：sys_issue_dev_assignees(issue_id=${devAssigneeIssueId13}) = 0`);
+                }
+            } catch (localCleanupErr) {
+                fail++;
+                failDetails.push('⑬ 局部清理异常（sys_issue_dev_assignees）：' + (localCleanupErr && localCleanupErr.message));
+                console.error('❌ ⑬ 局部清理异常：' + (localCleanupErr && localCleanupErr.message));
             }
         }
         // [C4c·codex 558 M2 收口，同 test-sys-release-overdue-playwright.js C3c·557 M3 同款范式]

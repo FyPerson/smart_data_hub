@@ -1120,7 +1120,18 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   SI_TL_RELEASE_SCOPE_LABEL/_CLS，防被「隐藏上线单调整记录」过滤器连带隐藏）。
 //   docs/local/系统迭代/时间线写入点码表_20260810.md 须同步登记（同上一条处置，留给下次接触到该目录
 //   时补）。
-const EXPECTED_INSERT_SITE_COUNT = 54;
+//   [2026-09-17 长任务 A 乙4·时间线留痕覆盖面补齐 S4a] +4 ⇒ 58：四个端点改为「两条显式 INSERT 分支」
+//   （有变化 → 新 INSERT 写字面量 action_code + payload_json；无变化 → 原 INSERT 逐字不动），各多一个站点：
+//     · /estimate      → event_type='estimate'     action_code='estimate_eta'          （key 仍 'estimate'）
+//     · /feasibility   → event_type='feasibility'  action_code='feasibility_change'    （key 仍 'feasibility'）
+//     · /assign        → event_type='assign'       action_code='assign_eta'            （key 仍 'assign'）
+//     · /scope-change  → event_type='scope_change' action_code='scope_change_deadline' （非 RELEASE_SCOPE 码 ⇒ key 仍 'scope_change'；端点当前不可达·防御性补齐）
+//   另两处 set_scheduled_start / set_oa_number 沿用既有字面量码只加 payload_json 列，站点数不变。
+//   四码按本文件 key 规则都不产生新 display key ⇒ 覆盖判定零影响；不进 SI_TL_LABEL / NOTE_OWN 集合（方案 v0.2 §2.2）。
+//   为何选两条显式 INSERT 而非条件表达式：candidatesFor 对 '?' 占位只认字面量/null/X||null/具名 function 体内
+//   字面量赋值的标识符，路由回调是箭头函数，三元或条件标识符会走到 findEnclosingFunctionBody throw（2026-09-17 核实）。
+//   码表 docs/local/系统迭代/时间线写入点码表_20260810.md 已同步追记。
+const EXPECTED_INSERT_SITE_COUNT = 58;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

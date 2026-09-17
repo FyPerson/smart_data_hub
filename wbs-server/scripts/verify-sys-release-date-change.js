@@ -203,6 +203,40 @@ async function main() {
     ok('[2b] 未逾期旧值清空（显式传 planned_date:""）：200 changed=true（与 [2] 互补覆盖两条不同输入路径）');
   }
 
+  // ═══ [2c] [#67 C9·578-M4] 单成员批次清空日期 → timeline 的 changes 必须**照样写**，new 严格为 null ═══
+  {
+    // ⚠️ 为什么另起一组而不复用 [2]/[2b]：那两组用的是**零成员批次**（`mkRelease` 不加成员），
+    //   零成员 ⇒ applyReleaseChange 一条 timeline 都不写（见其内 M1 注释）⇒ 根本没有载荷可断。
+    // ⚠️ 本组要防的退化（codex 578-M4）：若写点改成「只在新值非空时才写 changes」，
+    //   [7] 那组（非空→非空）照样全绿、变异也抓不住 ⇒ 清空这条路径必须有自己的载荷断言。
+    //   业务上清空是**合法操作**（normalizeDeadline 明确「留空可清除」），展开区应显「旧值 →（空）」，
+    //   不是「修改明细不可用」。
+    const oldDate2c = await futureDateStr(9);
+    const rel2c = await mkRelease({ title: '[2c]单成员清空', plannedDate: oldDate2c });
+    const issue2c = await mkIssue();
+    await addIssueTo(rel2c, issue2c);
+    const r2c = await call('POST', `/api/sys-releases/${rel2c}/update-planned-date`, adminTok, { planned_date: '' });
+    assert.strictEqual(r2c.status, 200, `[2c] 期望 200, got ${r2c.status} ${JSON.stringify(r2c.body)}`);
+    assert.strictEqual(r2c.body.changed, true, '[2c] changed=true');
+    assert.strictEqual(await plannedDateOf(rel2c), null, '[2c] planned_date 已清空');
+    const tl2c = await timelineByCode(rel2c, 'release_date_change');
+    assert.strictEqual(tl2c.length, 1, `[2c] timeline 恰 1 条（单成员），实得 ${tl2c.length}`);
+    assert.ok(tl2c[0].summary.includes('→ 未设定'), `[2c] 摘要应含「→ 未设定」，实得 ${tl2c[0].summary}`);
+    const p2c = JSON.parse(tl2c[0].payload_json);
+    assert.strictEqual(p2c.planned_date_new, null, '[2c] payload.planned_date_new=null（清空）');
+    assert.ok(Array.isArray(p2c.changes) && p2c.changes.length === 1, `[2c] **清空同样要写 changes**（恰一项），实得 ${JSON.stringify(p2c.changes)}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(p2c.changes[0], 'new'), `[2c] changes[0] 的 new 键必须存在（值为 null ≠ 缺键），实得 ${JSON.stringify(p2c.changes[0])}`);
+    assert.strictEqual(p2c.changes[0].new, null, `[2c] changes[0].new 严格为 null（清空是合法状态，前端渲染成「（空）」），实得 ${JSON.stringify(p2c.changes[0].new)}`);
+    assert.strictEqual(p2c.changes[0].old, p2c.planned_date_old, '[2c] changes[0].old 与同 payload 的 planned_date_old 逐值相等');
+    assert.strictEqual(p2c.changes[0].old, oldDate2c, `[2c] changes[0].old 应是清空前的日期 ${oldDate2c}，实得 ${p2c.changes[0].old}`);
+    // [578-R M-new2] 清空路径也必须断 field —— 否则「只在清空时漏写/写错 field」这种条件退化，
+    //   上面几条全过但**前端认不出是哪个字段**（拿不到「计划上线日期」中文名）。
+    //   与非空用例 [7] 保持**同一份对象结构契约**。
+    assert.deepStrictEqual(Object.keys(p2c.changes[0]).sort(), ['field', 'new', 'old'].sort(), `[2c] changes[0] 恰 {field,old,new} 三键（与 [7] 同契约），实得 ${JSON.stringify(p2c.changes[0])}`);
+    assert.strictEqual(p2c.changes[0].field, 'planned_date', `[2c] changes[0].field=planned_date（前端按此键取中文名「计划上线日期」），实得 ${JSON.stringify(p2c.changes[0].field)}`);
+    ok('[2c] 单成员批次清空日期：200 + 摘要「→ 未设定」+ payload.changes **照样写**且 new 严格为 null（防"只在新值非空时写 changes"的退化）');
+  }
+
   // ═══ [3] 逾期后改期缺理由 400 + 三字段 ═══
   {
     const oldDate = await pastDateStr(4);
@@ -292,17 +326,29 @@ async function main() {
     assert.ok(summary7.includes('原因：业务方要求延后上线窗口'), `[7] 摘要含理由，实际 ${summary7}`);
     assert.ok(/已丢弃 1 条完成确认：开发甲/.test(summary7), `[7] resetDiscardSuffix 保留（已丢弃完成确认），实际 ${summary7}`);
     const payload7 = JSON.parse(tl7[0].payload_json);
-    assert.deepStrictEqual(Object.keys(payload7).sort(), ['overdue_days', 'planned_date_new', 'planned_date_old', 'reason', 'release_no'].sort(), '[7] payload 恰五字段');
+    // [#67 C9·2026-09-16] 键集合由**五字段改六字段**——B1 追加 `changes` 是**有意的契约演进**，
+    //   不是绕过本断言（方案 §B1 明列本处为唯一「严格键集合消费者」）。其余四条逐字段断言原样保留。
+    assert.deepStrictEqual(Object.keys(payload7).sort(), ['changes', 'overdue_days', 'planned_date_new', 'planned_date_old', 'reason', 'release_no'].sort(), '[7] payload 恰六字段（#67 B1 起追加 changes）');
     assert.strictEqual(payload7.planned_date_old, oldDate, '[7] payload.planned_date_old');
     assert.strictEqual(payload7.planned_date_new, newDate, '[7] payload.planned_date_new');
     assert.strictEqual(payload7.reason, '业务方要求延后上线窗口', '[7] payload.reason');
     assert.strictEqual(payload7.release_no, relNo7, '[7] payload.release_no');
+    // [#67 C9·2026-09-16] 锁 `changes` 的结构**并与同 payload 的两键逐值比对**——防止写端出现
+    //   「changes 自己去 delta 重取一遍」这种取值来源分叉（feedback_write_read_same_semantic）。
+    //   ⚠️ 断的是**与同一 payload 内的值相等**，不是与 oldDate/newDate 相等：后者只能证明这一组夹具
+    //   对得上，前者才锁住"两处永远同源"这个不变量（换任何夹具都成立）。
+    assert.ok(Array.isArray(payload7.changes), `[7] payload.changes 应是数组，实得 ${JSON.stringify(payload7.changes)}`);
+    assert.strictEqual(payload7.changes.length, 1, `[7] payload.changes 恰一个元素（改期只改一个字段），实得 ${payload7.changes.length}`);
+    assert.deepStrictEqual(Object.keys(payload7.changes[0]).sort(), ['field', 'new', 'old'].sort(), `[7] changes[0] 恰 {field,old,new} 三键，实得 ${JSON.stringify(payload7.changes[0])}`);
+    assert.strictEqual(payload7.changes[0].field, 'planned_date', '[7] changes[0].field=planned_date（前端 SI_TL_CHANGE_FIELD_LABEL 按此键取中文名「计划上线日期」）');
+    assert.strictEqual(payload7.changes[0].old, payload7.planned_date_old, '[7] changes[0].old 与同 payload 的 planned_date_old **逐值相等**（两处取值不得分叉）');
+    assert.strictEqual(payload7.changes[0].new, payload7.planned_date_new, '[7] changes[0].new 与同 payload 的 planned_date_new **逐值相等**（两处取值不得分叉）');
     // [C4b·L6] 精确数值核对（同 [3] 范式：断言时现查 todayStr() 现算期望差值，不满足于"是个数字"）。
     const expectDays7 = I.releaseOverdueCalendarDayDiff(await todayStr(), oldDate);
     assert.strictEqual(payload7.overdue_days, expectDays7, `[7] payload.overdue_days 精确值，期望 ${expectDays7} 实际 ${payload7.overdue_days}`);
     const execAfter7 = await activeExecCount(rel7);
     assert.strictEqual(execAfter7, 0, '[7] 执行人子表已重置（全体软删）');
-    ok('[7] 逾期后带理由改期：摘要旧→新+批次号+逾期天数+原因+resetDiscardSuffix 全部齐全，payload_json 恰五字段，执行人子表如常重置');
+    ok('[7] 逾期后带理由改期：摘要旧→新+批次号+逾期天数+原因+resetDiscardSuffix 全部齐全，payload_json 恰六字段（含 #67 changes 且与两键逐值同源），执行人子表如常重置');
   }
 
   // ═══ [8] 理由超长 400 TOO_LONG ═══

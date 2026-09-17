@@ -27,11 +27,40 @@ const path = require('path');
 const { tmpdir } = require('os');
 const sqlite3 = require('sqlite3').verbose();
 const crypto = require('crypto');
+
+// [#76 2026-09-16] 本脚本原先不加载 .env，只靠下方那个硬编码回退值跑——等于用**错密钥**
+//   加解密：server 用 .env 真 key 写的密文这里解不开（静默 catch 归 null/'(解密失败)'），
+//   这里写的密文 server 也解不开。删回退值必须同时补 dotenv，否则 fail-closed 会直接拒跑。
+// ⚠️ [codex 571-M3 复核后修正] 这行必须排在 require('./_test-fixture') **之前**：fixture 顶层
+//   （_test-fixture.js:32）在被 require 的那一刻就读 process.env.JWT_SECRET，晚于它加载 dotenv
+//   会让 fixture 读到 undefined、落到它自己的回退值上。加载 env 的副作用属进程级，凡"顶层读 env
+//   的模块"都必须排在其后 —— 别按"内置模块在前"的惯例把这行往下挪。
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 const fx = require('./_test-fixture');
 
 const BASE = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+
+// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
+//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
+//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
+//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
+  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
+  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
+  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
+  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
+  process.exit(1);
+}
+// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
+//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
+//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
+if (!/^[!-~]+$/.test(ENCRYPTION_KEY) || Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
+  process.exit(1);
+}
 
 // HRD MySQL 连接配置：从 mcp-hrd/config.json 读（密钥不入代码，方便 GitHub 同步 + 后续凭证轮换）
 const HRD_CONFIG_PATH = path.join(__dirname, '..', '..', 'mcp-hrd', 'config.json');

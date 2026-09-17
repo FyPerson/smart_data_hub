@@ -24,7 +24,8 @@ const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'issue_tracker_webhook_key';
+// [#82 2026-09-16] 同族回退值清除；本脚本已加载 .env，原回退值是死代码。
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
 function dbGet(sql, params) {
     return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); }); });

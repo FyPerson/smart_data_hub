@@ -104,7 +104,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const SCREENSHOT_DIR = path.join(__dirname, '..', 'test-screenshots');
 // D12 缓存串现役值——唯一定义处，[T26] 的断言与探测输入均引用本常量，不再是散落在正则字面量里的
 // 拷贝。每次生产代码 bump app.js 缓存串，改这一个常量即可同步，不用去 [T26] 内部找字面量改；

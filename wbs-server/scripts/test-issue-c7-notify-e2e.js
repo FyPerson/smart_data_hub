@@ -38,7 +38,7 @@ const TEST_PORT = process.env.C7_NOTIFY_PORT || String(3100 + (process.pid % 200
 process.env.PORT = TEST_PORT;
 const BASE = `http://localhost:${TEST_PORT}`;
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 const ADMIN_ID = 1;
 const DEV_WITH_PHONE = 19;   // 示例用户B（有 phone）

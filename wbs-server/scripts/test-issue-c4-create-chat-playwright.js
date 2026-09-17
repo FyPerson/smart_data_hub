@@ -35,7 +35,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 const ADMIN_ID = 1, PUBLISHER_ID = 7, USER_CREATOR_ID = 19, USER_ASSIGNEE_ID = 8, USER_BYSTANDER_ID = 9, VIEWER_ID = 2;
 

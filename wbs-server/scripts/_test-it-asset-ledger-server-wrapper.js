@@ -14,7 +14,10 @@
  * 调用覆盖回原始类。
  *
  * 用法：spawn('node', [本文件路径], { cwd: ROOT, env: { ...process.env, PORT, IA_TEST_DB_PATH } })
- * ——cwd 必须传 ROOT：server.js 内 `require('dotenv').config()`（无 path 参数，按 process.cwd()
+ * ——cwd 建议仍传 ROOT（相对路径/产物落点仍按它解析）。⚠️ [codex 573-M2] 但本行原来的**理由已失效**：
+ *   server.js 那行 dotenv 自 #82（2026-09-16）起绑 `__dirname`，不再按 process.cwd() 找 .env，
+ *   因此「cwd 传错会读不到 .env」这个后果不复存在。保留下面这段原文作为历史沿革：
+ *   原 server.js 内 `require('dotenv').config()`（无 path 参数，按 process.cwd()
  * 解析）找不到 .env 时，JWT_SECRET 会静默落到 server.js 里的不安全兜底默认值，导致测试脚本自己
  * 签发的 token 与服务端校验用的密钥对不上。
  */

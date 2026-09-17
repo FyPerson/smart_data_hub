@@ -30,7 +30,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const PORT = process.env.PORT || '3000';
 const BASE_URL = `http://localhost:${PORT}`;
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const CHROME_PATH = 'C:/Users/FY/AppData/Local/ms-playwright/chromium-1208/chrome-win64/chrome.exe';
 
 let pass = 0;

@@ -76,15 +76,33 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE_URL = 'http://localhost:3000';
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 // LOW-6（C6 预筛回卷）：原硬编码路径含某一次会话的 scratchpad UUID——那是本次编写脚本时所在的临时会话
 // 目录，换一个新会话/新机器跑本文件，这个目录大概率不存在，会让失败截图静默丢失（screenshot 调用本身
 // 包在 try/catch 里吞掉了）。改用 os.tmpdir() 在运行时现算一个与仓库无关的固定子目录，目录不存在就建。
 const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-panel-c2b2-playwright-screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-// server.js:2696 逐字复刻——system_configs 值一律走这套 AES-256-CBC 加密约定，本文件仅用它写测试专用的
+// server.js:2784-2810 逐字复刻——system_configs 值一律走这套 AES-256-CBC 加密约定，本文件仅用它写测试专用的
 // sys_release_default_executor_ids 键（写前已查证该键当前无行，不覆盖任何真实配置；不触碰 sys_notify_dry_run）。
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY || 'change_me_with_random_32bytes_!!';
+// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
+//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
+//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
+//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
+const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
+if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
+  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
+  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
+  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
+  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
+  process.exit(1);
+}
+// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
+//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
+//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
+if (!/^[!-~]+$/.test(ENCRYPTION_KEY) || Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
+  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
+  process.exit(1);
+}
 
 const ADMIN_ID = 1;       // 管理员
 const LIAISON_ID = 13;    // 示例对接人（对接人白名单，排班写权限用）
@@ -582,8 +600,10 @@ async function main() {
             console.log('  · G3 附加：release_published timeline 折叠渲染（issueG1 详情抽屉，复用刚发布的真实数据）');
             const pageTl = await newPage(adminTok);
             await gotoIssue(pageTl, issueG1);
-            const hasFilterToggle = await pageTl.locator('label:has-text("隐藏上线单调整记录")').count();
-            await shotOnFail(pageTl, hasFilterToggle > 0, 'g3-tl-filter-toggle', 'G3 timeline 区出现「隐藏上线单调整记录」过滤开关（本单确有 release_add/release_published 事件）');
+            // [#67 A7·C5] 文案随可隐藏性双语义拆分改为「隐藏批次编排记录」——旧文案「隐藏上线单调整
+            //   记录」已不存在，定位器不同步会在这里先失败（这也是 C5 被方案列为必改的原因）。
+            const hasFilterToggle = await pageTl.locator('label:has-text("隐藏批次编排记录")').count();
+            await shotOnFail(pageTl, hasFilterToggle > 0, 'g3-tl-filter-toggle', 'G3 timeline 区出现「隐藏批次编排记录」过滤开关（本单确有 release_add/release_published 事件）');
             const evtLabels = await pageTl.$$eval('.si-tl-evt', els => els.map(e => e.textContent.trim()));
             await shotOnFail(pageTl, evtLabels.some(t => t.includes('发布留痕')), 'g3-tl-published-label', `G3 release_published 事件显示独立标签「发布留痕」，实得标签集: ${JSON.stringify(evtLabels)}`);
             await shotOnFail(pageTl, evtLabels.some(t => t.includes('加入上线单')), 'g3-tl-add-label', 'G3 release_add 事件显示独立标签「加入上线单」');
@@ -592,10 +612,39 @@ async function main() {
             await shotOnFail(pageTl, detailsInfo.length > 0 && detailsInfo.every(d => d.open === false), 'g3-tl-details-closed', 'G3 release_published 的 <details> 默认收起（未展开）');
             await shotOnFail(pageTl, detailsInfo.length > 0 && /C6-PW-G1选人弹窗.*\d+\s*条\s*commit/.test(detailsInfo[0].summary), 'g3-tl-summary-format', `G3 <summary> 摘要格式正确（类型·标题·commit数），实得："${detailsInfo[0] && detailsInfo[0].summary}"`);
             const releaseScopeCountBefore = await pageTl.locator('.si-tl-release-scope').count();
-            await pageTl.check('label:has-text("隐藏上线单调整记录") input[type="checkbox"]');
+            // [#67 A3/C5·核心语义锁] 改期行必须**存在**且**不带可隐藏 class**。
+            //   为什么不锁 .si-tl-release-scope 的具体总条数：那个数取决于本测试造了多少 release 事件，
+            //   硬编码脆且一改夹具就假红。改锁「改期行本身的归属」——判别力更强也更稳：
+            //   · 若有人把 release_date_change 加回白名单 → 改期行又带上 class → 本断言红
+            //   · 若改期事件根本没造出来 → 第一条红（防"没有样本所以恰好通过"的空转）
+            // ⚠️ [#67 S2 回归修正·2026-09-16] 定位器**不能再用徽章文本**「上线单改期」——S2 让改期码进了
+            //   changes 分支，而徽章覆盖是**无条件**的（进分支即 `label = SI_TL_CHANGE_BADGE_LABEL`，
+            //   与 payload 有没有明细无关）⇒ 改期行的 `.si-tl-evt` 现在恒为「✎ 变更留痕」，
+            //   按旧文案找会得到 **0 条**。
+            //   ⚠️ [581-R3 rec7 措辞订正] 此处原写「下面三条语义锁全部**空转**」——不准确：
+            //   下一行的存在性断言走 shotOnFail → must，**会登记失败并使进程 exit(1)**（见本文件
+            //   末尾 `if (fail > 0) process.exit(1)`）。准确说法是：**存在性断言会红**，
+            //   而其余两条检查在样本为 0 时**不能作为该事件语义已被验证的证据**。
+            //   （本脚本因 :553 夹具债跑不到这一段，所以这个 S2 回归没有任何执行面能发现，
+            //    是靠 S3 的反向清单核出来的。）
+            //   改用**写点保证的 summary 文本**定位：`上线计划日期变更：` 来自 applyReleaseChange 的
+            //   release_date_change 分支，不随徽章/标签口径变动。
+            const DC_ROW_TEXT = '上线计划日期变更：';
+            const dateChangeRows = await pageTl.$$eval('.si-tl-item', (els, key) => els.filter((e) => e.textContent.includes(key)).length, DC_ROW_TEXT);
+            await shotOnFail(pageTl, dateChangeRows > 0, 'g3-tl-datechange-present', `G3 时间线含改期行（按 summary「上线计划日期变更：」定位；本测试 setPlannedDate 造过改期），实得 ${dateChangeRows} 条 —— 为 0 时本条即判红，且下方两条检查不能作为该事件语义已验证的证据`);
+            const dateChangeWithHidableClass = await pageTl.$$eval('.si-tl-item.si-tl-release-scope', (els, key) => els.filter((e) => e.textContent.includes(key)).length, DC_ROW_TEXT);
+            await shotOnFail(pageTl, dateChangeWithHidableClass === 0, 'g3-tl-datechange-not-hidable', `G3 改期行**不带** si-tl-release-scope class（#67 核心语义：改期是对外承诺变更、不属批次编排、不可被过滤器藏），实得 ${dateChangeWithHidableClass} 条带了`);
+            await pageTl.check('label:has-text("隐藏批次编排记录") input[type="checkbox"]');
             await pageTl.waitForTimeout(200);
             const visibleAfterHide = await pageTl.$$eval('.si-tl-release-scope', els => els.filter(e => getComputedStyle(e).display !== 'none').length);
-            await shotOnFail(pageTl, releaseScopeCountBefore > 0 && visibleAfterHide === 0, 'g3-tl-filter-hides-rows', `G3 勾选过滤开关后 ${releaseScopeCountBefore} 条上线单调整记录全部隐藏（实际仍可见 ${visibleAfterHide} 条）`);
+            await shotOnFail(pageTl, releaseScopeCountBefore > 0 && visibleAfterHide === 0, 'g3-tl-filter-hides-rows', `G3 勾选过滤开关后 ${releaseScopeCountBefore} 条批次编排记录全部隐藏（实际仍可见 ${visibleAfterHide} 条）`);
+            // [#67 A3/C5·正向断言] 只断「带 class 的行全被藏」**不足以**证明改期没被藏——改期行已不带该
+            //   class，天然不在上面那个选择器里，藏没藏它都不体现。必须正面断它勾选后**仍可见**。
+            const dateChangeVisibleAfterHide = await pageTl.$$eval('.si-tl-item', (els, key) => els.filter((e) => e.textContent.includes(key) && getComputedStyle(e).display !== 'none').length, DC_ROW_TEXT);
+            // [576-M3] 原断言只要 > 0 就过 —— 多条改期时部分被隐藏也能通过。收紧为**全部可见**。
+            //   注：getComputedStyle(e).display !== 'none' 只排除该行自身的 display:none，不等于浏览器
+            //   可见性（父节点隐藏等不在覆盖内）——这条边界随 DOM 验收挂起项一并登记，见 #64 既有债②。
+            await shotOnFail(pageTl, dateChangeRows > 0 && dateChangeVisibleAfterHide === dateChangeRows, 'g3-tl-datechange-still-visible', `G3 勾选「隐藏批次编排记录」后改期行**全部仍可见**（实得可见 ${dateChangeVisibleAfterHide} / 共 ${dateChangeRows} 条）`);
 
             for (const p of [pageAdmin, pageA, pageB, pageTl]) {
                 const errs = unexpectedConsoleErrors(p._consoleErrors);
@@ -771,6 +820,10 @@ async function main() {
         // 这层歧义，唯独 ref_id 存在"巧合撞上其它特性用同一数值当别的意思"的风险）。收窄到本文件真实
         // 可能写出的、release 语义明确的 action_code 集合（与 Sys_Iteration.html SI_TL_RELEASE_SCOPE_LABEL
         // 权威映射表逐字同源），而不是"ref_id 数值撞上了就删"。
+        // ⚠️ [#67 A3·2026-09-16] 本数组对标的是 **SI_TL_RELEASE_SCOPE_LABEL（9 码，含 release_date_change）**，
+        //   **不是**新增的可隐藏白名单 SI_TL_HIDABLE_SCOPE_CODES（8 码，不含改期）。两者差集恰为改期。
+        //   清理要删「本测试写出的全部 release 语义行」，改期行当然也要删 ⇒ 本数组保持 9 码不动。
+        //   勿因为新集合是 8 码就把这里也改成 8 码——那会漏删改期行、污染后续跑次。
         const RELEASE_SCOPE_ACTION_CODES = [
             'release_add', 'release_remove', 'release_date_change', 'release_schedule_cancel',
             'release_published', 'release_executors_set', 'release_executor_notify',

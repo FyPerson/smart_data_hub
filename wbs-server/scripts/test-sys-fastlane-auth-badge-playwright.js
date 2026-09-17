@@ -30,7 +30,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE = 'http://localhost:3000';
 const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 const dbGet = (sql, p = []) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.get(sql, p, (e, row) => { d.close(); e ? j(e) : r(row); }); });
 const dbRun = (sql, p = []) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.run(sql, p, function (e) { d.close(); e ? j(e) : r(this); }); });

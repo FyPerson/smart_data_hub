@@ -7856,11 +7856,29 @@ module.exports = (deps) => {
           assignEtaSummaryPart += buildEtaOverrunReasonSummarySuffix(assignEtaReasonResult, row.eta_overrun_reason_code || null);
         }
         const assignSummary = `指派给 ${devName}` + (Number(row.oa_exempt) === 1 ? '（免 OA 单）' : '') + assignEtaSummaryPart;
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
-           VALUES (?, 'assign', ?, ?, ?, ?, ?)`,
-          [id, row.status, targetStatus, assignSummary, actor.id, actor.name]
-        );
+        // [S4a·A4·#67 六写点补齐] 仅 assignEtaOverdue 非空且值到分确实变化时走新 INSERT（附带变更类）；
+        //   否则原 INSERT 逐字不动——普通指派无 ETA 变化，负向必须无码无载荷（verify-sys-eta-generation 断言）。
+        let assignChanges = [];
+        if (assignEtaOverdue) {
+          const oldAssignEtaMin = truncToMinute(assignEtaOverdue.oldEta) || null;
+          const newAssignEtaMin = truncToMinute(assignEtaOverdue.newEta) || null;
+          if (oldAssignEtaMin !== newAssignEtaMin) {
+            assignChanges = [{ field: 'dev_estimated_at', old: oldAssignEtaMin, new: newAssignEtaMin }];
+          }
+        }
+        if (assignChanges.length) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'assign', ?, ?, ?, 'assign_eta', ?, ?, ?)`,
+            [id, row.status, targetStatus, assignSummary, actor.id, actor.name, JSON.stringify({ changes: assignChanges })]
+          );
+        } else {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, operator_id, operator_name)
+             VALUES (?, 'assign', ?, ?, ?, ?, ?)`,
+            [id, row.status, targetStatus, assignSummary, actor.id, actor.name]
+          );
+        }
 
         devAssignees = await fetchActiveDevAssignees(id);
         primaryRow = devAssignees.find(d => d.is_primary === 1) || {};
@@ -8121,20 +8139,35 @@ module.exports = (deps) => {
           //   整体改道 409 ETA_NOT_EXPIRED（上方 :5100 一带），保留分支代码理由见 /assign 同款登记
           //   （:4910 一带 assignEtaSummaryPart 处）。
           const reassignEtaNewText = truncToMinute(reassignEtaOverdue.newEta) || reassignEtaOverdue.newEta;
+          // [#67 B2·2026-09-16] 旧值展示文本**提到分支外**：下面三条摘要分支原本各自内联同一个表达式，
+          //   提取后 payload 的 `changes[0].old` 与摘要里显示的「原值」**必然同源**，不会两处取值分叉
+          //   （feedback_write_read_same_semantic）。表达式本体逐字未变、`truncToMinute` 对空值返回
+          //   null 不抛错，故三条分支的摘要输出与改造前**完全一致**（含 overdue 分支旧值为空这种边界）。
+          const reassignEtaOldText = truncToMinute(reassignEtaOverdue.oldEta) || reassignEtaOverdue.oldEta;
           let reassignEtaSummary;
           if (reassignEtaOverdue.overdue) {
-            reassignEtaSummary = `超时指派：预计完成时间由 ${actor.name} 重填为 ${reassignEtaNewText}（原值 ${truncToMinute(reassignEtaOverdue.oldEta) || reassignEtaOverdue.oldEta}）`;
+            reassignEtaSummary = `超时指派：预计完成时间由 ${actor.name} 重填为 ${reassignEtaNewText}（原值 ${reassignEtaOldText}）`;
           } else if (reassignEtaOverdue.oldEta) {
-            reassignEtaSummary = `改派时人工更新预计完成时间：${actor.name} 更新为 ${reassignEtaNewText}（原值 ${truncToMinute(reassignEtaOverdue.oldEta) || reassignEtaOverdue.oldEta}）`;
+            reassignEtaSummary = `改派时人工更新预计完成时间：${actor.name} 更新为 ${reassignEtaNewText}（原值 ${reassignEtaOldText}）`;
           } else {
             reassignEtaSummary = `改派时人工设定预计完成时间：${actor.name} 填写为 ${reassignEtaNewText}`;
           }
           // [组 C·SC3·修复 a] timeline 携带理由——同 /assign 同款收口，三态文案共用同一条追加。
           reassignEtaSummary += buildEtaOverrunReasonSummarySuffix(reassignEtaReasonResult, row.eta_overrun_reason_code || null);
+          // [#67 B2·2026-09-16] 本写点此前**不写** payload_json（该码历来无结构化载荷，前端因此
+          //   把它登记进「历史提示豁免集合」）。补 `changes` 后展开区能显前后值，三条文案分支共用同一条。
+          // ⚠️ [#67 B3] 第三条分支（「改派时人工设定」）是**首次赋值、旧值恒空**（分支条件就是
+          //   `!oldEta`）⇒ `old` 写 **null**，由前端既有 siTlChangeValueHtml 渲染「（空）」，
+          //   **不伪造旧值**。这是方案 §3.1 判据的登记例外。
+          // ⚠️ 取值用与摘要**同源**的 reassignEtaOldText/NewText（分钟粒度），不用 `dev_estimated_at`
+          //   原始列值 —— 展开区与摘要讲的是同一件事，粒度不一致会让同一条记录出现两个不同的时间。
+          const reassignEtaPayload = {
+            changes: [{ field: 'dev_estimated_at', old: reassignEtaOldText || null, new: reassignEtaNewText }],
+          };
           await dbRunAsync(
-            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-             VALUES (?, 'note', ?, 'assign_overdue_eta', ?, ?)`,
-            [id, reassignEtaSummary, Number(actor.id) || null, actor.name || null]
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'note', ?, 'assign_overdue_eta', ?, ?, ?)`,
+            [id, reassignEtaSummary, Number(actor.id) || null, actor.name || null, JSON.stringify(reassignEtaPayload)]
           );
         }
         // 先插新（§3：与 supersede-excuse 顺序相反）——始终 INSERT 新行，不复活旧软删行（§4.4 同一原则）。
@@ -12711,10 +12744,14 @@ module.exports = (deps) => {
         const upd = await dbRunAsync(`UPDATE sys_issues SET oa_number = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = ?`, [oa, id, row.status]);
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '单据状态已变化，请刷新后重试', code: 'OA_NUMBER_STATE_CHANGED' }); }
         const prev = row.oa_number ? `（原 ${row.oa_number}）` : '';
+        // [S4a·A6·#67 六写点补齐] 沿用既有字面量 action_code，仅加 payload_json 列；走到这里必是真变化
+        //   （上方 :12722 一带同值 no-op 已提前 return），单条 INSERT 无需分支。
         await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'note', ?, 'set_oa_number', ?, ?)`,
-          [id, `补填 OA 流程号：${oa}${prev}`, Number(actor.id) || null, actor.name || null]);
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'set_oa_number', ?, ?, ?)`,
+          [id, `补填 OA 流程号：${oa}${prev}`, Number(actor.id) || null, actor.name || null,
+           // [S4a2·预筛 L1] 旧值归一为字符串：同值 no-op 判据用 String(row.oa_number||'')，存量 INTEGER 列值若不归一会写出 number 对 string
+           JSON.stringify({ changes: [{ field: 'oa_number', old: (row.oa_number == null || row.oa_number === '') ? null : String(row.oa_number), new: oa }] })]);
         await sysCommit();
         return res.json({ id, oa_number: oa, changed: true });
       } catch (txErr) {
@@ -13645,10 +13682,13 @@ module.exports = (deps) => {
           `UPDATE sys_issues SET scheduled_start = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = ?`,
           [val, id, row.status]);
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_STATE_CHANGE' }); }
+        // [S4a·A3·#67 六写点补齐] 沿用既有字面量 action_code，仅加 payload_json 列（参数不被解析器解析）。
+        //   走到这里必是真变化（上方 curVal===val 同值 no-op 已提前 return），故只此一条 INSERT，无需分支。
         await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name)
-           VALUES (?, 'note', ?, 'set_scheduled_start', ?, ?)`,
-          [id, val === null ? '清除计划开工日' : `定计划开工日：${val}`, Number(sysActor(req).id) || null, sysActor(req).name || null]);
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'set_scheduled_start', ?, ?, ?)`,
+          [id, val === null ? '清除计划开工日' : `定计划开工日：${val}`, Number(sysActor(req).id) || null, sysActor(req).name || null,
+           JSON.stringify({ changes: [{ field: 'scheduled_start', old: curVal, new: val }] })]);
         await sysCommit();
         return res.json({ id, scheduled_start: val, action: 'set_scheduled_start' });
       } catch (txErr) {
@@ -14292,13 +14332,36 @@ module.exports = (deps) => {
         //   summary 逐字等于 estMin（verify-sys-effort-c7/verify-sys-time-precision 的 strictEqual(summary, EST)
         //   两条既有断言均未涉及超容差场景，不受影响）。
         const estimateTimelineSummary = estMin + buildEtaOverrunReasonSummarySuffix(estimateEtaReasonResult, row.eta_overrun_reason_code || null);
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
-           VALUES (?, 'estimate', ?, ?, ?)`,
-          //   summary 用 estMin（+ 上方理由后缀）：时间轴上这条 summary 是**纯文本直出**、前端不过格式化件，
-          //   写带秒的值进去，页面上就会冒出一条到秒的时间，直接违反 D3。（D4 管库里的字段，不管留痕文本。）
-          [id, estimateTimelineSummary, actor.id, actor.name]
-        );
+        // [S4a·A1·#67 六写点补齐] 变更留痕 changes 构造——按方案 §5.1 逐字段比较规则，仅真正变化的字段进 changes：
+        //   dev_estimated_at 旧值取 curEstMin（已在上方 :14245 算出）归 null、新值 estMin；estimated_effort_days
+        //   仅 effortApplicable（feature/improvement）时比较，旧值取 curEffort（已在上方 :14259 算出）归一后的值。
+        const estimateChanges = [];
+        if ((curEstMin || null) !== estMin) {
+          estimateChanges.push({ field: 'dev_estimated_at', old: curEstMin || null, new: estMin });
+        }
+        if (effortApplicable) {
+          const curEffortValue = curEffort.ok ? curEffort.value : null;
+          if (curEffortValue !== effortValue) {
+            estimateChanges.push({ field: 'estimated_effort_days', old: curEffortValue, new: effortValue });
+          }
+        }
+        //   summary 用 estMin（+ 上方理由后缀）：时间轴上这条 summary 是**纯文本直出**、前端不过格式化件，
+        //   写带秒的值进去，页面上就会冒出一条到秒的时间，直接违反 D3。（D4 管库里的字段，不管留痕文本。）
+        //   [S4a 硬约束] label-coverage 解析器不认三元/条件表达式写 action_code，故用两条显式 INSERT 分支
+        //   （有变化 → 字面量 'estimate_eta' + payload_json；无变化 → 原 INSERT 逐字不动）。
+        if (estimateChanges.length) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'estimate', ?, 'estimate_eta', ?, ?, ?)`,
+            [id, estimateTimelineSummary, actor.id, actor.name, JSON.stringify({ changes: estimateChanges })]
+          );
+        } else {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
+             VALUES (?, 'estimate', ?, ?, ?)`,
+            [id, estimateTimelineSummary, actor.id, actor.name]
+          );
+        }
         // [codex 100 号 HIGH-1] 方案 B（无条件重跑 runWGate）已被证伪并撤回——改方案 A（deferred 标记）：
         //   仅当 gate_deferred_at 非空（即此单确曾被 GATE 判定"全完成态但资格未过"，正等待资格修复）才重跑
         //   runWGate 消费标记；无标记时不调用，避免误伤 return/reopen 之后"roster 完成态保留但需求新一轮
@@ -14434,7 +14497,8 @@ module.exports = (deps) => {
       let feasibilityNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
       await sysBeginImmediate();
       try {
-        const row = await dbGetAsync('SELECT id, type, status, assigned_at, needs_feasibility, blocked, gate_deferred_at, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
+        // [S4a·A2·#67 H1] SELECT 补 4 列（估时工期 + 评估三列）——变更留痕 changes 需要旧值同源比较，不新增查询。
+        const row = await dbGetAsync('SELECT id, type, status, assigned_at, needs_feasibility, blocked, gate_deferred_at, dev_estimated_at, estimated_effort_days, feasibility_conclusion, feasibility_requirement_confirm, feasibility_risk, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
         assertKnownIssueStatus(row.type, row.status);
         // ⭐ [C8-fix Q1·315 表态=端点适用面优先·整体重排] **端点适用面两闸先于全部 payload 字段校验**。
@@ -14591,11 +14655,48 @@ module.exports = (deps) => {
         // [组 C·SC3·修复 a] timeline 携带理由——快照文本追加人话后缀，未超容差且此前也无理由时后缀为空串。
         const snapshot = `结论：${conclusion}｜需求理解：${requirementConfirm}｜风险：${risk || '无'}｜预计完成：${estMin}｜工期：${effortText}`
           + buildEtaOverrunReasonSummarySuffix(feasibilityEtaReasonResult, row.eta_overrun_reason_code || null);
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
-           VALUES (?, 'feasibility', ?, ?, ?)`,
-          [id, snapshot, actor.id, actor.name]
-        );
+        // [S4a·A2·#67 六写点补齐] 变更留痕 changes——按方案 §5.1 逐字段比较（B 类附带变更）：五字段各自
+        //   旧值取上方新扩的 SELECT 列（''/null 归 null），新值取 validateFeasibilityPayload 输出、与本条
+        //   UPDATE 参数逐字同源（risk 用 risk || null，与 UPDATE 参数一致）。全同值 ⇒ 行仍写、两列 NULL
+        //   （本端点无同值 rollback 分支，resubmission 全量覆盖，原有事件/通知照旧）。
+        const normFeasField = (v) => (v === '' || v === null || v === undefined) ? null : v;
+        const feasibilityChanges = [];
+        const oldFeasEstMin = truncToMinute(row.dev_estimated_at) || null;
+        if (oldFeasEstMin !== estMin) {
+          feasibilityChanges.push({ field: 'dev_estimated_at', old: oldFeasEstMin, new: estMin });
+        }
+        const curFeasEffort = normalizeSysEffortDays(row.estimated_effort_days);
+        const oldFeasEffortValue = curFeasEffort.ok ? curFeasEffort.value : null;
+        if (oldFeasEffortValue !== effortValue) {
+          feasibilityChanges.push({ field: 'estimated_effort_days', old: oldFeasEffortValue, new: effortValue });
+        }
+        const oldConclusion = normFeasField(row.feasibility_conclusion);
+        if (oldConclusion !== conclusion) {
+          feasibilityChanges.push({ field: 'feasibility_conclusion', old: oldConclusion, new: conclusion });
+        }
+        const oldRequirementConfirm = normFeasField(row.feasibility_requirement_confirm);
+        if (oldRequirementConfirm !== requirementConfirm) {
+          feasibilityChanges.push({ field: 'feasibility_requirement_confirm', old: oldRequirementConfirm, new: requirementConfirm });
+        }
+        const oldFeasRisk = normFeasField(row.feasibility_risk);
+        const newFeasRisk = risk || null;
+        if (oldFeasRisk !== newFeasRisk) {
+          feasibilityChanges.push({ field: 'feasibility_risk', old: oldFeasRisk, new: newFeasRisk });
+        }
+        // [S4a 硬约束] 两条显式 INSERT 分支（label-coverage 解析器不认条件写 action_code）。
+        if (feasibilityChanges.length) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'feasibility', ?, 'feasibility_change', ?, ?, ?)`,
+            [id, snapshot, actor.id, actor.name, JSON.stringify({ changes: feasibilityChanges })]
+          );
+        } else {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
+             VALUES (?, 'feasibility', ?, ?, ?)`,
+            [id, snapshot, actor.id, actor.name]
+          );
+        }
         // [codex 100 号 HIGH-1] 同 estimate：方案 B 撤回，改方案 A——仅 gate_deferred_at 非空时消费重跑
         //   runWGate（避免 return/reopen 后"roster 完成态保留但需重新提交"场景被误弹回 VERIFY）。
         if (row.gate_deferred_at) {
@@ -14842,6 +14943,16 @@ module.exports = (deps) => {
     } catch (err) { sendSysTransitionError(res, err); }
   });
 
+  // [S4a·A5·#67 H2·不可达写点·防御性补齐] buildScopeChangeDeadlineChanges——deadline 变更留痕的 changes
+  //   构造抽成模块级纯函数（583-R M2）：`provided = dlValue !== undefined`；未传或同值返回 []，否则返回一项。
+  //   端点用**同一个返回值**同时决定「是否 SET deadline」与「是否走新 INSERT」，不重复判定。
+  //   ⚠️ 本端点当前对全部四类型（feature/improvement/bug/config）均不可达（见下方 SCOPE_CHANGE_DISABLED /
+  //   findTransition 恒 null 两道闸），本函数与其调用点是受控范围内的静态结构补齐，不为验收放开状态机
+  //   （D4·codex 583 H2）。写入分支未验证——将来放开该动作时须补端到端写入测试。
+  function buildScopeChangeDeadlineChanges({ provided, dlTextOld, dlTextNew }) {
+    if (!provided || dlTextNew === dlTextOld) return [];
+    return [{ field: 'deadline', old: dlTextOld || null, new: dlTextNew }];
+  }
   // ── POST /sys-issues/:id/scope-change：范围变更（不改 status，写事件 + scope_changed=1，admin，§5.2）──────────
   router.post('/sys-issues/:id/scope-change', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
@@ -14892,7 +15003,11 @@ module.exports = (deps) => {
         //   本端点当前无 type 可达（见上方守卫注释），改在这里是为 config 流放开时不留坑。
         const dlTextNew = deadlineToMinuteText(dlValue);
         const dlTextOld = deadlineToMinuteText(row.deadline);
-        if (dlValue !== undefined && dlTextNew !== dlTextOld) {
+        // [S4a·A5] provided = dlValue !== undefined；scopeChangeDeadlineChanges 同时驱动 SET 片段与 INSERT 分支。
+        const scopeChangeDeadlineChanges = buildScopeChangeDeadlineChanges({
+          provided: dlValue !== undefined, dlTextOld, dlTextNew,
+        });
+        if (scopeChangeDeadlineChanges.length) {
           evSummary += `（deadline ${dlTextOld || '空'} → ${dlTextNew}）`;
           setFrags.push('deadline = ?'); setParams.push(dlValue);
         }
@@ -14901,11 +15016,20 @@ module.exports = (deps) => {
           [...setParams, id, row.status]
         );
         if (!upd || upd.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '迭代单状态已变更，请刷新重试', code: 'CONCURRENT_SCOPE_CHANGE' }); }
-        await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
-           VALUES (?, 'scope_change', ?, ?, ?)`,
-          [id, evSummary, actor.id, actor.name]
-        );
+        // [S4a 硬约束] 两条显式 INSERT 分支；本写点当前不可达（见上方 buildScopeChangeDeadlineChanges 注释）。
+        if (scopeChangeDeadlineChanges.length) {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, operator_id, operator_name, payload_json)
+             VALUES (?, 'scope_change', ?, 'scope_change_deadline', ?, ?, ?)`,
+            [id, evSummary, actor.id, actor.name, JSON.stringify({ changes: scopeChangeDeadlineChanges })]
+          );
+        } else {
+          await dbRunAsync(
+            `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, operator_id, operator_name)
+             VALUES (?, 'scope_change', ?, ?, ?)`,
+            [id, evSummary, actor.id, actor.name]
+          );
+        }
         await sysCommit();
       } catch (txErr) {
         try { await sysRollback(); } catch (_) { /* ignore */ }
@@ -16738,6 +16862,14 @@ module.exports = (deps) => {
         reason: delta.overdue_change_reason || null,
         release_no: rel.release_no || null,
       };
+      // [#67 B1·2026-09-16] 追加 `changes` —— 让时间线的改期行能展开看「计划上线日期 旧→新」，
+      //   不再只有一行灰「范围变更」。**既有五键一个不动**（前端 §6.2 分支 1 只读 `changes`，
+      //   其余键继续服务 summary 与既有断言）。
+      // ⚠️ 取值**必须从 payload 自身取**，不重新读 delta —— 这样「展开区显示的前后值」与「既有两键」
+      //   在结构上就不可能分叉（feedback_write_read_same_semantic；C9 另有一条断言逐值比对）。
+      // ⚠️ 新值为 null 是**合法状态**（改期端点 normalizeDeadline 明确「留空可清除」），此时展开区
+      //   由既有 siTlChangeValueHtml 渲染成「（空）」，与 summary 的「→ 未设定」一致。
+      payload.changes = [{ field: 'planned_date', old: payload.planned_date_old, new: payload.planned_date_new }];
       // [C4b·Opus 预筛 M1 收口] 零成员批次没有 sys_issue_timeline 行可挂（release_date_change 走"每受
       //   影响成员各写一条"的既有范式，零成员=零行），本端点（update-planned-date）也不写
       //   sys_release_audit（批次级审计表——那是 PATCH /sys-releases/:id 与 DELETE 端点专属的审计动作，
@@ -21472,6 +21604,9 @@ module.exports = (deps) => {
   // ============================================================
   const _internals = {
     SYS_SCHEMA_STATE,
+    // [S4a·A5·#67 六写点补齐] scope-change deadline changes 构造纯函数——供 verify-sys-timeline-trace-coverage.js
+    // 直调四格（未传/同值/首次/更新），本函数不接 db、无副作用（RC-L2 防复刻漂移，同本文件既有导出先例）。
+    buildScopeChangeDeadlineChanges,
     // [B·B.8·2026-09-09 方案 v1.5] 提交原地修正回滚三注入点 + 详情锁可释放屏障——仅 SYS_TEST_HOOKS=1 时
     // 生产分支才会读取，导出对象本身在任意环境下都存在（供 verify 判空/赋值），不代表生效。
     __testHooks,

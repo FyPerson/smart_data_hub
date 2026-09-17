@@ -52,6 +52,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 const sqlite3 = require('sqlite3');
+const acorn = require('acorn'); // [S5 甲2] extractFunctionBody 交叉验证。⚠️ [S5b·Opus 预筛 M3] 本仓第 6 处消费点（collab-validation-status-coverage / db-connections-writers 硬 require，badge-alias / external-source-playwright try 降级）——acorn 此前一直是 eslint 传递依赖被提升，本次 S5 首次显式写进 devDependencies 是补旧债，不是新引入
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -62,7 +63,9 @@ const failures = [];
 // `await Promise.all(pending)` 之后才打印总分/决定退出码——同步调用点行为逐字不变（fn() 非 thenable 时
 // 走原有同步分支，无感知）。
 const pending = [];
+const checkNames = [];
 function check(name, fn) {
+    checkNames.push(name);
     let result;
     try {
         result = fn();
@@ -85,7 +88,25 @@ const htmlPath = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
 const src = fs.readFileSync(htmlPath, 'utf8');
 
 // 取单个具名函数体（从 `function name(...) {` 到与之匹配的右括号）——同 verify-collab-terminal-notify.js
-// 既有范式（extractFunctionBody），balanced-brace 提取，避免跨函数误判。
+// 既有范式（extractFunctionBody）。
+// ⚠️ [581-R2 L1 / 581-R3 L 措辞订正·两轮] 原注释写「balanced-brace 提取，**避免跨函数误判**」
+//   ——这个保证**强于实现**：本实现**逐字符统计所有花括号**，不区分代码 / 字符串 / 模板字面量 /
+//   正则 / 注释。⇒ 函数体内只要出现**不成对的花括号字面量**（字符串里单独的 `}` 或 `{`、
+//   模板里的 `${` 拼接片段、正则中的 `{n,m}`、注释里的孤立括号），提取结果就不可靠。
+//   ⚠️ [581-R3] 后果**不止「提前结束」一种**（我上一轮只写了这一种，不全）：
+//     · 多出**右**花括号 ⇒ **提前结束**，拿到截断的函数体
+//     · 多出**左**花括号 ⇒ **越过函数边界**，把后面的函数一起吞进来
+//     · 括号始终不归零 ⇒ **提取失败**（返回 null）
+//   截断/越界后的后果分两种：① 被断言的特征串落在错误范围外 ⇒ **假红**（能发现）
+//   ② 断言的是「不含某串」这类负向条件 ⇒ **假绿**（发现不了）。
+//   **准确的表述**：本提取器只在「目标函数体内花括号成对且不出现于字符串/模板/正则/注释」这一
+//   输入格式约束下正确；**提取成功 ≠ 函数边界正确**。
+//   ⇒ 使用纪律（⚠️ 这是**待落实的纪律**，不代表现有调用点已全部实施）：凡用本提取器做
+//   **负向断言**（断某串不存在）的地方，都应另加一条正向锚点断言（断一个只出现在函数体
+//   **尾部**的特征串），以排除提取范围不对。
+//   ⇒ 更彻底的修法是改用真正的 JS 解析器按函数节点取起止偏移并与本提取器对照
+//   （codex 581-R2/R3 建议），属**测试工具可靠性**改造、不在 #67 范围内
+//   ⇒ 登记锚点 §9 第 9 项，不在本批实施。
 function extractFunctionBody(source, fnName) {
     const startRe = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)\\s*\\{`);
     const m = startRe.exec(source);
@@ -145,6 +166,149 @@ function guardConditionBefore(body, marker) {
     }
     throw new Error(`"${marker}" 的 if 条件未闭合`);
 }
+
+// [S5 甲2 · 长任务A锚点 §9 第 9 项裁定] extractFunctionBody（本文件 :109 一带）逐字符统计花括号、
+// 不区分字符串/模板/正则/注释——「提取成功 ≠ 函数边界正确」的风险此前只有「末字符为 } + new Function
+// 编译」两项间接检查，未直接验证边界。裁定＝不换实现（保留现状），改用真正的 JS 解析器（acorn）独立
+// 复算每个目标函数体的花括号区间，与 extractFunctionBody 的返回值逐字节比对——把"未发现异常"升级
+// 为"已证明边界正确"，且一旦未来出现截断/越界会立刻在此报红（不必等到下游用它做负向断言的地方假绿）。
+//
+// 比对口径：extractFunctionBody(source, name) 返回值从 `{`（源码里 `function name(...) {` 的那个左
+// 花括号，函数体起点）到与之配对的 `}`（含两端花括号）的原始子串——即 acorn AST 里 FunctionDeclaration
+// 节点 `.body`（BlockStatement）的 `[start, end)` 区间原样切片：node.body.start 指向左花括号，
+// node.body.end 是右花括号之后一位（exclusive），故 `blockText.slice(node.body.start, node.body.end)`
+// 与 extractFunctionBody 的返回值应逐字节相等，两者对同一份源码文本取同一含义的区间，非近似比较。
+//
+// 范围：本文件内实际调用 extractFunctionBody(src, 目标函数名字面量)（含经由内部小工具 grabFnA 间接
+// 调用的形态）覆盖到的全部目标函数名，去重后取集合——不是固定 26 这个预估数，以本文件当前实际调用点
+// 为准（多点位重复调用同一函数名只登记一次，比对一次即可，重复调用不改变该函数体在源码里的边界）。
+const EXTRACT_FN_BODY_TARGET_NAMES = (() => {
+    const names = new Set();
+    const re1 = /extractFunctionBody\(\s*(?:src|mutated|indexJsSrc)\s*,\s*'([^']+)'\s*\)/g;
+    const re2 = /grabFnA\('([^']+)'\)/g;
+    const selfSrc = fs.readFileSync(__filename, 'utf8');
+    // [S5b-4] 在**剥注释后**的文本上扫：注释里写的示例（如 grabFnA('…')）会被当成目标名「…」→ acorn 找不到而假红
+    const selfClean = stripComments(selfSrc);
+    let mm;
+    while ((mm = re1.exec(selfClean))) names.add(mm[1]);
+    while ((mm = re2.exec(selfClean))) names.add(mm[1]);
+    // [S5b·Opus 预筛 M2] 自扫正则只认「第一参 ∈ src/mutated/indexJsSrc + 第二参单引号字面量」与 grabFnA('…')，
+    //   **非字面量传名**（如 :513 一带 `for (const fn of [...]) extractFunctionBody(src, fn)`）扫不到——那三个名字
+    //   此前只是恰好在别处另有字面量调用点才进了集合。反向封闭：枚举全文所有 `extractFunctionBody(` 调用（剥注释），
+    //   凡不匹配 re1 形态的，必须落在已知白名单形态内（本函数定义行 / 本 check 自身 `extractFunctionBody(src, name)` /
+    //   grabFnA 内部 / :513 的 fn 循环），且循环数组里的名字必须已在集合内——否则报错，不让「变量传名新增目标」静默漏出验证面。
+    // 只认真正的调用（前面不是 "function " 定义、也不是正则字面量里的转义形态 "extractFunctionBody\("）
+    const allCalls = [...selfClean.matchAll(/(?<!function\s)extractFunctionBody\(\s*([^)]*)\)/g)].map(m => m[1].replace(/\s+/g, ' ').trim());
+    const literalRe = /^(?:src|mutated|indexJsSrc) *, *'[^']+'$/;
+    const nonLiteral = allCalls.filter(a => !literalRe.test(a));
+    // 已知白名单形态：本 check 自身 (src, name) / grabFnA 内部 (src, name) / :513 一带 fn 循环 (src, fn)
+    // [S6a·codex 587-R M1] 白名单不再按参数文本"全局放行"，而是**精确计数**：'src, name' 恰 2 处（grabFnA 内部 + S5 check 自身）、
+    //   'src, fn' 恰 1 处（:513 一带循环）——新增任何一处 \`const name = '…'; extractFunctionBody(src, name)\` 之类的动态调用
+    //   都会让计数 +1 判红，而不是被同文本白名单放过；grabFnA 的非字面量调用恰 0 处（同理封住 grabFnA(name) 入口）。
+    const countOf = (txt) => nonLiteral.filter(a => a === txt).length;
+    const EXPECTED_NON_LITERAL = { 'src, name': 2, 'src, fn': 1 };
+    const unknown = nonLiteral.filter(a => !(a in EXPECTED_NON_LITERAL));
+    if (unknown.length) throw new Error('[S5b] extractFunctionBody 出现未登记的非字面量调用形态（交叉验证面会静默缺口）：' + JSON.stringify(unknown) + '——要么改成字面量传名，要么把名字并入集合并登记形态');
+    for (const [txt, expected] of Object.entries(EXPECTED_NON_LITERAL)) {
+        if (countOf(txt) !== expected) throw new Error('[S6a] 动态传名形态「' + txt + '」的调用次数应恰 ' + expected + '，实得 ' + countOf(txt) + '——新增动态传名调用不进交叉验证集合，禁止');
+    }
+    const grabDynamic = [...selfClean.matchAll(/grabFnA\(\s*([^)]*)\)/g)].map(m => m[1].trim()).filter(a => !/^'[^']+'$/.test(a) && a !== 'name');
+    if (grabDynamic.length) throw new Error('[S6a] grabFnA 出现非字面量调用（不进交叉验证集合）：' + JSON.stringify(grabDynamic));
+    // 只认循环体内真的调用了 extractFunctionBody(src, fn) 的循环（本文件另有"这些函数应已删除"的负向 fn 循环，不相干）
+    let extractLoops = 0;
+    for (const lm of selfClean.matchAll(/for \(const fn of \[([^\]]+)\]\)\s*\{/g)) {
+        const body = selfClean.slice(lm.index, lm.index + 400);
+        if (!/extractFunctionBody\(src, fn\)/.test(body)) continue;
+        extractLoops += 1;
+        for (const nm of [...lm[1].matchAll(/'([^']+)'/g)].map(m => m[1])) {
+            if (!names.has(nm)) throw new Error('[S5b] 变量传名循环里的 ' + nm + ' 不在交叉验证集合内（无字面量调用点兜底）');
+        }
+    }
+    if (extractLoops !== 1) throw new Error('[S5b] 用变量 fn 调用 extractFunctionBody 的循环应恰 1 处（:513 一带），实得 ' + extractLoops + '——形态变了要同步本自检');
+    return [...names].sort();
+})();
+
+// 递归 walk 整棵 AST（不引入 acorn-walk，手写足够）：对每个节点，遍历其自身属性，凡值是"看起来像
+// AST 节点"（有 .type 字符串）的对象或此类对象组成的数组，递归下探——这样嵌套在其它函数体内的
+// FunctionDeclaration（闭包内再声明具名函数）同样能被发现，不局限于顶层 body。
+function walkFunctionDeclarations(node, names, out) {
+    if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+    if (node.type === 'FunctionDeclaration' && node.id && names.has(node.id.name)) {
+        (out[node.id.name] = out[node.id.name] || []).push({ start: node.body.start, end: node.body.end });
+    }
+    for (const key in node) {
+        if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+        const val = node[key];
+        if (Array.isArray(val)) {
+            for (const item of val) walkFunctionDeclarations(item, names, out);
+        } else if (val && typeof val === 'object' && typeof val.type === 'string') {
+            walkFunctionDeclarations(val, names, out);
+        }
+    }
+}
+
+check('[S5 甲2] acorn 交叉验证：extractFunctionBody 对全部目标函数的提取边界与真实 AST 逐字节一致', () => {
+    // src 是整段 HTML（:87 fs.readFileSync 的就是 Sys_Iteration.html 全文），先切出内联 <script>…</script>
+    // 块（跳过带 src= 的外链脚本，也跳过 type 非 JS 的内联块如 application/json）——本文件当前只有一个
+    // 内联块，但写成通用循环不假设"只有一个"，未来多块也能覆盖。
+    const scriptBlocks = [];
+    const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/g;
+    let sm;
+    while ((sm = scriptRe.exec(src))) {
+        const attrs = sm[1];
+        if (/\bsrc\s*=/.test(attrs)) continue;
+        if (/\btype\s*=\s*["'](?!text\/javascript|module)[^"']*["']/.test(attrs)) continue;
+        // [S5b·L1/L2] 记录 type 属性（module 块按 module 解析，否则 import/export 会让 check 假红）与块在 src 全文里的起点（同址断言用）
+        scriptBlocks.push({ text: sm[2], isModule: /\btype\s*=\s*["']module["']/.test(attrs), srcOffset: sm.index + sm[0].indexOf(sm[2]) });
+    }
+    assert.ok(scriptBlocks.length > 0, '未在 Sys_Iteration.html 中找到内联 <script> 块（跳过外链/非 JS type 后）');
+
+    const namesSet = new Set(EXTRACT_FN_BODY_TARGET_NAMES);
+    const foundByName = {};
+    for (const blk of scriptBlocks) {
+        const block = blk.text;
+        const ast = acorn.parse(block, { ecmaVersion: 'latest', sourceType: blk.isModule ? 'module' : 'script' });
+        const perBlock = {};
+        walkFunctionDeclarations(ast, namesSet, perBlock);
+        for (const name in perBlock) {
+            (foundByName[name] = foundByName[name] || []).push(...perBlock[name].map(x => ({ ...x, blockText: block, srcStart: blk.srcOffset + x.start })));
+        }
+    }
+
+    const problems = [];
+    for (const name of EXTRACT_FN_BODY_TARGET_NAMES) {
+        const matches = foundByName[name] || [];
+        if (matches.length === 0) {
+            problems.push(`${name}：acorn AST 中未找到 FunctionDeclaration（extractFunctionBody 靠正则找到了却在真实语法树里找不到，说明正则匹配到了非声明位置，如注释/字符串里的同名文本）`);
+            continue;
+        }
+        // extractFunctionBody 用 regex.exec(source) 只取源码里"第一个"匹配（未指定 g 标志、从头开始
+        // 搜），若同名声明有多处，只有位置最靠前那个会被现有实现实际消费——取 AST 里 start 最小的一条
+        // 与之对齐比较；但"存在多处同名声明"本身就是可疑信号，无论比对是否相等都单独报出，不静默吞掉。
+        matches.sort((a, b) => a.srcStart - b.srcStart);   // [S5b·L2] 按 src 全文偏移排序（块内偏移跨块无意义）
+        if (matches.length > 1) {
+            problems.push(`${name}：AST 中发现 ${matches.length} 处同名 FunctionDeclaration（extractFunctionBody 只会取正则命中的第一处，若与 AST 的"起始位置最小"那处不是同一处会掩盖問題——本次仍按起始位置最小对齐比较，但请人工确认是否为有意的重名）`);
+        }
+        const first = matches[0];
+        const acornText = first.blockText.slice(first.start, first.end);
+        // [S5b·L2] 「字节相等」升级为「同址且相等」：extractFunctionBody 取的是 src 全文首个匹配，其起点必须等于 acorn 节点换算到全文的起点
+        const naiveStart = (() => { const m = new RegExp('function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{').exec(src); return m ? m.index + m[0].length - 1 : -1; })();
+        if (naiveStart !== first.srcStart) problems.push(`${name}：起点不同址——extractFunctionBody 正则首个匹配起点 ${naiveStart}，acorn 节点全文起点 ${first.srcStart}`);
+        const naiveText = extractFunctionBody(src, name);
+        if (naiveText === null) {
+            problems.push(`${name}：extractFunctionBody 返回 null（正则未匹配到 "function ${name}(...) {"），但 AST 里能找到该函数声明——两者矛盾`);
+            continue;
+        }
+        if (acornText !== naiveText) {
+            let diffAt = 0;
+            const n = Math.min(acornText.length, naiveText.length);
+            while (diffAt < n && acornText[diffAt] === naiveText[diffAt]) diffAt++;
+            const ctx = (s, i) => JSON.stringify(s.slice(Math.max(0, i - 40), i + 40));
+            problems.push(`${name}：边界不一致 — acorn 长度 ${acornText.length}，extractFunctionBody 长度 ${naiveText.length}，首个差异偏移 ${diffAt}；acorn 处附近=${ctx(acornText, diffAt)}；extractFunctionBody 处附近=${ctx(naiveText, diffAt)}`);
+        }
+    }
+    assert.strictEqual(problems.length, 0, `${problems.length} 个目标未通过 acorn 交叉验证：\n  - ${problems.join('\n  - ')}`);
+});
 
 console.log('— §① 「上线单管理」入口不挂 META_OK（§6.7）—');
 check('siRenderHeadActions 存在', () => {
@@ -1495,32 +1659,329 @@ check('siReleaseOverdueApplicable：应急批次（release_kind===\'emergency\'�
 
 console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 // ═══ [时间线改动明细 方案 20260911 v1.2 §3.3] 修改类事件「查看改动」渲染：静态登记 + 直调行为 ═══
-check('[A] SI_TL_CHANGE_CODES 含 release_info_edit / edit_in_revision 两码 + SI_TL_CHANGE_FIELD_LABEL 含上线单三字段与迭代单十二字段', () => {
-    assert.ok(/SI_TL_CHANGE_CODES\s*=\s*new Set\(\[[^\]]*'release_info_edit'[^\]]*\]\)/.test(src), 'SI_TL_CHANGE_CODES 应含 release_info_edit');
-    assert.ok(/SI_TL_CHANGE_CODES\s*=\s*new Set\(\[[^\]]*'edit_in_revision'[^\]]*\]\)/.test(src), 'SI_TL_CHANGE_CODES 应含 edit_in_revision');
+// [#67 A3/C2·2026-09-16] 可隐藏性双语义拆分的**核心语义锁**。本条断言的判别力方向：
+//   · 有人把 release_date_change 加回白名单 → 差集变空 → 红（改期又会被过滤器藏掉，正是本次要修的病）
+//   · 有人往 SCOPE_LABEL 表加新码却忘登记白名单 → 差集多一项 → 红（提醒他做显式决策）
+//     ——这是**提醒而非阻止**：白名单的安全默认是「未登记即不可隐藏」，忘登记只多显示一行、不丢信息
+//   · 白名单登记了不在 SCOPE 表里的码 → 越界项非空 → 红（那个码拿不到标签，登记它无意义）
+check('[A·#67 A3] SI_TL_HIDABLE_SCOPE_CODES 恰 8 码 ∧ 全在 SCOPE_LABEL 表内 ∧ 两者差集恰为 release_date_change', () => {
+    const mH = src.match(/const SI_TL_HIDABLE_SCOPE_CODES = new Set\(\[([\s\S]*?)\]\);/);
+    assert.ok(mH, '未提取到 SI_TL_HIDABLE_SCOPE_CODES');
+    const hid = [...new Set((mH[1].match(/'([a-z_]+)'/g) || []).map((s) => s.replace(/'/g, '')))];
+    assert.strictEqual(hid.length, 8, `白名单应恰 8 码，实得 ${hid.length}：${hid.join(',')}`);
+    const mL = src.match(/const SI_TL_RELEASE_SCOPE_LABEL = \{([\s\S]*?)\};/);
+    assert.ok(mL, '未提取到 SI_TL_RELEASE_SCOPE_LABEL');
+    const lbl = [...new Set((mL[1].match(/([a-z_]+)\s*:/g) || []).map((s) => s.replace(/\s*:$/, '')))];
+    const outOfTable = hid.filter((k) => !lbl.includes(k));
+    assert.deepStrictEqual(outOfTable, [], `白名单成员必须都在 SCOPE_LABEL 表里（否则拿不到标签），越界：${outOfTable.join(',')}`);
+    const diff = lbl.filter((k) => !hid.includes(k));
+    assert.deepStrictEqual(diff, ['release_date_change'],
+        `SCOPE 表减白名单应恰为 release_date_change —— 这是 #67 的核心语义（改期仍进表拿「上线单改期」标签，但不再可隐藏）。实得：${diff.join(',') || '（空）'}`);
+});
+// [#67 A4/C2·576-M1 重写] 判据的**行为**断言，不只断源码长相。
+// ⚠️ 为什么必须直调：原版只有两条源码正则（断"含 scope_change"与"含 has(...)"）——**把 && 改成 ||
+//   两条正则照样匹配**，断言不红，而那时任意 scope_change 事件都会被隐藏。源码正则只能发现"删掉某段
+//   文本"，证明不了"两个条件必须同时成立"。故改为提取真实判据直调，逐码逐类型跑行为。
+// ⚠️ [576-L1 订正] 原注释说"删左半边会让 release_info_edit 等 note 码意外可隐藏"——**那是错的**：
+//   那些码不在白名单里，删左半边后 has() 仍为 false、照样不隐藏。真实风险是
+//   **白名单内的码以非 scope_change 类型出现时被误隐藏**（如 release_add 若某处以 note 写入）。
+// [576-R·rec2] 提取逻辑抽共用 helper：两条断言各自对**函数体**与**集合**分别断言，
+//   避免第二条在匹配失败时直接在 m[0] 处抛错（那是"报错不清晰"，虽不构成假绿）。
+const grabHidablePredicate = () => {
+    const mFn = src.match(/function siTlIsHidableScope\(e\) \{[\s\S]*?\n    \}/);
+    assert.ok(mFn, '未提取到 siTlIsHidableScope 函数体（提取失效=本组空转，必须先红在这里）');
+    const mSet = src.match(/const SI_TL_HIDABLE_SCOPE_CODES = new Set\(\[[\s\S]*?\]\);/);
+    assert.ok(mSet, '未提取到 SI_TL_HIDABLE_SCOPE_CODES 集合');
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(`${mSet[0]}\n${mFn[0]}\nreturn siTlIsHidableScope;`)();
+    assert.strictEqual(typeof fn, 'function', '提取出的判据不是函数');
+    return { fn, setSrc: mSet[0] };
+};
+// 注：每码跑 1 个正类型 + 8 个反类型 = 共 9 种 event_type 取值（576-R 订正了我原先写的"8 种"）。
+check('[A·#67 A4] siTlIsHidableScope 行为：8 个白名单码 × scope_change 为 true，同码换其他 8 种类型一律 false', () => {
+    const { fn, setSrc } = grabHidablePredicate();
+    const codes = [...new Set((setSrc.match(/'([a-z_]+)'/g) || []).map((s) => s.replace(/'/g, '')))];
+    assert.strictEqual(codes.length, 8, `白名单应恰 8 码，实得 ${codes.length}`);
+    for (const c of codes) {
+        assert.strictEqual(fn({ event_type: 'scope_change', action_code: c }), true, `${c} + scope_change 应可隐藏`);
+        for (const t of ['note', 'release', 'status_change', 'created', undefined, null, '', 'scope_change '])
+            assert.strictEqual(fn({ event_type: t, action_code: c }), false, `${c} + event_type=${JSON.stringify(t)} 不应可隐藏（&& 被改成 || 会在此红）`);
+    }
+});
+check('[A·#67 A4] siTlIsHidableScope 行为：改期码 / 未知码 / 异常输入一律 false（未登记即不可隐藏的安全默认）', () => {
+    const { fn } = grabHidablePredicate();
+    // 改期码：本次改造的核心——它是 scope_change 型且在 SCOPE_LABEL 表里，但**不在白名单**
+    assert.strictEqual(fn({ event_type: 'scope_change', action_code: 'release_date_change' }), false, '改期码不应可隐藏（#67 核心语义）');
+    for (const e of [
+        { event_type: 'scope_change', action_code: 'release_unknown_code' },
+        { event_type: 'scope_change', action_code: undefined },
+        { event_type: 'scope_change' },
+        { event_type: 'scope_change', action_code: 123 },
+        { event_type: 'scope_change', action_code: null },
+        {}, null, undefined,
+    ]) assert.strictEqual(fn(e), false, `异常/未登记输入应 false：${JSON.stringify(e)}`);
+});
+// [#67 A4/C2] 三处消费点的分工锁：class 与初始 display 必须用 isHidableScope；hasReleaseScopeTl 必须调
+//   同一纯函数（不得自行重算，否则出「勾了无反应的死开关」）；isReleaseScope 必须仍服务 key 计算。
+check('[A·#67 A4] 消费点分工：class/display 用 isHidableScope ∧ hasReleaseScopeTl 调纯函数 ∧ isReleaseScope 仍参与 key 计算', () => {
+    assert.ok(/class="si-tl-item\$\{isHidableScope \? ' si-tl-release-scope' : ''\}/.test(src),
+        'class 拼接未改用 isHidableScope —— 改期行仍会带可隐藏 class 而被藏');
+    assert.ok(/\$\{isHidableScope && siTlHideReleaseScope \? ' style="display:none"' : ''\}/.test(src),
+        '初始 display 未改用 isHidableScope');
+    assert.ok(/const hasReleaseScopeTl = tlEvents\.some\(siTlIsHidableScope\);/.test(src),
+        'hasReleaseScopeTl 未改调纯函数（自行重算会与行 class 判据漂移 → 死开关）');
+    assert.ok(/\(isReleaseScope \|\| isNoteWithOwnLabel\) \? e\.action_code : e\.event_type/.test(src),
+        'isReleaseScope 已不参与 key 计算 —— 改期会掉回通用「范围变更」标签');
+});
+// [#67 A7/C2] 过滤器文案与旧文案残留。旧文案曾出现在 UI 与三处注释里，改造时一并同步。
+check('[A·#67 A7] 过滤器文案为「隐藏批次编排记录」∧ 全文无旧文案残留', () => {
+    assert.ok(/> 隐藏批次编排记录<\/label>/.test(src), '过滤器 UI 文案未改');
+    assert.ok(!/隐藏上线单调整记录/.test(src), '仍有旧文案残留（含注释）—— 改文案必同步注释里的引用，否则注释成假事实源');
+});
+// [#67 A1/C10·2026-09-16] SI_TL_CHANGE_CODES 已由 Set 升为 Map<码, 期望 event_type>，本条随之重写。
+// ⚠️ 按 A1① 的「按用途分两类」原则：本条是**纯成员资格 / 集合关系检查**，故按 Map 的 **key 集合**比对，
+//   **不改成事件配对**（配对只用于事件分支资格判断，唯一规范在 A5——见下一条 check）。
+//   方案 v0.4/v0.5 曾写「所有 .has() 改为 get()===event_type」，那是 M1 修复后**未同步的旧指令**，
+//   照它处理本条会重新引入「未登记码 ∧ 缺 event_type ⇒ undefined===undefined」漏洞。
+check('[A·#67 A1/乙4 B1] SI_TL_CHANGE_CODES 是 Map 且恰含七码及其期望 event_type + SI_TL_CHANGE_FIELD_LABEL 含十六字段', () => {
+    const mMap = src.match(/const SI_TL_CHANGE_CODES = new Map\(\[([\s\S]*?)\]\);/);
+    assert.ok(mMap, 'SI_TL_CHANGE_CODES 应是 new Map([...]) 形态（#67 A1 由 Set 升级）');
+    const pairs = [...mMap[1].matchAll(/\[\s*'([a-z_]+)'\s*,\s*'([a-z_]+)'\s*\]/g)].map((m) => [m[1], m[2]]);
+    const got = Object.fromEntries(pairs);
+    // [577-R2 L4·同款缺陷全扫] 本条与下方 rec1 对拍用的是**同一个正则**，故有同一个洞：只收集
+    //   "能识别的条目"时，新增**双引号/变量/展开项**条目会被**静默忽略**，四码 deepStrictEqual 照样通过
+    //   ⇒ 新增第五码可以完全躲过本守卫。故先验**解析完备性**：剔除已识别条目后只应剩逗号与空白。
+    //   （codex 577-R2 只点了对拍那处；这处是按「修同类问题按模式全扫」自查出来的同款。）
+    const leftoverA1 = mMap[1].replace(/\[\s*'[a-z_]+'\s*,\s*'[a-z_]+'\s*\]/g, '').replace(/[\s,]/g, '');
+    assert.strictEqual(leftoverA1, '', `SI_TL_CHANGE_CODES 初始化列表里有本断言**无法识别**的内容（残留「${leftoverA1}」）——静态提取已不完备，下面的四码比对会漏掉这些条目`);
+    assert.deepStrictEqual(got, {
+        release_info_edit: 'note',
+        edit_in_revision: 'note',
+        release_date_change: 'scope_change',
+        assign_overdue_eta: 'note',
+        // [乙4·2026-09-17 B1] 时间线留痕覆盖面补齐 v0.2 §5 B1 新增三码：
+        estimate_eta: 'estimate',
+        set_scheduled_start: 'note',
+        set_oa_number: 'note',
+    }, `七码及其期望类型应逐项吻合（新增码须同时登记类型），实得 ${JSON.stringify(got)}`);
     const lbl = (src.match(/const SI_TL_CHANGE_FIELD_LABEL = \{[\s\S]*?\};/) || [''])[0];
     assert.ok(lbl, '未提取到 SI_TL_CHANGE_FIELD_LABEL');
     for (const f of ['title', 'version_tag', 'release_note', 'description', 'system_name', 'module_name', 'priority', 'deadline', 'needs_feasibility', 'requester_dept', 'requester_name', 'requester_phone', 'source', 'related_correction_no']) {
         assert.ok(new RegExp(`\\b${f}:\\s*'`).test(lbl), `SI_TL_CHANGE_FIELD_LABEL 缺 ${f}（后端 SYS_RELEASE_EDIT_FIELD_LABEL ∪ EDIT_FIELD_LABELS 前端副本失同源）`);
     }
+    // [#67 A2·577-M3] 本次新增两字段**核对中文内容**，不只检查「键 + 冒号 + 引号开头」——
+    //   原写法下把 dev_estimated_at 的文案改成任意错误字符串，断言照样通过（codex 577-M3 指出）。
+    for (const [f, zh] of [['planned_date', '计划上线日期'], ['dev_estimated_at', '预计完成时间']]) {
+        assert.ok(new RegExp(`\\b${f}:\\s*'${zh}'`).test(lbl), `SI_TL_CHANGE_FIELD_LABEL 的 ${f} 应为「${zh}」（展开区字段名直接来自它，改错文案用户会看到错的字段名）`);
+    }
 });
-check('[A] siRenderTimeline 含 changes 分支：按 SI_TL_CHANGE_CODES 收窄 action_code ∧ Array.isArray(parsedPayload.changes) → 调 siRenderTimelineChanges，且位于 online_mode 分支之前', () => {
+// [#67 C2·2026-09-16] 三条集合关系断言。⚠️ 按 A1② 的要求，凡涉及 SI_TL_CHANGE_CODES 的集合关系
+//   一律按**Map 的 key 集合**比对——不用事件配对（那只用于分支资格判断）。
+const parseChangeCodeKeys = () => {
+    const m = src.match(/const SI_TL_CHANGE_CODES = new Map\(\[([\s\S]*?)\]\);/);
+    assert.ok(m, '未提取到 SI_TL_CHANGE_CODES Map');
+    return [...new Set([...m[1].matchAll(/\[\s*'([a-z_]+)'\s*,/g)].map((x) => x[1]))];
+};
+const parseSetMembers = (name) => {
+    const m = src.match(new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`));
+    assert.ok(m, `未提取到 ${name}`);
+    return [...new Set((m[1].match(/'([a-z_]+)'/g) || []).map((s) => s.replace(/'/g, '')))];
+};
+check('[A·#67 C2] 历史提示豁免集合 ⊆ SI_TL_CHANGE_CODES 的 key 集合（豁免一个没进变更留痕的码没有意义）', () => {
+    const keys = parseChangeCodeKeys();
+    const exempt = parseSetMembers('SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES');
+    const outside = exempt.filter((k) => !keys.includes(k));
+    assert.deepStrictEqual(outside, [], `豁免集合有成员不在 CHANGE_CODES 里：${outside.join(',')}`);
+});
+check('[A·#67 C2] SI_TL_HIDABLE_SCOPE_CODES 与 SI_TL_CHANGE_CODES 的 key 集合**交集为空**（一个码不能既可隐藏又是变更留痕）', () => {
+    // 语义冲突：变更留痕是「对外承诺被改了、必须始终可见」，可隐藏是「批次内部编排噪音、可折叠」。
+    // 交集非空意味着某个码两种语义都占，渲染时就会出现「换了 ✎ 徽章但又被过滤器藏掉」的自相矛盾。
+    const keys = parseChangeCodeKeys();
+    const hidable = parseSetMembers('SI_TL_HIDABLE_SCOPE_CODES');
+    const inter = hidable.filter((k) => keys.includes(k));
+    assert.deepStrictEqual(inter, [], `两集合交集应为空，实得：${inter.join(',')}`);
+});
+check('[A·#67 C2/A9] SI_TL_CHANGE_LEGACY_ADAPTER 的键 ⊆ SI_TL_CHANGE_CODES 的 key 集合（给没进变更分支的码写适配器永远不会被调用）', () => {
+    const keys = parseChangeCodeKeys();
+    const m = src.match(/const SI_TL_CHANGE_LEGACY_ADAPTER = \{([\s\S]*?)\n    \};/);
+    assert.ok(m, '未提取到 SI_TL_CHANGE_LEGACY_ADAPTER');
+    const adapterKeys = [...new Set([...m[1].matchAll(/^\s{8}([a-z_]+):/gm)].map((x) => x[1]))];
+    assert.ok(adapterKeys.length > 0, '未解析出适配器的任何键（解析失效=本条空转）');
+    const outside = adapterKeys.filter((k) => !keys.includes(k));
+    assert.deepStrictEqual(outside, [], `适配器有键不在 CHANGE_CODES 里：${outside.join(',')}`);
+    // A9 明令「按 action_code 登记、不做通用推断」：当前只有 release_date_change 存在旧版结构化 payload
+    assert.deepStrictEqual(adapterKeys, ['release_date_change'], `适配器应只登记 release_date_change（assign_overdue_eta 历来无 payload，通用化会误吞），实得：${adapterKeys.join(',')}`);
+});
+// [#67 A5/C10·2026-09-16] 分支条件由「硬编码 note ∧ Set.has」改为**码 + 期望类型配对**，本条随之重写。
+// ⚠️ **定位锚必须换掉 `.has(e.action_code)`**（方案 C10 明警）：新条件里**仍含**那个字符串，
+//   拿它定位会**偶然命中却没验证完整条件** = 假绿。改用配对表达式整体作锚。
+check('[A·#67 A5] changes 分支条件为「has(码) ∧ get(码)===event_type」配对匹配 ∧ has() 前置不可省 ∧ 位于 online_mode 分支之前', () => {
     const body = stripComments(extractFunctionBody(src, 'siRenderTimeline') || '');
     assert.ok(body, '未提取到 siRenderTimeline 函数体');
-    const iChanges = body.indexOf('SI_TL_CHANGE_CODES.has(e.action_code)');
+    const pairRe = /SI_TL_CHANGE_CODES\.has\(e\.action_code\)\s*&&\s*SI_TL_CHANGE_CODES\.get\(e\.action_code\)\s*===\s*e\.event_type/;
+    assert.ok(pairRe.test(body), 'changes 分支条件应为 has(e.action_code) && get(e.action_code) === e.event_type');
+    // ⚠️ **has() 不可省**（codex 568-R2 M1）：若判据只剩 get(码) === e.event_type，未登记码 get()
+    //   返回 undefined、该行又缺 event_type（也是 undefined）⇒ undefined === undefined 成立 ⇒ 异常行
+    //   被放进分支。该漏洞的**行为级**验证见下方「未登记码 ∧ 缺失 event_type」用例。
+    // ⚠️ [577-rec2 订正] 下面这条「has 在 get 之前」是**方案风格约束，不是安全必需**——对原生 Map
+    //   交换两个 && 操作数并不会放行（has() 仍在 && 链里、照样返回 false）。保留它只为让判据读起来
+    //   与方案 A5 的写法一致，别把它当成在守 undefined===undefined 那个洞。
+    const iHas = body.indexOf('SI_TL_CHANGE_CODES.has(e.action_code)');
+    const iGet = body.indexOf('SI_TL_CHANGE_CODES.get(e.action_code)');
+    assert.ok(iHas > 0 && iGet > iHas, `风格约束：has() 应写在 get() 之前（与方案 A5 一致），实得 iHas=${iHas} iGet=${iGet}`);
+    assert.ok(!/e\.event_type === 'note' && SI_TL_CHANGE_CODES\./.test(body), '仍残留旧的硬编码 note 条件（会把 release_date_change 挡在外面）');
+    // [577-rec6] 顺序比较改用**配对表达式的匹配位置**，与上面「定位锚已换成配对表达式整体」的
+    //   记录一致；原先仍用独立 indexOf 取 iGet，实现与记录有出入。
+    const mPair = pairRe.exec(body);
+    assert.ok(mPair, '配对表达式应能定位');
     const iOnline = body.indexOf('parsedPayload.online_mode != null');
-    assert.ok(iChanges > 0, '未见 SI_TL_CHANGE_CODES.has(e.action_code) 分支');
-    assert.ok(/e\.event_type === 'note' && SI_TL_CHANGE_CODES\.has\(e\.action_code\)/.test(body), 'changes 分支条件应为 note 型 ∧ action_code 收窄（v1.172.1：不再要求 payload 存在，历史行也进本分支）');
-    assert.ok(/\(parsedPayload && Array\.isArray\(parsedPayload\.changes\)\)\s*\?\s*siRenderTimelineChanges\(/.test(body), '有 changes 数组才调渲染，否则空串');
-    assert.ok(/siRenderTimelineChanges\(parsedPayload\.changes,\s*siTlChangeObjectText\(e\)\)/.test(body), 'changes 分支应调用 siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e))');
-    assert.ok(iOnline > iChanges, 'changes 分支应在 online_mode 分支之前');
+    assert.ok(iOnline > mPair.index, 'changes 分支应在 online_mode 分支之前');
     // 徽章覆盖（v1.172.1）：两码 note 事件无条件统一为玫红「✎ 变更留痕」（si-tl-rose，用户选 V4a；不得与 release_published 的 si-tl-green 同色）；无明细时按 payload 空/非空分别追加「历史记录」/「明细不可用」说明
     assert.ok(/label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS;/.test(body) && !/if \(changesHtml\) \{ label = /.test(body), 'changes 分支应无条件覆盖 label/cls 为变更留痕徽章（v1.172.1 用户二拍：历史行也换徽章）');
     assert.ok(/（历史记录，未保存修改明细）/.test(body) && /（修改明细不可用）/.test(body), '无明细时应按 payload 空/非空分别追加「历史记录」/「明细不可用」两句');
-    assert.ok(/e\.payload_json == null \|\| e\.payload_json === ''/.test(body), '历史行判据=payload_json 为 NULL/空串（v1.172.0 起两写点恒写 payload，NULL 是版本边界）');
+    // [乙4·2026-09-17 B4] 该判据随 siTlChangesHtml 抽取搬进了独立函数体——siRenderTimeline 本体
+    //   不再直接出现这段文本，检查目标同步换成 siTlChangesHtml 的函数体（同一份判据，只是搬了家，
+    //   语义不变：kind='history' 的边界仍是 payload_json 为 NULL/空串）。
+    const changesHtmlFnBody = stripComments(extractFunctionBody(src, 'siTlChangesHtml') || '');
+    assert.ok(changesHtmlFnBody, '未提取到 siTlChangesHtml 函数体（B4 应已抽出该共用函数）');
+    assert.ok(/e\.payload_json == null \|\| e\.payload_json === ''/.test(changesHtmlFnBody), '历史行判据=payload_json 为 NULL/空串（v1.172.0 起两写点恒写 payload，NULL 是版本边界），现应位于 siTlChangesHtml 函数体内');
     assert.ok(/const SI_TL_CHANGE_BADGE_LABEL = '✎ 变更留痕';/.test(src) && /const SI_TL_CHANGE_BADGE_CLS = 'si-tl-rose';/.test(src), '变更留痕徽章常量：标签「✎ 变更留痕」+ si-tl-rose（用户 2026-09-11 选 V4a）');
     assert.ok(/\.si-tl-evt\.si-tl-rose \{ background: #fce7f3; color: #be185d; \}/.test(src), 'si-tl-rose CSS 类应存在且为玫红实底（#fce7f3 / #be185d）');
     assert.ok(/release_published:\s*'si-tl-green'/.test(stripComments(src)), '对照：release_published 仍为 si-tl-green，变更留痕不得与之同色');
+});
+// ══════════════════════════════════════════════════════════════════════════════
+// [乙4·2026-09-17 C1·时间线留痕覆盖面补齐 v0.2 §5 C1] S4b 前端 B 块（B1-B8）配套静态守卫。
+//   放在 #67 §6.2 组之后（既有辅助函数 parseChangeCodeKeys/parseSetMembers 已在上方定义可复用）。
+// ══════════════════════════════════════════════════════════════════════════════
+const parseAttachCodeEntries = () => {
+    const m = src.match(/const SI_TL_CHANGE_ATTACH_CODES = new Map\(\[([\s\S]*?)\]\);/);
+    assert.ok(m, '未提取到 SI_TL_CHANGE_ATTACH_CODES Map');
+    const pairs = [...m[1].matchAll(/\[\s*'([a-z_]+)'\s*,\s*'([a-z_]+)'\s*\]/g)].map((x) => [x[1], x[2]]);
+    const leftover = m[1].replace(/\[\s*'[a-z_]+'\s*,\s*'[a-z_]+'\s*\]/g, '').replace(/[\s,]/g, '');
+    assert.strictEqual(leftover, '', `SI_TL_CHANGE_ATTACH_CODES 初始化列表里有本断言**无法识别**的内容（残留「${leftover}」）——静态提取已不完备`);
+    return Object.fromEntries(pairs);
+};
+const parseAttachCodeKeys = () => Object.keys(parseAttachCodeEntries());
+check('[A·乙4 C1①] SI_TL_CHANGE_ATTACH_CODES 是 Map 且恰含三码（B 类）及其期望 event_type', () => {
+    const got = parseAttachCodeEntries();
+    assert.deepStrictEqual(got, {
+        feasibility_change: 'feasibility',
+        assign_eta: 'assign',
+        scope_change_deadline: 'scope_change',
+    }, `B 类三码及其期望类型应逐项吻合，实得 ${JSON.stringify(got)}`);
+});
+check('[A·乙4 C1③] SI_TL_CHANGE_CODES（A 类）与 SI_TL_CHANGE_ATTACH_CODES（B 类）**无交集**', () => {
+    const aKeys = parseChangeCodeKeys();
+    const bKeys = parseAttachCodeKeys();
+    const inter = aKeys.filter((k) => bKeys.includes(k));
+    assert.deepStrictEqual(inter, [], `A/B 两类不得有共同码（语义互斥：覆盖徽章 vs 保留原徽章），实得交集：${inter.join(',')}`);
+});
+check('[A·乙4 C1④] 六新码（A 类三 + B 类三）均不在 SI_TL_HIDABLE_SCOPE_CODES 白名单、也不在 SI_TL_NOTE_OWN_LABEL_CODES 里', () => {
+    const sixNew = ['estimate_eta', 'set_scheduled_start', 'set_oa_number', 'feasibility_change', 'assign_eta', 'scope_change_deadline'];
+    const hidable = parseSetMembers('SI_TL_HIDABLE_SCOPE_CODES');
+    const noteOwn = parseSetMembers('SI_TL_NOTE_OWN_LABEL_CODES');
+    for (const code of sixNew) {
+        assert.ok(!hidable.includes(code), `${code} 不应进可隐藏白名单（改造它的语义与「批次内部编排噪音」无关）`);
+        assert.ok(!noteOwn.includes(code), `${code} 不应进 NOTE_OWN_LABEL 白名单（其标签由 key===event_type 或 A/B 类分支决定，不走 note 型专属徽章路径）`);
+    }
+});
+check('[A·乙4 C1⑤] SI_TL_CHANGE_ATTACH_CODES 分支条件同样为「has(码) ∧ get(码)===event_type」配对匹配，位于 A 类分支之后、estimate 前缀分支之前，且不覆盖 label/cls', () => {
+    const body = stripComments(extractFunctionBody(src, 'siRenderTimeline') || '');
+    assert.ok(body, '未提取到 siRenderTimeline 函数体');
+    const pairReA = /SI_TL_CHANGE_CODES\.has\(e\.action_code\)\s*&&\s*SI_TL_CHANGE_CODES\.get\(e\.action_code\)\s*===\s*e\.event_type/;
+    const pairReB = /SI_TL_CHANGE_ATTACH_CODES\.has\(e\.action_code\)\s*&&\s*SI_TL_CHANGE_ATTACH_CODES\.get\(e\.action_code\)\s*===\s*e\.event_type/;
+    const mA = pairReA.exec(body);
+    const mB = pairReB.exec(body);
+    assert.ok(mA, 'A 类配对表达式应能定位');
+    assert.ok(mB, 'B 类配对表达式应能定位（has() 前置不可省，理由同 A 类）');
+    assert.ok(mB.index > mA.index, 'B 类分支应位于 A 类分支之后');
+    // ⚠️ 搜索起点须从 mB.index **之后**开始——「e.event_type === 'estimate' && e.summary」这段文本
+    //   还出现在函数顶部 baseSummaryHtml 的计算式里（早于整条 if/else 链，也早于 mB），从 0 找会误命中
+    //   那处，与「B 类分支应在 estimate 前缀分支之前」的意图无关。
+    const iEstimatePrefix = body.indexOf("e.event_type === 'estimate' && e.summary", mB.index);
+    assert.ok(iEstimatePrefix > mB.index, 'B 类分支应位于 estimate 前缀分支之前（B3 分支顺序）');
+    const iHasB = body.indexOf('SI_TL_CHANGE_ATTACH_CODES.has(e.action_code)');
+    const iGetB = body.indexOf('SI_TL_CHANGE_ATTACH_CODES.get(e.action_code)');
+    assert.ok(iHasB > 0 && iGetB > iHasB, `风格约束：has() 应写在 get() 之前，实得 iHasB=${iHasB} iGetB=${iGetB}`);
+    // B 类分支不得覆盖 label/cls——截取 B 类分支体（从 mB.index 到下一个 '} else if' 或本函数结尾附近）
+    // [S4b2·585 L3] 切片终点改为 B 分支之后紧邻的「} else if (e.event_type === 'estimate' && e.summary)」（B3 顺序已由上方断言锁住），
+    //   不再用 1500 定长窗口（分支体变长会逃逸、变短会吞进后续分支）；且禁止**任何**对 label/cls 的赋值形式，不只禁两个常量。
+    const bEnd = body.indexOf("} else if (e.event_type === 'estimate' && e.summary)", mB.index);
+    assert.ok(bEnd > mB.index, 'B 类分支之后应紧邻 estimate 前缀分支（切片终点定位失败 = 分支顺序或文本变了）');
+    const bBranchSlice = body.slice(mB.index, bEnd);
+    assert.ok(!/\b(label|cls)\s*=[^=]/.test(bBranchSlice), `B 类分支体内不得出现任何 label/cls 赋值（保留原徽章是 B 类核心语义），实得片段：${(bBranchSlice.match(/\b(label|cls)\s*=[^=][^\n]*/) || [''])[0]}`);
+});
+check('[A·乙4 C1⑥] SI_TL_CHANGE_FIELD_LABEL 含六处漏网写点新纳入的六个 field，且中文文案与方案 B5 逐项一致', () => {
+    const lbl = (src.match(/const SI_TL_CHANGE_FIELD_LABEL = \{[\s\S]*?\};/) || [''])[0];
+    assert.ok(lbl, '未提取到 SI_TL_CHANGE_FIELD_LABEL');
+    for (const [f, zh] of [
+        ['scheduled_start', '计划开工日'], ['oa_number', 'OA 流程号'], ['estimated_effort_days', '预计工期（人日）'],
+        ['feasibility_conclusion', '评估结论'], ['feasibility_requirement_confirm', '需求理解确认'], ['feasibility_risk', '风险'],
+    ]) {
+        assert.ok(new RegExp(`\\b${f}:\\s*'${zh}'`).test(lbl), `SI_TL_CHANGE_FIELD_LABEL 的 ${f} 应为「${zh}」，实得未匹配（展开区字段名直接来自它）`);
+    }
+    // deadline 沿用既有「预期完成」，不应被本次改动重复定义第二次
+    const deadlineHits = (lbl.match(/\bdeadline:\s*'/g) || []).length;
+    assert.strictEqual(deadlineHits, 1, `deadline 应沿用既有定义、不重复登记，实得出现 ${deadlineHits} 次`);
+    // [S4b2·codex 585 M] 方案 C1 要求**程序化**从六写点提取 field 字面量再对账，不只手写六个标签：
+    //   后端新增/拼错字段时，上面的手写清单照样绿。做法：按路由处理器切片（起点 router.post('/sys-issues/:id/<p>'、
+    //   终点该处理器收尾 "\n  });"）+ scope-change 的构造纯函数体，提取 `field: '<name>'` 字面量，
+    //   逐项断言是 SI_TL_CHANGE_FIELD_LABEL 的自有键；并锁定字段全集（防漏提取——空集合也会"全部通过"）。
+    const ixSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    const routeSlice = (p) => {
+        const key = `router.post('/sys-issues/:id/${p}'`;
+        const i = ixSrc.indexOf(key); assert.ok(i >= 0, `[C1⑥] 未找到路由 ${key}`);
+        const j = ixSrc.indexOf('\n  });', i + key.length); assert.ok(j > i, `[C1⑥] 路由 ${key} 未找到处理器收尾`);
+        return ixSrc.slice(i, j);
+    };
+    const fnStart = ixSrc.indexOf('function buildScopeChangeDeadlineChanges(');
+    assert.ok(fnStart >= 0, '[C1⑥] 未找到 buildScopeChangeDeadlineChanges');
+    const fnSlice = ixSrc.slice(fnStart, ixSrc.indexOf('\n  }', fnStart));
+    const backendFields = new Set();
+    for (const seg of ['estimate', 'feasibility', 'set-scheduled-start', 'assign', 'scope-change', 'set-oa-number'].map(routeSlice).concat([fnSlice])) {
+        for (const m of stripComments(seg).matchAll(/\bfield:\s*'([a-z_]+)'/g)) backendFields.add(m[1]);
+    }
+    const EXPECTED_BACKEND_FIELDS = ['dev_estimated_at', 'estimated_effort_days', 'feasibility_conclusion', 'feasibility_requirement_confirm', 'feasibility_risk', 'scheduled_start', 'deadline', 'oa_number'];
+    assert.deepStrictEqual([...backendFields].sort(), [...EXPECTED_BACKEND_FIELDS].sort(), `六写点程序化提取的 field 全集应恰为 8 个（漂移=后端加/改了字段，前端标签与本清单要同步），实得 ${[...backendFields].sort().join(',')}`);
+    const labelKeys = new Set([...lbl.matchAll(/\b([a-z_]+):\s*'/g)].map(m => m[1]));
+    for (const f of backendFields) assert.ok(labelKeys.has(f), `后端写点产出的 field「${f}」在 SI_TL_CHANGE_FIELD_LABEL 无自有键（展开区会落回裸字段名）`);
+});
+check('[A·乙4 C1⑦] SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES 恰含六码（四既有 + set_scheduled_start/set_oa_number），且不含 estimate_eta 与 B 类三码', () => {
+    const eligible = parseSetMembers('SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES');
+    const expected = ['release_info_edit', 'edit_in_revision', 'release_date_change', 'assign_overdue_eta', 'set_scheduled_start', 'set_oa_number'];
+    assert.deepStrictEqual([...eligible].sort(), [...expected].sort(), `历史资格集合应恰含这六码，实得：${eligible.join(',')}`);
+    for (const excluded of ['estimate_eta', 'feasibility_change', 'assign_eta', 'scope_change_deadline']) {
+        assert.ok(!eligible.includes(excluded), `${excluded} 无历史空载荷阶段，不应进历史资格集合（583-R M1）`);
+    }
+});
+check('[A·乙4 C1⑧] 六新码的 event_type 与后端 index.js 写点的 INSERT 字面量一致（程序化提取，防前后端登记漂移）', () => {
+    const indexJsSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    const EXPECTED_EVENT_TYPE = {
+        estimate_eta: 'estimate',
+        feasibility_change: 'feasibility',
+        set_scheduled_start: 'note',
+        assign_eta: 'assign',
+        scope_change_deadline: 'scope_change',
+        set_oa_number: 'note',
+    };
+    // [S4b2·585 L2 / Opus L2] 不再用「全文 400 字符窗口 + 首个命中」（会跨到上一条 VALUES 或注释）：
+    //   逐条解析 INSERT 模板「(列清单) VALUES (令牌)」，按列位置取 event_type / action_code 令牌，
+    //   对每个码断**恰 1 条**模板以字面量写该码，且同一模板内 event_type 字面量等于期望。
+    const sites = [];
+    for (const m of stripComments(indexJsSrc).matchAll(/INSERT INTO sys_issue_timeline\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/g)) {
+        const cols = m[1].split(',').map(t => t.trim());
+        const toks = m[2].split(',').map(t => t.trim());
+        if (cols.length !== toks.length) continue;   // 非 ?/字面量一一对应的形态不在本对账范围（label-coverage 守卫另管）
+        const iA = cols.indexOf('action_code'); const iE = cols.indexOf('event_type');
+        if (iA < 0 || iE < 0) continue;
+        const ma = toks[iA].match(/^'([a-z_]+)'$/); const me = toks[iE].match(/^'([a-z_]+)'$/);
+        if (ma) sites.push({ code: ma[1], eventType: me ? me[1] : null });
+    }
+    for (const [code, expectedType] of Object.entries(EXPECTED_EVENT_TYPE)) {
+        const hits = sites.filter(x => x.code === code);
+        assert.strictEqual(hits.length, 1, `index.js 以字面量写 '${code}' 的 INSERT 模板应恰 1 条，实得 ${hits.length}`);
+        assert.strictEqual(hits[0].eventType, expectedType, `后端 ${code} 同一模板内的 event_type 应为 '${expectedType}'，实得 '${hits[0].eventType}'（前后端不同源会让 A/B 类配对判据永远不成立）`);
+    }
 });
 check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ changes })）', () => {
     const indexJsSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
@@ -1580,10 +2041,48 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
             const h3 = render([{ field: 'title', old: 'A', new: 'B' }], '<b>x</b>');
             assert.ok(!h3.includes('<b>x</b>') && h3.includes('&lt;b&gt;x&lt;/b&gt;'), 'objectText 也经转义');
         });
-        check('[A 直调] 缺损项规则：null / 非对象 / 数组 / field 非字符串 → 跳过且不计数；缺 old / 缺 new / 两者都缺 → 显「（空）」且保留计数', () => {
-            const h = render([null, 'x', 7, ['a'], { old: 1, new: 2 }, { field: 3, old: 1, new: 2 }, { field: 'title', new: 'B' }, { field: 'title', old: 'A' }, { field: 'title' }]);
-            assert.strictEqual(count(h), 3, `应保留 3 项（三种缺值），实得 ${h}`);
-            assert.strictEqual((h.match(/（空）/g) || []).length, 4, `「（空）」应出现 4 次（1+1+2），实得 ${(h.match(/（空）/g) || []).length}`);
+        check('[A 直调·甲1 统一契约·2026-09-17] 缺损项规则：null / 非对象 / 数组 / field 非字符串 → 跳过不计数；**缺 old 或缺 new 自有键 → 同样跳过不计数**；显式 null 保留并显「（空）」', () => {
+            // ⚠️ 本条**推翻 codex 565-R M5 冻结的规则**（原规则：缺 old / 缺 new / 两者都缺 → 显「（空）」且保留计数）。
+            //   裁定依据（用户 2026-09-17·上段锚点 §9 第 8 项）：旧键适配器（codex 568-R M1）判「缺键=数据损坏」，
+            //   新载荷路径却「缺键保留计数」——同一形态两条线结论相反比任一边错更危险；显式 null 是已保存的合法状态
+            //   （清空/原未设定），缺键是缺失证据，两者必须可分辨；生产全量探针 6 个 changes 项均三键齐全 ⇒ 零显示影响。
+            const h = render([null, 'x', 7, ['a'], { old: 1, new: 2 }, { field: 3, old: 1, new: 2 },
+                { field: 'title', new: 'B' }, { field: 'title', old: 'A' }, { field: 'title' },
+                { field: 'title', old: null, new: 'B' }, { field: 'priority', old: 'P2', new: null },
+                { field: 'title', old: undefined, new: 'C' }]);   // [S2b·L1→M1 合并定] 自有键但值为 undefined（JSON 不可构造，仅直调可达）：按 M1 标量规则 undefined 不是合法标量 ⇒ 过滤。
+            //   预筛 L1 原想用这一格区分「自有属性」与「值 !== undefined」两种实现——加了标量规则后两者对本格结论相同，
+            //   区分点消失属预期：契约的准确措辞是「自有属性 ∧ 值为 null 或原始标量」，缺键与 undefined 值都不满足。
+            assert.strictEqual(count(h), 2, `只有两个三键齐全项应保留（三种缺键项 + undefined 值项都不计数），实得 ${h}`);
+            assert.strictEqual((h.match(/（空）/g) || []).length, 2, `「（空）」应恰出现 2 次（显式 null 各一），实得 ${(h.match(/（空）/g) || []).length}`);
+            assert.ok(!/→ C|>C</.test(h) && !h.includes('修改后</span><div class="si-tl-change-val">C<'), 'undefined 值项不得渲染出来');
+            assert.ok(/（空）/.test(String(oldVal(h, 0))) && newVal(h, 0) === 'B', `第 1 项应为「（空）→ B」，实得 ${oldVal(h, 0)} / ${newVal(h, 0)}`);
+            assert.ok(oldVal(h, 1) === 'P2' && /（空）/.test(String(newVal(h, 1))), `第 2 项应为「P2 →（空）」，实得 ${oldVal(h, 1)} / ${newVal(h, 1)}`);
+            assert.strictEqual(render([{ field: 'title', new: 'B' }, { field: 'title', old: 'A' }, { field: 'title' }]), '',
+                '只含缺键项 → 全部过滤 → 空串（调用方据此落分支4「修改明细不可用」，不出折叠）');
+        });
+        check('[A 直调·甲1 S2b·Opus 预筛 M1] changes 项 old/new 为对象/数组 → 整项过滤（与旧键适配器「非法类型=损坏」对齐）；数字/布尔仍是合法标量', () => {
+            // 预筛指出：甲1 把两条路径统一到了「缺键」维度，但「非法类型」维度仍相反——旧键路径对 {} / [] 判损坏，
+            //   changes 路径却把 {old:{},new:false} 渲染成「[object Object] → false」正常展开。本条锁住对齐后的契约。
+            assert.strictEqual(render([{ field: 'a', old: {}, new: 'x' }, { field: 'b', old: 'x', new: [1] }, { field: 'c', old: { d: 1 }, new: {} }, { field: 'd', old: ['x'], new: null }]), '',
+                '全部为对象/数组 → 全过滤 → 空串（调用方落分支4）');
+            const h = render([{ field: 'n', old: 0, new: 1 }, { field: 'b', old: false, new: true }, { field: 'bad', old: {}, new: 'x' }]);
+            assert.strictEqual(count(h), 2, `数字与布尔项保留、对象项过滤 ⇒ 计 2，实得 ${h}`);
+            assert.strictEqual(oldVal(h, 0), '0'); assert.strictEqual(newVal(h, 0), '1');
+            assert.strictEqual(oldVal(h, 1), 'false'); assert.strictEqual(newVal(h, 1), 'true');
+            assert.ok(!h.includes('[object Object]'), '不得出现 [object Object]');
+        });
+        check('[A 直调·甲1 S2c·codex 582 M] old/new 来自原型链（非自有属性）→ 整项过滤——把「自有属性」与「标量检查」两道判据分别锁住', () => {
+            // codex 582：S2b 加标量规则后，缺键与 undefined 值都被标量检查兜住，看似 hasOwnProperty 检查冗余；
+            //   但**继承得到的合法标量**（原型上有 old:'A'）能通过标量检查、只被自有键检查拦下 ⇒ 自有键检查非冗余，
+            //   守卫此前缺该用例（变异「去掉自有键过滤」在 S2b 后不再打红）。本条是**函数防御契约覆盖**：普通 JSON
+            //   载荷构造不出原型形态，不宣称生产可达；它锁的是「实现按自有属性判」这一契约本身。
+            const inhOld = Object.assign(Object.create({ old: 'A' }), { field: 'title', new: 'B' });
+            const inhNew = Object.assign(Object.create({ new: 'B' }), { field: 'title', old: 'A' });
+            const inhBoth = Object.assign(Object.create({ old: 'A', new: 'B' }), { field: 'title' });
+            assert.strictEqual(render([inhOld, inhNew, inhBoth]), '', '继承 old / 继承 new / 两者都继承 → 全部过滤 → 空串');
+            const h = render([inhOld, { field: 'title', old: 'A', new: 'B' }]);
+            assert.strictEqual(count(h), 1, `继承项过滤、自有项保留 ⇒ 计 1，实得 ${h}`);
+            assert.strictEqual(oldVal(h, 0), 'A'); assert.strictEqual(newVal(h, 0), 'B');
         });
         check('[A 直调] 全部无效项 / 非数组 / 空数组 → 返回空串（不出折叠）', () => {
             assert.strictEqual(render([null, 'x', { old: 1 }]), '', '全无效应空串');
@@ -1632,15 +2131,34 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
         // ── [566-R L2] 徽章覆盖直调：装配真实 siRenderTimeline（with 作用域注入真实标签/配色登记 + 其余依赖替身）──
         {
             const fnTimeline = grabFnA('siRenderTimeline');
+            // [乙4·2026-09-17 B4] siRenderTimeline 自本次起依赖共用函数 siTlChangesHtml——隔离装配同样
+            //   必须注入它的函数本体，否则 new Function 里 ReferenceError: siTlChangesHtml is not defined。
+            const fnChangesHtml = grabFnA('siTlChangesHtml');
             const grabConst = (name) => (src.match(new RegExp(`const ${name} = \\{[\\s\\S]*?\\};`)) || [''])[0];
             const grabSet = (name) => (src.match(new RegExp(`const ${name} = new Set\\(\\[[\\s\\S]*?\\]\\);`)) || [''])[0];
             const badgeConsts = (src.match(/const SI_TL_CHANGE_BADGE_LABEL = '[^']*';\s*\n\s*const SI_TL_CHANGE_BADGE_CLS = '[^']*';/) || [''])[0];
-            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabSet('SI_TL_CHANGE_CODES'), badgeConsts];
-            check('[A 徽章前置] siRenderTimeline + 五张登记表 + 徽章常量均提取成功', () => {
+            // [#67 A4·C1 必改] siRenderTimeline 自本次起依赖**模块级纯函数** siTlIsHidableScope，
+            //   隔离装配必须把它的**函数本体**与它依赖的白名单一并注入 parts——否则 new Function 里
+            //   ReferenceError: siTlIsHidableScope is not defined（本次改造前实测三条断言正是这样红的）。
+            //   提取失败会被下方 parts.forEach 的 assert.ok 兜住，不会静默跑空。
+            const fnHidable = (src.match(/function siTlIsHidableScope\(e\) \{[\s\S]*?\n    \}/) || [''])[0];
+            // [#67 A1③·2026-09-16] grabSet 解析的是 `new Set([...])` 字面量，SI_TL_CHANGE_CODES 升 Map 后**失效**
+            //   （本次实测：parts 第 5 项提取为空、被既有 assert.ok 兜住报「第 5 项登记/常量未提取到」，
+            //   **不是静默跑空**）。故新增 grabMap 专取 `new Map([[...]])`。
+            const grabMap = (name) => (src.match(new RegExp(`const ${name} = new Map\\(\\[[\\s\\S]*?\\]\\);`)) || [''])[0];
+            // [#67 §6.3 + A9] 本分支新依赖两个常量：历史提示豁免集合与旧版 payload 适配器，隔离装配须一并注入
+            const exemptSet = grabSet('SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES');
+            const legacyAdapter = (src.match(/const SI_TL_CHANGE_LEGACY_ADAPTER = \{[\s\S]*?\n    \};/) || [''])[0];
+            // [乙4·2026-09-17 B2/B4] 新增两项装配依赖：B 类附带变更表（Map）+ 历史资格集合（Set）。
+            const attachMap = grabMap('SI_TL_CHANGE_ATTACH_CODES');
+            const eligibleSet = grabSet('SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES');
+            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabSet('SI_TL_HIDABLE_SCOPE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet];
+            check('[A 徽章前置] siRenderTimeline + siTlChangesHtml + 九张登记表/常量 + 适配器 + 徽章常量 + siTlIsHidableScope 本体均提取成功', () => {
                 assert.ok(fnTimeline, '未提取到 siRenderTimeline');
+                assert.ok(fnChangesHtml, '未提取到 siTlChangesHtml（B4 应已抽出该共用函数）');
                 parts.forEach((p, i) => assert.ok(p, `第 ${i} 项登记/常量未提取到`));
             });
-            if (fnTimeline && parts.every(Boolean)) {
+            if (fnTimeline && fnChangesHtml && parts.every(Boolean)) {
                 const stubs = {
                     SI_TL_WGATE_LEGACY_SUMMARY: '__wgate__', SI_DEV_FAMILY_STATUSES: ['开发中', '处理中'],
                     siStatusDisplay: (s) => s, siFmtDT: (s) => s, siFmtDTSec: (s) => s, siTlHideReleaseScope: false, siOpenId: 1,
@@ -1648,7 +2166,7 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     console: { warn: () => {} },
                 };
                 // eslint-disable-next-line no-new-func
-                const tl = new Function('stubs', `with (stubs) { ${parts.join('\n')}\n${constLbl}\n${constMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\n${fnTimeline}\nreturn siRenderTimeline; }`)(stubs);
+                const tl = new Function('stubs', `with (stubs) { ${parts.join('\n')}\n${constLbl}\n${constMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\n${fnChangesHtml}\n${fnTimeline}\nreturn siRenderTimeline; }`)(stubs);
                 const badge = (h) => { const m = String(h).match(/<span class="si-tl-evt ([^"]+)">([^<]*)<\/span>/); return m ? { cls: m[1], label: m[2] } : null; };
                 const row = (extra) => Object.assign({ id: 1, event_type: 'note', action_code: 'edit_in_revision', summary: '编辑内容（标题）', operator_name: '示例客服B', created_at: '2026-09-11 10:00:00', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'A', new: 'B' }] }) }, extra);
                 check('[A 徽章直调] 有效 changes → 徽章覆盖为玫红「✎ 变更留痕」（si-tl-rose），edit_in_revision 与 release_info_edit 两码均如此；发布留痕不与之同色', () => {
@@ -1676,6 +2194,549 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                         assert.ok(hNew.includes('查看改动') && !hNew.includes('未保存修改明细') && !hNew.includes('明细不可用'), '有明细的行只出折叠不追加说明');
                     }
                 });
+                // ══ [#67 A3/A4·真实渲染层双向证明] ══════════════════════════════════════════
+                // 为什么要在这里加：C2 的那几条是**源码正则**（断"代码里写的是 isHidableScope"），
+                //   而"改期行到底带不带 class、勾选后到底可不可见"必须看**渲染输出**才算证明。
+                // 本该由 c2b2 在 DOM 层证明，但它有既有债——夹具排班 2032-04-07 撞 F1 闸，:553 的
+                //   「确认上线完成」按钮被禁用致 page.click 超时，**跑不到 G3 尾段的 timeline 断言**
+                //   （PROJECT_STATUS #64 既有债②，非本次引入）。故在此用真实 siRenderTimeline 直调补证，
+                //   并把 c2b2 的 DOM 级验证登记为挂起项。
+                const stubsHidden = Object.assign({}, stubs, { siTlHideReleaseScope: true });
+                // eslint-disable-next-line no-new-func
+                const tlHidden = new Function('stubs', `with (stubs) { ${parts.join('\n')}\n${constLbl}\n${constMax}\n${fnEsc}\n${fnVal}\n${fnObj}\n${fnRender}\n${fnChangesHtml}\n${fnTimeline}\nreturn siRenderTimeline; }`)(stubsHidden);
+                // ⚠️ [579-R2 L1] 本 helper 是**锁定当前序列化格式**的检查，不是 HTML 解析器：
+                //   它要求 div 的第一个属性就是 class ⇒ 合法调整属性顺序会**假红**；
+                //   且原写法 `si-tl-item[^"]*` 会把 `si-tl-item-wrapper` 这类**前缀类**误当事件项 ⇒ **假绿**。
+                //   ⇒ 补**完整 class 令牌边界**：`si-tl-item` 后面只能是引号或空格。
+                //   若将来渲染结构外面再包一层容器，应改为真正解析 HTML 后按令牌集合选取。
+                const firstItemAttrs = (h) => {
+                    const m = String(h).match(/<div class="(si-tl-item(?:\s[^"]*)?)"([^>]*)>/);
+                    if (!m) return null;
+                    const tokens = m[1].split(/\s+/).filter(Boolean);
+                    return { cls: m[1], rest: m[2], tokens, has: (t) => tokens.includes(t) };
+                };
+                const evtDateChange = { id: 71, event_type: 'scope_change', action_code: 'release_date_change', summary: '计划上线日期 2026-09-20 → 2026-09-25', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 10:00:00' };
+                const evtHidable = { id: 72, event_type: 'scope_change', action_code: 'release_add', summary: '加入上线单 R-1', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 10:01:00' };
+                check('[A 直调·#67 A3] 改期行**不带** si-tl-release-scope class，而白名单码（release_add）**带**——双向对照，证明拆分真的生效而非恰好', () => {
+                    const a = firstItemAttrs(tl([evtDateChange], [], ''));
+                    assert.ok(a, '改期行未渲染出 si-tl-item');
+                    assert.ok(!/si-tl-release-scope/.test(a.cls), `改期行不应带可隐藏 class（#67 核心语义），实得 class="${a.cls}"`);
+                    const b = firstItemAttrs(tl([evtHidable], [], ''));
+                    assert.ok(b && /si-tl-release-scope/.test(b.cls), `对照组 release_add 应带可隐藏 class（否则本断言是恒真、无判别力），实得 class="${b && b.cls}"`);
+                });
+                check('[A 直调·#67 A3] 勾选过滤器（siTlHideReleaseScope=true）后：改期行**无** display:none 仍可见，而白名单码被隐藏', () => {
+                    const a = firstItemAttrs(tlHidden([evtDateChange], [], ''));
+                    assert.ok(a, '改期行未渲染出 si-tl-item');
+                    assert.ok(!/display:none/.test(a.rest), `勾选后改期行仍须可见（这是 S1 的验收标准），实得属性="${a.rest}"`);
+                    const b = firstItemAttrs(tlHidden([evtHidable], [], ''));
+                    assert.ok(b && /display:none/.test(b.rest), `对照组 release_add 勾选后应被隐藏（否则过滤器整体失效、本断言无判别力），实得属性="${b && b.rest}"`);
+                });
+                // ⚠️ [#67 S2 改写·2026-09-16] **本条断言的前提被 S2 改变了**，原样保留会假红。
+                //   S1 时改期还没进 changes 分支，所以它的徽章取自 SCOPE_LABEL 表（「上线单改期」），
+                //   S1 据此断言「isReleaseScope 保留的标签作用仍在」。S2 的 A5 配对匹配让
+                //   release_date_change + scope_change 命中 changes 分支后，**徽章被覆盖为 ✎「变更留痕」**
+                //   （方案有意：统一徽章，「改的是什么对象」下沉到展开区头行）⇒ 原断言必然失败。
+                // ⚠️ 更要紧的是：徽章覆盖会**掩盖 isReleaseScope 被误改的后果**——若它被误改，key 会落到
+                //   event_type，默认 label 变成通用「范围变更」，但 changes 分支照样覆盖成 ✎，**看不出来**。
+                //   故改期码这条路已失去可观测性 ⇒ isReleaseScope 的标签作用改用**未进 changes 分支的
+                //   可隐藏码**（release_add）来验，那条路径没有徽章覆盖、能真实反映 key 计算结果。
+                check('[A 直调·#67 S2] 改期行徽章被统一覆盖为 ✎「变更留痕」∧ 展开区头行落「上线批次（批次 #N）」（A8）', () => {
+                    const h = tl([Object.assign({}, evtDateChange, { payload_json: JSON.stringify({ changes: [{ field: 'planned_date', old: '2026-09-20', new: '2026-09-25' }] }) })], [], '');
+                    assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, '改期进 changes 分支后徽章应统一为玫红变更留痕');
+                    assert.ok(h.includes('变更对象：上线批次（批次 #9） · '), `展开区头行应含 A8 新增的改期分支文案，实得片段：${(h.match(/变更对象：[^<]*/) || ['(无)'])[0]}`);
+                    assert.ok(h.includes('计划上线日期'), 'A2 新增的 planned_date 字段标签应生效（否则落回裸字段名）');
+                });
+                check('[A 直调·#67 A4] isReleaseScope 的标签作用仍在——用未进 changes 分支的可隐藏码验（release_add 取「加入上线单」而非通用「范围变更」）', () => {
+                    const bd = badge(tl([evtHidable], [], ''));
+                    assert.ok(bd, 'release_add 行未渲染出徽章');
+                    assert.strictEqual(bd.label, '加入上线单', `应取 SCOPE_LABEL 表里的专属标签；若 isReleaseScope 被误改，key 会落到 event_type、标签变成通用「范围变更」。实得「${bd.label}」`);
+                });
+                // ══ [#67 §6.2/C2b/C12·四分支行为断言] ══════════════════════════════════════
+                // 为什么在这里补：C10-b 删掉了两条**源码正则**（锁「三元表达式形态」与「直接传
+                //   parsedPayload.changes」），因为 A9 引入适配器后调用参数变成了统一变量、那两条必红。
+                //   方案 C12 要求「优先改为行为断言」——删了正则不补行为断言就是净损失。以下按
+                //   §6.2 的四个分支逐条断**渲染结果**，不再断源码长相。
+                const dcRow = (payload) => Object.assign({}, evtDateChange, { payload_json: payload });
+                const hasFold = (h) => /查看改动/.test(h);
+                const noteOf = (h) => (h.match(/（(历史记录[^）]*|修改明细不可用)）/) || [])[0] || '';
+                check('[A 直调·#67 §6.2 分支1] changes 键存在且渲染非空 → 展开明细，不加任何说明文字', () => {
+                    const h = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', old: '2026-09-20', new: '2026-09-25' }] }))], [], '');
+                    assert.ok(hasFold(h), '应出现「查看改动」折叠');
+                    assert.strictEqual(noteOf(h), '', `分支1 不应追加说明文字，实得「${noteOf(h)}」`);
+                    assert.ok(h.includes('2026-09-20') && h.includes('2026-09-25'), '应渲染出前后两值');
+                });
+                check('[A 直调·#67 §6.2 分支2·A9 适配器] changes 键**不存在**但有旧键 planned_date_old/new → 用适配结果展开（T2 段记录）', () => {
+                    const h = tl([dcRow(JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25', reason: 'x', release_no: 'R-1' }))], [], '');
+                    assert.ok(hasFold(h), 'T2 段（有旧键、无 changes）应能展开——这是 D5 方案1「渲染期适配」的核心');
+                    assert.strictEqual(noteOf(h), '', `分支2 成功时不应追加说明文字，实得「${noteOf(h)}」`);
+                    assert.ok(h.includes('2026-09-20') && h.includes('2026-09-25'), '适配结果应渲染出旧键的前后两值');
+                    assert.ok(h.includes('计划上线日期'), '适配结果的 field 应是 planned_date、取到 A2 的中文标签');
+                });
+                check('[A 直调·#67 §6.2 分支2 边界] old 键存在但值为 null/空串 → 合法「原未设定」，展开且旧值显「（空）」', () => {
+                    for (const ov of [null, '']) {
+                        const h = tl([dcRow(JSON.stringify({ planned_date_old: ov, planned_date_new: '2026-09-25' }))], [], '');
+                        assert.ok(hasFold(h), `old=${JSON.stringify(ov)} 应仍可展开（键存在即合法）`);
+                        assert.ok(h.includes('（空）'), `old=${JSON.stringify(ov)} 的旧值应渲染「（空）」`);
+                    }
+                });
+                // ⚠️ [577-M2 / 577-R L2 登记] 方案 568-R2 还要求「适配器返回非 null 但**渲染为空**时继续落分支4」。
+                //   当前真实依赖下该返回值**不可达**：适配器硬编码 `field: 'planned_date'`（字符串），按
+                //   siRenderTimelineChanges 的过滤规则至少产出一行 ⇒ 必返回非空串。
+                //   ⇒ 本轮**不新增故障注入测试**，并**明确登记：该防御契约（调用方对空串的回退）未作行为验证**。
+                //   ⚠️ 不写成「stub 渲染依赖就是假绿」——577-R 指出那不成立：保留真实调用方、只替换下游依赖，
+                //     是能验证调用方契约的，只是不能证明该返回值在真实依赖下可达。这里是**范围取舍**，不是"已验证"。
+                //   若将来适配结果可能被过滤规则全部丢弃（而非只是"扩到多字段"——多字段全合法时仍不可达），
+                //     再补这条覆盖。
+                check('[A 直调·#67 §6.2 分支2→4] 适配器判为损坏（缺 old 键 / 新值为空）→ 不停在分支2，落分支4「修改明细不可用」', () => {
+                    // 缺 old 自有键 = 数据损坏（codex 568-R M1：正常写点恒写 old/new 两键，值可为 null）
+                    //   若缺键时补成 null，会渲染出「（空）→ 新值」这种**半条明细**，方案明令禁止
+                    const hMissOld = tl([dcRow(JSON.stringify({ planned_date_new: '2026-09-25' }))], [], '');
+                    assert.ok(!hasFold(hMissOld), '缺 old 键不得展开（不得拼半条明细）');
+                    assert.strictEqual(noteOf(hMissOld), '（修改明细不可用）', `缺 old 键应落分支4，实得「${noteOf(hMissOld)}」`);
+                });
+                // [577-R L1] 新值损坏那组**拆成独立 check**：原先与「缺 old 键」同处一个 check，而缺-old 的
+                //   严格断言在循环**之前** ⇒ 它一抛错循环根本不执行，变异报告里看到的红就成了既有断言的红，
+                //   **证不出新增断言的增量判别力**（codex 577-R 的 LOW-1，说得对）。拆开后两组各自可观测。
+                check('[A 直调·#67 §6.2 分支2→4·新值损坏] 旧键齐全但**新值为空串/缺键** → 落分支4「修改明细不可用」（不得静默）', () => {
+                    // [577-M2] 断的是**最终结果**——只断「不展开」的话，把这些输入改成静默返回摘要也能通过，
+                    //   恰好漏掉 §6.2 要防的**静默空洞**（既不展开、也不提示异常）。
+                    // ⚠️ [579-R L3] 本组只管**真正的数据损坏**（空串、缺键）。`null` 那一格已按 codex 579
+                    //   的建议**拆到下面单独一条**（它是合法清空、性质不同）——原先写在这里的那段 null 说明
+                    //   已随之删除，不留在本组制造"本组含 null"的错觉。
+                    for (const nv of ['', undefined]) {
+                        const p = { planned_date_old: '2026-09-20' };
+                        p.planned_date_new = nv;
+                        const h = tl([dcRow(JSON.stringify(p))], [], '');
+                        assert.ok(!hasFold(h), `新值=${JSON.stringify(nv)} 不得展开`);
+                        assert.strictEqual(noteOf(h), '（修改明细不可用）', `新值=${JSON.stringify(nv)} 应落分支4并提示，实得「${noteOf(h)}」——只断不展开会漏掉静默空洞`);
+                    }
+                });
+                // ⚠️⚠️ [S4b·codex 579 rec] `new === null` 这一格**单独拆出来**，因为它和上面两格性质不同：
+                //   空串与缺键是**真正的数据损坏**，而 `null` 是**合法的清空**（改期端点 normalizeDeadline
+                //   明确「留空可清除」）。混在一组里会让人把「已知缺陷的现状刻画」误读成「正确的业务契约」
+                //   （codex 579 原话：应「名称明确写『已知缺陷』，与空串、缺键的真正损坏用例分开」）。
+                check('[A 直调·#67 §6.2 分支2·甲1 统一契约·2026-09-17] T2 段的**合法清空**（旧键齐、new 为 null）→ 展开且旧值显实值、新值显「（空）」、无说明文字', () => {
+                    // 原为「现状刻画·待裁定」（记录当时被误报为「修改明细不可用」）。用户 2026-09-17 裁定：按 codex 578 收紧版——
+                    //   两键须为自有属性 + 各自校验「字符串 或 null」，显式 null = 已保存的合法清空（改期端点 normalizeDeadline
+                    //   「留空可清除」；verify-sys-release-date-change [2c] 断写点 changes[0].new 严格为 null）。
+                    const p = { planned_date_old: '2026-09-20', planned_date_new: null };
+                    const h = tl([dcRow(JSON.stringify(p))], [], '');
+                    assert.ok(hasFold(h), '合法清空应可展开（不再落分支4）');
+                    assert.strictEqual(noteOf(h), '', `合法清空不应带任何说明文字，实得「${noteOf(h)}」`);
+                    const olds = [...h.matchAll(/si-tl-change-old"><span class="si-tl-change-tag">修改前<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/g)].map(m => m[1]);
+                    const news = [...h.matchAll(/si-tl-change-new"><span class="si-tl-change-tag">修改后<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/g)].map(m => m[1]);
+                    assert.strictEqual(olds.length, 1, `应恰 1 行明细，实得 ${olds.length}`);
+                    assert.strictEqual(olds[0], '2026-09-20', `旧值应为实值，实得「${olds[0]}」`);
+                    assert.ok(/（空）/.test(String(news[0])), `新值应显「（空）」，实得「${news[0]}」`);
+                });
+                check('[A 直调·#67 §6.2 分支2→4·甲1 收紧版·非法类型] 旧键存在但值为 false/数字/对象/数组（old 或 new 任一）→ 落分支4「修改明细不可用」', () => {
+                    // codex 577-rec4 登记、578 收紧版 (b) 吞并的边界：键存在 ≠ 合法；非字符串非 null 的值是损坏，不得当有效适配。
+                    for (const bad of [false, 0, 123, {}, [], ['2026-09-25'], { d: '2026-09-25' }]) {
+                        for (const side of ['planned_date_old', 'planned_date_new']) {
+                            const p = { planned_date_old: '2026-09-20', planned_date_new: '2026-09-25' };
+                            p[side] = bad;
+                            const h = tl([dcRow(JSON.stringify(p))], [], '');
+                            assert.ok(!hasFold(h), `${side}=${JSON.stringify(bad)} 不得展开`);
+                            assert.strictEqual(noteOf(h), '（修改明细不可用）', `${side}=${JSON.stringify(bad)} 应落分支4，实得「${noteOf(h)}」`);
+                        }
+                    }
+                });
+                check('[A 直调·#67 §6.2 分支1 vs 4 严格区分] changes 键**存在但值异常** → 落分支4，**不得用旧键掩盖异常**', () => {
+                    // codex 568 H1：changes 键缺失但旧键有效=正常旧版（分支2）；changes 键存在但值异常=数据异常（分支4）
+                    for (const bad of [{ changes: null }, { changes: 'x' }, { changes: [] }, { changes: [{}] }]) {
+                        const p = Object.assign({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25' }, bad);
+                        const h = tl([dcRow(JSON.stringify(p))], [], '');
+                        assert.ok(!hasFold(h), `changes 异常(${JSON.stringify(bad)}) 时即便旧键有效也不得展开——那会用旧键掩盖新数据的异常`);
+                        assert.strictEqual(noteOf(h), '（修改明细不可用）', `changes 异常应落分支4，实得「${noteOf(h)}」`);
+                    }
+                });
+                check('[A 直调·#67 §6.2 前置守卫] payload 解析出**原始值/数组** → 直接落分支4，不抛错（禁对原始值用 in）', () => {
+                    // 方案前置守卫：对原始值用 `in` 会抛 TypeError 并**中断整条时间线渲染**
+                    // [577-M2] 同样补断最终结果。注意 'null' 解析出的是 null ⇒ payload_json 字符串本身
+                    //   非空、但解析值为 null ⇒ 按 §6.2 应落**分支4**（payload_json 非空那一支）。
+                    for (const raw of ['"juststring"', '123', 'null', '[1,2]', '[]']) {
+                        const h = tl([dcRow(raw)], [], '');
+                        assert.ok(typeof h === 'string' && h.length > 0, `payload=${raw} 不得中断渲染`);
+                        assert.ok(!hasFold(h), `payload=${raw} 不得展开`);
+                        assert.strictEqual(noteOf(h), '（修改明细不可用）', `payload=${raw} 应落分支4并提示，实得「${noteOf(h)}」`);
+                    }
+                });
+                check('[A 直调·#67 §6.2 分支3a] 豁免码（assign_overdue_eta）payload 为空 → **无任何说明文字**', () => {
+                    const base = { id: 73, event_type: 'note', action_code: 'assign_overdue_eta', summary: '超时指派：预计完成时间由甲重填为 2026-09-30（原值 2026-09-25）', operator_name: '示例客服B', created_at: '2026-09-16 10:02:00' };
+                    for (const pj of [null, '']) {
+                        const h = tl([Object.assign({}, base, { payload_json: pj })], [], '');
+                        assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, 'ETA 变更码应进 changes 分支换徽章');
+                        assert.strictEqual(noteOf(h), '', `豁免码 payload 空时不得加说明文字（其 summary 已自足，加提示是假警报），实得「${noteOf(h)}」`);
+                    }
+                });
+                check('[A 直调·#67 §6.2 分支3b] 非豁免码 payload 为空 → 「历史记录，未保存修改明细」', () => {
+                    for (const pj of [null, '']) {
+                        const h = tl([dcRow(pj)], [], '');
+                        assert.strictEqual(noteOf(h), '（历史记录，未保存修改明细）', `改期码（非豁免）payload 空时应报历史提示，实得「${noteOf(h)}」`);
+                    }
+                });
+                check('[A 直调·#67 §6.3] 豁免只作用于分支3a——豁免码 payload **非空但异常** 仍报「修改明细不可用」', () => {
+                    const base = { id: 74, event_type: 'note', action_code: 'assign_overdue_eta', summary: 'x', operator_name: '示例客服B', created_at: '2026-09-16 10:03:00' };
+                    const h = tl([Object.assign({}, base, { payload_json: JSON.stringify({ changes: [] }) })], [], '');
+                    assert.strictEqual(noteOf(h), '（修改明细不可用）', `豁免不影响分支4（payload 非空却读不出明细是真异常），实得「${noteOf(h)}」`);
+                });
+                // [577-M1] C11 扩展覆盖：方案要求的不只是「原六组仍通过」，还要**四码遍历已知错误类型**
+                //   与**「未登记码且缺 event_type」定点用例**。原先只加了 release_add 一条负向，
+                //   据此宣布 C11 达标是**过度声称**（codex 577-M1）。下面按预期配对表生成全组合。
+                // [577-R rec1] 预期表**保持独立来源**（不从被测 Map 反推，否则负向组合会随实现漂移），
+                //   但**另加一条与真实 Map 的键值对拍**——否则将来只改生产 Map 与 A1、漏改这里，
+                //   16 组会静默变成「测老四码」。对拍红了就是提醒人同时更新两处。
+                const EXPECT_PAIR = {
+                    release_info_edit: 'note',
+                    edit_in_revision: 'note',
+                    release_date_change: 'scope_change',
+                    assign_overdue_eta: 'note',
+                    // [乙4·2026-09-17 B1] 时间线留痕覆盖面补齐 v0.2 §5 B1 新增三码：
+                    estimate_eta: 'estimate',
+                    set_scheduled_start: 'note',
+                    set_oa_number: 'note',
+                };
+                check('[A 直调·#67 A5/C11 扩展] 七码 × 各自的错误 event_type 一律不换变更徽章、不展开', () => {
+                    // [577-R2 rec5] 组数不再手写常数——由**独立的类型集合**与预期表算出，新增码/新增类型时
+                    //   自动跟上；并另断「每个预期类型都属于该集合」，否则集合漏了某类型会让遍历少跑而不报。
+                    // [乙4·2026-09-17] +'estimate'——estimate_eta 的期望类型是 'estimate'，须在 ALL_TYPES
+                    //   里才能被遍历到（否则漏跑「estimate_eta 配错误类型」这一组，也漏跑「老码配 estimate
+                    //   类型」这组负向对照）。
+                    const ALL_TYPES = ['note', 'scope_change', 'status_change', 'release', 'created', 'estimate'];
+                    for (const t of Object.values(EXPECT_PAIR)) {
+                        assert.ok(ALL_TYPES.includes(t), `预期类型 ${t} 不在 ALL_TYPES 里——遍历会少跑一组且不报错`);
+                    }
+                    const expectN = Object.keys(EXPECT_PAIR).length * (ALL_TYPES.length - 1);
+                    let n = 0;
+                    for (const [code, okType] of Object.entries(EXPECT_PAIR)) {
+                        for (const badType of ALL_TYPES.filter((t) => t !== okType)) {
+                            const h = tl([{ id: 90 + n, event_type: badType, action_code: code, summary: 'x', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 11:00:00', payload_json: JSON.stringify({ changes: [{ field: 'planned_date', old: 'a', new: 'b' }] }) }], [], '');
+                            const bd = badge(h) || {};
+                            assert.notStrictEqual(bd.label, '✎ 变更留痕', `${code} + ${badType} 不得换变更徽章（配对不成立）`);
+                            assert.ok(!hasFold(h), `${code} + ${badType} 不得展开`);
+                            n += 1;
+                        }
+                    }
+                    assert.strictEqual(n, expectN, `应跑满 ${Object.keys(EXPECT_PAIR).length} 码 × ${ALL_TYPES.length - 1} 种错误类型 = ${expectN} 组，实得 ${n}`);
+                });
+                check('[A 直调·#67 A5/C11 扩展·577-R rec1] 负向用例的预期配对表与生产 Map **键值逐项一致**（防只改一处的静默漂移）', () => {
+                    const mMap = src.match(/const SI_TL_CHANGE_CODES = new Map\(\[([\s\S]*?)\]\);/);
+                    assert.ok(mMap, '未提取到 SI_TL_CHANGE_CODES');
+                    const entryRe = /\[\s*'([a-z_]+)'\s*,\s*'([a-z_]+)'\s*\]/g;
+                    const real = Object.fromEntries([...mMap[1].matchAll(entryRe)].map((m) => [m[1], m[2]]));
+                    // [577-R2 L4] **先验解析完备性再对拍**：只收集"能识别的条目"时，将来新增双引号条目/
+                    //   变量条目/展开项会被**静默忽略**，原四项仍相等 ⇒ 对拍失去「防新增码遗漏」的作用。
+                    //   故把已识别条目从列表里剔除，残留必须只剩逗号与空白；否则立即失败而不是默默放过。
+                    const leftover = mMap[1].replace(/\[\s*'[a-z_]+'\s*,\s*'[a-z_]+'\s*\]/g, '').replace(/[\s,]/g, '');
+                    assert.strictEqual(leftover, '', `SI_TL_CHANGE_CODES 的初始化列表里有本断言**无法识别**的内容（残留「${leftover}」）——静态提取已不完备，对拍会漏掉这些条目，请改用装配导出实际 Map 或扩展提取语法`);
+                    assert.deepStrictEqual(EXPECT_PAIR, real, '上面负向用例的预期表与生产 Map 已不一致——新增/改动码时两处都要更新（预期表刻意不从 Map 反推，故只能靠本条对拍）');
+                });
+                check('[A 直调·#67 A5/C11 扩展] 未登记码 ∧ **缺失 event_type** → 不进分支（这是 has() 不可省要防的核心场景）', () => {
+                    // 若判据写成只有 get(码) === e.event_type（省掉 has）：未登记码 get() 返回 undefined，
+                    //   该行又缺 event_type（也是 undefined）⇒ undefined === undefined 成立 ⇒ 异常行被放进分支。
+                    //   本用例是那条漏洞的**行为级**定点验证（源码正则只能证明 has 这段文本还在）。
+                    const h = tl([{ id: 120, action_code: 'totally_unknown_code', summary: '某个未登记码的事件', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 11:10:00', payload_json: JSON.stringify({ changes: [{ field: 'planned_date', old: 'a', new: 'b' }] }) }], [], '');
+                    const bd = badge(h) || {};
+                    assert.notStrictEqual(bd.label, '✎ 变更留痕', '未登记码 + 缺 event_type 不得换变更徽章');
+                    assert.ok(!hasFold(h), '未登记码 + 缺 event_type 不得展开明细');
+                    // 同族：已登记码 + 缺 event_type 也不得进（get 返回 'note'，与 undefined 不等 ⇒ 天然挡住）
+                    const h2 = tl([{ id: 121, action_code: 'edit_in_revision', summary: 'x', operator_name: '示例客服B', created_at: '2026-09-16 11:11:00', payload_json: JSON.stringify({ changes: [{ field: 'title', old: 'a', new: 'b' }] }) }], [], '');
+                    assert.notStrictEqual((badge(h2) || {}).label, '✎ 变更留痕', '已登记码 + 缺 event_type 也不得换徽章');
+                });
+                // [577-R M] 断言必须**定位到展开区的明细行**逐单元格核对，不能在整页 HTML 里 includes——
+                //   「预计完成时间」头行里就有、日期在 summary 里也有 ⇒ 整页 includes 是**恒真于本夹具**的假绿：
+                //   明细行的字段标签或新值丢了照样通过（codex 577-R 的 MEDIUM）。
+                //   配套：夹具 summary 改成**中性文本**（不含字段中文名与日期），减少其他整页级断言的误匹配;
+                //   明细行的字段名与前后值由**行级断言**验证——其作用域由 changeRows 决定，与 summary 无关
+                //   （原注释写「日期写回 summary 会让行级断言退化成整页 includes」是**错的**，577-R2 已纠正）。
+                const changeRows = (h) => {
+                    const det = String(h).match(/<details class="si-tl-release-json">[\s\S]*?<\/details>/);
+                    if (!det) return [];
+                    return det[0].split('<div class="si-tl-change-row">').slice(1).map((seg) => ({
+                        label: (seg.match(/^<div class="si-tl-change-field">([\s\S]*?)<\/div>/) || [, null])[1],
+                        old: (seg.match(/si-tl-change-old"><span class="si-tl-change-tag">修改前<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/) || [, null])[1],
+                        new: (seg.match(/si-tl-change-new"><span class="si-tl-change-tag">修改后<\/span><div class="si-tl-change-val">([\s\S]*?)<\/div>/) || [, null])[1],
+                    }));
+                };
+                check('[A 直调·#67 A2/A8·577-M3+R] ETA 变更正常展开：明细行**逐单元格**核对字段标签/旧值/新值 + 头行文案 + 不含批次编号', () => {
+                    // 该码**不写 ref_id**，A8 故意不拼批次号——拼了会渲染出「批次 #NaN」。
+                    //   原先 ETA 只有「空 payload 豁免」与「异常 payload」两条用例，缺正常展开路径
+                    //   ⇒ 删掉 A8 的 ETA 分支或改错 A2 的中文标签都测不出来（codex 577-M3）。
+                    const etaRow = { id: 122, event_type: 'note', action_code: 'assign_overdue_eta', summary: '改派时由人工重新设定了交付时点', operator_name: '示例客服B', created_at: '2026-09-16 11:12:00', payload_json: JSON.stringify({ changes: [{ field: 'dev_estimated_at', old: null, new: '2026-09-30' }] }) };
+                    // [577-R2 L3] 断的必须是**真正传入 tl 的那个对象**。原先对另写的一份字面量做正则，
+                    //   改夹具不会让它失败 = 锁字面量而非锁真相（codex 577-R2 指出，说得对）。
+                    assert.ok(!/预计完成时间|2026-09-30/.test(etaRow.summary), '夹具 summary 须保持中性（不含字段中文名与日期），以免下面的整页级断言误匹配到摘要');
+                    const h = tl([etaRow], [], '');
+                    assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, 'ETA 正常 changes 应换变更留痕徽章');
+                    assert.ok(hasFold(h), 'ETA 正常 changes 应可展开');
+                    assert.ok(h.includes('变更对象：预计完成时间 · '), `展开区头行应落 A8 的 ETA 分支文案，实得：${(h.match(/变更对象：[^<]*/) || ['(无)'])[0]}`);
+                    assert.ok(!/批次 #/.test(h), '该码不写 ref_id，头行不得拼批次号（否则出「批次 #NaN」）');
+                    // [581-R L1] 原先这里还有一条对**另写的一份 summary 字面量**做的正则断言，
+                    //   与上面那条针对真实 etaRow.summary 的检查重复、且改夹具不会让它失败
+                    //   ——正是 577-R2 批过的「锁字面量而非锁真相」，我在上方注释里自陈已订正、
+                    //   却把同一形态又写了一遍（codex 581-R 指出，成立）⇒ 删除。
+                    //   下面通过 changeRows 定位明细单元格，独立核对字段与前后值。
+                    const rows = changeRows(h);
+                    assert.strictEqual(rows.length, 1, `展开区应恰有 1 行明细，实得 ${rows.length}`);
+                    assert.strictEqual(rows[0].label, '预计完成时间', `明细行字段标签应取 A2 的中文名，实得「${rows[0].label}」`);
+                    assert.strictEqual(rows[0].new, '2026-09-30', `明细行「修改后」单元格应是新值，实得「${rows[0].new}」`);
+                    assert.ok(/（空）/.test(String(rows[0].old)), `首次设定 old=null 属合法「原未设定」，「修改前」单元格应显「（空）」，实得「${rows[0].old}」`);
+                    assert.ok(!/（空）/.test(String(rows[0].new)), '「修改后」单元格不得显「（空）」（新值有实值）');
+                    assert.strictEqual(noteOf(h), '', `正常展开时不应追加说明文字，实得「${noteOf(h)}」`);
+                });
+                // ══ [S4·C8 数据形态矩阵补格·方案 §7.2] ══
+                //   S1-S3 已逐条覆盖 17 格中的绝大多数（见上方各 §6.2 行为断言与 567-M2 那组）。
+                //   本段只补**核对后确认缺失**的格，不重复造已覆盖的：
+                //     · 格8「changes 混合数组（部分有效）」—— 全文搜过，此前无任何用例
+                //     · 格14「ETA payload NULL × **三种文案分支各一**」—— 此前只有「超时指派」一条
+                //     · codex 578-R2 追加要求的「**新载荷合法清空**」—— 渲染层此前没有（[2c] 只断库层）
+                //     · 格17「过滤开关 × 每种形态」—— 压成一条**有判别力**的断言（见该条注释）
+                check('[A 直调·#67 C8 格2·真实 T1 摘要] 用生产 #176 的**实际摘要**（无冒号/无 X→Y/无批次号）+ payload NULL → 「历史记录，未保存修改明细」', () => {
+                    // [codex 579 rec] 原先格2 只造了「payload 为 NULL」的合成夹具 —— 那覆盖的是**载荷分支**，
+                    //   不等于「真实 T1 摘要兼容验收」。方案 §7.1 记了生产 #176 那行的实际摘要：
+                    //   「上线计划日期变更，通知与执行人已重置」——**无冒号、无 `X → Y`、无批次号**，
+                    //   与 v1.172.0 后的模板逐字不同（这正是 T1/T2 分界在真实数据上成立的实证依据）。
+                    //   ⇒ 用那条真实摘要再跑一遍，确认摘要文本本身不参与分支判定、且被原样转义输出。
+                    const T1_SUMMARY = '上线计划日期变更，通知与执行人已重置';
+                    for (const pj of [null, '']) {
+                        const h = tl([Object.assign({}, evtDateChange, { summary: T1_SUMMARY, payload_json: pj })], [], '');
+                        assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, `T1 摘要 + payload=${JSON.stringify(pj)} 仍应换 ✎ 徽章（v1.172.1：历史行也换）`);
+                        assert.ok(!hasFold(h), `T1 摘要 + payload=${JSON.stringify(pj)} 不得出现展开区`);
+                        assert.strictEqual(noteOf(h), '（历史记录，未保存修改明细）', `T1 摘要 + payload=${JSON.stringify(pj)} 应报历史提示（改期码不在 §6.3 豁免集合里），实得「${noteOf(h)}」`);
+                        // ⚠️ [579-R L3] 这条验的是**该真实摘要被完整保留**与它走的兼容分支，
+                        //   **不是**转义判别力——这条摘要里没有需要转义的字符（只有中文逗号）。
+                        //   转义行为由上方专门那条「值含 <script> 与引号被转义」的用例负责。
+                        assert.ok(h.includes(T1_SUMMARY), `该真实摘要应被完整保留在渲染结果里，实得未含「${T1_SUMMARY}」`);
+                    }
+                });
+                check('[A 直调·#67 C8 格8] changes **混合数组**（部分有效）→ 保留有效项照常展开，不因存在无效项整体判失败', () => {
+                    // 方案 §7.2：「保留有效项照常展开，不整体判失败」。无效项的丢弃条件是
+                    //   `!c || typeof c !== 'object' || Array.isArray(c) || typeof c.field !== 'string'`。
+                    //   未登记的 field 是**有效项**（渲染时回退成裸字段名），不是无效项——这是本格容易搞错的地方。
+                    const p = { changes: [
+                        { field: 'planned_date', old: '2026-09-20', new: '2026-09-25' },
+                        {},
+                        { field: 123, old: 'a', new: 'b' },
+                        null,
+                        [{ field: 'planned_date' }],
+                        { field: 'some_unregistered_field', old: 'x', new: 'y' },
+                    ] };
+                    const h = tl([dcRow(JSON.stringify(p))], [], '');
+                    assert.ok(hasFold(h), '混合数组应仍可展开（有有效项就不该整体判失败）');
+                    assert.strictEqual(noteOf(h), '', `混合数组有有效项时不应追加说明文字，实得「${noteOf(h)}」`);
+                    const rows = changeRows(h);
+                    assert.strictEqual(rows.length, 2, `应恰渲染 2 行（planned_date + 未登记字段），实得 ${rows.length}：${JSON.stringify(rows)}`);
+                    assert.strictEqual(rows[0].label, '计划上线日期', `第 1 行取 A2 中文名，实得「${rows[0].label}」`);
+                    assert.strictEqual(rows[1].label, 'some_unregistered_field', `第 2 行未登记字段回退**裸字段名**，实得「${rows[1].label}」`);
+                    // [579-L1] 光断标签不够——「保留了字段却丢/串了值」这种退化测不出来 ⇒ 两行的前后值都要断
+                    assert.strictEqual(rows[0].old, '2026-09-20', `第 1 行「修改前」实得「${rows[0].old}」`);
+                    assert.strictEqual(rows[0].new, '2026-09-25', `第 1 行「修改后」实得「${rows[0].new}」`);
+                    assert.strictEqual(rows[1].old, 'x', `第 2 行「修改前」实得「${rows[1].old}」`);
+                    assert.strictEqual(rows[1].new, 'y', `第 2 行「修改后」实得「${rows[1].new}」`);
+                    // [579-R L2] 折叠计数要**单独提取 `<summary>` 元素**再断——整页搜「查看改动（2 项）」的话，
+                    //   折叠摘要里的计数写错、而该字符串恰好出现在别处，仍会通过（codex 579-R 指出，成立）。
+                    const sum8 = (h.match(/<summary>([\s\S]*?)<\/summary>/) || [, ''])[1];
+                    assert.strictEqual(sum8, '查看改动（2 项）', `折叠摘要本身的计数应为有效项数 2，实得 summary「${sum8}」`);
+                    const head8 = (h.match(/<div class="si-tl-change-head">([\s\S]*?)<\/div>/) || [, ''])[1];
+                    assert.ok(/（2 项）/.test(head8), `展开区头行的计数也应为 2，实得头行「${head8}」`);
+                });
+                check('[A 直调·#67 C8 格14] ETA payload NULL × **三种文案分支各一** → 一律无说明文字、无展开', () => {
+                    // 方案 §7.2 写的是「三种文案分支各一」，此前只造了「超时指派」一条。
+                    //   三条文案来自 index.js 的 /reassign：overdue → 「超时指派」；oldEta 非空 → 「人工更新」
+                    //   （该分支在本端点已 structurally 不可达，但写点代码仍在、时间线里可能存有历史行）；
+                    //   否则 → 「人工设定」。它们共用同一个 action_code，故渲染层必须三条都无提示。
+                    const SUMS = [
+                        '超时指派：预计完成时间由甲重填为 2026-09-30（原值 2026-09-25）',
+                        '改派时人工更新预计完成时间：甲 更新为 2026-09-30（原值 2026-09-25）',
+                        '改派时人工设定预计完成时间：甲 填写为 2026-09-30',
+                    ];
+                    let n = 0;
+                    for (const summary of SUMS) {
+                        for (const pj of [null, '']) {
+                            const h = tl([{ id: 130 + n, event_type: 'note', action_code: 'assign_overdue_eta', summary, operator_name: '示例客服B', created_at: '2026-09-16 12:00:00', payload_json: pj }], [], '');
+                            assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, `「${summary.slice(0, 6)}…」payload=${JSON.stringify(pj)} 仍应换 ✎ 徽章（v1.172.1：历史行也换）`);
+                            assert.ok(!hasFold(h), `「${summary.slice(0, 6)}…」payload=${JSON.stringify(pj)} 不得出现展开区`);
+                            assert.strictEqual(noteOf(h), '', `「${summary.slice(0, 6)}…」payload=${JSON.stringify(pj)} 不得加说明文字（§6.3 豁免：三条文案都自带前后值，加提示是假警报），实得「${noteOf(h)}」`);
+                            n += 1;
+                        }
+                    }
+                    assert.strictEqual(n, 6, `应跑满 3 种文案 × 2 种空 payload = 6 组，实得 ${n}`);
+                });
+                check('[A 直调·#67 C8·578-R2 追加] **新载荷合法清空**（changes 键存在、new 为 null）→ 展开且新值显「（空）」', () => {
+                    // codex 578-R2 明确要求 S4 覆盖「新载荷合法清空」。历史上它曾是 §9 第 3 项争议的对照证据
+                    //   （当时旧键路径把 nv=null 判进「新值损坏」组显「修改明细不可用」，两条路径结论相反）。
+                    //   ⚠️ [S2c·codex 582 L 订正] 2026-09-17 裁定后旧键路径已改（见上方「甲1 统一契约」合法清空条）：
+                    //   现在本条与那条**共同锁定**同一个「改为未设定」语义在两条路径上**均展开、新值均显「（空）」**——
+                    //   不再有「供裁定」的分歧，本注释不再引用已不存在的 nv=null 损坏用例。
+                    const p = { changes: [{ field: 'planned_date', old: '2026-09-20', new: null }] };
+                    const h = tl([dcRow(JSON.stringify(p))], [], '');
+                    assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, '合法清空仍是变更留痕');
+                    assert.ok(hasFold(h), '合法清空应可展开（changes 键存在且渲染非空）');
+                    assert.strictEqual(noteOf(h), '', `合法清空不得报异常文案，实得「${noteOf(h)}」`);
+                    const rows = changeRows(h);
+                    assert.strictEqual(rows.length, 1, `应恰 1 行明细，实得 ${rows.length}`);
+                    assert.strictEqual(rows[0].label, '计划上线日期', `字段名应为「计划上线日期」，实得「${rows[0].label}」`);
+                    assert.strictEqual(rows[0].old, '2026-09-20', `「修改前」应是清空前的日期，实得「${rows[0].old}」`);
+                    assert.ok(/（空）/.test(String(rows[0].new)), `「修改后」应显「（空）」，实得「${rows[0].new}」`);
+                });
+                // ⚠️ [581-R2 M2 → 甲1 统一契约·2026-09-17] 新载荷 changes 项**缺 old/new 自有键**：原为「现状刻画·待裁定」
+                //   （当时缺 old 会显示成「（空）→ 新值」，与显式 null 不可分辨，与旧键路径「缺键=损坏」结论相反）。
+                //   用户 2026-09-17 裁定选 A：统一为严格三键契约，与 §9 第 3 项合并实施 ⇒ 本条改为**锁目标契约**：
+                //   缺键项按自有属性过滤（不计数）、显式 null 保留；全部项无效时落既有「（修改明细不可用）」出口。
+                //   ⚠️ 这推翻了「[A 直调] 缺损项规则」那条（原 :1739 一带）锁定的 565-R M5「缺键显（空）保留计数」（那条已同步改写为「甲1 统一契约」）。
+                check('[A 直调·#67 §6.2·甲1 统一契约·2026-09-17] 新载荷 changes 项缺 old/new 自有键 → 该项过滤；全缺则落分支4；显式 null 保留——与旧键路径结论一致', () => {
+                    const hMissOld = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', new: '2026-09-25' }] }))], [], '');
+                    assert.ok(!hasFold(hMissOld), '缺 old 的新载荷不得展开（不得拼半条明细）');
+                    assert.strictEqual(noteOf(hMissOld), '（修改明细不可用）', `缺 old 应落分支4，实得「${noteOf(hMissOld)}」`);
+                    const hMissNew = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', old: '2026-09-20' }] }))], [], '');
+                    assert.ok(!hasFold(hMissNew), '缺 new 的新载荷不得展开');
+                    assert.strictEqual(noteOf(hMissNew), '（修改明细不可用）', `缺 new 应落分支4，实得「${noteOf(hMissNew)}」`);
+                    // 混合：缺键项过滤、齐全项照常 ⇒ 展开且只计 1 项
+                    const hMixed = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', new: '2026-09-25' }, { field: 'planned_date', old: '2026-09-20', new: '2026-09-25' }] }))], [], '');
+                    assert.ok(hasFold(hMixed), '混合数组应展开（有效项保留）');
+                    assert.strictEqual(changeRows(hMixed).length, 1, `混合数组只计齐全项，实得 ${changeRows(hMixed).length}`);
+                    // 显式 null 保留：这是「合法首次设定」，与缺键必须可分辨
+                    const hNull = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', old: null, new: '2026-09-25' }] }))], [], '');
+                    assert.ok(hasFold(hNull), '显式 old=null 应展开');
+                    const rN = changeRows(hNull);
+                    assert.strictEqual(rN.length, 1, `显式 null 应恰 1 行，实得 ${rN.length}`);
+                    assert.ok(/（空）/.test(String(rN[0].old)) && rN[0].new === '2026-09-25', `应为「（空）→ 2026-09-25」，实得 ${rN[0].old} / ${rN[0].new}`);
+                    // [S2b·Opus 预筛 M1] 非法类型维度同样对齐：changes 项 old 为对象 ⇒ 过滤 ⇒ 全无效 ⇒ 分支4，与旧键路径 {} 判损坏一致
+                    const hObj = tl([dcRow(JSON.stringify({ changes: [{ field: 'planned_date', old: {}, new: '2026-09-25' }] }))], [], '');
+                    assert.ok(!hasFold(hObj), 'changes 项 old 为对象不得展开');
+                    assert.strictEqual(noteOf(hObj), '（修改明细不可用）', `changes 项 old 为对象应落分支4，实得「${noteOf(hObj)}」`);
+                    // 对照：同一「缺 old」形态走旧键路径 ⇒ 同样判损坏 ⇒ 两条路径结论**一致**（这正是本次统一的目的）
+                    const hLegacyMissOld = tl([dcRow(JSON.stringify({ planned_date_new: '2026-09-25' }))], [], '');
+                    assert.strictEqual(noteOf(hLegacyMissOld), '（修改明细不可用）', '对照：旧键路径缺 old 判损坏，与新载荷路径一致');
+                });
+                check('[A 直调·#67 C8·载荷×归属关系回归] 可隐藏性归属**不随载荷形态变化**——同一码在 **15 种**载荷下归属恒定（原 11 项 + 579-R6 补 4 项对应格 5/6/7）', () => {
+                    // ══ [579-R6 收口记录] 本条在格17 里的位置，以及两处**不能写成"已覆盖"**的格 ══
+                    //   · **格9**（适配器返回非 null 但渲染为空）=「**已接受范围豁免**：当前真实依赖下
+                    //     不可达（适配器硬编码 `field: 'planned_date'` 字符串字面量、返回非 null 的前提
+                    //     已含新值非空 ⇒ 必产出至少一行），该防御契约**未作行为验证**」。
+                    //     ⚠️ codex 579-R6 明确：**不得标为已覆盖**，且格17 的验收范围应**注明排除此豁免形态**。
+                    //   · **格5**（新值为空 → 落异常）要**拆开写**：`空串／缺键` = 有契约断言；
+                    //     `null` = **合法清空**（2026-09-17 裁定后已是契约断言，见上方「甲1 统一契约」合法清空条；
+                    //     原「现状刻画·待裁定」口径作废）。
+                    // ⚠️ [579-M1 降级定位] 本条**不是**方案 §7.2 格17（「过滤开关 × 每种形态」）的完整验收
+                    //   ——它**没有开启过滤开关**、不验实际可见性、不遍历 8 个可隐藏码。开关事件失效／
+                    //   容器状态未切换／过滤样式失效／其他白名单码归属错误，都可能穿过本条（codex 579-M1
+                    //   指出，成立）。⇒ 本条的准确定位是「**载荷与归属关系的回归测试**」；格17 的开关验收
+                    //   由下一条（8 码 × 开关开启）与 C6 的浏览器实证第 ⑫ 组共同承担。
+                    // 为什么这个回归值得单列：A3 的判据（siTlIsHidableScope）只看 event_type + action_code，
+                    //   与 payload **结构上无关**。
+                    // ⚠️ [579-L2 / 579-R L3 / 579-R7 LOW 三次收窄] 本条**覆盖所列 15 种形态**
+                    //   （原 11 项 + 579-R6 补的 4 项，对应方案格 5/6/7）、**能捕获"载荷为真值即改变归属"
+                    //   这一类变异**（实测变异：`if (e && e.payload_json) return false;` → 本条红）。
+                    //   **不**声称"锁死一切引入载荷的改法"，也**不**声称那 15 种形态都被执行过——
+                    //   断言遇错即抛，红在第一个触发的形态上（前段原有的宽泛承诺已删，避免与本段自相矛盾）。
+                    // ⚠️ [579-R7 订正我自己一处**过度自谦**] 我原先说 579-R6 新增那 4 项"不新增判别力"——
+                    //   codex 指出这**不能泛化**：准确说法是"对**已讨论的那个**『载荷为真值即改变归属』
+                    //   变异没有新增区分能力"；而**只在缺旧键时错误改变归属**这类改法，**恰恰只有新增项
+                    //   能捕获**。⇒ 它们既补覆盖对应性、也确实带来针对特定形态的判别力。
+                    // ⚠️ [579-R6 M] 补 **4 项**（覆盖方案格 5/6/7）**此前不在本表里**的载荷形态——codex 把格17 的剩余缺口
+                    //   具体定位到方案 §7.2 的格 5/6/7：那三格此前只有**明细语义**断言
+                    //   （不展开 + 异常说明），**没有断言目标行的可隐藏归属**。本表正是管"归属"的，
+                    //   把那三种载荷加进来即一处补齐三格的归属证据。原话：「复用这些既有夹具，
+                    //   补充目标行的归属断言，再连接已经接受的共同归属判据及开关验证即可」。
+                    const FORMS = [
+                        null,
+                        '',
+                        'not-json',
+                        '"juststring"',
+                        '123',
+                        'null',
+                        '[1,2]',
+                        JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25' }),
+                        JSON.stringify({ changes: [{ field: 'planned_date', old: 'a', new: 'b' }] }),
+                        JSON.stringify({ changes: null }),
+                        JSON.stringify({ changes: [] }),
+                        // ↓↓ [579-R6 M] 新增 **4 项**，逐项标明它对应方案 §7.2 的哪一格 ↓↓
+                        // 格6：缺 planned_date_old（只有 new 键的损坏对象）
+                        JSON.stringify({ planned_date_new: '2026-09-25' }),
+                        // 格5：缺 planned_date_new（旧键齐但新键缺）——空串那半由下一项覆盖
+                        JSON.stringify({ planned_date_old: '2026-09-20' }),
+                        // 格5：planned_date_new 为空串（真正的损坏，与"合法清空"的 null 不同）
+                        JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '' }),
+                        // 格7/11/13：无效 changes **与有效旧键同时存在**（禁止回退的诱饵形态）
+                        JSON.stringify({ planned_date_old: '2026-09-20', planned_date_new: '2026-09-25', changes: [{}] }),
+                    ];
+                    // ⚠️ [581-R L2] 原先这两条用 `/si-tl-release-scope/.test(h)` 在**整段 HTML** 里搜子串，
+                    //   **没有确认该令牌属于事件行本身**——若某个载荷路径让这个字符串出现在子节点或
+                    //   其他文本里，白名单行即使丢了目标 class 也照样通过（本文件已有 firstItemAttrs
+                    //   却没在这组用上·codex 581-R 指出，成立）。改为逐条提取事件行属性：
+                    //   **先断事件行存在**，再按**完整 class 令牌**核归属，不再吃整页子串。
+                    let n = 0;
+                    for (const pj of FORMS) {
+                        const tag = `payload=${JSON.stringify(pj)}`;
+                        // 改期码：**任何**载荷形态下事件行都在、且都不带可隐藏令牌
+                        const aDc = firstItemAttrs(tl([Object.assign({}, evtDateChange, { payload_json: pj })], [], ''));
+                        assert.ok(aDc, `改期行在 ${tag} 下应渲染出事件行（firstItemAttrs 取不到 = 结构变了或没渲染）`);
+                        assert.strictEqual(aDc.has('si-tl-release-scope'), false,
+                            `改期行在 ${tag} 下仍不得带 si-tl-release-scope 令牌，实得 class「${aDc.cls}」`);
+                        // 白名单码（release_add）：**任何**载荷形态下都带（双向对照，防"恰好都不带"）
+                        const aAdd = firstItemAttrs(tl([Object.assign({}, evtHidable, { payload_json: pj })], [], ''));
+                        assert.ok(aAdd, `白名单码在 ${tag} 下应渲染出事件行`);
+                        assert.strictEqual(aAdd.has('si-tl-release-scope'), true,
+                            `白名单码在 ${tag} 下应带 si-tl-release-scope 令牌，实得 class「${aAdd.cls}」`);
+                        n += 1;
+                    }
+                    assert.strictEqual(n, FORMS.length, `应跑满 ${FORMS.length} 种载荷形态（含 579-R6 补的格 5/6/7 三种），实得 ${n}`);
+                    assert.strictEqual(FORMS.length, 15, `载荷形态表应为 15 项（原 11 + 579-R6 补 4 项覆盖格 5/6/7），实得 ${FORMS.length} —— 数量变了就该同步核对它与方案 §7.2 的对应关系`);
+                });
+                check('[A 直调·#67 C8 格17·渲染层半] 8 个可隐藏码 × 开关**开启** → 逐码输出隐藏属性；**关闭**态则一律不输出；改期行两态都不输出（方案 §7.1 点名的那 8 个）', () => {
+                    // [579-M1] 上一条只验「载荷×归属」，**没开开关、没遍历 8 码** ⇒ 格17 的开关验收缺口。
+                    //   方案 §7.1 把 8 个码逐个点了名：add / remove / schedule_cancel / published /
+                    //   executors_set / notify / done / hotfix_create。本条用 `tlHidden` 装配
+                    //   （siTlHideReleaseScope=true）逐码验，并**双向对照**改期行仍可见。
+                    //   ⚠️ 真实浏览器里的开关**事件**（点 checkbox → siToggleTlReleaseScope → 逐行改 style）
+                    //   由 C6 的 Playwright 第 ⑫ 组覆盖；本条覆盖的是**初始渲染时 8 码全带 display:none**
+                    //   这一半——两半合起来才是格17。单独任一半都不够，这点在注释里写明以免被误读。
+                    // ⚠️ [579-R L1 措辞收窄] 本条查的是**输出里有没有那段隐藏属性**，
+                    //   **不等价于**「有效隐藏样式」：属性原文里的同名文本、或后面再写一个 display:block，
+                    //   文本检查都会满足；写成带空格的 `display: none` 又会假红。
+                    // ⚠️ [579-R2 L2 / 579-R3 L2 计数订正] 浏览器层的**实际可见性证据**
+                    //   （`getComputedStyle` + `getClientRects`，C6 第 ⑫ 组）**只覆盖该夹具里出现的两类行**
+                    //   ——8 个可隐藏码里只有 `release_add`，外加**不属于**那 8 码的改期行。
+                    //   ⇒ 没有浏览器层有效样式证据的是**其余 7 个可隐藏码**（我上一轮写"6 个"算错了：
+                    //   改期行是单独类别，不该从 8 里扣），它们靠的是「三处消费同一归属判据」这个
+                    //   分层论证（由 A4 那条源码正则锁住）。不要把「⑫ 组兜底」读成"8 码两态都被浏览器验过"。
+                    // ⚠️ [579-R2 M2·581-R 计数同步] 同理，本文件的覆盖不是「8 码 × 两态 × 15 载荷」的
+                    //   **笛卡尔积**：实际执行的是「8 码 × 两态」的渲染检查 **加** 「15 种载荷」的归属
+                    //   检查两组，它们经共同判据支持**分层组合**，不是一次跑完 240 个组合。
+                    //   （载荷表已由 579-R6 从 11 扩到 15，此处计数原先漏改·codex 581-R 指出。
+                    //    格17 的准确组成 = 15 形态的两码归属检查 + 8 码两态初始输出检查 +
+                    //    浏览器夹具的「关闭→开启→关闭」交互检查；另有格9 豁免；合法 null 已于 2026-09-17 裁定为契约。）
+                    // ⚠️ [579-R M] 补**开关关闭态**作对照：只断"开启时带隐藏属性"不足以证明那段属性是
+                    //   **开关驱动**的——若实现变成"这 8 码恒带 display:none"，只测开启态照样全绿，
+                    //   而用户在关闭开关时根本看不到这 8 类记录。故两态都断。
+                    const EIGHT = ['release_add', 'release_remove', 'release_schedule_cancel', 'release_published',
+                        'release_executors_set', 'release_executor_notify', 'release_executor_done', 'release_hotfix_create'];
+                    let n = 0;
+                    for (const code of EIGHT) {
+                        const row = { id: 150 + n, event_type: 'scope_change', action_code: code, summary: `${code} 事件`, ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 13:00:00' };
+                        const on = firstItemAttrs(tlHidden([row], [], ''));
+                        assert.ok(on, `${code} 未渲染出 si-tl-item（开启态）`);
+                        assert.ok(on.has('si-tl-release-scope'), `${code} 应带 si-tl-release-scope（它在方案 §7.1 点名的 8 码里）——按**完整 class 令牌**判定，不用子串匹配，实得 tokens=${JSON.stringify(on.tokens)}`);
+                        assert.ok(/display:none/.test(on.rest), `${code} 在开关**开启**时应输出隐藏属性（方案 §7.1：8 个可隐藏码全部消失），实得属性="${on.rest}"`);
+                        const off = firstItemAttrs(tl([row], [], ''));
+                        assert.ok(off, `${code} 未渲染出 si-tl-item（关闭态）`);
+                        assert.ok(off.has('si-tl-release-scope'), `${code} 关闭态仍应带 class（class 是归属、与开关无关）——按完整令牌判定，实得 tokens=${JSON.stringify(off.tokens)}`);
+                        assert.ok(!/display:none/.test(off.rest), `${code} 在开关**关闭**时不得输出隐藏属性（否则这 8 类记录恒不可见），实得属性="${off.rest}"`);
+                        n += 1;
+                    }
+                    assert.strictEqual(n, 8, `应跑满方案点名的 8 码，实得 ${n}`);
+                    // 双向对照：**两态**下改期行都不得被隐藏（否则"全隐藏"可能是过滤器整体失控）
+                    const dOn = firstItemAttrs(tlHidden([evtDateChange], [], ''));
+                    assert.ok(dOn && !/display:none/.test(dOn.rest), `开启态下改期行仍须可见（#67 A3 核心语义），实得属性="${dOn && dOn.rest}"`);
+                    const dOff = firstItemAttrs(tl([evtDateChange], [], ''));
+                    assert.ok(dOff && !/display:none/.test(dOff.rest), `关闭态下改期行当然也须可见，实得属性="${dOff && dOff.rest}"`);
+                });
+                check('[A 直调·#67 A5 负向] 非白名单的 scope_change 事件不进本分支、不换徽章', () => {
+                    const h = tl([{ id: 75, event_type: 'scope_change', action_code: 'release_add', summary: '加入上线单', ref_id: 9, operator_name: '示例客服B', created_at: '2026-09-16 10:04:00' }], [], '');
+                    assert.notStrictEqual((badge(h) || {}).label, '✎ 变更留痕', 'release_add 不在 CHANGE_CODES 里，不得换变更留痕徽章');
+                    assert.ok(!hasFold(h), '不得出现折叠');
+                });
                 check('[A 徽章直调·567 M2] 普通 note / 同码非 note / release_published / accept(online_mode) 不受覆盖影响——断完整徽章对象，不只比旧标签文本', () => {
                     const rose = { cls: 'si-tl-rose', label: '✎ 变更留痕' };
                     const notRose = (h, name) => { const b = badge(h); assert.ok(b && b.cls !== 'si-tl-rose' && b.label !== '✎ 变更留痕' && !b.label.includes('变更留痕'), `${name}：不得被覆盖成变更留痕，实得 ${JSON.stringify(b)}`); return b; };
@@ -1692,6 +2753,109 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     assert.deepStrictEqual(pub, { cls: 'si-tl-green', label: '发布留痕' }, 'release_published 保持绿色发布留痕');
                     const acc = tl([row({ event_type: 'status_change', action_code: 'accept', from_status: '待验证', to_status: '已上线', payload_json: JSON.stringify({ online_mode: 'direct' }) })], [], '');
                     assert.ok(acc.includes('上线方式') && !acc.includes('变更留痕') && !acc.includes('si-tl-rose'), 'accept 行走 online_mode 分支且不换徽章');
+                });
+                // ══════════════════════════════════════════════════════════════════════
+                // [乙4·2026-09-17 C2·时间线留痕覆盖面补齐 v0.2 §5 C2] S4b 新增六码的真实渲染层行为。
+                // ══════════════════════════════════════════════════════════════════════
+                const NEW_CODE_FIXTURES = {
+                    estimate_eta:          { event_type: 'estimate',    cls: 'si-tl-rose',   label: '✎ 变更留痕', field: 'dev_estimated_at',       fieldLabel: '预计完成时间', objText: '预计完成时间' },
+                    set_scheduled_start:   { event_type: 'note',        cls: 'si-tl-rose',   label: '✎ 变更留痕', field: 'scheduled_start',        fieldLabel: '计划开工日',   objText: '计划开工日' },
+                    set_oa_number:         { event_type: 'note',        cls: 'si-tl-rose',   label: '✎ 变更留痕', field: 'oa_number',              fieldLabel: 'OA 流程号',    objText: 'OA 流程号' },
+                    feasibility_change:    { event_type: 'feasibility', cls: 'si-tl-indigo', label: '可行性评估', field: 'feasibility_conclusion', fieldLabel: '评估结论',     objText: '可行性评估' },
+                    assign_eta:            { event_type: 'assign',      cls: 'si-tl-indigo', label: '指派',       field: 'dev_estimated_at',       fieldLabel: '预计完成时间', objText: '预计完成时间' },
+                    scope_change_deadline: { event_type: 'scope_change',cls: 'si-tl-orange', label: '范围变更',   field: 'deadline',               fieldLabel: '预期完成',     objText: '预期完成' },
+                };
+                const mkRow = (code, extra) => Object.assign({
+                    id: 200, event_type: NEW_CODE_FIXTURES[code].event_type, action_code: code,
+                    summary: code === 'estimate_eta' ? '2026-09-30 12:00' : `${code} 中性摘要`,
+                    operator_name: '示例客服B', created_at: '2026-09-17 09:00:00',
+                }, extra);
+                check('[A 直调·乙4 C2] 六新码各自的有效 payload → 展开 + 逐单元格前后值 + 头行变更对象文案 + 各自正确徽章', () => {
+                    for (const code of Object.keys(NEW_CODE_FIXTURES)) {
+                        const fx = NEW_CODE_FIXTURES[code];
+                        const h = tl([mkRow(code, { payload_json: JSON.stringify({ changes: [{ field: fx.field, old: 'X', new: 'Y' }] }) })], [], '');
+                        assert.ok(hasFold(h), `${code}：有效 payload 应可展开，实得 ${h}`);
+                        const rows = changeRows(h);
+                        assert.strictEqual(rows.length, 1, `${code}：应恰有 1 行明细，实得 ${rows.length}`);
+                        assert.strictEqual(rows[0].label, fx.fieldLabel, `${code}：字段标签应为「${fx.fieldLabel}」，实得「${rows[0].label}」`);
+                        assert.strictEqual(rows[0].old, 'X', `${code}：修改前应为 X`);
+                        assert.strictEqual(rows[0].new, 'Y', `${code}：修改后应为 Y`);
+                        assert.ok(h.includes(`变更对象：${fx.objText} · `), `${code}：头行变更对象应含「${fx.objText}」，实得 ${(h.match(/变更对象：[^<]*/) || ['(无)'])[0]}`);
+                        assert.strictEqual(noteOf(h), '', `${code}：正常展开不应追加说明文字，实得「${noteOf(h)}」`);
+                        assert.deepStrictEqual(badge(h), { cls: fx.cls, label: fx.label }, `${code}：徽章应为 ${JSON.stringify({ cls: fx.cls, label: fx.label })}，实得 ${JSON.stringify(badge(h))}`);
+                    }
+                });
+                check('[A 直调·乙4 C2·S4b2 L4] assign_eta 带 from/to_status（真实指派行形态）：指派徽章 + 起止状态文案 + 展开区共存', () => {
+                    const pl = JSON.stringify({ changes: [{ field: 'dev_estimated_at', old: null, new: '2026-10-08 10:00' }] });
+                    const h = tl([mkRow('assign_eta', { from_status: '待指派', to_status: '开发中', summary: '指派给 开发王｜指派时人工设定预计完成时间：管理员 填写为 2026-10-08 10:00', payload_json: pl })], [], '');
+                    assert.deepStrictEqual(badge(h), { cls: 'si-tl-indigo', label: '指派' }, `assign_eta 带状态流转仍应是「指派」徽章，实得 ${JSON.stringify(badge(h))}`);
+                    // flow 的真实形态（Sys_Iteration.html siRenderTimeline）：from≠to 时输出 <span class="si-tl-to"> →目标状态</span>，同状态不输出
+                    assert.ok(/class="si-tl-to">\s*→/.test(h), `from≠to 时应输出目标状态箭头 si-tl-to，实得 ${h}`);
+                    assert.ok(hasFold(h) && changeRows(h).length === 1, 'assign_eta 带状态流转仍应有 1 行展开区');
+                    const hSame = tl([mkRow('assign_eta', { from_status: '开发中', to_status: '开发中', summary: '指派给 开发王', payload_json: pl })], [], '');
+                    assert.ok(hasFold(hSame) && changeRows(hSame).length === 1, '同状态指派带 ETA 变化仍应有展开区');
+                    assert.deepStrictEqual(badge(hSame), { cls: 'si-tl-indigo', label: '指派' }, '同状态指派徽章不变');
+                    assert.ok(!/si-tl-to/.test(hSame), '同状态时不应输出目标状态箭头（flow 判据 from!==to）');
+                });
+                check('[A 直调·乙4 C2/B3] estimate_eta 行 summary 前缀「预计完成：」恰一次（不双拼）', () => {
+                    const h = tl([mkRow('estimate_eta', { payload_json: JSON.stringify({ changes: [{ field: 'dev_estimated_at', old: null, new: '2026-09-30 12:00' }] }) })], [], '');
+                    const hits = (h.match(/预计完成：/g) || []).length;
+                    assert.strictEqual(hits, 1, `「预计完成：」前缀应恰出现一次，实得 ${hits} 次，${h}`);
+                });
+                check('[A 直调·乙4 C2] 历史行零变化四格：无码 estimate 行 / set_scheduled_start 历史提示 / set_oa_number 历史豁免 / B 类三种旧行原样', () => {
+                    // 无码 estimate 行——原「estimate 前缀分支」，不受本次 A/B 类改动影响
+                    const hEst = tl([{ id: 201, event_type: 'estimate', summary: '2026-08-01 10:00', operator_name: '示例客服B', created_at: '2026-08-01 10:00:00' }], [], '');
+                    assert.ok(hEst.includes('预计完成：2026-08-01 10:00'), '无码 estimate 行应仍走原「estimate 前缀分支」');
+                    assert.ok(!hasFold(hEst) && !noteOf(hEst), `无码 estimate 行不应展开、不应有说明文字，实得 ${hEst}`);
+                    // set_scheduled_start：非豁免码，payload 空 → 历史提示
+                    const hSched = tl([mkRow('set_scheduled_start', { summary: '定计划开工日：2026-09-01', payload_json: null })], [], '');
+                    assert.strictEqual(noteOf(hSched), '（历史记录，未保存修改明细）', `set_scheduled_start 历史行应报历史提示，实得「${noteOf(hSched)}」`);
+                    assert.ok(!hasFold(hSched), 'set_scheduled_start 历史行不应展开');
+                    // set_oa_number：豁免码，payload 空 → 无提示
+                    const hOa = tl([mkRow('set_oa_number', { summary: '补填 OA 流程号：OA-1（原空）', payload_json: '' })], [], '');
+                    assert.strictEqual(noteOf(hOa), '', `set_oa_number 历史行应豁免（无提示），实得「${noteOf(hOa)}」`);
+                    assert.ok(!hasFold(hOa), 'set_oa_number 历史行不应展开');
+                    // B 类三种 event_type 的无码旧行——action_code 为 null，根本不进 A/B 分支，原样渲染
+                    for (const et of ['assign', 'feasibility', 'scope_change']) {
+                        const hOld = tl([{ id: 202, event_type: et, action_code: null, summary: `${et} 旧行`, operator_name: '示例客服B', created_at: '2026-08-01 10:00:00' }], [], '');
+                        assert.ok(!hasFold(hOld) && !noteOf(hOld), `${et} 无码旧行应原样，不展开不提示，实得 ${hOld}`);
+                    }
+                });
+                check('[A 直调·乙4 C2/583-R M1·S4b2 L1] estimate_eta 空载荷（NULL/空串）与损坏载荷（解析失败/空 changes）→「修改明细不可用」（无历史资格）且「预计完成：」前缀恰一次', () => {
+                    for (const pj of [null, '', '{not json', JSON.stringify({ changes: [] })]) {
+                        const h = tl([mkRow('estimate_eta', { payload_json: pj })], [], '');
+                        assert.strictEqual(noteOf(h), '（修改明细不可用）', `estimate_eta payload=${JSON.stringify(pj)} 应报「修改明细不可用」，实得「${noteOf(h)}」`);
+                        assert.ok(!hasFold(h), 'estimate_eta 空载荷不应展开');
+                        // [S4b2·L1] history/broken 出口若把 baseSummaryHtml 换回 esc(summary) 会丢前缀——此前只在 ok 出口锁过
+                        assert.ok(h.includes('预计完成：2026-09-30 12:00'), `estimate_eta payload=${JSON.stringify(pj)} 的摘要应含完整「预计完成：2026-09-30 12:00」，实得 ${h}`);
+                        assert.strictEqual((h.match(/预计完成：/g) || []).length, 1, `estimate_eta payload=${JSON.stringify(pj)} 前缀应恰一次`);
+                        assert.deepStrictEqual(badge(h), { cls: 'si-tl-rose', label: '✎ 变更留痕' }, 'estimate_eta 徽章不受载荷形态影响（A 类无条件覆盖）');
+                    }
+                });
+                check('[A 直调·乙4 C2/B4 M2] B 类异常载荷（NULL/空串/解析失败/无有效项）一律「修改明细不可用」且徽章仍为原徽章', () => {
+                    const code = 'feasibility_change';
+                    const fx = NEW_CODE_FIXTURES[code];
+                    for (const [name, pj] of [['NULL', null], ['空串', ''], ['解析失败', '{not json'], ['无有效项', JSON.stringify({ changes: [] })]]) {
+                        const h = tl([mkRow(code, { payload_json: pj })], [], '');
+                        assert.strictEqual(noteOf(h), '（修改明细不可用）', `${code} payload=${name} 应报「修改明细不可用」（B 类无历史资格，不显历史提示），实得「${noteOf(h)}」`);
+                        assert.ok(!hasFold(h), `${code} payload=${name} 不应展开`);
+                        assert.deepStrictEqual(badge(h), { cls: fx.cls, label: fx.label }, `${code} payload=${name} 徽章应仍为原徽章「${fx.label}」`);
+                    }
+                });
+                check('[A 直调·乙4 C2] 异常配对两格：未登记码+缺 event_type 不入任一分支；登记码+类型错（assign_eta 配 note）不入分支', () => {
+                    const h1 = tl([{ id: 203, action_code: 'totally_unknown_new_code', summary: 'x', operator_name: '示例客服B', created_at: '2026-09-17 09:00:00', payload_json: JSON.stringify({ changes: [{ field: 'x', old: 1, new: 2 }] }) }], [], '');
+                    assert.ok(!hasFold(h1), '未登记码+缺 event_type 不得展开');
+                    const bd1 = badge(h1) || {};
+                    assert.notStrictEqual(bd1.label, '✎ 变更留痕', '未登记码+缺 event_type 不得换 A 类徽章');
+                    const h2 = tl([mkRow('assign_eta', { event_type: 'note', payload_json: JSON.stringify({ changes: [{ field: 'dev_estimated_at', old: 'X', new: 'Y' }] }) })], [], '');
+                    assert.ok(!hasFold(h2), 'assign_eta 配 event_type=note（类型错）不得展开（B 类同样受 has()+get()===event_type 配对约束）');
+                });
+                check('[A 直调·乙4 C2/B8] scope_change_deadline 行不带 si-tl-release-scope 令牌 ∧ 徽章「范围变更」（B 类不覆盖 label/cls）', () => {
+                    const row5 = mkRow('scope_change_deadline', { payload_json: JSON.stringify({ changes: [{ field: 'deadline', old: '2026-09-20 18:00', new: '2026-09-25 18:00' }] }) });
+                    const a = firstItemAttrs(tl([row5], [], ''));
+                    assert.ok(a, 'scope_change_deadline 行未渲染出 si-tl-item');
+                    assert.ok(!/si-tl-release-scope/.test(a.cls), `scope_change_deadline 不应带可隐藏 class，实得 class="${a.cls}"`);
+                    assert.deepStrictEqual(badge(tl([row5], [], '')), { cls: 'si-tl-orange', label: '范围变更' }, 'scope_change_deadline 徽章应为「范围变更」（保留原徽章，B 类不覆盖）');
                 });
             }
         }
@@ -1711,7 +2875,15 @@ check('Sys_Iteration.html 内联脚本可编译（new Function，不执行）', 
 // 立即 resolve，对既有同步跑法零延迟零行为变化。
 (async () => {
     await Promise.all(pending);
+    // [579-R rec] **单列「待裁定项」计数**：本文件里有"现状刻画"型检查（锁住已知缺陷的当前行为、
+    //   等决策者裁定），它们通过**不代表**对应业务场景验收通过。若只打印「全部通过 N/N」，
+    //   后人很容易把它读成"业务全绿"。故按检查名里的标记单独计数并显式提示。
+    const pendingRuling = checkNames.filter((nm) => nm.includes('待裁定'));
     console.log(`\n${failed === 0 ? '[全部通过]' : '[失败]'} ${passed}/${passed + failed} 项断言${failed ? `，${failed} 项失败` : ''}`);
+    if (pendingRuling.length) {
+        console.log(`⚠️ 其中 ${pendingRuling.length} 项是「现状刻画·待裁定」——通过 ≠ 该业务场景验收通过：`);
+        for (const nm of pendingRuling) console.log(`   · ${nm}`);
+    }
     if (failed) {
         console.log('失败详情：');
         for (const f of failures) console.log(`  - ${f.name}: ${f.err}`);

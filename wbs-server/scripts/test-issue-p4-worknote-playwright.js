@@ -18,7 +18,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const BASE = 'http://localhost:3000';
 const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const ADMIN = 1, DEV_A = 19, DEV_B = 9;   // 示例用户B / 示例开发B
 
 const dbGet = (s, p) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.get(s, p, (e, x) => { d.close(); e ? j(e) : r(x); }); });

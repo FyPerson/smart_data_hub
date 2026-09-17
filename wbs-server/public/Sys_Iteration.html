@@ -3940,10 +3940,13 @@
         // 〔F3b·F2-LOW-2〕siCurTimeline 已在函数顶部与 siDetail 同期原子赋值（见该处注释），此处直接读，
         //   不重复赋值。
         const tlEvents = siCurTimeline;
-        const hasReleaseScopeTl = tlEvents.some(e => e.event_type === 'scope_change' && SI_TL_RELEASE_SCOPE_LABEL[e.action_code]);
+        // [#67 A4] 原为自行重算（作用域在 siRenderDrawer，不共享 siRenderTimeline 的局部变量）——
+        //   改调同一纯函数，与行的 class/display 判据同源。不改的后果：只有改期事件的单会渲染出一个
+        //   **勾了无反应的死开关**（此处仍判 true，而该行已不带 si-tl-release-scope class）。
+        const hasReleaseScopeTl = tlEvents.some(siTlIsHidableScope);
         const tlFilterHtml = hasReleaseScopeTl
             ? `<label style="font-weight:normal;font-size:11px;color:#6b7280;margin-left:12px;cursor:pointer">
-                <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏上线单调整记录</label>`
+                <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏批次编排记录</label>`
             : '';
         const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [], iss && iss.title)}</div>`;
 
@@ -4264,15 +4267,18 @@
         //   三字段任一实际变更，PATCH /sys-releases/:id，R-C4 后端已写好 event_type='note'+本 action_code，
         //   R-C5 补齐前端三处登记）——独立徽章而非落回通用「备注」：summary 已是完整可读文案"上线单信息
         //   修改（标题、版本号）"这类，但仍给专属标签便于时间线里快速扫到"这单被改过基本信息"，同
-        //   completion_overrun_reason 等既有一带模式。⚠️ 不注册进 SI_TL_RELEASE_SCOPE_LABEL——那会被
-        //   「隐藏上线单调整记录」过滤器连带隐藏，违反 D9「信息修改始终可见」（方案 §3 O3 明文）。
+        //   completion_overrun_reason 等既有一带模式。⚠️ **不注册进 SI_TL_RELEASE_SCOPE_LABEL**：
+        //   标签表只管标签、不再决定可隐藏性（可隐藏性由 SI_TL_HIDABLE_SCOPE_CODES 白名单独立决定），
+        //   本码继续用这里登记的独立徽章即可，无需进该表；D9「信息修改始终可见」由
+        //   「note 型 + 未登记白名单」双重保证。（历史沿革集中见 SI_TL_HIDABLE_SCOPE_CODES 定义处。）
         release_info_edit: '上线单信息修改',
         // [上线单管理体验优化 R-C7·方案 §3 O4] 删除上线单——独立徽章而非落回通用「备注」：与
         //   release_info_edit 同一带模式（成员单被删批次波及本身就是需要一眼识别的高关注度事件），
         //   summary 已区分"退回「待上线」"/"历史批次关联已清除（单据保持「已作废」）"两种措辞（见
         //   index.js DELETE /sys-releases/:id 步骤⑤），标签统一用中性描述"上线单已删除"。⚠️ 同 D9
-        //   不注册进 SI_TL_RELEASE_SCOPE_LABEL——那会被「隐藏上线单调整记录」过滤器连带隐藏（方案未
-        //   明文要求 O4 走 D9，但 O4 删除是比 O3 编辑更高关注度的事件，理应同等甚至更强地"始终可见"）。
+        //   同 release_info_edit：用这里的独立徽章，无需进 SCOPE_LABEL 表（方案未明文要求 O4 走 D9，
+        //   但 O4 删除是比 O3 编辑更高关注度的事件，理应同等甚至更强地"始终可见"）；不被隐藏由
+        //   「note 型 + 未登记可隐藏白名单」保证，与标签表无关。
         release_deleted: '上线单已删除',
         // [开发撤回提交 方案 v1.2 §5.10] 开发撤回提交——note 型独立徽章（同 assign_overdue_eta/
         //   fast_release_* 等既有"自定义端点直写 timeline"范式），需登记三处：本表 + SI_TL_CLS +
@@ -4282,8 +4288,9 @@
         //   release_info_edit/release_deleted 一带模式，需登记三处 + 一处脚本口径（本表 + SI_TL_CLS +
         //   SI_TL_NOTE_OWN_LABEL_CODES + scripts/verify-sys-timeline-label-coverage.js 的
         //   NOTE_OWN_LABEL_ACTION_CODES，四处同改）。⚠️ C0 ⑤-a 实证：**刻意不注册进**
-        //   SI_TL_RELEASE_SCOPE_LABEL/_CLS——那会被「隐藏上线单调整记录」过滤器一键隐藏，与 D2
-        //   「豁免的是输入闸不是事实」冲突，同 release_info_edit/release_deleted 两先例处置一致。
+        //   SI_TL_RELEASE_SCOPE_LABEL/_CLS——本码用这里的独立徽章即可；D2「豁免的是输入闸不是事实」
+        //   要求它始终可见，这由「note 型 + 未登记可隐藏白名单」保证，与标签表无关。同
+        //   release_info_edit/release_deleted 两先例处置一致。
         release_overdue_reason: '上线逾期'
     };
     const SI_TL_CLS = {
@@ -4387,6 +4394,40 @@
         release_executors_set: 'si-tl-indigo', release_executor_notify: 'si-tl-blue',
         release_executor_done: 'si-tl-green', release_hotfix_create: 'si-tl-amber',
     };
+    // [#67 A3·2026-09-16] 可隐藏性**显式白名单**（codex 568 M1）——与 SI_TL_RELEASE_SCOPE_LABEL 的成员
+    //   刻意不同：后者 9 个成员（含 release_date_change），本表只登记其中 **8 个**，把改期排除在外。
+    //   为什么改期要排除：它改的是**对外交付承诺日期**，属「信息修改」而非「批次内部编排」，被过滤器
+    //   一勾连带隐藏会让「改过期」这件事整个看不见（方案 §1 问题二）。剩下 8 码的共性=批次内部编排。
+    // ⚠️ **不采用**「isReleaseScope 减去 SI_TL_CHANGE_CODES」的减法写法（方案 §5.1）：减法的默认方向
+    //   危险——将来任何为拿标签而进 SCOPE 表的新码会**自动获得可隐藏性**，忘记登记 = 信息被藏；
+    //   白名单的默认方向相反，新码默认**不可隐藏**，忘记登记 = 多显示一行。不可隐藏是安全默认。
+    // ⚠️ 本表保持 Set（非 Map）：8 个成员**全部**是 scope_change 型，类型约束已显式写在下方函数的
+    //   条件左半边，逐码登记类型是冗余。对照 SI_TL_CHANGE_CODES——它跨两种 event_type，故必须用 Map
+    //   逐码登记配对（见 #67 A1）。两者形态不同是有意的，不是疏漏。
+    const SI_TL_HIDABLE_SCOPE_CODES = new Set([
+        'release_add', 'release_remove', 'release_schedule_cancel', 'release_published',
+        'release_executors_set', 'release_executor_notify', 'release_executor_done', 'release_hotfix_create',
+    ]);
+    // [#67 A4·2026-09-16] 可隐藏性判据**收敛为单一纯函数**。改造前同一判据在两处独立计算
+    //   （siRenderDrawer 里的 hasReleaseScopeTl 自行重算、siRenderTimeline 里算 isReleaseScope），
+    //   过滤器开关的显示条件与行的实际 class 各算一次 ⇒ 两边口径一旦漂移就出「勾了无反应的死开关」。
+    // ⚠️ 与 isReleaseScope 的分工（方案 A3/A4 明令，勿混用）：
+    //   · isReleaseScope  → **只管 key 计算与标签归属**（改期靠它才能取到「上线单改期」而非通用「范围变更」）
+    //   · siTlIsHidableScope → **只管可隐藏性**（class 拼接 + 初始 display 两个消费点）
+    //   把标签归属也换成本判据，会让改期掉回通用标签；反之把可隐藏性交给 isReleaseScope，改期又会被藏。
+    function siTlIsHidableScope(e) {
+        return !!e && e.event_type === 'scope_change' && SI_TL_HIDABLE_SCOPE_CODES.has(e.action_code);
+    }
+    // ⚠️ [#67 A3 附带订正·2026-09-16] 本次改造**推翻了一条曾被三处注释引用的因果**：
+    //   改造前「进 SI_TL_RELEASE_SCOPE_LABEL 表」= 连带获得可隐藏性（isReleaseScope 一个布尔管两件事），
+    //   所以 release_info_edit / release_deleted / release_overdue_reason 三码当初**刻意不注册进该表**，
+    //   理由写的是「防被过滤器连带隐藏」（见本文件下方三处 ⚠️ 注释）。
+    //   改造后：进该表**只决定标签归属**，可隐藏性由本白名单独立决定，且上方函数的左半边限定
+    //   `event_type === 'scope_change'` ⇒ 那三码是 **note 型**、又未登记本白名单，**双重保证不会被藏**。
+    //   ⇒ 那三码「不注册进 SCOPE_LABEL」的**决策保留**（本次不动它——属其他方案的决策），三处注释的
+    //     理由已就地改写为「标签表只管标签、不被隐藏由 note 型 + 未登记白名单双重保证」。
+    //   ⚠️ [576-L1] 不要把这理解成「标签表的准入规则是不属批次编排」——**改期就仍留在标签表里**。
+    //     标签表的准入规则本次未变；本次只把「可隐藏性」从它身上剥离出来。
     // release_published 的 summary = §6.6a 结构化 JSON（{issue_id,schema_version,type,title_snapshot,
     //   status_at_publish,commits}），直接 esc() 裸展示会在时间线里甩一坨技术 JSON（commits 多时很长）。
     //   解析出「类型 · 标题 · commit 数」几个人读得懂的字段做摘要；解析失败不伪造字段，只标注"原始记录"+
@@ -4507,15 +4548,80 @@
     //   （index.js POST /sys-issues/:id/edit-in-revision，十二字段）。字段标签是后端 SYS_RELEASE_EDIT_FIELD_LABEL ∪
     //   EDIT_FIELD_LABELS 的前端副本（⚠️ 同源改两处：后端加字段必须同步这里，未登记字段落回裸字段名不隐藏，
     //   同 SI_TL_LABEL 的 `|| key` 兜底口径）。历史行（payload_json 为 NULL 或无 changes 键）走原 summary 路径不变。
-    //   逐项校验规则（codex 565-R M5 冻结）：**只跳过**非对象或 field 非字符串的项；old/new 缺失
-    //   （undefined/null/''）显「（空）」但项保留；折叠计数按保留项计；保留项为 0 返回空串（不出折叠）。
+    //   逐项校验规则（⚠️ 2026-09-17 甲1 判据统一·**推翻 codex 565-R M5 冻结版**）：跳过非对象、field 非字符串、
+    //   **以及缺 old 或缺 new 自有键**的项；显式 null / '' 显「（空）」但项保留；折叠计数按保留项计；保留项为 0
+    //   返回空串（不出折叠）。原冻结版是「old/new 缺失（undefined/null/''）显（空）但项保留」——推翻理由（用户
+    //   09-17 裁定·上段锚点 §9 第 8 项）：旧键适配器（568-R M1）判「缺键=数据损坏」，本函数却「缺键保留计数」，
+    //   同一形态两条线结论相反比任一边错更危险；显式 null 是已保存的合法状态、缺键是缺失证据，必须可分辨；
+    //   生产全量探针 6 个 changes 项均三键齐全 ⇒ 改判据对存量零显示影响。
     //   整个渲染外层 try/catch：任何异常返回空串并 console.warn，不中断整段时间线。
-    const SI_TL_CHANGE_CODES = new Set(['release_info_edit', 'edit_in_revision']);
+    // [#67 A1·2026-09-16] 由 Set 升级为 Map<action_code, 期望 event_type>，四个成员。
+    // 每个码登记自己**唯一合法**的 event_type——不匹配的组合一律不进变更留痕分支。
+    // 目的：A5 去掉硬编码的 event_type==='note' 之后，仍保留 v1.172.1（codex 567 M2）建立的防御——
+    //   异常数据（如某端点复用 release_info_edit 却写 event_type='status_change'）若被渲染成
+    //   「✎ 变更留痕」+「历史记录，未保存修改明细」，等于**凭空捏造一条"改过但明细丢了"的审计事实**。
+    // 纳入判据=「该码的主体用途是对已存在记录的字段值做事后修改」（方案 §3.1，按码而非按条记录）。
+    // ⚠️ 新增第五个码时**必须同时登记其 event_type**，否则 A5 的配对判据会把它挡在外面。
+    // ⚠️ 与 SI_TL_HIDABLE_SCOPE_CODES（S1 建的可隐藏白名单）形态不同是**有意的**：那个 8 成员全是
+    //   scope_change 型、类型约束写在判据左半边故用 Set；本表 4 成员**跨两种 event_type**
+    //   （3 个 note + 1 个 scope_change），必须逐码登记才能保留「码 × 类型」配对校验。
+    // [乙4·2026-09-17 B1·时间线留痕覆盖面补齐 v0.2 §5 B1] 新增三码（A 类·修改类）：
+    //   estimate_eta（/estimate，event_type='estimate'）、set_scheduled_start / set_oa_number
+    //   （均沿用既有 event_type='note' 的写点，本次只是补上 action_code+payload_json 两列）。
+    const SI_TL_CHANGE_CODES = new Map([
+        ['release_info_edit',    'note'],
+        ['edit_in_revision',     'note'],
+        ['release_date_change',  'scope_change'],
+        ['assign_overdue_eta',   'note'],
+        ['estimate_eta',         'estimate'],
+        ['set_scheduled_start',  'note'],
+        ['set_oa_number',        'note'],
+    ]);
+    // [乙4·2026-09-17 B2·同上方案 §3/§5 B2] 附带变更类（B 类）：主体是另一个动作（指派/可行性评估/
+    //   范围变更事件本身），顺带改了字段——**保留原徽章**（不覆盖 label/cls），只加展开区。
+    //   与上方 SI_TL_CHANGE_CODES（A 类·修改类，覆盖徽章为「✎ 变更留痕」）语义互斥、两表**无交集**
+    //   （守卫断言锁住）。判据同 A 类：**has() 前置 + get()===event_type**，理由同 #67 A5 注释——
+    //   未登记码 + 缺 event_type 不得靠 undefined===undefined 混进来。
+    const SI_TL_CHANGE_ATTACH_CODES = new Map([
+        ['feasibility_change',   'feasibility'],
+        ['assign_eta',           'assign'],
+        ['scope_change_deadline','scope_change'],
+    ]);
+    // [#67 §6.3·2026-09-16] 历史提示豁免集合。
+    // 语义是**「该码在 payload 为空时免加历史提示文字」这一条规则**——不是「已逐行验证该码每条
+    //   summary 都自足」（codex 568 M3 订正了 v0.1 的 `..._SUMMARY_SELF_SUFFICIENT_CODES` 过度宣称）。
+    // 豁免依据（按码）：assign_overdue_eta 的三个文案分支全部自带完整信息——
+    //   ①「超时指派：预计完成时间由 X 重填为 Y（原值 Z）」含前后值
+    //   ②「改派时人工更新预计完成时间：X 更新为 Y（原值 Z）」含前后值
+    //   ③「改派时人工设定预计完成时间：X 填写为 Y」**首次设定、本无旧值**，非缺失
+    //   ⇒ 给它加「未保存修改明细」是**假警报**（用户 2026-09-11 拍板 D2）。
+    // ⚠️ 只作用于**分支 3a**（payload 空时免提示），**不影响分支 4**（payload 非空异常仍报
+    //   「修改明细不可用」）。守卫断言锁死它是 SI_TL_CHANGE_CODES 的 key 子集。
+    // [乙4·2026-09-17 B7] +set_oa_number——其历史 summary「补填 OA 流程号：X（原 Y）」自带前后值，
+    //   加「未保存修改明细」是假警报（同 assign_overdue_eta 的豁免理由）。set_scheduled_start **不豁免**
+    //   ——其历史 summary「定计划开工日：X」/「清除计划开工日」不含旧值，历史提示有真实信息量。
+    const SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES = new Set(['assign_overdue_eta', 'set_oa_number']);
+    // [乙4·2026-09-17 B4/583-R M1] 历史资格集合——语义="该码在改造前确有一段只写 event_type/action_code、
+    //   不写 payload_json 的存量阶段"，只有这些码的 payload 为 NULL/空串时才算「历史记录」；不在此集合的码
+    //   （典型：本次新增的 estimate_eta——它从诞生起就恒写 payload_json）空载荷视为「修改明细不可用」
+    //   （真异常，不冒充历史）。⚠️ 与「载荷渲染是否成功」是两个维度，不得合并（583-R M1 訂正 v0.1 的过度合并）。
+    //   B 类三码（feasibility_change/assign_eta/scope_change_deadline）均无历史空载荷阶段，故**不进本集合**
+    //   （B4/M2：B 类空载荷一律「修改明细不可用」，不查本集合）。
+    const SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES = new Set([
+        'release_info_edit', 'edit_in_revision', 'release_date_change', 'assign_overdue_eta',
+        'set_scheduled_start', 'set_oa_number',
+    ]);
     const SI_TL_CHANGE_FIELD_LABEL = {
         title: '标题', version_tag: '版本号', release_note: '上线说明',
         description: '描述', system_name: '所属系统', module_name: '模块', priority: '优先级', deadline: '预期完成',
         needs_feasibility: '需可行性评估', requester_dept: '需求方部门', requester_name: '需求方姓名',
-        requester_phone: '需求方电话', source: '来源', related_correction_no: '关联修正单号'
+        requester_phone: '需求方电话', source: '来源', related_correction_no: '关联修正单号',
+        // [#67 A2] 本次纳入的两码各自的字段：改期写 planned_date、ETA 变更写 dev_estimated_at
+        planned_date: '计划上线日期', dev_estimated_at: '预计完成时间',
+        // [乙4·2026-09-17 B5] 六处漏网写点新纳入的 field；deadline 已在上方（'预期完成'，edit_in_revision
+        //   在用）沿用不动，不在此重复登记。
+        scheduled_start: '计划开工日', oa_number: 'OA 流程号', estimated_effort_days: '预计工期（人日）',
+        feasibility_conclusion: '评估结论', feasibility_requirement_confirm: '需求理解确认', feasibility_risk: '风险'
     };
     const SI_TL_CHANGE_VALUE_MAX = 120;   // 展开区单值最长码点数；超出截断 + title 挂全文（码点计法同 created 行 60 字口径）
     function siTlChangeValueHtml(field, v) {
@@ -4542,8 +4648,52 @@
             return (Number.isInteger(rid) && rid > 0) ? `上线单信息（批次 #${rid}）` : '上线单信息';
         }
         if (e.action_code === 'edit_in_revision') return '迭代单内容';
+        // [#67 A8·2026-09-16] 补本次纳入的两码——不补会让展开区头行「变更对象」为空（codex 568 R3）。
+        if (e.action_code === 'release_date_change') {
+            // ref_id=批次 id（写点 applyReleaseChange 的 delta.planned_date_changed 分支已落 ref_id）
+            const rid = Number(e.ref_id);
+            return (Number.isInteger(rid) && rid > 0) ? `上线批次（批次 #${rid}）` : '上线批次';
+        }
+        // assign_overdue_eta 该码**不写 ref_id**，故不拼批次号（拼了会渲染出「批次 #NaN」）
+        if (e.action_code === 'assign_overdue_eta') return '预计完成时间';
+        // [乙4·2026-09-17 B6] 六处漏网写点各自的展开区头行「变更对象」文案；均不写 ref_id，不拼批次号。
+        if (e.action_code === 'estimate_eta' || e.action_code === 'assign_eta') return '预计完成时间';
+        if (e.action_code === 'feasibility_change') return '可行性评估';
+        if (e.action_code === 'set_scheduled_start') return '计划开工日';
+        if (e.action_code === 'set_oa_number') return 'OA 流程号';
+        if (e.action_code === 'scope_change_deadline') return '预期完成';
         return '';
     }
+    // [#67 A9·D5 定案·2026-09-16] 旧版 payload 适配登记表。
+    // 背景（方案 §6.1 时间轴三段）：改期行有个 T2 段——v1.172.0（09-11 11:02）起写了
+    //   `planned_date_old/new` 两个**旧键**但没有 `changes` 键，summary 也已含前后值。那段记录里
+    //   确有结构化的旧值新值，只是形状不同 ⇒ 读旧键拼成 changes 形状渲染，**绝不回写数据库**。
+    // ⚠️ **按 action_code 登记，不做通用推断**：只有 release_date_change 存在旧版结构化 payload，
+    //   assign_overdue_eta 历来无 payload，通用化会误吞。
+    // ⚠️ 为何不用「一次性回填脚本」把旧键转成 changes 写回库（落选方案 3）：要动生产数据，且
+    //   上线前 T2 仍会继续新增，回填时点之后写入的记录仍需兼容分支，没真正消灭 T2。
+    const SI_TL_CHANGE_LEGACY_ADAPTER = {
+        // key = action_code；value = (payload) => changes[] | null
+        // 仅在「payload 解析成功 ∧ 是非 null 非数组的对象 ∧ 不含 changes 自有键」时调用（见 §6.2 分支 2）
+        release_date_change: (p) => {
+            if (!p || typeof p !== 'object') return null;
+            const has = (k) => Object.prototype.hasOwnProperty.call(p, k);
+            // 【codex 568-R M1】两个键都必须是**自有属性**——CODE-6 证明正常写点恒写出 old/new 两个键
+            //   （值可为 null），故「缺键」= 数据损坏，**不等于**「原值未设定」。缺 old 键时若补成 null，
+            //   会把损坏对象渲染成「（空）→ 新值」，正是本方案明令禁止的"半条明细"。
+            if (!has('planned_date_old') || !has('planned_date_new')) return null;
+            // [甲1·2026-09-17·codex 578 收紧版 (b)] 两键各自校验类型：old = 字符串（含 ''=原未设定）或 null；
+            //   new = 非空字符串 或 **null（合法清空**：改期端点 normalizeDeadline「留空可清除」，写点 changes[0].new
+            //   严格写 null，见 verify-sys-release-date-change [2c]）。非字符串非 null（false/数字/对象/数组）= 损坏。
+            //   原版把「new 为 null」与空串/缺键一并判损坏，导致 T2 段合法清空被误报「修改明细不可用」（上段锚点 §9 第 3 项）。
+            //   不做日期格式校验：写点对 old 原样落库（同 verify [6] '2026-13-99' 用例），格式不是本适配器的契约。
+            const ov = p.planned_date_old, nv = p.planned_date_new;
+            const okOld = ov === null || typeof ov === 'string';
+            const okNew = nv === null || (typeof nv === 'string' && nv !== '');
+            if (!okOld || !okNew) return null;
+            return [{ field: 'planned_date', old: ov, new: nv }];
+        }
+    };
     // changes：[{field,old,new}]；objectText：展开区头行「变更对象」文案（可空）。
     function siRenderTimelineChanges(changes, objectText) {
         try {
@@ -4552,6 +4702,15 @@
             const labels = [];
             for (const c of changes) {
                 if (!c || typeof c !== 'object' || Array.isArray(c) || typeof c.field !== 'string') continue;
+                // [甲1·2026-09-17] 严格三键契约：old/new 必须是自有属性（值可为 null）。缺键项整项过滤、不计数——
+                //   与 SI_TL_CHANGE_LEGACY_ADAPTER 的「缺键=损坏」判据一致；全部项被过滤时返回空串，调用方落分支4。
+                if (!Object.prototype.hasOwnProperty.call(c, 'old') || !Object.prototype.hasOwnProperty.call(c, 'new')) continue;
+                // [甲1·S2b·Opus 预筛 M1] 类型维度也对齐旧键适配器：old/new 只接受 null 或原始标量（string/number/boolean）；
+                //   对象/数组 = 损坏，整项过滤。本函数是多字段通用渲染（needs_feasibility 走 0/1 数字、工期走数字），
+                //   故只能拒对象/数组、不能像适配器那样按「日期字段」收到 string——适配器更严是因为它知道字段类型，
+                //   两条线在「缺键」与「对象/数组」两个维度结论一致，非矛盾。
+                const siTlIsScalarOrNull = (v) => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+                if (!siTlIsScalarOrNull(c.old) || !siTlIsScalarOrNull(c.new)) continue;
                 const label = Object.prototype.hasOwnProperty.call(SI_TL_CHANGE_FIELD_LABEL, c.field)
                     ? SI_TL_CHANGE_FIELD_LABEL[c.field] : c.field;
                 labels.push(label);
@@ -4570,12 +4729,49 @@
             return '';
         }
     }
+    // [乙4·2026-09-17 B4·时间线留痕覆盖面补齐 v0.2 §5 B4] 共用改动明细渲染——供 A 类（修改类）与
+    //   B 类（附带变更类）配对分支复用，取代原来只服务 A 类四码的内联判断（§6.2 固定分支优先级不变：
+    //   changes 键存在只认它 → 缺键时旧适配器 → 按渲染结果是否非空判 ok；否则按 payload_json 是否
+    //   NULL/空串分 history/broken）。
+    // ⚠️ **本函数只负责「渲染结果三分类」，不决定文案**——「历史行是否显示提示文字」「豁免判断」由调用方
+    //   按 SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES 与 SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES 自行决定
+    //   （583-R M1：载荷分类与「历史资格」分开——estimate_eta 等无历史空载荷阶段的新码，即使 kind
+    //   落在 'history'，调用方仍应按「不具历史资格」处理成「修改明细不可用」，不显历史提示）。
+    function siTlChangesHtml(e, parsedPayload) {
+        // ⚠️ **前置守卫**（codex 568-R2 沿用）：只有「非 null、非数组的**对象**」才能做自有键检查；
+        //   payload 解析出原始值（字符串/数字/null/数组）直接落 kind='broken'，不得对原始值用 `in`。
+        const payloadObj = (parsedPayload && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload))
+            ? parsedPayload : null;
+        const hasChangesKey = !!payloadObj && Object.prototype.hasOwnProperty.call(payloadObj, 'changes');
+        let changesHtml = '';
+        if (hasChangesKey) {
+            // 分支 1：changes 键存在 → 只认它。判据是「实际渲染结果非空」而非「数组长度 > 0」（568-R M4）。
+            changesHtml = Array.isArray(payloadObj.changes)
+                ? siRenderTimelineChanges(payloadObj.changes, siTlChangeObjectText(e)) : '';
+        } else if (payloadObj) {
+            // 分支 2：changes 键不存在 ∧ 该码有旧版适配器登记 → 读旧键拼 changes 形状渲染（A9）。
+            const legacyAdapt = SI_TL_CHANGE_LEGACY_ADAPTER[e.action_code];
+            if (typeof legacyAdapt === 'function') {
+                const adapted = legacyAdapt(payloadObj);
+                if (adapted) changesHtml = siRenderTimelineChanges(adapted, siTlChangeObjectText(e));
+            }
+        }
+        if (changesHtml) return { html: changesHtml, kind: 'ok' };
+        // 分支 3/4 判据：payload_json 为 NULL/空串 ⇒ 版本边界意义上的「历史行」；其余（非空却读不出明细）
+        //   ⇒ 数据异常，不冒充历史。是否真的按历史提示展示，由调用方结合 HISTORY_ELIGIBLE_CODES 决定。
+        if (e.payload_json == null || e.payload_json === '') return { html: '', kind: 'history' };
+        return { html: '', kind: 'broken' };
+    }
     function siRenderTimeline(list, atts, currentTitle) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
             // L-1（codex 复审）：release 事件也优先识别 action_code——「确认上线·不发版」(confirm_online_norelease)
             //   与批次/hotfix 发版都写 event_type='release'，只有前者带 action_code，需区分标签保留审计可见性。
             const isReleaseScope = e.event_type === 'scope_change' && !!SI_TL_RELEASE_SCOPE_LABEL[e.action_code];
+            // [#67 A4] isReleaseScope **原样保留**，继续只服务 key 计算与标签归属（下方 key/label/cls）。
+            //   可隐藏性另走 isHidableScope——两者差集恰为 release_date_change：它仍进 SCOPE 表拿
+            //   「上线单改期」标签，但不再进可隐藏集合。
+            const isHidableScope = siTlIsHidableScope(e);
             // [MED-2·组A + 组B] note 型事件默认落回通用「备注」徽章；仅登记在 SI_TL_NOTE_OWN_LABEL_CODES
             //   里的少数 action_code 取自己的徽章——同 isReleaseScope 的既有模式，不逐个引入新徽章制造
             //   噪音（受理留痕/退改原因等裸文本备注继续用通用 note）。[组B] 追加 fast_release_authorize/
@@ -4636,6 +4832,14 @@
             //   维持现状不动——那种情况下 info.commits/statusAtPublish 恒 null，走不到结构化这条路径。
             //   （esc() 后再拼进 <pre>，不走 innerHTML 之外的第二次 DOM 赋值，字符串已按 HTML 语境转义，无 XSS 风险）。
             let summaryHtml;
+            // [乙4·2026-09-17 B3·时间线留痕覆盖面补齐 v0.2 §5 B3] 摘要前缀统一生成一次，供下方 A/B 类
+            //   配对分支的 ok/history/broken 三种出口复用——estimate 事件类型专属前缀「预计完成：」不再
+            //   在两处各自实现一遍。历史 estimate 行（无码，未命中 A/B 类分支）仍落原「estimate 前缀分支」
+            //   （下方顺序不变，见 C5b 噪音折叠③），与本变量互不冲突：两处逻辑一致，只是覆盖对象不同
+            //   （本变量只服务新码 estimate_eta 的三个出口）。
+            const baseSummaryHtml = (e.event_type === 'estimate' && e.summary)
+                ? esc('预计完成：' + e.summary)
+                : (e.summary ? esc(e.summary) : '');
             if (key === 'release_published' && e.summary) {
                 const info = siFormatReleasePublishedSummary(e.summary, currentTitle);
                 if (info.ok) {
@@ -4676,9 +4880,62 @@
                 //   （cancel_consult 的两个写点未必含 (idN)），正则不命中时是安全 no-op，非本条断言范围。
                 const folded = e.summary.replace(/\(id\d+\)/, '');
                 summaryHtml = `<span title="${esc(e.summary)}">${esc(folded)}</span>`;
+            } else if (SI_TL_CHANGE_CODES.has(e.action_code)
+                       && SI_TL_CHANGE_CODES.get(e.action_code) === e.event_type) {
+                // [时间线改动明细 方案 20260911 v1.2 §3.2 + #67 A5/§6.2·2026-09-16 + 乙4·2026-09-17 B3/B4]
+                //   A 类（修改类）事件：摘要照旧 + 「查看改动」折叠；与下方 accept 行的 online_mode 分支
+                //   互斥。⚠️ [#67 A5] 分支条件由「硬编码 event_type==='note' ∧ Set.has(码)」改为**码 +
+                //   期望类型配对**——release_date_change 因登记为 scope_change 得以进入，而**异常组合
+                //   （白名单码 + 非其登记类型）仍被挡在外面**（v1.172.1/codex 567 M2 那六组防御断言语义
+                //   完整保留）。⚠️ **has() 前置不可省**（codex 568-R2 M1）：未登记码走 get() 返回
+                //   undefined，若该行同时**缺失 event_type**（也是 undefined），`undefined === undefined`
+                //   成立，异常行反而会被放进本分支。
+                label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS;
+                // [乙4·B4] 载荷解析/分类抽到共用函数 siTlChangesHtml（供 A/B 两类复用）；本分支只负责
+                //   按 kind 决定最终文案——「历史资格」判断（SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES）与
+                //   「豁免」判断（SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES）都留在这里，不下沉进共用函数
+                //   （583-R M1：载荷分类与历史资格是两个维度）。
+                const changesResultA = siTlChangesHtml(e, parsedPayload);
+                const changesHtmlA = changesResultA.html;
+                const kindA = changesResultA.kind;
+                if (changesHtmlA) {
+                    summaryHtml = baseSummaryHtml + changesHtmlA;
+                } else if (kindA === 'history' && SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES.has(e.action_code)) {
+                    // 分支 3：payload_json 为 NULL/空串 ∧ 该码有历史空载荷阶段 ⇒ 改造前写入的**历史行**。
+                    //   · 3a 该码 ∈ 历史提示豁免集合 → **无任何说明文字**（其 summary 已自足，加提示是假警报）
+                    //   · 3b 否则 → 「（历史记录，未保存修改明细）」——旧值当初未落库，无法回填
+                    const hint = SI_TL_CHANGE_HISTORY_HINT_EXEMPT_CODES.has(e.action_code)
+                        ? '' : '（历史记录，未保存修改明细）';
+                    summaryHtml = baseSummaryHtml
+                        + (hint ? `<span class="si-muted" style="margin-left:6px">${hint}</span>` : '');
+                } else {
+                    // 分支 4：payload_json 非空 ∧ 无有效 changes（数据异常）；或 payload 为空但该码**无历史
+                    //   资格**（如新码 estimate_eta——它从诞生起就恒写 payload_json，空载荷是真异常，不
+                    //   冒充历史，583-R M1）⇒ 不冒充历史。⚠️ 豁免集合**不影响本分支**（方案 §6.3）。
+                    summaryHtml = baseSummaryHtml
+                        + `<span class="si-muted" style="margin-left:6px">（修改明细不可用）</span>`;
+                }
+            } else if (SI_TL_CHANGE_ATTACH_CODES.has(e.action_code)
+                       && SI_TL_CHANGE_ATTACH_CODES.get(e.action_code) === e.event_type) {
+                // [乙4·2026-09-17 B3/B4] B 类（附带变更类）事件：主体是另一个动作（指派/可行性评估/
+                //   状态机的范围变更事件本身），顺带改了字段——**保留原徽章**（label/cls 已由上方 key/
+                //   SI_TL_LABEL/SI_TL_CLS 算好，本分支不覆盖），只加「查看改动」展开区。判据同 A 类：
+                //   has() 前置 + get()===event_type，理由同上。
+                const changesResultB = siTlChangesHtml(e, parsedPayload);
+                const changesHtmlB = changesResultB.html;
+                if (changesHtmlB) {
+                    summaryHtml = baseSummaryHtml + changesHtmlB;
+                } else {
+                    // B 类三码均无历史空载荷阶段（M2）：kind 无论是 'history' 还是 'broken'，一律按
+                    // 「修改明细不可用」处理，不查 HISTORY_ELIGIBLE_CODES、不显历史提示。
+                    summaryHtml = baseSummaryHtml
+                        + `<span class="si-muted" style="margin-left:6px">（修改明细不可用）</span>`;
+                }
             } else if (e.event_type === 'estimate' && e.summary) {
                 // C5b 噪音折叠③：estimate 行 summary 是裸值（index.js :8022 estMin，无标签），加前缀让读者知道
                 // 这是"预计完成"时刻而非其它时间字段——存量与新行同渲染路径，一并受益，无需回填历史数据。
+                //   （历史 estimate 行无 action_code，命中不了上方 A 类 Map，故落到本分支——与 baseSummaryHtml
+                //   逻辑一致，只是覆盖对象不同：本分支服务旧数据，baseSummaryHtml 服务新码 estimate_eta。）
                 summaryHtml = esc('预计完成：' + e.summary);
             } else if (e.event_type === 'created' && e.summary && [...e.summary].length > 60) {
                 // C5b 噪音折叠④：建单描述原文可能很长，时间线正文只给前 60 字摘要，title 挂全文。
@@ -4688,23 +4945,6 @@
                 //   字符——改用 `[...e.summary]` 展开成码点数组再判长/切片/join，对齐全仓其余长度口径
                 //   （work_note 上限 1000、bug_cause_note 上限 500 均按 `[...s].length` 码点计数）。
                 summaryHtml = `<span title="${esc(e.summary)}">${esc([...e.summary].slice(0, 60).join('') + '…')}</span>`;
-            } else if (e.event_type === 'note' && SI_TL_CHANGE_CODES.has(e.action_code)) {
-                // [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件：摘要照旧 + 「查看改动」折叠。分支按
-                //   action_code 收窄（release_info_edit / edit_in_revision 两个写点均为 event_type='note'），
-                //   与下方 accept 行的 online_mode 分支互斥——两类事件不会共用同一行 payload。
-                //   [用户 2026-09-11 二拍·v1.172.1] 两码**一律**换「✎ 变更留痕」徽章（同一张单上新旧两种样式并存别扭）。
-                //   无可渲染明细时按 payload 是否为空分两句（codex 567 M1）：
-                //     · payload_json 为 NULL/空 ⇒ v1.172.0 之前写入的**历史行**（两写点自 v1.172.0 起恒写 payload，
-                //       NULL 是可靠的版本边界）⇒「（历史记录，未保存修改明细）」——旧值当初未落库无法回填
-                //     · payload_json 非空但解析失败 / 无 changes 数组 / 全部缺损 ⇒ 新行数据异常 ⇒「（修改明细不可用）」，
-                //       不冒充历史
-                const changesHtml = (parsedPayload && Array.isArray(parsedPayload.changes))
-                    ? siRenderTimelineChanges(parsedPayload.changes, siTlChangeObjectText(e)) : '';
-                label = SI_TL_CHANGE_BADGE_LABEL; cls = SI_TL_CHANGE_BADGE_CLS;
-                const noDetailNote = (e.payload_json == null || e.payload_json === '')
-                    ? '（历史记录，未保存修改明细）' : '（修改明细不可用）';
-                summaryHtml = (e.summary ? esc(e.summary) : '')
-                    + (changesHtml || `<span class="si-muted" style="margin-left:6px">${noDetailNote}</span>`);
             } else if (parsedPayload && parsedPayload.online_mode != null) {
                 // [S1c 补丁 AD·AD3·预筛 L2] accept 行 online_mode 消费——config 验收通过选的 release/
                 //   direct 落在 payload_json.online_mode（index.js:6118，D11「选项写时间线」），此前前端
@@ -4718,7 +4958,9 @@
             } else {
                 summaryHtml = e.summary ? esc(e.summary) : '';
             }
-            return `<div class="si-tl-item${isReleaseScope ? ' si-tl-release-scope' : ''}"${isReleaseScope && siTlHideReleaseScope ? ' style="display:none"' : ''}>
+            // [#67 A4] 这两处消费点由 isReleaseScope 换成 isHidableScope（class 与初始 display 共用同一
+            //   局部布尔，是消费点不是第三处计算）。siToggleTlReleaseScope 继续按 class 批量切换、不动。
+            return `<div class="si-tl-item${isHidableScope ? ' si-tl-release-scope' : ''}"${isHidableScope && siTlHideReleaseScope ? ' style="display:none"' : ''}>
                 <div class="si-tl-time" title="${esc(siFmtDTSec(e.created_at))}">${esc(siFmtDT(e.created_at))}</div>
                 <div class="si-tl-dot"></div>
                 <div class="si-tl-body">

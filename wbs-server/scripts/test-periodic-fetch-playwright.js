@@ -26,7 +26,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const PORT = process.env.PORT || '3200';
 const BASE_URL = `http://localhost:${PORT}`;
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 const ADMIN_ID = 1;
 const NON_ADMIN_ID = 2; // role='viewer'（本地 db 副本实测存在，用于非 admin 重定向断言）

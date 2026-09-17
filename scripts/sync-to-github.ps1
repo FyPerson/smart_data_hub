@@ -905,6 +905,10 @@ $replacements = @(
     @{ From = 'change_me_on_first_login'; To = 'change_me_on_first_login' },
     @{ From = 'change_me_with_random_32bytes'; To = 'change_me_with_random_32bytes' },
     @{ From = 'change_me_with_random_32bytes_!!'; To = 'change_me_with_random_32bytes_!!' },
+    # [#82 2026-09-16] JWT 签发密钥的旧默认值——本表此前**只覆盖 DB 密钥与 admin 口令**，这个值
+    #   一条规则都没有，随 server.js 原样进了公开镜像（2026-09-16 逐条核实）。server.js 侧已删，
+    #   scripts/ 侧逐个清理期间由本规则兜底；清完后作为纯防御保留（防将来有人再写回去）。
+    @{ From = 'change_me_with_random_secret'; To = 'change_me_with_random_secret' },
     @{ From = 'business_db\.dbo\.crm_bid'; To = 'business_db.dbo.bid_table' },
     @{ From = 'business_db\.dbo\.bms_xxx'; To = 'business_db.dbo.demo_table' },
     @{ From = 'business_db'; To = 'business_db' },

@@ -72,7 +72,7 @@ const ARGS = parseArgs(process.argv.slice(2));
 const PORT = process.env.PORT || '3100';
 const BASE_URL = `http://localhost:${PORT}`;
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET || 'default_secret_key_change_me';
+const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const OUTPUT_DIR = path.join(__dirname, 'unify-baseline', ARGS.shot);
 const FIXTURE_PREFIX = '[UNIFY-BASELINE]';
 
