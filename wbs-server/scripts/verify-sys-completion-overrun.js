@@ -841,7 +841,8 @@ async function main() {
       //   系合并后 main 全家族复验才拦获——当批收口亲跑面未含本守卫=「动 index.js 必跑全家族」纪律再犯
       //   （97c43d7 后第二次），第 7 次追平，backlog #25③ 结构锚改造实例再 +1。
       // ⚠️ [S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4·2026-09-02] 在 runWGate 函数体正上方新增
-      //   独立小节（DEFAULT_SKIP_LIAISON_TEST_SYSTEMS/isSkipLiaisonTestSystem/isSkipLiaisonTestSystemForIssue
+      //   独立小节（DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS〔hotfix 2026-09-18 由 DEFAULT_SKIP_LIAISON_TEST_
+      //   SYSTEMS 改名+判定反转，符号数不变〕/isSkipLiaisonTestSystem/isSkipLiaisonTestSystemForIssue
       //   三符号+注释）+ runWGate 内部新增一段 else-if 分支（⑤变体与⑥之间）+ W_GATE_SKIP_SUMMARY 相关
       //   注释/键值扩充，三处改动全部落在写点 #3（本清单第 3 条，原 runWGate UPDATE）**之前**，对写点
       //   #1/#2（1764/1864，两处历史迁移脚本，均在本次改动位置之前）零影响；写点 #3~#8 六条锚点因此

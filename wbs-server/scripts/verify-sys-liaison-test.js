@@ -2065,20 +2065,30 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // [M] S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4：按系统跳过对接测试
-  //   M1 正例 + M6 运行时映射／M2 反证（BMS 对照）／M3 优先级对照（不吞 ⑤变体）／M4 回路（含 BMS
-  //   对照）／M5 fail-closed 单元级（经 _internals）。放在 [17]/[17b]/[终态] 全表扫描之前——本组
-  //   构造的单据不触碰通知列组，但让文件末尾的全表终态扫描一并覆盖到它们（额外保障，非必需）。
+  // [M] S3·hotfix 2026-09-18：按系统白名单跳过对接测试（DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS=['BMS']）
+  //   M1 正例（小程序样本）+ M6 运行时映射／M1b 正例（HRD 样本，证明非硬编码单个系统字面量）／
+  //   M2 反证（BMS 对照，走测试）／M3 优先级对照（不吞 ⑤变体）／M4 回路（含 BMS 对照）／M5
+  //   fail-closed 单元级（经 _internals，覆盖名单外多系统样本）。放在 [17]/[17b]/[终态] 全表扫描
+  //   之前——本组构造的单据不触碰通知列组，但让文件末尾的全表终态扫描一并覆盖到它们（额外保障，非必需）。
   // ══════════════════════════════════════════════════════════════════════
   {
     // ── M5：fail-closed 单元级（经 _internals 直调，不经 HTTP）──────────────────────────
-    assert.strictEqual(I.isSkipLiaisonTestSystem(null), false, '[M5] null 不命中');
-    assert.strictEqual(I.isSkipLiaisonTestSystem(''), false, '[M5] 空串不命中');
-    assert.strictEqual(I.isSkipLiaisonTestSystem(undefined), false, '[M5] undefined 不命中');
-    assert.strictEqual(I.isSkipLiaisonTestSystem('BMS'), false, '[M5] 非命中系统（BMS）不命中');
-    assert.strictEqual(I.isSkipLiaisonTestSystem('小程序-智荟人力'), true, '[M5] ⭐ 命中系统命中');
-    assert.deepStrictEqual(I.DEFAULT_SKIP_LIAISON_TEST_SYSTEMS, ['小程序-智荟人力'], '[M5] ⭐ 清单本体 deepStrictEqual——有意摩擦，改清单必须来改这里（同 C11 EXPECTED_DEFAULT_SINGLE 注释先例），实现坏成什么样这条会红：清单被误改/误加成员/顺序变化全部会红');
-    ok('[M5] fail-closed 单元级：isSkipLiaisonTestSystem(null/空串/undefined/非命中系统) 全 false、(小程序-智荟人力) true，DEFAULT_SKIP_LIAISON_TEST_SYSTEMS 清单本体逐字相等');
+    //   [hotfix 2026-09-18] 白名单反转：DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS=['BMS']，只有 BMS 走测试
+    //   （false=不跳过），名单外任意系统（含小程序-智荟人力/HRD/电子签/客户报销平台/RPA程序/其他/新
+    //   系统等未来新增）一律跳过（true）。
+    assert.strictEqual(I.isSkipLiaisonTestSystem(null), false, '[M5] null 不命中（仍走测试）');
+    assert.strictEqual(I.isSkipLiaisonTestSystem(''), false, '[M5] 空串不命中（仍走测试）');
+    assert.strictEqual(I.isSkipLiaisonTestSystem(undefined), false, '[M5] undefined 不命中（仍走测试）');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('BMS'), false, '[M5] ⭐ 白名单内系统（BMS）不命中——走测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('小程序-智荟人力'), true, '[M5] ⭐ 名单外系统命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('HRD'), true, '[M5] ⭐ 名单外系统（HRD）命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('电子签'), true, '[M5] ⭐ 名单外系统（电子签）命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('客户报销平台'), true, '[M5] ⭐ 名单外系统（客户报销平台）命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('RPA程序'), true, '[M5] ⭐ 名单外系统（RPA程序）命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('其他'), true, '[M5] ⭐ 名单外系统（其他）命中——跳过测试');
+    assert.strictEqual(I.isSkipLiaisonTestSystem('新系统X'), true, '[M5] ⭐ 名单外任意新系统（新系统X，未来新增样本）命中——跳过测试');
+    assert.deepStrictEqual(I.DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS, ['BMS'], '[M5] ⭐ 清单本体 deepStrictEqual——有意摩擦，改清单必须来改这里（同 C11 EXPECTED_DEFAULT_SINGLE 注释先例），实现坏成什么样这条会红：清单被误改/误加成员/顺序变化全部会红');
+    ok('[M5] fail-closed 单元级：isSkipLiaisonTestSystem(null/空串/undefined/BMS) 全 false（走测试）、名单外任意系统（小程序-智荟人力/HRD/电子签/客户报销平台/RPA程序/其他/新系统X）全 true（跳过），DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS 清单本体逐字相等');
   }
   {
     // ── M7：fail-closed「查无单据」（经 _internals 直调 isSkipLiaisonTestSystemForIssue）──────────
@@ -2130,6 +2140,20 @@ async function main() {
     assert.strictEqual(detailM6.status, 200, `[M6] 详情端点应 200，实际 ${detailM6.status}`);
     assert.strictEqual(detailM6.body.issue.last_completed_at, tl.created_at, '[M6] ⭐ 详情端点真实响应 last_completed_at 精确等于 skip_system 事件时刻——实现坏成什么样这条会红：若 index.js:8992 一带白名单漏加该码，此列会恒为 null');
     ok('[M6] 489-H6 运行时映射核实：liaison_test_skip_system 在 last_completed_at 两处白名单（list/detail 真实端点）均生效，W_GATE_SKIP_SUMMARY 文案精确落地（非仅标签表覆盖）');
+  }
+  {
+    // ── M1b：名单外系统（HRD，非小程序）e2e 正例——证明跳过判定按「白名单排除」而非「硬编码单个
+    //   系统字面量」，任意名单外系统均命中（对照 M1 的小程序样本，换一个系统名验证同一判定路径）。
+    const id = await mkIssue('feature', '开发中', { intakeLiaisonId: 13, systemName: 'HRD' });
+    await mkMember(id, 5, '开发甲', 'code_submitted');
+    const daId2 = await mkMember(id, 6, '开发乙', 'pending');
+    const r = await triggerGateViaExcuse(id, daId2, '[M1b] 开发乙请假');
+    assert.strictEqual(r.status, 200, `[M1b] excuse 触发 GATE 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.strictEqual(r.body.main_status, '待验证', '[M1b] ⭐ HRD 单命中按系统白名单跳过对接测试，直落待验证（非待对接测试）——实现坏成什么样这条会红：若判定仍硬编码小程序字面量而非按白名单排除，HRD 会误判为不命中并落待对接测试');
+    const tl = await latestTimeline(id);
+    assert.strictEqual(tl.action_code, 'liaison_test_skip_system', '[M1b] ⭐ 专用 actionCode 留痕（同 M1）');
+    assert.strictEqual(tl.summary, '所属系统策略跳过对接测试，自动流转', '[M1b] ⭐ W_GATE_SKIP_SUMMARY 文案不变——与 M1（小程序样本）逐字相同，证明文案不因具体系统名而分叉');
+    ok('[M1b] e2e 正例：HRD（名单外系统，非小程序）feature 单全员完成+对接人有效 → 按系统白名单跳过对接测试，直落「待验证」，action_code=liaison_test_skip_system，summary 文案与 M1 一致');
   }
   {
     // ── M2 反证：同条件 BMS 单（对照组）——不命中跳过清单，走既有 ⑦ 正常路径 ──────────────────

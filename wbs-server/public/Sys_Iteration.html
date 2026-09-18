@@ -4239,7 +4239,7 @@
         intake_accept: '受理', intake_return: '受理退改', resubmit_intake: '重新提交受理',
         liaison_test_pass: '对接测试通过', liaison_test_return: '对接测试打回',
         liaison_test_skip_excused: '跳过对接测试（全员开脱）', liaison_test_skip_liaison: '跳过对接测试（对接人失效）',
-        liaison_test_skip_system: '跳过对接测试（系统策略）',   // [S3·方案 v1.2 §4.4] 小程序-智荟人力等按系统策略跳过对接测试
+        liaison_test_skip_system: '跳过对接测试（系统策略）',   // [S3·hotfix 2026-09-18] 按系统白名单（仅 BMS 需对接测试），名单外一律跳过
         status_change: '状态流转',   // 通用兜底——裸 status_change（action_code=null，index.js:2876 默认路径）的正名；
         //   W-GATE 那四种 mirrorActionCode 变体走各自更具体的码（本条只兜底真正裸的 status_change 行）
         change_intake_mode: '受理模式变更',   // 仅存量兜底：路由已恒 409（非当前代码可达写点），但库里历史行仍可能带此码
@@ -8842,11 +8842,11 @@
         // [codex 291 号 M-2 收口] 原固定文案"…自动进入「待验收」"对 feature 失实——feature 主路径先进
         // 「待对接测试」（W-GATE §3.0-⑦），对接人测试通过（liaison_test_pass）后才到「待验收」；仅
         // improvement/bug 才是"全部完成→直接待验收"。⭐ feature 还存在 ⑥ 降级分支（对接人当前失效等
-        // 情形会跳过测试段直落「待验收」，见 runWGate ⑥）与 [S3·2026-09-02] 按所属系统策略跳过分支
-        // （如小程序-智荟人力恒不经对接测试，见 runWGate isSkipLiaisonTestSystemForIssue），落点在提交
+        // 情形会跳过测试段直落「待验收」，见 runWGate ⑥）与 [S3·hotfix 2026-09-18] 按系统白名单跳过分支
+        // （按系统白名单，仅 BMS 需对接测试，名单外一律跳过，见 runWGate isSkipLiaisonTestSystemForIssue），落点在提交
         // 那一刻不确定，故用"通常/或"的诚实表述并列两种归因，不承诺唯一确定结果。
         const submitCompleteHint = iss.type === 'feature'
-            ? '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单通常进入「待对接测试」（若对接人当前不可用、或所属系统策略不经对接测试〔如小程序-智荟人力〕等情形会直接跳至「待验收」），对接测试通过后再进入「待验收」。'
+            ? '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，所属系统为 BMS 的单进入「待对接测试」，其他系统直接进入「待验证」（BMS 单若对接人当前不可用等情形也会直接跳至「待验证」）。'
             : '仅标记<b>你本人</b>的开发项完成；全部在册开发都完成后，本单才自动进入「待验收」。';
         const fields = [{ k: null, html: `<div class="u-hint" style="margin-bottom:8px">${submitCompleteHint}</div>` }, { k: null, html: modeHtml }];
         if (needGap) fields.push(fTextarea('fix_gap_note', '修复缺口说明', '', true, '必填：上一版修复缺口在哪（复盘素材，不作考核）'));

@@ -4015,21 +4015,23 @@ module.exports = (deps) => {
   //   guidanceSuffix 消费点）——用户当场无法在该操作面提供理由，需改走能修 deadline/加成员的入口。
 
   // ============================================================
-  // [S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4.3] 按系统跳过对接测试——判定源单一收口。
-  //   「小程序-智荟人力」发版没有版本号、不区分前后端，开发全员自测完直转建单人验收，不经对接人
-  //   测试段（用户口径 D，§1.1）。improvement/bug 天然无对接测试段（现状已满足，§4.1），本组只处理
-  //   feature 决策树。
+  // [S3·hotfix 2026-09-18] 按系统白名单跳过对接测试——判定源单一收口。
+  //   用户口径（2026-09-18 拍板）：feature 单全员完成后的 W-GATE，「待对接测试」只对所属系统 **BMS**
+  //   生效；名单外的所有系统（HRD/电子签/客户报销平台/RPA程序/小程序-智荟人力/其他/将来新增）一律
+  //   按系统策略跳过、直落待验证。空值/查无单据**不按系统策略跳过**、继续既有 ⑥ 对接人判定（跳过=省掉对接测试环节非建单人验收；fail-closed 三契约不变）；
+  //   精确匹配：system_name 建单 NOT NULL+白名单+trim 使空值/带空格在写入口不可达；新增 BIZ_SYSTEMS 成员默认跳过、需测试须同步改本清单与 verify M5。improvement/bug 天然无对接
+  //   测试段（现状已满足，§4.1），本组只处理 feature 决策树。
   //   照搬 C11（DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS，本文件 :9493 一带）的清单+纯函数范式命名，
   //   **不做 config 覆盖层**：C11 的 loadSingleCommitGroupSystemSet() 含约 40 行畸形值回落逻辑，但
   //   该 config 至今无写入端点（仅一次性脚本）、两环境实测均空（部署前置探针 §9.2-1），属"预留但
   //   零使用"复杂度；本组只做代码常量，避免复制未被使用的分支及其测试面，将来需配置化再按 C11 补齐。
   // ============================================================
-  const DEFAULT_SKIP_LIAISON_TEST_SYSTEMS = ['小程序-智荟人力'];
+  const DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS = ['BMS'];
   function isSkipLiaisonTestSystem(systemName) {
-    // null/空串不命中——同 hasValidLiaison（:3653 一带 `if (!row || !row.intake_liaison_id) return null;`）
-    //   既有的 falsy 短路早退写法。
+    // null/空串不命中（仍走测试）——同 hasValidLiaison（:3653 一带 `if (!row || !row.intake_liaison_id)
+    //   return null;`）既有的 falsy 短路早退写法。
     if (!systemName) return false;
-    return DEFAULT_SKIP_LIAISON_TEST_SYSTEMS.includes(systemName);
+    return !DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS.includes(systemName);
   }
   // runWGate 决策树内查询包装——**fail-closed 三契约**（方案 §4.2）：
   //   ① 查不到该单据行 → 不跳过（走既有 ⑥/⑦），留 logger.error 可观测信号（含"W-GATE skip-system
@@ -4111,13 +4113,13 @@ module.exports = (deps) => {
             targetStatus = SF.SYS_VERIFY_STATUSES[issueType][0];
             mirrorActionCode = 'liaison_test_skip_excused';
           } else if (await isSkipLiaisonTestSystemForIssue(issueId)) {
-            // [S3·方案 v1.2 §4.4] 按系统跳过对接测试——「小程序-智荟人力」开发全员自测完直转建单人
-            //   验收，不经对接人测试段（用户口径 D，§1.1）。
+            // [S3·hotfix 2026-09-18] 按系统白名单跳过对接测试——只有 BMS 需对接测试（用户口径），
+            //   名单外系统（含「小程序-智荟人力」）开发全员自测完直转建单人验收，不经对接人测试段。
             //   排在 ⑤变体之后：deliverableCount===0 的防死胡同处置（上方长注释）对所有系统一致，
             //   不因所属系统而异，故先判它。
-            //   排在 ⑥（hasValidLiaison）之前：小程序单不再要求对接人测试，但对接人在受理环节仍有
+            //   排在 ⑥（hasValidLiaison）之前：名单外系统不再要求对接人测试，但对接人在受理环节仍有
             //   作用且建单必填（建单端点 intake_liaison 必填校验，与 INVALID_SYSTEM_NAME 白名单校验同段——grep 定位，不记绝对行号），故本分支不查
-            //   hasValidLiaison——即使小程序单当前对接人恰好失效，也走本分支而非 ⑥（两者殊途同归，
+            //   hasValidLiaison——即使该单当前对接人恰好失效，也走本分支而非 ⑥（两者殊途同归，
             //   都落待验证，但留痕码需精确反映真实原因，见下方 D4 决策依据）。
             //   489-H7 已确认本位置不吞掉 ⑤变体，且"待验证→新增 pending→回开发中→再次全员完成"会
             //   重新经过本判定（回路正确——isSkipLiaisonTestSystemForIssue 每次判定都重新查库，非
@@ -22077,10 +22079,10 @@ module.exports = (deps) => {
     assertMainStatusTransition,
     electRepresentative,
     runWGate,
-    // S3（所属系统「小程序-智荟人力」接入 方案 v1.2 §4.3）：按系统跳过对接测试——判定源单一收口，
+    // S3（hotfix 2026-09-18·按系统白名单跳过对接测试）：判定源单一收口，只有 BMS 需对接测试，
     //   verify-sys-liaison-test.js 直调做 fail-closed 单元级断言（M5：null/''/undefined/'BMS' 全
-    //   false、'小程序-智荟人力' true；清单本体 deepStrictEqual，有意摩擦——改清单必须来改这里）。
-    DEFAULT_SKIP_LIAISON_TEST_SYSTEMS,
+    //   false、名单外任意系统（含'小程序-智荟人力'）true；清单本体校验，有意摩擦——改清单必须来改这里）。
+    DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS,
     isSkipLiaisonTestSystem,
     isSkipLiaisonTestSystemForIssue,   // M7 直调：fail-closed「查无单据」分支——verify 直调覆盖 e2e 结构性不可达的分支
     insertDevEvent,
