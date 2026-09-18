@@ -897,7 +897,12 @@ function extractSetLiteralStrings(text, constName) {
 // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] +dev_submit_done/+dev_no_code——
 //   开发逐人完成两码，Sys_Iteration.html 已同步三处登记（SI_TL_LABEL/SI_TL_CLS/
 //   SI_TL_NOTE_OWN_LABEL_CODES），本文件同步补登记（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);
+// [#83·S2 续做·C1·时间线附件留痕_方案_20260917_v1.3 §4 C1] +attachment_added/attachment_replaced/
+//   attachment_removed——附件增删三码，正式登记（S1 返工批2 曾"刻意暂落 note 通用标签"，见本文件
+//   EXPECTED_INSERT_SITE_COUNT 定义处上方旧注释，已随本次改为正式登记而删除，不留过期指令）；
+//   Sys_Iteration.html 已同步三处登记（SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES，S2 首批），
+//   本文件同步补登记（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1148,7 +1153,15 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   两码已按 D10 逐字登记进 SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES（Sys_Iteration.html）
 //   与本文件 NOTE_OWN_LABEL_ACTION_CODES（上方 SI_TL_NOTE_OWN_LABEL_CODES 双向核对已通过）。
 //   码表 docs/local/系统迭代/时间线写入点码表_20260810.md 已同步登记（见该文件本批新增条目）。
-const EXPECTED_INSERT_SITE_COUNT = 60;
+// [#83·S1] 60→61：persist 新增两条字面量 INSERT 分支（attachment_added/attachment_replaced，+2）
+//   − spec 分支旧无码替换 INSERT 删除（−1）；删除端点 INSERT 原位补码，非新增站点（0）。净 +1（方案
+//   §4 C1 写点增删表：60→61，带码 INSERT +3）。
+// [#83·S2 续做·C1] 三新码（attachment_added/attachment_replaced/attachment_removed）已正式登记进上方
+//   NOTE_OWN_LABEL_ACTION_CODES + Sys_Iteration.html 三处（SI_TL_LABEL/SI_TL_CLS/
+//   SI_TL_NOTE_OWN_LABEL_CODES，双向核对断言见下方 [预筛 MED-5]）——原 S1 遗留「刻意暂落 note 通用标签」
+//   的说明已随本次改造过期删除，不留跟实际不符的指令。三码各恰 1 个字面量站点的断言见下方
+//   ATTACHMENT_ACTION_CODES 相关 check（replaced/added 在 persist、removed 在删除端点，同方案 §4 C1）。
+const EXPECTED_INSERT_SITE_COUNT = 61;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(
@@ -1164,6 +1177,16 @@ const producedKeys = new Map(); // key -> Set(provenance)
 function addProduced(key, provenance) {
   if (!producedKeys.has(key)) producedKeys.set(key, new Set());
   producedKeys.get(key).add(provenance);
+}
+// [#83·S2 续做·C1·方案 §4 C1] action_code 字面量 → 产出该字面量的站点 label 集合——用于下方断言三个
+// 附件码各自恰有 1 个字面量 INSERT 站点（replaced/added 在 persist、removed 在删除端点）。与
+// producedKeys（键=display key，可能合并多个 action_code 的展示语义）不同，本 map 直接按 action_code
+// 原始字面量分组，不经 computeDisplayKey 归并，粒度更细、专供"物理写点数量"这类断言使用。
+const actionCodeSites = new Map(); // action_code 字面量 -> Set(site.label)
+function addActionCodeSite(ac, label) {
+  if (typeof ac !== 'string') return; // 非字面量（如 null 占位/运行时表达式解析出的非字符串）不计入
+  if (!actionCodeSites.has(ac)) actionCodeSites.set(ac, new Set());
+  actionCodeSites.get(ac).add(label);
 }
 
 let engineSiteLabel = null;
@@ -1182,7 +1205,19 @@ for (const site of sites) {
     if (et === null || et === undefined) throw new Error(`${site.label}: event_type 解析为空——异常（event_type 列不应能删除）`);
     for (const ac of acCandidates) {
       addProduced(computeDisplayKey(et, ac, releaseScopeKeys), site.label);
+      addActionCodeSite(ac, site.label);
     }
+  }
+}
+// [#83·S2 续做·C1·方案 §4 C1] 三个附件码各自恰 1 个字面量 INSERT 站点——防未来重构把 added/replaced
+//   意外合并回一条 `?` 占位运行时表达式（解析器认不出、会静默漏计），或把 removed 拆成两条/漏改。
+const ATTACHMENT_ACTION_CODES = ['attachment_added', 'attachment_replaced', 'attachment_removed'];
+for (const code of ATTACHMENT_ACTION_CODES) {
+  const labels = [...(actionCodeSites.get(code) || [])];
+  if (labels.length !== 1) {
+    fail(`附件码 '${code}' 应恰有 1 个字面量 INSERT 站点，实得 ${labels.length} 个：${labels.join(',') || '（无）'}`);
+  } else {
+    ok(`附件码 '${code}' 恰 1 个字面量 INSERT 站点：${labels[0]}`);
   }
 }
 // [LOW-1·组A预筛修复批2 订正] 原硬编码"29"是 EXPECTED_INSERT_SITE_COUNT 早期基线遗留字面量——

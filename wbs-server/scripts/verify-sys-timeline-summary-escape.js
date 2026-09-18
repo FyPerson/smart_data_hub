@@ -207,6 +207,14 @@ const TRUSTED_HTML_CALLEE_NAMES = new Set([
     // siRenderTimelineChanges(changes, objectText)（:4737 一带）——内部 esc(label)/esc(objectText)/
     // siTlChangeValueHtml(...)（该函数同样内部处处 esc）/esc(labels.join(...))，逐字段转义后拼接。
     'siRenderTimelineChanges',
+    // [#83·S2 续做] siRenderAttachListHtml(attachPayload, actionCode)（public/Sys_Iteration.html :4862
+    // 一带，附件增删三码「读侧校验 + <li> 列表渲染」）——返回 { valid, html }，html 内每个字段（id/文件名/
+    // 类型词/原上传人）各自独立 esc() 包裹后拼接（removed 分支与 added/replaced 分支各自一条独立赋值语句，
+    // 均字面含 esc(）。登记原因：原实现内联在 siRenderTimeline 分支里，局部变量经 attachments→attachPayload
+    // →parsedPayload 三级间接引用，触发 isLocalVarSafe 的递归深度上限（3）被 fail-closed 判"不安全"——
+    // 不是真实转义缺口（人工审计过：每个输出字段都在函数体内被 esc() 包裹），是"局部变量间接链过深"这个
+    // 结构性限制。抽成具名函数、调用点只留一次函数调用，与本表其余三个既有 helper 同款处置。
+    'siRenderAttachListHtml',
 ]);
 // ⚠️ 刻意**不**放进白名单的既有 helper（如 siFmtDT/siFmtDTSec/siStatusDisplay/
 //   siFormatReleasePublishedSummary）——grep 现场逐处核实过，fnBody 里它们的全部用法要么已被外层

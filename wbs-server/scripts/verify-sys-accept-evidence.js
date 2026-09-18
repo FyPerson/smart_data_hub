@@ -316,10 +316,6 @@ async function main() {
       const upSpec = await upload(`/api/sys-issues/${id}/attachments`, adminTok, { attachment_type: 'spec' }, 'a7-spec.pdf');
       assert.strictEqual(upSpec.status, 200, `[A7] 上传 spec 200, got ${upSpec.status} ${JSON.stringify(upSpec.body)}`);
       const specId = upSpec.body.attachments[0].id;
-      const beforeA7 = await timelineCount(id);
-      const rSpec = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [specId] });
-      assert.strictEqual(rSpec.status, 400, `[A7-spec] spec 类型 id 应 400, got ${rSpec.status} ${JSON.stringify(rSpec.body)}`);
-      assert.strictEqual(rSpec.body.code, 'ACCEPT_ATTACHMENT_INVALID', '[A7-spec] 错误码 ACCEPT_ATTACHMENT_INVALID');
 
       // 已 superseded：delivery/screenshot 无真实 API 路径产出 superseded 态（supersede 机制仅接在 spec
       // 分支，见 index.js :14158 一带"12-M1 二次 WHERE attachment_type='spec'"）——raw SQL 直接改状态
@@ -328,6 +324,13 @@ async function main() {
       assert.strictEqual(upSS.status, 200, `[A7] 上传待作废 screenshot 200, got ${upSS.status}`);
       const ssId = upSS.body.attachments[0].id;
       await run(`UPDATE sys_issue_attachments SET status='superseded' WHERE id=?`, [ssId]);
+      // [#83·S1 订正] beforeA7 挪到两次上传（均各自写一条 attachment_added 时间线行，方案 v1.3 B1）之后、
+      // 两次预期 400 accept 之前——本用例断言的是"两次**被拒绝**的 accept 零副作用"，不是"上传零副作用"
+      // （上传写行是 #83 的既定新行为，不在本用例断言范围内）。
+      const beforeA7 = await timelineCount(id);
+      const rSpec = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [specId] });
+      assert.strictEqual(rSpec.status, 400, `[A7-spec] spec 类型 id 应 400, got ${rSpec.status} ${JSON.stringify(rSpec.body)}`);
+      assert.strictEqual(rSpec.body.code, 'ACCEPT_ATTACHMENT_INVALID', '[A7-spec] 错误码 ACCEPT_ATTACHMENT_INVALID');
       const rSS = await call('POST', `/api/sys-issues/${id}/accept`, adminTok, { attachment_ids: [ssId] });
       assert.strictEqual(rSS.status, 400, `[A7-superseded] 已失效附件 id 应 400, got ${rSS.status} ${JSON.stringify(rSS.body)}`);
       assert.strictEqual(rSS.body.code, 'ACCEPT_ATTACHMENT_INVALID', '[A7-superseded] 错误码 ACCEPT_ATTACHMENT_INVALID');

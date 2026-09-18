@@ -3330,9 +3330,37 @@ module.exports = (deps) => {
     // recheckFn（INSERT 之后、COMMIT 之前重验）确能捕获并同事务回滚（409 + 行未提交 + 已移动文件清理），
     // 而不是靠"直连 SQL 绕过上传端点插入附件行"这种不经过 recheckFn 校验路径的假证据。
     beforeAttachmentInsertHook: null,
+    // [#83·S1·A1] persist 逐文件 rename/INSERT 循环之后、recheckFn 之前——用它在 INSERT/rename 已发生
+    // 后再撤资格，证明 recheckFn（INSERT 之后二次核）确能捕获（区别于 beforeAttachmentInsertHook 在
+    // INSERT 之前撤资格，那条路径由 targetFn 提前拒绝，rename/INSERT 根本不会发生）。
+    afterAttachmentInsertHook: null,
+    // [#83·S1·A2] spec 分支 beforeTimeline 内、条件 UPDATE 之前（仅测试模式）——用它在同事务内把已冻结的
+    // 旧附件直接置 superseded，令条件 UPDATE 的 changes===0（矩阵 #13：目标冻结有效但 UPDATE 未命中）。
+    beforeSupersedeUpdateHook: null,
+    // [#83·S1·A1] releaseSysTxn 闭包内真实释放点的测试观察钩子（593-R R-1）——{tag, held}：tag=当前事务
+    // 归属标记（persist 设为 `attach:<issueId>:<自增序号>`，其它端点为 null），held=本次调用是否真持有
+    // 释放句柄（对 null 的幂等调用不算真释放）。钩子自身异常必须 try/catch 兜住，不得阻止释放/改变事务结果。
+    onSysTxnRelease: null,
+    // [#83·S1 返工批1·补做4] 上传端点 spec/delivery 两分支各自 `return res.json(...)` 之前（COMMIT 已
+    // 提交、persist 返回值已是最终态）——用它模拟 B2b「提交后失败」：钩子内可直接抛错（headersSent=false
+    // 场景）或先手动写响应头/部分响应体再抛错（headersSent=true 场景），验证端点 catch 按 headersSent
+    // 分流、且三类记录（附件行/时间线行/文件）均已保留不回滚（persist 是事务唯一所有者，提交后无补偿）。
+    beforeAttachmentResponseHook: null,
   };
   let __sysTxnRelease = null;   // 当前持锁事务的 release（单持有者不变量，mutex 串行化保证）
-  function releaseSysTxn() { const r = __sysTxnRelease; __sysTxnRelease = null; if (r) r(); }
+  let __sysCurrentTxnTag = null;   // [#83·S1] 当前持锁事务归属标记，仅 persist 设置，供 onSysTxnRelease 钩子按 tag 计数
+  let __sysAttachTxnSeq = 0;       // [#83·S1] persist 事务序号自增（tag 用）
+  function releaseSysTxn() {
+    const r = __sysTxnRelease;
+    const tag = __sysCurrentTxnTag;
+    const held = !!r;
+    __sysTxnRelease = null;
+    __sysCurrentTxnTag = null;
+    if (SYS_TEST_HOOKS_ENABLED && __testHooks.onSysTxnRelease) {
+      try { __testHooks.onSysTxnRelease({ tag, held }); } catch (_) { /* 钩子异常不得阻止释放 */ }
+    }
+    if (r) r();
+  }
   // 取代 dbRunAsync('BEGIN IMMEDIATE')：先拿 mutex 串行化，再开事务；超时→SysTransitionError(503)；开事务失败→释放锁后抛原错。
   //   ⚠️ 锁在「成功 COMMIT」或「任一 ROLLBACK」时释放，故每个 sysBeginImmediate 必须有对应 sysCommit/sysRollback（既有结构已保证）。
   async function sysBeginImmediate() {
@@ -15532,26 +15560,105 @@ module.exports = (deps) => {
       });
     };
   }
-  // _pending → uploads/sys-iteration/{id}/ + INSERT，返回 [{id,...}]。round_no 传 null（暂存/spec）。任一步失败内部 best-effort 回滚。
+  // ── #83·S1·A1 五态 persist（方案 v1.3 §3/§4 A1 + C0 报告 §2.2 伪码）──────────────────────
+  //   PersistAbort：业务拒绝哨兵，走同一 catch 保证"回滚恰一次"；只被 persist 自身识别（instanceof）。
+  class PersistAbort extends Error {
+    constructor(reason) { super('PersistAbort:' + reason); this.name = 'PersistAbort'; this.reason = reason; }
+  }
+  const SYS_ATTACH_TYPE_WORD = { spec: '需求材料', delivery: '交付附件', screenshot: '截图' };
+  function sysCpLen(s) { return Array.from(String(s == null ? '' : s)).length; }
+  function sysCpTrunc(s, max) {
+    const arr = Array.from(String(s == null ? '' : s));
+    if (arr.length <= max) return arr.join('');
+    return arr.slice(0, max).join('') + '…';
+  }
+  // original_name 为空（null/undefined/纯空串）→「（无文件名）#id」（读侧/summary 共用同一显示规则）。
+  function sysAttachDisplayName(name, id) {
+    const s = (name === null || name === undefined || String(name).trim() === '') ? null : String(name);
+    return s === null ? `（无文件名）#${id}` : sysCpTrunc(s, 60);
+  }
+  // 文件名列表段：最多列 3 个用「、」连接；N>3（或超出可用长度）时逐个去尾并补「 等 N 个」（N=总数，非剩余数）。
+  function sysBuildFileListSegment(names, avail) {
+    const N = names.length;
+    let showCount = Math.min(N, 3);
+    while (showCount >= 0) {
+      const shown = names.slice(0, showCount);
+      let seg;
+      if (showCount === N) seg = shown.join('、');
+      else if (showCount > 0) seg = shown.join('、') + ' 等 ' + N + ' 个';
+      else seg = '等 ' + N + ' 个';
+      if (sysCpLen(seg) <= avail || showCount === 0) return seg;
+      showCount--;
+    }
+    return '';
+  }
+  // added/replaced summary：固定段（类型词+计数+替换尾注）永不截断，文件名列表段按剩余可用长度截断，总长封顶 200 码点。
+  function sysBuildAttachSummary(actionCode, attachmentType, insertedRows, supersedeId) {
+    const typeWord = SYS_ATTACH_TYPE_WORD[attachmentType] || attachmentType;
+    const names = insertedRows.map(a => sysAttachDisplayName(a.original_name, a.id));
+    const prefix = actionCode === 'attachment_replaced' ? '替换' : '上传';
+    const fixedHead = `${prefix}${typeWord} ${insertedRows.length} 个：`;
+    const suffix = actionCode === 'attachment_replaced' ? `（旧附件 #${supersedeId} 已作废）` : '';
+    const L0 = sysCpLen(fixedHead) + sysCpLen(suffix);
+    const avail = Math.max(0, 200 - L0);
+    const listSeg = sysBuildFileListSegment(names, avail);
+    return `${fixedHead}${listSeg}${suffix}`;
+  }
+  function sysBuildRemoveSummary(attachmentType, originalName, attId) {
+    const typeWord = SYS_ATTACH_TYPE_WORD[attachmentType] || attachmentType;
+    return `删除${typeWord}：${sysAttachDisplayName(originalName, attId)}`;
+  }
+  // 契约校验唯一入口：任一回调返回非对象或缺布尔 ok → PERSIST_CALLBACK_CONTRACT（undefined 不等于放行）。
+  // 成功约束（target/superseded 合法性）由各调用点在 ok===true 时另行校验，不在本函数里做（不同回调约束不同）。
+  async function sysRunPersistCallback(name, fn, args) {
+    const result = await fn(...args);
+    if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') {
+      throw new SysTransitionError(500, 'PERSIST_CALLBACK_CONTRACT', `回调 ${name} 返回值不符合契约（须为含布尔 ok 的对象）`);
+    }
+    return result;
+  }
+  // _pending → uploads/sys-iteration/{id}/ + INSERT + 时间线留痕，同一事务原子提交/回滚。round_no 传 null（暂存/spec）。
   //   F1（C4.5 审 CONFIRMED）：INSERT 纳入 sysBeginImmediate 事务 → 经 sysTxnMutex 与状态机事务同锁串行化，
   //     杜绝 autocommit INSERT 落进他人已开事务被一起回滚的脏态（"全模块覆盖"=DB 写全串行，非仅 15 状态机点）。
   //     文件 renameSync 在锁内（≤5 个，metadata 级，<100ms）；失败走事务 ROLLBACK 撤 INSERT + unlink 文件（无需手工 DELETE）。
-  // [C3b·H1 写侧订正·2026-09-09] opts.recheckFn（可选）——delivery/screenshot 上传原先"INSERT 独立提交
-  //   →释放锁→锁外再查一次状态/授权"，与 DELETE 端点"检查+删除同一把锁内"不对称（H1）。传入 recheckFn 时，
-  //   状态/授权重验挪到**INSERT 之后、COMMIT 之前**，与 INSERT 共享同一个 sysBeginImmediate 事务：不通过则
-  //   在本事务内 sysRollback + 删已 rename 的物理文件后返回 `{ aborted:true, reason }`，调用方按此返回定向
-  //   409，不再需要事后单独起一个 sysRollbackPersisted 事务撤销已提交的行（那个函数仍保留给 spec 分支与
-  //   本函数自身抛异常时的兜底路径用，未删除）。**不传 opts.recheckFn 时行为与改前逐字相同**（spec 分支
-  //   未改造，见调用点——其"锁外重验"张力如实保留，未在本批处理，如实登记）。
+  // [#83·S1·A1·方案 v1.3 §3/§4] 五态：idle → inTxn（BEGIN 成功）→ committed（COMMIT 返回）/ rolledBack（persist
+  //   内 ROLLBACK 成功）/ rollbackUnconfirmed（ROLLBACK 抛错·两态之后都 releaseSysTxn()）。persist 是事务唯一
+  //   所有者——**端点 catch 不再调用 sysRollback/sysRollbackPersisted**（该函数已随本批删除，见 §A5）。
+  //   opts：targetFn?（锁内·INSERT 前·冻结替换目标）/ recheckFn?（INSERT 后二次核）/ beforeTimeline?(inserted,
+  //   target)（只对冻结 target 做条件 UPDATE，返回布尔 superseded）/ timeline?:{intent:'add'|'replace'}。
+  //   缺省语义（C0 v1.1 F13）：未提供 targetFn → target=null 不校验；未提供 recheckFn → 放行；未提供
+  //   beforeTimeline → {ok:true,superseded:false}；契约校验只对**实际调用**的回调执行。
   async function sysPersistAttachments(issueId, files, attachmentType, roundNo, uploader, opts = {}) {
     const finalDir = path.join(SYS_UPLOAD_BASE, String(issueId));
     fs.mkdirSync(finalDir, { recursive: true });
     const inserted = [];
     const movedPaths = [];
+    let state = 'idle';
+    let rollbackErr = null;
     await sysBeginImmediate();
+    state = 'inTxn';
+    if (SYS_TEST_HOOKS_ENABLED) { __sysCurrentTxnTag = `attach:${issueId}:${++__sysAttachTxnSeq}`; }
     try {
-      // [C3c·M5] 持久化前可控注入点——逐文件 rename/INSERT 循环尚未开始（见钩子声明处注释）。
+      // [返工批2·L3·主会话亲核] files 为空时，A2 的 beforeTimeline 会拼出 `id NOT IN ()`（placeholders
+      // 回退成 'NULL' ⇒ `id NOT IN (NULL)` 恒 UNKNOWN），条件 UPDATE 静默 0 行降级，而不是一个明确的拒绝。
+      // 真实 HTTP 路径不可达（两端点均已在调 persist 之前 `files.length===0` → 400 NO_FILE），但
+      // `_internals` 直调可达——persist 自身也应该拒绝这个无意义输入，不依赖调用方总是先检查。
+      if (!Array.isArray(files) || files.length === 0) throw new PersistAbort('NO_FILE');
+      // [C3c·M5] 持久化前可控注入点——逐文件 rename/INSERT 循环尚未开始（见钩子声明处注释）；位置固定在
+      // BEGIN 后、targetFn 前（C0 §4(j)，既有 verify-sys-submit-amend.js 用例位置不变）。
       if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeAttachmentInsertHook) { await __testHooks.beforeAttachmentInsertHook(); }
+      let target = null;
+      if (typeof opts.targetFn === 'function') {
+        const verdict = await sysRunPersistCallback('targetFn', opts.targetFn, []);
+        if (!verdict.ok) throw new PersistAbort(verdict.reason || 'TARGET_REJECTED');
+        // [codex 594 M1] 成功时 target 只能是 null 或 {id:正整数}；undefined（含缺键）视为契约错误，防「漏冻结目标」被静默当普通上传。
+        if (verdict.target !== null) {
+          if (typeof verdict.target !== 'object' || !(Number.isInteger(verdict.target.id) && verdict.target.id > 0)) {
+            throw new SysTransitionError(500, 'PERSIST_CALLBACK_CONTRACT', 'targetFn 返回的 target 非法（须为 null 或 {id:正整数}）');
+          }
+          target = { id: verdict.target.id };
+        }
+      }
       for (const f of files) {
         const finalName = f.filename;
         const finalPath = path.join(finalDir, finalName);
@@ -15568,78 +15675,94 @@ module.exports = (deps) => {
         );
         inserted.push({ id: r.lastID, attachment_type: attachmentType, round_no: roundNo, file_name: relPath, original_name: f.originalname, file_size: fileSize, mime_type: mimeType });
       }
+      // [#83·S1·F3] rename/INSERT 循环已结束、recheckFn 之前——证明"二次核有效"需要 INSERT 已发生这一前提
+      // （区别于 beforeAttachmentInsertHook 在 INSERT 前撤资格，那条路径由 targetFn 提前拒绝）。
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.afterAttachmentInsertHook) { await __testHooks.afterAttachmentInsertHook(); }
       if (typeof opts.recheckFn === 'function') {
-        const verdict = await opts.recheckFn();
-        if (!verdict || !verdict.ok) {
-          await sysRollback();
-          for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (_) {} }
-          return { aborted: true, reason: (verdict && verdict.reason) || 'RECHECK_FAILED', inserted: [] };
+        const verdict = await sysRunPersistCallback('recheckFn', opts.recheckFn, []);
+        if (!verdict.ok) throw new PersistAbort(verdict.reason || 'RECHECK_FAILED');
+      }
+      const insertedIds = inserted.map(a => a.id);
+      let bt;
+      if (typeof opts.beforeTimeline === 'function') {
+        bt = await sysRunPersistCallback('beforeTimeline', opts.beforeTimeline, [inserted, target]);
+        // [D-1·主会话亲核] 契约校验（缺 superseded/成功约束）只在 ok===true 时检查；ok===false 是业务拒绝，
+        // 须先于契约校验分流走 PersistAbort（方案 §3：ok:false → 回滚 → 补偿 → {aborted:true, reason}）。
+        if (!bt.ok) throw new PersistAbort(bt.reason || 'BEFORE_TIMELINE_REJECTED');
+        if (typeof bt.superseded !== 'boolean') {
+          throw new SysTransitionError(500, 'PERSIST_CALLBACK_CONTRACT', 'beforeTimeline 返回缺布尔 superseded');
+        }
+        if (bt.superseded === true) {
+          const intentChk = (opts.timeline && opts.timeline.intent) || 'add';
+          if (intentChk !== 'replace' || !target || !(target.id > 0) || insertedIds.includes(target.id)) {
+            throw new SysTransitionError(500, 'PERSIST_CALLBACK_CONTRACT', 'beforeTimeline superseded=true 违反契约（须 intent=replace ∧ target 非空 ∧ target 不在本批 inserted 内）');
+          }
+        }
+      } else {
+        bt = { ok: true, superseded: false };
+      }
+      const intent = (opts.timeline && opts.timeline.intent) || 'add';
+      const actionCode = (intent === 'replace' && bt.superseded === true) ? 'attachment_replaced' : 'attachment_added';
+      const supersedeId = (actionCode === 'attachment_replaced') ? target.id : null;
+      const summary = sysBuildAttachSummary(actionCode, attachmentType, inserted, supersedeId);
+      const refId = inserted.length ? inserted[0].id : null;
+      const payload = {
+        attachments: inserted.map(a => ({ id: a.id, original_name: (a.original_name === undefined ? null : a.original_name), attachment_type: a.attachment_type })),   // undefined→null：JSON.stringify 不得省略必填键（codex 594 risk）
+        count: inserted.length,
+      };
+      if (actionCode === 'attachment_replaced') payload.superseded_id = supersedeId;
+      // 两条字面量 INSERT 分支（Opus 预筛先例，#72 :10784 一带注释）——静态解析器对 `?` 绑定的运行时表达式
+      // 会 throw，白名单一旦存在该站点的码怎么改守卫都看不见；两分支各自独立 INSERT 语句，码可被字面量提取。
+      if (actionCode === 'attachment_replaced') {
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'attachment_replaced', ?, ?, ?, ?, ?)`,
+          [issueId, summary, refId, roundNo, uploader.id, uploader.name, JSON.stringify(payload)]
+        );
+      } else {
+        await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'attachment_added', ?, ?, ?, ?, ?)`,
+          [issueId, summary, refId, roundNo, uploader.id, uploader.name, JSON.stringify(payload)]
+        );
+      }
+      await dbRunAsync('COMMIT');
+      state = 'committed';   // 置态先于释放锁
+      releaseSysTxn();
+      return { aborted: false, reason: undefined, inserted, superseded: bt.superseded === true, actionCode };
+    } catch (e) {
+      if (state === 'inTxn') {
+        // [返工批2·M7·主会话亲核] 已知的 fail-closed 过度报警：某些真实 COMMIT 失败（如 SQLITE_FULL/
+        // IOERR）会让 sqlite 隐式回滚事务，随后这里的 ROLLBACK 会以「cannot rollback - no transaction is
+        // active」类错误抛出，落进 rollbackUnconfirmed（写平台级故障日志 + 500 TXN_ROLLBACK_UNCONFIRMED +
+        // 不 unlink），即便 DB 侧实际已是干净状态——这会多留一份孤儿文件、多一条故障日志噪声。方向刻意
+        // 保持 fail-closed（宁可报平台故障也不谎称"已确认回滚"），**不加"识别该错误串→当作已确认回滚"
+        // 的智能放行分支**（memory feedback_guard_hard_gate_over_smart_allow：放行逻辑每多一条多一个攻击
+        // 面，且此处无法可靠区分"真无事务"与"其它原因导致 ROLLBACK 失败"）。孤儿文件由管理员核查处置，
+        // 与 #85（sysRollback 归属校验/连接隔离）一并登记，本方案不在此发明连接状态探测机制。
+        try { await dbRunAsync('ROLLBACK'); state = 'rolledBack'; }
+        catch (rbErr) { state = 'rollbackUnconfirmed'; rollbackErr = rbErr; }
+        releaseSysTxn();   // 置态之后才释放锁
+      }
+      if (state === 'rollbackUnconfirmed') {
+        // [codex 594 L1] 原异常与回滚异常分别记录（区分「无活动事务」vs 回滚执行失败），不按错误文本放行。
+        try { logger.error(`[系统迭代] 附件事务回滚未确认：issue=${issueId} moved=${JSON.stringify(movedPaths)} cause=${(e && ((e.code ? e.code + ' ' : '') + e.message)) || e} rollbackErr=${(rollbackErr && (rollbackErr.code ? rollbackErr.code + ' ' : '') + rollbackErr.message) || rollbackErr}`); } catch (_) { /* 日志自身异常不改变状态 */ }
+        throw new SysTransitionError(500, 'TXN_ROLLBACK_UNCONFIRMED', '附件写入回滚未确认，请联系管理员核查');
+      }
+      if (state === 'rolledBack') {
+        for (const p of movedPaths) {
+          try { fs.unlinkSync(p); }
+          catch (unlinkErr) { try { logger.warn(`[系统迭代] 附件回滚补偿 unlink 失败: issue=${issueId} path=${p} err=${(unlinkErr && unlinkErr.message) || unlinkErr}`); } catch (_) { /* ignore */ } }
         }
       }
-      await sysCommit();
-      return opts.recheckFn ? { aborted: false, inserted } : inserted;
-    } catch (e) {
-      try { await sysRollback(); } catch (_) { /* 事务 ROLLBACK 撤本次 INSERT */ }
-      for (const p of movedPaths) { try { fs.unlinkSync(p); } catch (_) {} }
-      throw e;
+      if (e instanceof PersistAbort) return { aborted: true, reason: e.reason, inserted: [], superseded: false };
+      throw e;   // DB/回调异常/契约错误 → 端点 catch 映射
     }
   }
-  // 旁路校验失败时回滚本次已落库附件（DELETE 行 + 删文件，走 ALLOWED_FILE_DIRS 白名单）。
-  //   F1（C4.5 审）：DELETE 纳入 mutex 事务（与 persist/状态机同锁串行化）。
-  //   F1 二轮（附件段快审 CONFIRMED）：**全 best-effort，绝不向外抛**——sysBeginImmediate 在 try 内、acquire 超时(SYS_BUSY)
-  //     与 DELETE 失败都吞掉。否则上传 outer catch 在 F2 guard 之前 await 本函数，抛错会逃出 catch → 请求挂死无响应（raw async handler 无错误包装）。
-  //   **物理删文件仅对「DB 确删的行（changes=1 且事务已提交）」**——否则事务回滚 / 行被并发 superseded 时，
-  //     行仍 active 却文件被删 → 下载 404 不一致。
-  //   [codex 106 号 LOW 回填] `status = 'active'` 守卫（防并发 supersede 窗口误删）仍是活防线，保留；旧
-  //   `round_no IS NULL` 子句已随 round_no 绑定机制退场失去意义（本函数只处理 sysPersistAttachments 刚落库的
-  //   行，C3 起该写路径 round_no 恒 NULL——条件恒真、从未真正过滤任何行，纯历史遗留死代码），本次简化删除，
-  //   不改变任何可观测行为（del where 少一个恒真子句，结果集不变）。
-  //   [混合对抗审 B 半修·106 号 LOW 后续] 原实现内部吞掉一切失败、调用方永远拿不到"是否真撤销"的信号——
-  //   三处 TOCTOU recheck 409 分支曾无条件回复"上传已撤销"，即便实际撤销失败（附件仍 active）也这么说，
-  //   等于对用户/日志撒谎。改为**返回 boolean**：全部行确认已从 active 撤下（本次删除成功，或核实时发现
-  //   本就不在 active——例如被更早一次调用已处理）→ true；仍有任一行核实后仍 active → false（绝不向外抛
-  //   这条铁律不变，调用方据 false 改说诚实文案 + 记错误日志，见三处调用点）。**重试一次**（获锁超时或
-  //   DELETE 事务失败时，整批重跑一遍 attemptOnce，仍不行才认输）——不做 persist 整体事务化（P3 backlog，
-  //   F1 基础设施结构不动，本次只加"重试 1 次 + 如实回报"两层轻量兜底）。
-  async function sysRollbackPersisted(persisted) {
-    const list = (persisted || []);
-    if (list.length === 0) return true;
-    const attemptOnce = async () => {
-      try {
-        await sysBeginImmediate();
-        try {
-          const deletedIds = new Set();
-          for (const a of list) {
-            const r = await dbRunAsync("DELETE FROM sys_issue_attachments WHERE id = ? AND status = 'active'", [a.id]);
-            if (r && r.changes === 1) deletedIds.add(a.id);
-          }
-          await sysCommit();
-          // 仅删「本次确已从 DB 删除的行」的文件，杜绝 active 行指向缺失文件（未匹配的 id 留给下方逐行核实兜底）
-          for (const a of list) { if (deletedIds.has(a.id)) { try { safeDeleteFileSync(a.file_name, UPLOAD_DIR); } catch (_) {} } }
-          return true;
-        } catch (e) {
-          try { await sysRollback(); } catch (__) { /* ignore */ }
-          logger.warn('[系统迭代] sysRollbackPersisted DELETE 失败: ' + (e && e.message));
-          return false;
-        }
-      } catch (acqErr) {
-        logger.warn('[系统迭代] sysRollbackPersisted 获锁失败: ' + (acqErr && acqErr.message));
-        return false;
-      }
-    };
-    let committed = await attemptOnce();
-    if (!committed) {
-      logger.warn('[系统迭代] sysRollbackPersisted 首次尝试未提交，重试一次');
-      committed = await attemptOnce();
-    }
-    // 最终真值来源＝逐行核实（不只信 attemptOnce 内部粗粒度布尔）：两次 attemptOnce 之间可能出现"第一次已
-    // 部分删除成功、第二次因该行不再匹配 WHERE（已不是 active）而被计为未命中"这类假阴性——直接查库判"是否
-    // 还 active"才是"全部行确认删除（或本就不存在）"这条成功语义的准确判据，且天然幂等（重复调用不误报）。
-    for (const a of list) {
-      const stillActive = await dbGetAsync(`SELECT 1 FROM sys_issue_attachments WHERE id = ? AND status = 'active'`, [a.id]);
-      if (stillActive) return false;
-    }
-    return true;
+  // [codex 594 M2] 响应头已发但未结束（钩子/序列化在 write 后抛错）：不再发错误响应，但必须收尾——否则客户端持续等待。
+  //   已 end/已 destroy 的响应不动（幂等）；destroy 自身异常吞掉，不改变已提交的数据结果。
+  function sysFinishBrokenResponse(res) {
+    try { if (res && !res.writableEnded && !res.destroyed && typeof res.destroy === 'function') res.destroy(); } catch (_) { /* ignore */ }
   }
   // 清本次 _pending 残留（handler 校验失败/未移动时调；10-M2 命名 cleanupOrphanFiles，仅指 multer 临时文件，非 DB 暂存态）
   function sysCleanupOrphanFiles(req, issueId) {
@@ -15666,7 +15789,9 @@ module.exports = (deps) => {
   //   delivery/screenshot=(在册∨协调人)∧状态∈SYS_DEV∪SYS_VERIFY）──────────────────────────────────────
   router.post('/sys-issues/:id/attachments', authenticateToken, requireSysSchemaReady, sysIdGuard, sysUploadMw('files', 5), async (req, res) => {
     const id = parsePositiveId(req.params.id);
-    let persisted = [];   // 提升到 handler 作用域，catch 才能回滚（对齐 corrections M-1）
+    let persisted = [];   // [返工批2·L1] 提升到 handler 作用域——A1-A3 后端点 catch 不再回滚（persist 是事务
+    // 唯一所有者），本变量现只供 logger.info 摘要与响应序列化两处 spec/delivery 分支复用（原「catch 才能
+    // 回滚」的注释已失真，见 feedback_delete_old_clause_when_adding_new / feedback_comment_is_review_input）。
     try {
       const rawType = (req.body && typeof req.body.attachment_type === 'string') ? req.body.attachment_type.trim() : '';
       const attachmentType = rawType || 'delivery';
@@ -15718,62 +15843,57 @@ module.exports = (deps) => {
         if (SF.isInFamily(row.type, row.status, 'TERMINAL')) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '终态单不可上传需求材料', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
         if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
         const supersedeId = parsePositiveId((req.body || {}).supersede_id);   // 可选替换（10-M1 supersede 留痕）
-        persisted = await sysPersistAttachments(id, files, 'spec', null, actor);
-        // TOCTOU 二次守卫：persist 后重读状态仍∉SYS_TERMINAL（校验→INSERT 间被流转进终态则回滚；type 不可变用首读值）
-        const recheck = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
-        if (!recheck || SF.isInFamily(row.type, recheck.status, 'TERMINAL')) {
-          const failedIds = persisted.map(a => a.id);
-          const rolledBack = await sysRollbackPersisted(persisted); persisted = [];
-          if (!rolledBack) {
-            logger.error(`[系统迭代] 附件上传撤销未确认（spec 锁外终态重验命中）：issue=${id}, attachment_ids=${JSON.stringify(failedIds)}`);
-            return res.status(409).json({ error: '迭代单状态已变更，上传撤销未确认，请联系管理员核查附件', code: 'INVALID_STATE_FOR_ATTACHMENT' });
+        // [#83·S1·A2·方案 v1.3 §4] 锁内资格函数（targetFn/recheckFn 复用同一份，不含替换目标查询）：
+        //   !freshRow → ISSUE_MISSING；终态 → TERMINAL；isBoundLiaisonEligibleOrAdmin 为假 → AUTH_CHANGED。
+        const specEligibilityCheck = async () => {
+          const freshRow = await dbGetAsync('SELECT id, type, status, intake_liaison_id FROM sys_issues WHERE id = ?', [id]);
+          if (!freshRow) return { ok: false, reason: 'ISSUE_MISSING' };
+          if (SF.isInFamily(freshRow.type, freshRow.status, 'TERMINAL')) return { ok: false, reason: 'TERMINAL' };
+          if (!(await isBoundLiaisonEligibleOrAdmin(actor, freshRow))) return { ok: false, reason: 'AUTH_CHANGED' };
+          return { ok: true };
+        };
+        const targetFn = async () => {
+          const verdict = await specEligibilityCheck();
+          if (!verdict.ok) return { ok: false, reason: verdict.reason };
+          if (!supersedeId) return { ok: true, target: null };
+          // R2-1：本批新附件尚未 INSERT，此刻查询天然不会命中本批新 id（不存在于表中）——降级而非拒绝。
+          const tgt = await dbGetAsync(
+            `SELECT id FROM sys_issue_attachments WHERE id = ? AND issue_id = ? AND attachment_type = 'spec' AND status = 'active'`,
+            [supersedeId, id]
+          );
+          return { ok: true, target: tgt ? { id: tgt.id } : null };
+        };
+        const recheckFn = async () => {
+          const verdict = await specEligibilityCheck();
+          return { ok: verdict.ok, reason: verdict.reason };
+        };
+        // 只对冻结 target 做条件 UPDATE，且显式排除本批 inserted ids（R2-1 belt-and-suspenders）。
+        const beforeTimeline = async (insertedRows, target) => {
+          if (!target) return { ok: true, superseded: false };
+          if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeSupersedeUpdateHook) { await __testHooks.beforeSupersedeUpdateHook(); }
+          const insertedIds = insertedRows.map(a => a.id);
+          const placeholders = insertedIds.length ? insertedIds.map(() => '?').join(',') : 'NULL';
+          const sup = await dbRunAsync(
+            `UPDATE sys_issue_attachments SET status = 'superseded'
+               WHERE id = ? AND status = 'active' AND id NOT IN (${placeholders})`,
+            [target.id, ...insertedIds]
+          );
+          return { ok: true, superseded: !!(sup && sup.changes === 1) };
+        };
+        const persistResult = await sysPersistAttachments(id, files, 'spec', null, actor, {
+          targetFn, recheckFn, beforeTimeline, timeline: { intent: supersedeId ? 'replace' : 'add' },
+        });
+        if (persistResult.aborted) {
+          if (persistResult.reason === 'AUTH_CHANGED') {
+            return res.status(409).json({ error: '权限已变更，请刷新', code: 'AUTH_CHANGED_FOR_ATTACHMENT' });
           }
+          // TERMINAL / ISSUE_MISSING / 未知 reason 一律 409 INVALID_STATE_FOR_ATTACHMENT（方案 v1.3 §4 A2）。
           return res.status(409).json({ error: '迭代单状态已变更，上传已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
         }
-        // 替换：旧 spec 标 superseded（12-M1 二次 WHERE：id + issue_id + attachment_type='spec' + active）+ note 留痕。
-        //   A4：supersede UPDATE + note 包进事务——半成品（UPDATE 成功 note 失败）整体回滚 + 走外层 catch 删新 spec（替换整体失败，旧件保持 active，无"新旧都没了"窗口）。
-        //   软信号：supersedeId 命中 → superseded=true；不命中（非本单/非 spec/非 active）→ superseded=false（新 spec 仍保留，前端据此提示"替换目标无效"）。
-        let superseded = false;
-        if (supersedeId) {
-          await sysBeginImmediate();
-          try {
-            // [对抗审 A 回填·与 106 号 DELETE 锁内重验同构] 锁外 recheck（上方 L4166-4171）→ 本事务拿锁之间
-            //   仍有终态转移窗口（publish/void 持锁提交）——supersede 让旧 spec 退出 active 是一次附件写，
-            //   同受 §5.4 终态门约束，锁内须重读 status 以真值收口。命中终态：本事务回滚 + 撤销刚 persist 的
-            //   新 spec（与锁外 recheck 失败同语义同码），return 在 try 内——事务已 sysRollback()，不会再走到
-            //   外层 catch 的兜底回滚（sysRollback 已释放锁，外层 catch 不会二次拿锁重复回滚，对照 106 号范式）。
-            const supGate = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
-            if (!supGate || SF.isInFamily(row.type, supGate.status, 'TERMINAL')) {
-              await sysRollback();
-              const failedIds = persisted.map(a => a.id);
-              const rolledBack = await sysRollbackPersisted(persisted); persisted = [];
-              if (!rolledBack) {
-                logger.error(`[系统迭代] 附件上传撤销未确认（supersede 锁内终态重验命中）：issue=${id}, attachment_ids=${JSON.stringify(failedIds)}`);
-                return res.status(409).json({ error: '迭代单状态已变更，上传撤销未确认，请联系管理员核查附件', code: 'INVALID_STATE_FOR_ATTACHMENT' });
-              }
-              return res.status(409).json({ error: '迭代单状态已变更，上传已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
-            }
-            const sup = await dbRunAsync(
-              `UPDATE sys_issue_attachments SET status = 'superseded'
-                 WHERE id = ? AND issue_id = ? AND attachment_type = 'spec' AND status = 'active'`,
-              [supersedeId, id]
-            );
-            if (sup && sup.changes === 1) {
-              await dbRunAsync(
-                `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, ref_id, operator_id, operator_name)
-                 VALUES (?, 'note', ?, ?, ?, ?)`,
-                [id, `替换需求材料（旧附件 #${supersedeId} 留痕 superseded）`, (persisted[0] ? persisted[0].id : null), actor.id, actor.name]
-              );
-              superseded = true;
-            }
-            await sysCommit();
-          } catch (supErr) {
-            try { await sysRollback(); } catch (_) { /* ignore */ }
-            throw supErr;
-          }
-        }
-        logger.info(`用户 ${req.user.username} 为迭代单 #${id} 上传需求材料 ${persisted.length} 个${supersedeId ? `（替换 #${supersedeId}=${superseded}）` : ''}`);
-        return res.json({ ok: true, id, attachment_type: 'spec', attachments: persisted, superseded });
+        persisted = persistResult.inserted;
+        logger.info(`用户 ${req.user.username} 为迭代单 #${id} 上传需求材料 ${persisted.length} 个${supersedeId ? `（替换 #${supersedeId}=${persistResult.superseded}）` : ''}`);
+        if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeAttachmentResponseHook) { await __testHooks.beforeAttachmentResponseHook(res); }
+        return res.json({ ok: true, id, attachment_type: 'spec', attachments: persisted, superseded: persistResult.superseded });
       }
 
       // delivery / screenshot（开发交付物，C5·§5.4）：(在册∨协调人) ∧ 状态∈(SYS_DEV∪SYS_VERIFY)。
@@ -15792,30 +15912,36 @@ module.exports = (deps) => {
       const inDevOrVerify = SF.isInFamily(row.type, row.status, 'DEV') || SF.isInFamily(row.type, row.status, 'VERIFY') || SF.isInFamily(row.type, row.status, 'LIAISON_TEST');
       if (!inDevOrVerify) { sysCleanupOrphanFiles(req, id); return res.status(409).json({ error: '仅开发进行态（开发中/处理中/待验证/待对接测试）可上传交付附件', code: 'INVALID_STATE_FOR_ATTACHMENT' }); }
       if (files.length === 0) { sysCleanupOrphanFiles(req, id); return res.status(400).json({ error: '未收到上传文件（field 名应为 files）', code: 'NO_FILE' }); }
-      // [C3b·H1 写侧订正] TOCTOU 二次守卫挪进 sysPersistAttachments 的同一把锁/同一事务内（recheckFn），
-      //   与 INSERT 原子——不再是"独立事务提交→释放锁→锁外再查一次→查不过再起一个事务撤销"这种存在
-      //   "撤销本身也可能失败"这一失败态的三段式；重验不过直接在同一事务内回滚（DB 与已落盘文件一起
-      //   撤销），结构上不再可能出现"已提交但状态早已不对"的窗口，故下方也不再需要 sysRollbackPersisted
-      //   兜底 + "撤销未确认"分支（旧分支依赖的失败态已被消除，非简化掉了某种仍可能发生的情形）。
+      // [C3b·H1 写侧订正][#83·S1·A3] TOCTOU 二次守卫在 sysPersistAttachments 的同一把锁/同一事务内
+      // （recheckFn，INSERT 之后、COMMIT 之前）与 INSERT 原子；A3 补 !freshRow 先拒（ISSUE_MISSING）。
       const recheckFn = async () => {
-        const recheck = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
-        const recheckStatusOk = !!recheck && (SF.isInFamily(row.type, recheck.status, 'DEV') || SF.isInFamily(row.type, recheck.status, 'VERIFY') || SF.isInFamily(row.type, recheck.status, 'LIAISON_TEST'));
+        const freshRow = await dbGetAsync('SELECT status FROM sys_issues WHERE id = ?', [id]);
+        if (!freshRow) return { ok: false, reason: 'ISSUE_MISSING' };
+        const recheckStatusOk = SF.isInFamily(row.type, freshRow.status, 'DEV') || SF.isInFamily(row.type, freshRow.status, 'VERIFY') || SF.isInFamily(row.type, freshRow.status, 'LIAISON_TEST');
         const recheckAuthOk = isCoordinator || (await sysAttachmentRosterState(id, actor.id)).active;
-        return { ok: recheckStatusOk && recheckAuthOk };
+        return { ok: !!(recheckStatusOk && recheckAuthOk), reason: !recheckStatusOk ? 'INVALID_STATE' : (!recheckAuthOk ? 'NOT_AUTHORIZED' : undefined) };
       };
-      const persistResult = await sysPersistAttachments(id, files, attachmentType, null, actor, { recheckFn });
+      const persistResult = await sysPersistAttachments(id, files, attachmentType, null, actor, { recheckFn, timeline: { intent: 'add' } });
       if (persistResult.aborted) {
         logger.warn(`[系统迭代] 附件上传已撤销（delivery/screenshot 事务内重验未过，DB 与已落盘文件同事务原子回滚）：issue=${id}`);
         return res.status(409).json({ error: '迭代单状态已变更，上传已撤销，请刷新重试', code: 'INVALID_STATE_FOR_ATTACHMENT' });
       }
       persisted = persistResult.inserted;
       logger.info(`用户 ${req.user.username} 为迭代单 #${id} 上传${attachmentType === 'screenshot' ? '截图' : '交付物'} ${persisted.length} 个（round_no 遗产①：恒 NULL，无待绑语义，C5）`);
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.beforeAttachmentResponseHook) { await __testHooks.beforeAttachmentResponseHook(res); }
       return res.json({ ok: true, id, attachment_type: attachmentType, attachments: persisted });
     } catch (e) {
-      await sysRollbackPersisted(persisted);   // 异常分支回滚本次已落库附件防 orphan
+      // [#83·S1·A1/A2/A3] persist 是事务唯一所有者，端点 catch 不再调用 sysRollback/sysRollbackPersisted
+      // （该函数已随本批删除）；只做清理 + 错误映射。res.headersSent 为真（COMMIT 后 res.json 抛错的场景）
+      // 只记日志不再尝试发送（B2b）。
       sysCleanupOrphanFiles(req, id);
-      if (e instanceof SysTransitionError) return sendSysTransitionError(res, e);   // F2：SYS_BUSY 等保 503
-      logger.error('[系统迭代] 附件上传失败:', e && e.message);
+      if (e instanceof SysTransitionError) {
+        if (res.headersSent) { try { logger.error('[系统迭代] 附件上传失败（响应已发送，仅记录）:', e && e.message); } catch (_) { /* ignore */ } sysFinishBrokenResponse(res); return; }
+        return sendSysTransitionError(res, e);   // F2：SYS_BUSY / TXN_ROLLBACK_UNCONFIRMED 等按其码
+      }
+      // [主会话 S1 收口] 普通 Error 分支同样区分 headersSent（B2b 20b 判别力：两类异常都有「响应已发送，仅记录」措辞）。
+      if (res.headersSent) { try { logger.error('[系统迭代] 附件上传失败（响应已发送，仅记录）:', e && e.message); } catch (_) { /* ignore */ } sysFinishBrokenResponse(res); return; }
+      try { logger.error('[系统迭代] 附件上传失败:', e && e.message); } catch (_) { /* 日志自身异常不改变响应 */ }
       return res.status(500).json({ error: (e && e.message) || '附件上传失败' });
     } finally {
       // A6：persist 用 renameSync 把文件移出 _pending/{id} 后该目录空了——任何分支（成功/TOCTOU-409）都清空目录，防长跑堆积
@@ -15892,8 +16018,9 @@ module.exports = (deps) => {
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       // C5（§5.4 前置）：附件写先过 assertKnownIssueStatus
       assertKnownIssueStatus(row.type, row.status);
+      // [#83·S1·A4] SELECT 补 original_name/uploaded_by_name 两列，供删除留痕 summary/payload 用。
       const att = await dbGetAsync(
-        `SELECT id, attachment_type, round_no, file_name, uploaded_by FROM sys_issue_attachments WHERE id = ? AND issue_id = ? AND status = 'active'`,
+        `SELECT id, attachment_type, round_no, file_name, original_name, uploaded_by, uploaded_by_name FROM sys_issue_attachments WHERE id = ? AND issue_id = ? AND status = 'active'`,
         [attId, id]
       );
       if (!att) return res.status(404).json({ error: '附件不存在或已失效', code: 'SYS_ATTACHMENT_NOT_FOUND' });
@@ -15968,10 +16095,13 @@ module.exports = (deps) => {
           [attId, id, att.attachment_type]
         );
         if (!del || del.changes !== 1) { await sysRollback(); return res.status(409).json({ error: '附件状态已变更，请刷新重试', code: 'SYS_ATTACHMENT_NOT_FOUND' }); }
+        // [#83·S1·A4] 原位补 action_code='attachment_removed' + payload_json（原 INSERT 站点原地加列，非新增站点）。
+        const removeSummary = sysBuildRemoveSummary(att.attachment_type, att.original_name, attId);
+        const removePayload = { attachment: { id: att.id, original_name: (att.original_name === undefined ? null : att.original_name), attachment_type: att.attachment_type, uploaded_by_name: (att.uploaded_by_name === undefined ? null : att.uploaded_by_name) } };
         await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, ref_id, operator_id, operator_name)
-           VALUES (?, 'note', ?, ?, ?, ?)`,
-          [id, `删除${att.attachment_type === 'spec' ? '需求材料' : '交付附件'} #${attId}`, attId, actor.id, actor.name]
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'attachment_removed', ?, ?, ?, ?)`,
+          [id, removeSummary, attId, actor.id, actor.name, JSON.stringify(removePayload)]
         );
         await sysCommit();
       } catch (txErr) {
@@ -21831,8 +21961,11 @@ module.exports = (deps) => {
     SYS_ETA_STATS_SAMPLE_THRESHOLD,
     SYS_ETA_STATS_OVERDUE_EXAMPLE_LIMIT,
     // C3b：附件基础设施（verify-sys-attachments require 真实逻辑）
+    // [#83·S1·A5] sysRollbackPersisted 已删除（零调用后随本批删除：persist 是事务唯一所有者，端点 catch
+    // 不再需要它兜底；全仓 grep 已确认无残留引用）。
     sysPersistAttachments,
-    sysRollbackPersisted,
+    // [#83·S1 返工批1·补做1] summary 纯函数导出——供 verify 直调构造精确码点边界（RC-L2 防复刻漂移）。
+    sysBuildAttachSummary,
     sysCleanupOrphanFiles,
     SYS_UPLOAD_BASE,
     SYS_PENDING_BASE,

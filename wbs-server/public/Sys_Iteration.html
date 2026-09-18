@@ -414,6 +414,14 @@
         .si-tl-withdraw-detail summary { cursor: pointer; color: #374151; }
         .si-tl-withdraw-detail summary:hover { color: #1e293b; }
         .si-tl-withdraw-detail pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
+        /* [#83·S2·B2·时间线附件留痕_方案_20260917_v1.3 §3] 附件增删三码——一律展开区（added/replaced 全名单、
+           removed 四字段），专名 class（不复用上方三个既有 details 命名，语义各不相同），外观三条规则复制自
+           .si-tl-withdraw-detail；内容是 <ul><li> 列表非 <pre>，另加两条列表专属规则。 */
+        .si-tl-attach-list { display: inline; }
+        .si-tl-attach-list summary { cursor: pointer; color: #374151; }
+        .si-tl-attach-list summary:hover { color: #1e293b; }
+        .si-tl-attach-list ul { white-space: normal; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px 8px 8px 22px; margin: 4px 0 0; font-size: 11px; }
+        .si-tl-attach-list li { margin: 2px 0; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
         /* [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件「查看改动」展开区：头行「变更对象 · 变更字段」+ 逐字段两块「修改前 / 修改后」包裹。
            复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源，不 bump ?v=。 */
@@ -3958,9 +3966,14 @@
         //   改调同一纯函数，与行的 class/display 判据同源。不改的后果：只有改期事件的单会渲染出一个
         //   **勾了无反应的死开关**（此处仍判 true，而该行已不带 si-tl-release-scope class）。
         const hasReleaseScopeTl = tlEvents.some(siTlIsHidableScope);
+        // [#83·S2·B3] 勾选文案由原仅提批次编排、扩为下方「隐藏批次编排与附件增删记录」——SI_TL_HIDABLE_CODES
+        //   Map 化后同一开关现同时管 8 个批次编排码 + 3 个附件码，文案须如实反映范围扩大（最小改：只改
+        //   这一处字面量，判据/开关行为本身不变）。[S2 续做] 本注释刻意不逐字写出改前文案——
+        //   verify-sys-release-panel-static.js 的旧文案残留检查按字面量正则扫全文（含注释），逐字复述
+        //   反而会把自己变成一条"残留"误报。
         const tlFilterHtml = hasReleaseScopeTl
             ? `<label style="font-weight:normal;font-size:11px;color:#6b7280;margin-left:12px;cursor:pointer">
-                <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏批次编排记录</label>`
+                <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏批次编排与附件增删记录</label>`
             : '';
         const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [], iss && iss.title)}</div>`;
 
@@ -4282,9 +4295,12 @@
         //   R-C5 补齐前端三处登记）——独立徽章而非落回通用「备注」：summary 已是完整可读文案"上线单信息
         //   修改（标题、版本号）"这类，但仍给专属标签便于时间线里快速扫到"这单被改过基本信息"，同
         //   completion_overrun_reason 等既有一带模式。⚠️ **不注册进 SI_TL_RELEASE_SCOPE_LABEL**：
-        //   标签表只管标签、不再决定可隐藏性（可隐藏性由 SI_TL_HIDABLE_SCOPE_CODES 白名单独立决定），
+        //   标签表只管标签、不再决定可隐藏性（可隐藏性由 SI_TL_HIDABLE_CODES 白名单独立决定），
         //   本码继续用这里登记的独立徽章即可，无需进该表；D9「信息修改始终可见」由
-        //   「note 型 + 未登记白名单」双重保证。（历史沿革集中见 SI_TL_HIDABLE_SCOPE_CODES 定义处。）
+        //   **「未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏」**保证。（历史沿革集中见 SI_TL_HIDABLE_CODES
+        //   定义处。）⚠️ [#83·S2·B3 订正] 原注释写「note 型 + 未登记白名单」双重保证——#83 起白名单本身
+        //   已升级为跨类型 Map（含 note 型成员，见附件三码），「note 型」不再天然免于可隐藏，唯一保证是
+        //   「未登记」（has() 先短路 false），特此更正措辞、不留旧结论字面。
         release_info_edit: '上线单信息修改',
         // [上线单管理体验优化 R-C7·方案 §3 O4] 删除上线单——独立徽章而非落回通用「备注」：与
         //   release_info_edit 同一带模式（成员单被删批次波及本身就是需要一眼识别的高关注度事件），
@@ -4292,7 +4308,8 @@
         //   index.js DELETE /sys-releases/:id 步骤⑤），标签统一用中性描述"上线单已删除"。⚠️ 同 D9
         //   同 release_info_edit：用这里的独立徽章，无需进 SCOPE_LABEL 表（方案未明文要求 O4 走 D9，
         //   但 O4 删除是比 O3 编辑更高关注度的事件，理应同等甚至更强地"始终可见"）；不被隐藏由
-        //   「note 型 + 未登记可隐藏白名单」保证，与标签表无关。
+        //   **「未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏」**保证（同上条订正，非「note 型」本身免隐藏），
+        //   与标签表无关。
         release_deleted: '上线单已删除',
         // [开发撤回提交 方案 v1.2 §5.10] 开发撤回提交——note 型独立徽章（同 assign_overdue_eta/
         //   fast_release_* 等既有"自定义端点直写 timeline"范式），需登记三处：本表 + SI_TL_CLS +
@@ -4303,14 +4320,22 @@
         //   SI_TL_NOTE_OWN_LABEL_CODES + scripts/verify-sys-timeline-label-coverage.js 的
         //   NOTE_OWN_LABEL_ACTION_CODES，四处同改）。⚠️ C0 ⑤-a 实证：**刻意不注册进**
         //   SI_TL_RELEASE_SCOPE_LABEL/_CLS——本码用这里的独立徽章即可；D2「豁免的是输入闸不是事实」
-        //   要求它始终可见，这由「note 型 + 未登记可隐藏白名单」保证，与标签表无关。同
-        //   release_info_edit/release_deleted 两先例处置一致。
+        //   要求它始终可见，这由**「未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏」**保证（[#83·S2·B3 订正]
+        //   原「note 型 + 未登记可隐藏白名单」双重保证已不成立——白名单升级为跨类型 Map 后 note 型
+        //   本身不再天然免隐藏，唯一保证是未登记本身），与标签表无关。同 release_info_edit/
+        //   release_deleted 两先例处置一致。
         release_overdue_reason: '上线逾期',
         // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] 开发逐人完成——note 型独立徽章
         //   （同 dev_withdraw 一带模式），两码分开（D10：`dev_submit_done`=有代码提交、`dev_no_code`=无
         //   代码交付），需登记三处：本表 + SI_TL_CLS + SI_TL_NOTE_OWN_LABEL_CODES（下方两处同步，改一处
         //   必须同改另两处）+ scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES。
-        dev_submit_done: '开发完成·代码已提交', dev_no_code: '开发完成·无代码交付'
+        dev_submit_done: '开发完成·代码已提交', dev_no_code: '开发完成·无代码交付',
+        // [#83·S2·B1·时间线附件留痕_方案_20260917_v1.3 §3 契约冻结/§4 B1] 附件增删三码——note 型独立徽章
+        //   （同 dev_submit_done/dev_withdraw 一带模式），需登记五处（C0 报告 §3(c) 实证「三码三表」实为
+        //   四张登记面 + 可隐藏 Map = 五处）：本表 + SI_TL_CLS + SI_TL_NOTE_OWN_LABEL_CODES +
+        //   SI_TL_HIDABLE_CODES（下方三处同步）+ 专属渲染分支（dev_withdraw 分支之后）。徽章短词——
+        //   summary 已含类型词与文件名，标签只给动作本身。
+        attachment_added: '上传附件', attachment_replaced: '替换附件', attachment_removed: '删除附件'
     };
     const SI_TL_CLS = {
         created: 'si-tl-amber', derive: 'si-tl-amber',
@@ -4394,7 +4419,14 @@
         // [长任务B·S2·方案 D10] 开发逐人完成两码——归 **si-tl-teal**（用户 2026-09-17 在示例页 V1-V9 九个候选里
         // 选 V1 teal 实底：与既有 amber/gray/rose/green/red/blue/indigo 全不撞，形态与页内其他实底徽章一致；
         // D10 要求不与绿色「发布留痕」/玫红「变更留痕」撞色）。两码同色族，靠标签文字区分模式。
-        dev_submit_done: 'si-tl-teal', dev_no_code: 'si-tl-teal'
+        dev_submit_done: 'si-tl-teal', dev_no_code: 'si-tl-teal',
+        // [#83·S2·B1] 附件增删三码配色——**待用户从示例页 A/B 两候选拍板**（scratchpad/s2/sample.html）：
+        //   A＝沿用 note 型中性灰（与页内绝大多数未特化 note 事件同色，视觉噪音最低）；B＝附件专属淡蓝
+        //   （与既有 si-tl-blue submit 族区分度更高，突出"这是一次附件动作"）。本次落地先取 **A（gray）**
+        //   占位——三码本就走 note 型专属徽章（非落回通用备注），不设色也会自动 fallback 到
+        //   `cls = ... || 'si-tl-gray'`，显式登记 A 只是让"三码统一色"的决策落字面，不影响观感；
+        //   用户拍板后若选 B，只需把三值改 'si-tl-blue' 或新增专色，不涉及其余改造点。
+        attachment_added: 'si-tl-gray', attachment_replaced: 'si-tl-gray', attachment_removed: 'si-tl-gray'
     };
     // [长任务B·S2b·Opus 预筛 LOW-4·方案 D9] no_code 原因摘要上限——具名常量取代裸 `80`，与后端
     // routes/sys-iteration/index.js 的 `PERDEV_DONE_SUMMARY_MAX_CODEPOINTS`（同为 80）同源同值但物理
@@ -4423,18 +4455,24 @@
         release_executor_done: 'si-tl-green', release_hotfix_create: 'si-tl-amber',
     };
     // [#67 A3·2026-09-16] 可隐藏性**显式白名单**（codex 568 M1）——与 SI_TL_RELEASE_SCOPE_LABEL 的成员
-    //   刻意不同：后者 9 个成员（含 release_date_change），本表只登记其中 **8 个**，把改期排除在外。
+    //   刻意不同：后者 9 个成员（含 release_date_change），批次编排段只登记其中 **8 个**，把改期排除在外。
     //   为什么改期要排除：它改的是**对外交付承诺日期**，属「信息修改」而非「批次内部编排」，被过滤器
     //   一勾连带隐藏会让「改过期」这件事整个看不见（方案 §1 问题二）。剩下 8 码的共性=批次内部编排。
     // ⚠️ **不采用**「isReleaseScope 减去 SI_TL_CHANGE_CODES」的减法写法（方案 §5.1）：减法的默认方向
     //   危险——将来任何为拿标签而进 SCOPE 表的新码会**自动获得可隐藏性**，忘记登记 = 信息被藏；
     //   白名单的默认方向相反，新码默认**不可隐藏**，忘记登记 = 多显示一行。不可隐藏是安全默认。
-    // ⚠️ 本表保持 Set（非 Map）：8 个成员**全部**是 scope_change 型，类型约束已显式写在下方函数的
-    //   条件左半边，逐码登记类型是冗余。对照 SI_TL_CHANGE_CODES——它跨两种 event_type，故必须用 Map
-    //   逐码登记配对（见 #67 A1）。两者形态不同是有意的，不是疏漏。
-    const SI_TL_HIDABLE_SCOPE_CODES = new Set([
-        'release_add', 'release_remove', 'release_schedule_cancel', 'release_published',
-        'release_executors_set', 'release_executor_notify', 'release_executor_done', 'release_hotfix_create',
+    // [#83·S2·B3·时间线附件留痕_方案_20260917_v1.3 §4 B3] 本表由 Set 升级为 **Map<action_code,
+    //   期望 event_type>**（C0 报告 §3(c′)：附件三码是 note 型，混进原 Set 会让「事件类型」这条约束
+    //   失去表达位置）。原 8 个 scope_change 型成员逐字从旧 Set 搬入（一个不少不多，各自登记
+    //   `'scope_change'`）；新增 3 个附件码各自登记 `'note'`。⚠️ 与 SI_TL_CHANGE_CODES 的 Map 化理由
+    //   同构（#67 A1 那次先例）：跨事件类型的白名单必须逐码登记配对，不能只在函数左半边写一个共同类型。
+    const SI_TL_HIDABLE_CODES = new Map([
+        ['release_add', 'scope_change'], ['release_remove', 'scope_change'],
+        ['release_schedule_cancel', 'scope_change'], ['release_published', 'scope_change'],
+        ['release_executors_set', 'scope_change'], ['release_executor_notify', 'scope_change'],
+        ['release_executor_done', 'scope_change'], ['release_hotfix_create', 'scope_change'],
+        // [#83·S2·B1/B3] 附件增删三码——note 型，可隐藏性与批次编排八码同一 Map、同一判据函数。
+        ['attachment_added', 'note'], ['attachment_replaced', 'note'], ['attachment_removed', 'note'],
     ]);
     // [#67 A4·2026-09-16] 可隐藏性判据**收敛为单一纯函数**。改造前同一判据在两处独立计算
     //   （siRenderDrawer 里的 hasReleaseScopeTl 自行重算、siRenderTimeline 里算 isReleaseScope），
@@ -4443,17 +4481,21 @@
     //   · isReleaseScope  → **只管 key 计算与标签归属**（改期靠它才能取到「上线单改期」而非通用「范围变更」）
     //   · siTlIsHidableScope → **只管可隐藏性**（class 拼接 + 初始 display 两个消费点）
     //   把标签归属也换成本判据，会让改期掉回通用标签；反之把可隐藏性交给 isReleaseScope，改期又会被藏。
+    // [#83·S2·B3·C0 报告 §3(c′)] Map 化后判据改**先 has() 再 get()**——未登记码即便 event_type 恰好
+    //   为 undefined，`has()` 先短路 false，不会走到 `undefined===undefined` 误放行那条老坑
+    //   （memory feedback_predicate_shape_change_edges 同款教训：换判据结构=换边界行为，需重新核）。
     function siTlIsHidableScope(e) {
-        return !!e && e.event_type === 'scope_change' && SI_TL_HIDABLE_SCOPE_CODES.has(e.action_code);
+        return !!e && SI_TL_HIDABLE_CODES.has(e.action_code) && SI_TL_HIDABLE_CODES.get(e.action_code) === e.event_type;
     }
     // ⚠️ [#67 A3 附带订正·2026-09-16] 本次改造**推翻了一条曾被三处注释引用的因果**：
     //   改造前「进 SI_TL_RELEASE_SCOPE_LABEL 表」= 连带获得可隐藏性（isReleaseScope 一个布尔管两件事），
     //   所以 release_info_edit / release_deleted / release_overdue_reason 三码当初**刻意不注册进该表**，
     //   理由写的是「防被过滤器连带隐藏」（见本文件下方三处 ⚠️ 注释）。
-    //   改造后：进该表**只决定标签归属**，可隐藏性由本白名单独立决定，且上方函数的左半边限定
-    //   `event_type === 'scope_change'` ⇒ 那三码是 **note 型**、又未登记本白名单，**双重保证不会被藏**。
+    //   改造后：进该表**只决定标签归属**，可隐藏性由本白名单独立决定；判据已是「码 × 期望 event_type」
+    //   逐码配对（`has()` 先 short-circuit），那三码未登记进 `SI_TL_HIDABLE_CODES`，**唯一保证是未登记
+    //   本身**——note 型不再天然免于可隐藏（附件三码同为 note 型却已登记进本白名单，见上方三码）。
     //   ⇒ 那三码「不注册进 SCOPE_LABEL」的**决策保留**（本次不动它——属其他方案的决策），三处注释的
-    //     理由已就地改写为「标签表只管标签、不被隐藏由 note 型 + 未登记白名单双重保证」。
+    //     理由已就地改写为「标签表只管标签、不被隐藏由『未登记进 SI_TL_HIDABLE_CODES』保证」。
     //   ⚠️ [576-L1] 不要把这理解成「标签表的准入规则是不属批次编排」——**改期就仍留在标签表里**。
     //     标签表的准入规则本次未变；本次只把「可隐藏性」从它身上剥离出来。
     // release_published 的 summary = §6.6a 结构化 JSON（{issue_id,schema_version,type,title_snapshot,
@@ -4565,7 +4607,10 @@
     // [长任务B·S2·时间线逐人完成事件_方案_20260916_v1.1 §4 B1/D10] +dev_submit_done/dev_no_code（开发
     //   逐人完成两码独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS 处注释；同源纪律同上，已同步改
     //   scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES）。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);
+    // [#83·S2·B1·时间线附件留痕_方案_20260917_v1.3 §4 B1] +attachment_added/attachment_replaced/
+    //   attachment_removed（附件增删三码独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS 处注释；同源纪律同上，
+    //   已同步改 scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES）。
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4593,9 +4638,12 @@
     //   「✎ 变更留痕」+「历史记录，未保存修改明细」，等于**凭空捏造一条"改过但明细丢了"的审计事实**。
     // 纳入判据=「该码的主体用途是对已存在记录的字段值做事后修改」（方案 §3.1，按码而非按条记录）。
     // ⚠️ 新增第五个码时**必须同时登记其 event_type**，否则 A5 的配对判据会把它挡在外面。
-    // ⚠️ 与 SI_TL_HIDABLE_SCOPE_CODES（S1 建的可隐藏白名单）形态不同是**有意的**：那个 8 成员全是
-    //   scope_change 型、类型约束写在判据左半边故用 Set；本表 4 成员**跨两种 event_type**
-    //   （3 个 note + 1 个 scope_change），必须逐码登记才能保留「码 × 类型」配对校验。
+    // ⚠️ [#83·S2·B3 订正] 原注释称本表与 SI_TL_HIDABLE_SCOPE_CODES「形态不同（Set vs Map）是有意的」——
+    //   #83 起后者也升级为 Map（S1 建的可隐藏白名单，见 SI_TL_HIDABLE_CODES 定义处，含 8 个 scope_change
+    //   型 + 3 个附件 note 型），两表现同为 Map 且同走「逐码登记 event_type」范式，不再是"形态不同"的对照
+    //   例子——两表仍保持**物理独立**（服务不同用途：本表管「查看改动」展开区，那表管可隐藏性），只是
+    //   都已采用同一种"跨类型必须逐码配对"的解法，本表现有 7 成员**跨三种 event_type**（5 个 note + 1 个
+    //   scope_change + 1 个 estimate），必须逐码登记才能保留「码 × 类型」配对校验。
     // [乙4·2026-09-17 B1·时间线留痕覆盖面补齐 v0.2 §5 B1] 新增三码（A 类·修改类）：
     //   estimate_eta（/estimate，event_type='estimate'）、set_scheduled_start / set_oa_number
     //   （均沿用既有 event_type='note' 的写点，本次只是补上 action_code+payload_json 两列）。
@@ -4801,6 +4849,78 @@
         if (e.payload_json == null || e.payload_json === '') return { html: '', kind: 'history' };
         return { html: '', kind: 'broken' };
     }
+    // [#83·S2·B2·时间线附件留痕_方案_20260917_v1.3 §3 契约冻结] 附件类型词——前端展示专用副本，
+    // 与后端 index.js 的 SYS_ATTACH_TYPE_WORD（persist summary 构造用，见 sysBuildAttachSummary/
+    // sysBuildRemoveSummary）同源同值但物理分属前后端两份源码，不共享运行时（同 SI_PERDEV_REASON_BRIEF_MAX
+    // 一带既有先例）。只服务 attachment_added/_replaced/_removed 三码的展开区渲染，不是通用附件类型标签表
+    // （已有的「需求材料」「补充截图」等文案是各自独立的字面量，不从本表读取，未改动）。
+    const SI_TL_ATTACH_TYPE_WORD = { spec: '需求材料', delivery: '交付附件', screenshot: '截图' };
+    // [#83·S2·B2] 附件展开区展示名——original_name 为空（null/undefined/空串）→「（无文件名）#id」，与
+    // 后端 sysAttachDisplayName 的空值判据同源（三态判空：null/undefined/trim 后空串）；本函数不做长度
+    // 截断（后端 summary 已截断，展开区是"审计原文"，如实全显，同 §6.6b 不伪造/不二次加工精神）。
+    function siTlAttachDisplayName(name, id) {
+        const s = (name === null || name === undefined || String(name).trim() === '') ? null : String(name);
+        return s === null ? `（无文件名）#${id}` : s;
+    }
+    // [S2 续做·verify-sys-timeline-summary-escape.js M1 加固修复] 附件三码「读侧校验 + 展开区列表」抽成
+    // 具名函数——原实现内联在 siRenderTimeline 的 else-if 分支里，`attachListHtml` 经 `attachments`→
+    // `attachPayload`→`parsedPayload` 三级局部变量间接引用，被该守卫的 AST 叠加层判据（isLocalVarSafe，
+    // 递归深度上限 3）判定「回溯链超限，fail-closed 判不安全」——不是真实 XSS（每个字段其实都各自 esc()
+    // 包裹），是**回溯链过深**触发的实现纪律问题。同 `siTlChangesHtml`/`siRenderTimelineChanges`/
+    // `siRenderReleasePublishedCommits` 三个既有先例一样：把易变深链路收进一个**具名函数**、内部自证全程
+    // 转义，调用点只留一次函数调用——该守卫的白名单（TRUSTED_HTML_CALLEE_NAMES）信任整条已审计调用、不
+    // 深入其参数，天然绕开"局部变量间接引用链过深"这个结构性限制，非绕过安全审查（本函数体内校验逻辑与
+    // 展开区渲染逻辑与改造前逐字一致，只是搬进了具名函数，见 verify-sys-timeline-summary-escape.js 的
+    // TRUSTED_HTML_CALLEE_NAMES 已同步登记本函数）。
+    // 返回 { valid, html }：valid=false 时调用方回退 esc(e.summary)；valid=true 时 html 是 <li> 列表全文
+    // （每个字段均已 esc() 转义，可直接拼进 <ul>）。
+    function siRenderAttachListHtml(attachPayload, actionCode) {
+        // [S2 修复批·MED-2] 不再硬编码字面量集合——改读 SI_TL_ATTACH_TYPE_WORD 的 key 集，把前端两份
+        // 附件类型枚举副本压成一份；与后端 SYS_ATTACH_TYPES/SYS_ATTACH_TYPE_WORD 的一致性由
+        // verify-sys-release-panel-static.js 新增的四方对拍断言锁（见该文件 [A·#83 D1] 一带）。
+        // [S2 修复批2·codex 595 M1] hasOwnProperty.call 会先把 t 转成属性键——attachment_type 若是数组
+        // （如 ['spec']）会被字符串化成 'spec' 误判合法；若是 { toString: null } 这种"合法 JSON 值"，属性键
+        // 转换本身会抛 TypeError，中断整条时间线渲染。故先严格判字符串类型，非字符串直接短路为 false，
+        // 不进 hasOwnProperty 转换。
+        const attachTypeOk = (t) => typeof t === 'string' && Object.prototype.hasOwnProperty.call(SI_TL_ATTACH_TYPE_WORD, t);
+        if (actionCode === 'attachment_removed') {
+            const att = attachPayload ? attachPayload.attachment : undefined;
+            const valid = !!att && typeof att === 'object' && !Array.isArray(att)
+                && Number.isInteger(att.id) && att.id > 0
+                && attachTypeOk(att.attachment_type)
+                && Object.prototype.hasOwnProperty.call(att, 'original_name')
+                && (att.original_name === null || typeof att.original_name === 'string')
+                && Object.prototype.hasOwnProperty.call(att, 'uploaded_by_name')
+                && (att.uploaded_by_name === null || typeof att.uploaded_by_name === 'string');
+            if (!valid) return { valid: false, html: '' };
+            const typeWord = SI_TL_ATTACH_TYPE_WORD[att.attachment_type] || att.attachment_type;
+            const nameDisp = siTlAttachDisplayName(att.original_name, att.id);
+            const uploaderDisp = (att.uploaded_by_name === null || att.uploaded_by_name === undefined || String(att.uploaded_by_name).trim() === '')
+                ? '（未知上传人）' : String(att.uploaded_by_name);
+            // [#83·S2·B2] removed 列四字段（方案「读侧校验」段）：id / 文件名（无则占位）/ 类型词 / 原上传人。
+            return { valid: true, html: `<li>#${esc(String(att.id))} · ${esc(nameDisp)} · ${esc(typeWord)} · 原上传人：${esc(uploaderDisp)}</li>` };
+        }
+        const attachments = attachPayload ? attachPayload.attachments : undefined;
+        const arrValid = Array.isArray(attachments) && attachments.length > 0 && attachments.every((item) =>
+            item && typeof item === 'object' && !Array.isArray(item)
+            && Number.isInteger(item.id) && item.id > 0
+            && attachTypeOk(item.attachment_type)
+            && Object.prototype.hasOwnProperty.call(item, 'original_name')
+            && (item.original_name === null || typeof item.original_name === 'string'));
+        const countOk = !!attachPayload && Number.isInteger(attachPayload.count)
+            && arrValid && attachPayload.count === attachments.length;
+        const supersedeOk = actionCode !== 'attachment_replaced'
+            || (!!attachPayload && Number.isInteger(attachPayload.superseded_id) && attachPayload.superseded_id > 0);
+        const valid = !!attachPayload && arrValid && countOk && supersedeOk;
+        if (!valid) return { valid: false, html: '' };
+        // [#83·S2·B2] added/replaced 列全名单（方案「读侧校验」段，不按 summary 的 3 个截断口径）。
+        const html = attachments.map((item) => {
+            const typeWord = SI_TL_ATTACH_TYPE_WORD[item.attachment_type] || item.attachment_type;
+            const nameDisp = siTlAttachDisplayName(item.original_name, item.id);
+            return `<li>#${esc(String(item.id))} · ${esc(nameDisp)} · ${esc(typeWord)}</li>`;
+        }).join('');
+        return { valid: true, html };
+    }
     function siRenderTimeline(list, atts, currentTitle) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
         return '<div class="si-timeline">' + list.map(e => {
@@ -4926,9 +5046,12 @@
                 //   **并存，不去重、不互相替代**——两者各自独立成行（写点见 index.js POST
                 //   /sys-issues/:id/submit 内 buildPerDevDonePayload 调用处注释，B5：逐人行先于其触发的
                 //   整单流转行落库）。
-                //   本分支**不依赖 #67 的可隐藏集合**（D3：逐人完成不归可隐藏集合）——SI_TL_HIDABLE_SCOPE_CODES
-                //   只判 `event_type==='scope_change'`（见 siTlIsHidableScope），note 型天然不带
-                //   si-tl-release-scope class，不会被「隐藏批次编排记录」勾选项连带隐藏。
+                //   本分支**不依赖 #67/#83 的可隐藏集合**（D3：逐人完成不归可隐藏集合）——[#83·S2·B3 订正]
+                //   SI_TL_HIDABLE_CODES 现为 Map（含 8 个 scope_change 型 + 3 个附件 note 型，见其定义处），
+                //   `dev_submit_done`/`dev_no_code` 均**未登记**进该 Map，siTlIsHidableScope 先 `has()`
+                //   短路 false（未登记即天然不可隐藏，非「note 型」本身免隐藏——note 型附件三码同为 note
+                //   却已登记进该 Map、会被隐藏，可见「note 型天然不可隐藏」这条旧结论本身已不成立），故本两
+                //   码仍不带 si-tl-release-scope class，不会被「隐藏批次编排与附件增删记录」勾选项连带隐藏。
                 //   按 action_code 分派解析（D9）：payload 非对象或缺 dev_user_name/submitted_at 关键字段
                 //   （历史脏数据/未来 schema 漂移）一律静默回退到 esc(e.summary)，不报错、不显告警——同本
                 //   函数其余分支的降级精神（§6.6b 不伪造）。
@@ -5022,6 +5145,36 @@
                     //   （任何 `.length` 访问一律按普通属性读取处理）对齐，不再依赖"这条是安全数字"的
                     //   特例豁免。
                     summaryHtml = `${e.summary ? esc(e.summary) : ''}<span style="color:#9ca3af;font-size:11px;">（撤回提交 #${esc(withdrawEventIdDisplay)}）</span>${withdrawCommits.length > 0 ? `<details class="si-tl-withdraw-detail"><summary>查看撤回前 commit（${esc(String(withdrawCommits.length))}）</summary><pre>${esc(commitLines)}</pre></details>` : ''}`;
+                }
+            } else if (e.event_type === 'note' && (e.action_code === 'attachment_added' || e.action_code === 'attachment_replaced' || e.action_code === 'attachment_removed')) {
+                // [#83·S2·B2·时间线附件留痕_方案_20260917_v1.3 §3 契约冻结/§4 B2·C0 报告 §3(c″)] 附件增删
+                //   三码渲染——同 dev_submit_done/dev_withdraw 分支纪律：严格按 e.action_code 分派、复用
+                //   本函数顶部已解析的 parsedPayload（不二次 JSON.parse，:4917 一带）、payload 非法一律静默
+                //   回退 esc(e.summary)（不报错不显告警，§6.6b 不伪造精神）。**一律展开区**（方案「读侧校验」
+                //   段：一律展开，非按数量门槛决定要不要给展开区——summary 已含截断后的文件名列表，展开区
+                //   是"审计原文"，added/replaced 列全名单，removed 列四字段）。
+                //   读侧校验须与写侧同源（index.js sysPersistAttachments/sysBuildRemoveSummary 实际写法，
+                //   见 commit d679d9e/17aa885）：added/replaced payload={attachments:[{id,original_name,
+                //   attachment_type}],count[,superseded_id]}；removed payload={attachment:{id,original_name,
+                //   attachment_type,uploaded_by_name}}——original_name/uploaded_by_name 后端已把 undefined
+                //   归一成 null（17aa885 L1），故这里**显式 null 合法**（不算缺键），只有**自有键不存在**
+                //   才算缺键回退（同 :4772 一带 hasOwnProperty 前置守卫范式，不得对 undefined 与"键不存在"
+                //   混同判断）。
+                // [S2 续做·verify-sys-timeline-summary-escape.js M1 加固修复] 校验 + 列表渲染已抽到具名
+                // 函数 siRenderAttachListHtml（:4862 一带，同 siTlChangesHtml 等既有白名单 helper 先例），
+                // 本分支只负责解析 attachPayload、调用、按 valid 决定回退还是拼展开区——逻辑与改造前逐字
+                // 一致，只是搬了位置（见该函数头注释：原实现的局部变量间接引用链过深，被该守卫 AST 叠加层
+                // 的递归深度上限判定"不安全"，改具名函数后守卫白名单信任整条调用不深入参数，结构性绕开）。
+                const attachPayload = (parsedPayload && typeof parsedPayload === 'object' && !Array.isArray(parsedPayload))
+                    ? parsedPayload : null;
+                const attachResult = siRenderAttachListHtml(attachPayload, e.action_code);
+                if (!attachResult.valid) {
+                    summaryHtml = e.summary ? esc(e.summary) : '';
+                } else {
+                    // 三路径各自独立 esc（同 perDev/withdraw 分支纪律）：baseSummaryHtml 已 esc 过 summary，
+                    // attachResult.html 内每个字段各自独立 esc（siRenderAttachListHtml 内部两分支），此处
+                    // 第三次独立 esc 仅用于 summary 的兜底路径，三处互不复用同一份转义结果。
+                    summaryHtml = `${baseSummaryHtml}<details class="si-tl-attach-list"><summary>查看附件清单</summary><ul>${attachResult.html}</ul></details>`;
                 }
             } else if (SI_TL_CHANGE_CODES.has(e.action_code)
                        && SI_TL_CHANGE_CODES.get(e.action_code) === e.event_type) {

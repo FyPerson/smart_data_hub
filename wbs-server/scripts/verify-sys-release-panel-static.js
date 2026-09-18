@@ -1892,19 +1892,49 @@ console.log('— §⑤ HTML 内联 <script> 语法有效 —');
 //   · 有人往 SCOPE_LABEL 表加新码却忘登记白名单 → 差集多一项 → 红（提醒他做显式决策）
 //     ——这是**提醒而非阻止**：白名单的安全默认是「未登记即不可隐藏」，忘登记只多显示一行、不丢信息
 //   · 白名单登记了不在 SCOPE 表里的码 → 越界项非空 → 红（那个码拿不到标签，登记它无意义）
-check('[A·#67 A3] SI_TL_HIDABLE_SCOPE_CODES 恰 8 码 ∧ 全在 SCOPE_LABEL 表内 ∧ 两者差集恰为 release_date_change', () => {
-    const mH = src.match(/const SI_TL_HIDABLE_SCOPE_CODES = new Set\(\[([\s\S]*?)\]\);/);
-    assert.ok(mH, '未提取到 SI_TL_HIDABLE_SCOPE_CODES');
-    const hid = [...new Set((mH[1].match(/'([a-z_]+)'/g) || []).map((s) => s.replace(/'/g, '')))];
-    assert.strictEqual(hid.length, 8, `白名单应恰 8 码，实得 ${hid.length}：${hid.join(',')}`);
+// [#83·S2 续做·C2] SI_TL_HIDABLE_SCOPE_CODES（Set，8 码）已由 S2 升级为 SI_TL_HIDABLE_CODES
+//   （Map<action_code,期望 event_type>，恰 11 项：原 8 个 scope_change 型逐字不变 + 新增 3 个附件
+//   note 型）。提取范式同 SI_TL_CHANGE_CODES（A1③ 先例）：正则抓 `['code','type']` 对 + 完备性核对
+//   （剔除已识别条目后只应剩逗号/空白，防新增**未被本正则识别**的条目形态——双引号/变量/展开——静默漏检）。
+const parseHidableCodesMap = () => {
+    const m = src.match(/const SI_TL_HIDABLE_CODES = new Map\(\[([\s\S]*?)\]\);/);
+    assert.ok(m, '未提取到 SI_TL_HIDABLE_CODES Map');
+    // [596B-L2] 先剥注释再对**同一份**文本做成员提取与 leftover 完备性核对——原写法成员提取跑在原始
+    // 文本上、leftover 跑在剥注释后的文本上，若 Map 初始化列表内的注释含形如 ['x_code','note'] 的示例，
+    // 会被原始 matchAll 误当成真实成员多算一条，而 leftover（剥注释后）看不到它、不会报残留，两处口径
+    // 不一致导致假红/漏检两个方向都可能发生。统一改成都在 stripped 上跑。
+    const stripped = stripComments(m[1]);
+    const pairs = [...stripped.matchAll(/\[\s*'([a-z_]+)'\s*,\s*'([a-z_]+)'\s*\]/g)].map((mm) => [mm[1], mm[2]]);
+    const leftover = stripped.replace(/\[\s*'[a-z_]+'\s*,\s*'[a-z_]+'\s*\]/g, '').replace(/[\s,]/g, '');
+    assert.strictEqual(leftover, '', `SI_TL_HIDABLE_CODES 初始化列表里有本断言**无法识别**的内容（残留「${leftover}」）——静态提取已不完备，下面的项数/成员比对会漏掉这些条目`);
+    return pairs;
+};
+const ATTACHMENT_HIDABLE_CODES = ['attachment_added', 'attachment_replaced', 'attachment_removed'];
+const RELEASE_HIDABLE_SCOPE_CODES = ['release_add', 'release_remove', 'release_schedule_cancel', 'release_published', 'release_executors_set', 'release_executor_notify', 'release_executor_done', 'release_hotfix_create'];
+check('[A·#67/#83 A3] SI_TL_HIDABLE_CODES 恰 11 项 ∧ 8 个批次编排码=scope_change 逐字不变 ∧ 3 个附件码=note ∧ 批次编排码全在 SCOPE_LABEL 表内 ∧ 两者差集恰为 release_date_change', () => {
+    const pairs = parseHidableCodesMap();
+    assert.strictEqual(pairs.length, 11, `SI_TL_HIDABLE_CODES 应恰 11 项，实得 ${pairs.length}：${JSON.stringify(pairs)}`);
+    const dup = pairs.map((p) => p[0]);
+    assert.strictEqual(new Set(dup).size, dup.length, `11 项的 action_code 不应有重复，实得 ${dup.join(',')}`);
+    const scopeEntries = pairs.filter((p) => p[1] === 'scope_change').map((p) => p[0]).sort();
+    const noteEntries = pairs.filter((p) => p[1] === 'note').map((p) => p[0]).sort();
+    const otherEntries = pairs.filter((p) => p[1] !== 'scope_change' && p[1] !== 'note');
+    assert.deepStrictEqual(otherEntries, [], `不应出现 scope_change/note 之外的第三种登记类型，实得 ${JSON.stringify(otherEntries)}`);
+    assert.deepStrictEqual(scopeEntries, [...RELEASE_HIDABLE_SCOPE_CODES].sort(),
+        `8 个批次编排码应逐字不变（原 Set 8 码原样搬入 Map，各配 'scope_change'），实得 ${scopeEntries.join(',')}`);
+    assert.deepStrictEqual(noteEntries, [...ATTACHMENT_HIDABLE_CODES].sort(),
+        `3 个附件码应恰为 attachment_added/attachment_replaced/attachment_removed，各配 'note'，实得 ${noteEntries.join(',')}`);
     const mL = src.match(/const SI_TL_RELEASE_SCOPE_LABEL = \{([\s\S]*?)\};/);
     assert.ok(mL, '未提取到 SI_TL_RELEASE_SCOPE_LABEL');
     const lbl = [...new Set((mL[1].match(/([a-z_]+)\s*:/g) || []).map((s) => s.replace(/\s*:$/, '')))];
-    const outOfTable = hid.filter((k) => !lbl.includes(k));
-    assert.deepStrictEqual(outOfTable, [], `白名单成员必须都在 SCOPE_LABEL 表里（否则拿不到标签），越界：${outOfTable.join(',')}`);
-    const diff = lbl.filter((k) => !hid.includes(k));
+    const outOfTable = scopeEntries.filter((k) => !lbl.includes(k));
+    assert.deepStrictEqual(outOfTable, [], `批次编排码成员必须都在 SCOPE_LABEL 表里（否则拿不到标签），越界：${outOfTable.join(',')}`);
+    const diff = lbl.filter((k) => !scopeEntries.includes(k));
     assert.deepStrictEqual(diff, ['release_date_change'],
-        `SCOPE 表减白名单应恰为 release_date_change —— 这是 #67 的核心语义（改期仍进表拿「上线单改期」标签，但不再可隐藏）。实得：${diff.join(',') || '（空）'}`);
+        `SCOPE 表减批次编排码应恰为 release_date_change —— 这是 #67 的核心语义（改期仍进表拿「上线单改期」标签，但不再可隐藏）。实得：${diff.join(',') || '（空）'}`);
+    // 附件三码不应混进 SCOPE_LABEL 表（它们是 note 型，走独立徽章路径，不经此表）
+    const attachInScopeLabel = ATTACHMENT_HIDABLE_CODES.filter((k) => lbl.includes(k));
+    assert.deepStrictEqual(attachInScopeLabel, [], `附件码不应出现在 SCOPE_LABEL 表里（那是 scope_change 型标签表，附件三码是 note 型独立徽章），实得：${attachInScopeLabel.join(',')}`);
 });
 // [#67 A4/C2·576-M1 重写] 判据的**行为**断言，不只断源码长相。
 // ⚠️ 为什么必须直调：原版只有两条源码正则（断"含 scope_change"与"含 has(...)"）——**把 && 改成 ||
@@ -1912,31 +1942,50 @@ check('[A·#67 A3] SI_TL_HIDABLE_SCOPE_CODES 恰 8 码 ∧ 全在 SCOPE_LABEL �
 //   文本"，证明不了"两个条件必须同时成立"。故改为提取真实判据直调，逐码逐类型跑行为。
 // ⚠️ [576-L1 订正] 原注释说"删左半边会让 release_info_edit 等 note 码意外可隐藏"——**那是错的**：
 //   那些码不在白名单里，删左半边后 has() 仍为 false、照样不隐藏。真实风险是
-//   **白名单内的码以非 scope_change 类型出现时被误隐藏**（如 release_add 若某处以 note 写入）。
+//   **白名单内的码以非登记类型出现时被误隐藏**（如 release_add 若某处以 note 写入，或附件码若某处以
+//   scope_change 写入——[#83·S2 续做] Map 化后类型错配的风险面从"单一 scope_change"扩到"逐码各自登记
+//   的期望类型"，下方行为断言据此扩为"配对类型 true / 换任意错配类型 false"）。
 // [576-R·rec2] 提取逻辑抽共用 helper：两条断言各自对**函数体**与**集合**分别断言，
 //   避免第二条在匹配失败时直接在 m[0] 处抛错（那是"报错不清晰"，虽不构成假绿）。
 const grabHidablePredicate = () => {
     const mFn = src.match(/function siTlIsHidableScope\(e\) \{[\s\S]*?\n    \}/);
     assert.ok(mFn, '未提取到 siTlIsHidableScope 函数体（提取失效=本组空转，必须先红在这里）');
-    const mSet = src.match(/const SI_TL_HIDABLE_SCOPE_CODES = new Set\(\[[\s\S]*?\]\);/);
-    assert.ok(mSet, '未提取到 SI_TL_HIDABLE_SCOPE_CODES 集合');
+    const mMap = src.match(/const SI_TL_HIDABLE_CODES = new Map\(\[[\s\S]*?\]\);/);
+    assert.ok(mMap, '未提取到 SI_TL_HIDABLE_CODES Map');
     // eslint-disable-next-line no-new-func
-    const fn = new Function(`${mSet[0]}\n${mFn[0]}\nreturn siTlIsHidableScope;`)();
+    const fn = new Function(`${mMap[0]}\n${mFn[0]}\nreturn siTlIsHidableScope;`)();
     assert.strictEqual(typeof fn, 'function', '提取出的判据不是函数');
-    return { fn, setSrc: mSet[0] };
+    // [596B-L2] 成员清单复用 parseHidableCodesMap()（内部已统一在 stripComments 后的文本上提取），
+    // 不再让调用方各自对 mMap[0]（含注释的原始 Map 字面量）重新 matchAll——消除三套提取口径漂移。
+    return { fn, pairs: parseHidableCodesMap() };
 };
 // 注：每码跑 1 个正类型 + 8 个反类型 = 共 9 种 event_type 取值（576-R 订正了我原先写的"8 种"）。
-check('[A·#67 A4] siTlIsHidableScope 行为：8 个白名单码 × scope_change 为 true，同码换其他 8 种类型一律 false', () => {
-    const { fn, setSrc } = grabHidablePredicate();
-    const codes = [...new Set((setSrc.match(/'([a-z_]+)'/g) || []).map((s) => s.replace(/'/g, '')))];
-    assert.strictEqual(codes.length, 8, `白名单应恰 8 码，实得 ${codes.length}`);
+check('[A·#67 A4] siTlIsHidableScope 行为：8 个批次编排码 × scope_change 为 true，同码换其他 8 种类型一律 false', () => {
+    const { fn, pairs } = grabHidablePredicate();
+    const codes = pairs.filter((p) => p[1] === 'scope_change').map((p) => p[0]);
+    assert.strictEqual(codes.length, 8, `批次编排码应恰 8 码，实得 ${codes.length}`);
     for (const c of codes) {
         assert.strictEqual(fn({ event_type: 'scope_change', action_code: c }), true, `${c} + scope_change 应可隐藏`);
         for (const t of ['note', 'release', 'status_change', 'created', undefined, null, '', 'scope_change '])
             assert.strictEqual(fn({ event_type: t, action_code: c }), false, `${c} + event_type=${JSON.stringify(t)} 不应可隐藏（&& 被改成 || 会在此红）`);
     }
 });
-check('[A·#67 A4] siTlIsHidableScope 行为：改期码 / 未知码 / 异常输入一律 false（未登记即不可隐藏的安全默认）', () => {
+// [#83·S2 续做·C2] 三码 note 型行为断言——同上一条镜像结构，只是白名单登记类型是 'note' 而非
+//   'scope_change'：三码 + 'note' 应 true；同三码换其余 8 种类型（含真正的 'scope_change'——这正是
+//   「类型错配」用例，验证 Map 化后不同码各自独立类型约束，不会被批次编排码的 scope_change 语义污染）
+//   应一律 false。
+check('[A·#83 C2] siTlIsHidableScope 行为：3 个附件码 × note 为 true，同码换其他 8 种类型（含 scope_change 类型错配）一律 false', () => {
+    const { fn, pairs } = grabHidablePredicate();
+    const codes = pairs.filter((p) => p[1] === 'note').map((p) => p[0]);
+    assert.strictEqual(codes.length, 3, `附件码应恰 3 码，实得 ${codes.length}`);
+    assert.deepStrictEqual([...codes].sort(), [...ATTACHMENT_HIDABLE_CODES].sort(), `附件码集合应恰为三码，实得 ${codes.join(',')}`);
+    for (const c of codes) {
+        assert.strictEqual(fn({ event_type: 'note', action_code: c }), true, `${c} + note 应可隐藏`);
+        for (const t of ['scope_change', 'release', 'status_change', 'created', undefined, null, '', 'note '])
+            assert.strictEqual(fn({ event_type: t, action_code: c }), false, `${c} + event_type=${JSON.stringify(t)} 不应可隐藏（类型错配应被挡）`);
+    }
+});
+check('[A·#67/#83 A4] siTlIsHidableScope 行为：改期码 / 未知码 / 异常输入 / 逐人完成两码一律 false（未登记即不可隐藏的安全默认）', () => {
     const { fn } = grabHidablePredicate();
     // 改期码：本次改造的核心——它是 scope_change 型且在 SCOPE_LABEL 表里，但**不在白名单**
     assert.strictEqual(fn({ event_type: 'scope_change', action_code: 'release_date_change' }), false, '改期码不应可隐藏（#67 核心语义）');
@@ -1947,6 +1996,14 @@ check('[A·#67 A4] siTlIsHidableScope 行为：改期码 / 未知码 / 异常输
         { event_type: 'scope_change', action_code: 123 },
         { event_type: 'scope_change', action_code: null },
         {}, null, undefined,
+        // [#83·S2 续做·C2] M1 负向：未登记码 + 缺 event_type——has() 必须先短路 false，不能靠
+        //   `undefined===undefined` 混进来（换判据结构=换边界行为，memory feedback_predicate_shape_change_edges）。
+        { action_code: 'attachment_unregistered_code' },
+        { event_type: undefined, action_code: 'totally_unknown_attachment_code' },
+        // [#83·S2 续做·C2] 逐人完成两码（#72，note 型但未登记进 SI_TL_HIDABLE_CODES）——D3 决策：
+        //   逐人完成不归可隐藏集合，即便与附件三码同为 note 型也不应可隐藏。
+        { event_type: 'note', action_code: 'dev_submit_done' },
+        { event_type: 'note', action_code: 'dev_no_code' },
     ]) assert.strictEqual(fn(e), false, `异常/未登记输入应 false：${JSON.stringify(e)}`);
 });
 // [#67 A4/C2] 三处消费点的分工锁：class 与初始 display 必须用 isHidableScope；hasReleaseScopeTl 必须调
@@ -1961,10 +2018,170 @@ check('[A·#67 A4] 消费点分工：class/display 用 isHidableScope ∧ hasRel
     assert.ok(/\(isReleaseScope \|\| isNoteWithOwnLabel\) \? e\.action_code : e\.event_type/.test(src),
         'isReleaseScope 已不参与 key 计算 —— 改期会掉回通用「范围变更」标签');
 });
-// [#67 A7/C2] 过滤器文案与旧文案残留。旧文案曾出现在 UI 与三处注释里，改造时一并同步。
-check('[A·#67 A7] 过滤器文案为「隐藏批次编排记录」∧ 全文无旧文案残留', () => {
-    assert.ok(/> 隐藏批次编排记录<\/label>/.test(src), '过滤器 UI 文案未改');
-    assert.ok(!/隐藏上线单调整记录/.test(src), '仍有旧文案残留（含注释）—— 改文案必同步注释里的引用，否则注释成假事实源');
+// [#67 A7/C2·#83 S2 续做] 过滤器文案与旧文案残留。旧文案曾出现在 UI 与三处注释里，改造时一并同步。
+// [#83·S2] SI_TL_HIDABLE_CODES 扩容进附件三码后，开关同时管批次编排 + 附件增删两类，文案随之扩为
+//   「隐藏批次编排与附件增删记录」——旧文案「隐藏批次编排记录」现算"过期文案"，一并纳入残留检查。
+check('[A·#67/#83 A7] 过滤器文案为「隐藏批次编排与附件增删记录」∧ 全文无旧文案残留（含更早的「隐藏上线单调整记录」与本次已过期的「隐藏批次编排记录」）', () => {
+    assert.ok(/> 隐藏批次编排与附件增删记录<\/label>/.test(src), '过滤器 UI 文案未改');
+    assert.ok(!/隐藏上线单调整记录/.test(src), '仍有更早的旧文案残留（含注释）—— 改文案必同步注释里的引用，否则注释成假事实源');
+    // 新文案「隐藏批次编排与附件增删记录」在"编排"与"记录"之间插了「与附件增删」，故旧文案「隐藏批次编排
+    // 记录」不是新文案的子串，直接判残留即可，无需排除新文案本身误命中。
+    assert.ok(!/隐藏批次编排记录/.test(src), '仍有本次改造前的旧文案「隐藏批次编排记录」残留（未跟附件增删一起扩写）');
+});
+// [#83·S2 续做·C2] 「未登记码天然不可隐藏」新措辞注释存在——S2 曾推翻「note 型天然不可隐藏」这条随
+//   Map 化而失效的旧结论（附件三码同为 note 型却已登记进 SI_TL_HIDABLE_CODES 会被隐藏，反证旧结论不再
+//   成立），把三处（release_info_edit/release_deleted 一带 + release_overdue_reason 一带）+ #72 分支
+//   一带的措辞改成「未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏」——本条锁住新措辞确实落地，且不止一处
+//   （单处可能是笔误，需 ≥3 处才算"逐条改写"而非"改了一处凑数"）。
+check('[A·#83 C2] 「未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏」新措辞注释存在且不止一处', () => {
+    const hits = (src.match(/未登记进 SI_TL_HIDABLE_CODES 天然不可隐藏/g) || []).length;
+    assert.ok(hits >= 3, `新措辞注释应至少出现 3 处（S2 回执登记的三/四处订正位），实得 ${hits} 处`);
+});
+// [S2 修复批·MED-1] 负向半边——只查新词落地不查旧词清干净是单向的（与 A7 文案残留检查不对称）；
+//   Opus 预筛拦下 :4494-4497 漏改的旧结论两句（「左半边限定 event_type === 'scope_change'」「双重保证不会
+//   被藏」），本条锁死旧措辞不得残留，防未来再有同类"改了新地方、漏了历史沿革集中处"的盘点盲区。
+//   [codex 595 L2] 本条是**精确短语的文案检查**，不穷尽同义改写后的语义变体（换个说法表达同一错误结论
+//   仍可能漏检）——真正的语义机制保证靠上方 [A·#67 A4]（消费点分工）与 [A·#67 A1] 一带的行为断言，本条
+//   只是防"错误结论的字面原句"死灰复燃。
+check('[A·#83 C2·MED-1] 旧结论「上方函数的左半边限定 scope_change」「双重保证不会被藏」不得作为现行断言残留全文（S2 修复批已订正 :4494-4497；不含 :4301/:4324 那两处"原注释写「…」双重保证——已订正"的历史沿革引述，那两处是正确的订正说明，不是残留的错误结论）', () => {
+    assert.ok(!/上方函数的左半边限定/.test(src), '仍有「上方函数的左半边限定」旧措辞残留（该判据已改为 has()+get() 逐码配对，不再有"函数左半边"这种结构）');
+    assert.ok(!/双重保证不会被藏/.test(src), '仍有「双重保证不会被藏」旧结论字面残留（Map 化后 note 型不再天然免于可隐藏，唯一保证是未登记本身）');
+});
+// [#83·S2 续做·C2·K1·C0 报告 §3(a)/(c)] K1 静态：persist 内附件三码的 payload 构造（两条字面量 INSERT
+//   共用同一个 `payload` 对象 + 删除端点的 `removePayload`）不得出现 `attachment_ids` 键——那是既有
+//   accept/return 两步链凭证专用键名（verify-sys-accept-evidence.js deepStrictEqual 锁死），前端
+//   `siRenderTimeline` :4917 一带唯一无条件读该键渲染成 📎 凭证行；附件三码若意外带上这个键，会被那条
+//   通用分支误渲染成"两步链凭证"，与三码自己的专属展开区（si-tl-attach-list）产生双重/矛盾展示。
+//   切片终点用**结构锚**（花括号平衡的对象字面量本身自然收尾，`};`），不用行号——防止 index.js 增删行
+//   后行号漂移导致断言悄悄失效（memory 坑 27：正则限定作用域切片终点须用结构锚）。
+// [codex 595 M3] ⚠️ 本条只是**前置静态检查**——它只能证明"写代码时刻的字面量初始化"不含该键，不能保证
+//   INSERT 前没有人在初始化之后又给根对象追加 `payload.attachment_ids = ...`（对象展开同理）。最终保证
+//   是 verify-sys-attachment-trace.js 里读**实际落库 payload_json**做的行为断言：
+//   - added 路径 `[B1] delivery 上传：action_code/summary/payload 完整快照/ref_id 四件套核对通过`
+//     （:325 一带，`assert.deepStrictEqual(payload, {...})` 完整快照深比较——缺 attachment_ids 键即通过）
+//   - replaced 路径 `[B3/K1] replaced 根对象无 attachment_ids`（:561）
+//   - removed 路径 `[删除/K1] 根对象无 attachment_ids`（:1852）
+//   本条静态检查的价值是"结构锚失效时先在这里红"（省去到行为层排查的成本），不是唯一防线。
+// [K1 专用] 本文件既有 extractFunctionBody(src|mutated|indexJsSrc, 'name') 的调用会被 :406 一带
+//   EXTRACT_FN_BODY_TARGET_NAMES 自动收编进 [S5 甲2] acorn 交叉验证集合——那条检查固定只对
+//   Sys_Iteration.html 的 <script> 块跑 acorn 解析，目标若是 index.js 里的函数（如本处
+//   sysPersistAttachments）必然"AST 中找不到"而误判空转。K1 要定位的是 index.js 内部函数，
+//   与那条元检查的验证域不同源，故不复用同名 extractFunctionBody（会被字面量正则强行拉进验证集合），
+//   另写一个逻辑相同、命名不同的本地花括号平衡提取函数，专供 K1 使用。
+function extractFnBodyLocal(source, fnName) {
+    const startRe = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)\\s*\\{`);
+    const m = startRe.exec(source);
+    if (!m) return null;
+    let depth = 0;
+    let i = m.index + m[0].length - 1;
+    const start = i;
+    for (; i < source.length; i++) {
+        if (source[i] === '{') depth++;
+        else if (source[i] === '}') { depth--; if (depth === 0) return source.slice(start, i + 1); }
+    }
+    return null;
+}
+check('[A·#83 C2·K1] persist 附件 payload 构造（两条字面量 INSERT 共用）与删除端点 removePayload 构造均不含 attachment_ids 键', () => {
+    const indexJsSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    // [自测踩坑修正] `const payload = {` 在 index.js 里**并非唯一**（全仓另有 3 处同名局部变量声明，
+    //   与 persist 无关）——裸 `indexJsSrc.match(...)` 只取全文件第一个匹配，曾悄悄抓到一处不相关的
+    //   声明（约 :10282，配置类 payload），本条检查因此对真正的目标全程空转、从未真正扫描过附件 payload。
+    //   改为**先用结构锚定位到 sysPersistAttachments 函数体**（花括号平衡，见上方 extractFnBodyLocal），
+    //   再在该函数体内找 `const payload = {`，确保定位到的就是附件三码这一处。
+    const persistFnBody = extractFnBodyLocal(indexJsSrc, 'sysPersistAttachments');
+    assert.ok(persistFnBody, '未提取到 sysPersistAttachments 函数体（结构锚失效=本条空转，须先红在这里）');
+    const persistPayload = persistFnBody.match(/const payload = \{[\s\S]*?\};/);
+    assert.ok(persistPayload, '未在 sysPersistAttachments 函数体内提取到 `const payload = {...};`（结构锚失效=本条空转，须先红在这里）');
+    assert.ok(!/attachment_ids/.test(persistPayload[0]), `persist payload 构造不得出现 attachment_ids 键，实得：${persistPayload[0]}`);
+    // [codex 595 M3] removePayload 的匹配须限定到删除端点自己的 handler 作用域内，不能对全文件裸
+    //   `match`（若未来别处新增同名局部变量 `removePayload`，裸正则会取"全文件第一个匹配"，可能命中
+    //   不相关声明而误判——同上方 persistPayload 已踩过的"裸正则取错声明"坑，:2073 一带自测踩坑修正）。
+    //   结构锚：先定位 `router.delete('/sys-issues/:id/attachments/:attId', ...)` 路由注册行，从其
+    //   handler 的 `=> {` 起花括号平衡切片到 handler 结尾，只在该切片内找 removePayload。
+    const delRouteRe = /router\.delete\('\/sys-issues\/:id\/attachments\/:attId'[\s\S]*?=>\s*\{/;
+    const delRouteM = delRouteRe.exec(indexJsSrc);
+    assert.ok(delRouteM, '未定位到附件删除端点 router.delete(\'/sys-issues/:id/attachments/:attId\'...) 注册行（结构锚失效=本条空转，须先红在这里）');
+    let depth = 0;
+    let i = delRouteM.index + delRouteM[0].length - 1;
+    const delHandlerStart = i;
+    for (; i < indexJsSrc.length; i++) {
+        if (indexJsSrc[i] === '{') depth++;
+        else if (indexJsSrc[i] === '}') { depth--; if (depth === 0) break; }
+    }
+    assert.ok(depth === 0 && i < indexJsSrc.length, '删除端点 handler 花括号未能配平（结构锚失效=本条空转，须先红在这里）');
+    const delHandlerBody = indexJsSrc.slice(delHandlerStart, i + 1);
+    const removePayload = delHandlerBody.match(/const removePayload = \{[\s\S]*?\};/);
+    assert.ok(removePayload, '未在删除端点 handler 作用域内提取到 `const removePayload = {...};`（结构锚失效=本条空转，须先红在这里）');
+    assert.ok(!/attachment_ids/.test(removePayload[0]), `removePayload 构造不得出现 attachment_ids 键，实得：${removePayload[0]}`);
+    // 双保险：两条字面量 INSERT 语句本身（含 JSON.stringify(payload) 绑定表达式）也不应出现该键名——
+    //   防止未来有人绕过 `payload` 变量、直接在 INSERT 语句里内联拼一个新对象。用**精确字面量正则**
+    //   （完整列清单 + 完整占位符 + 完整绑定数组，逐字匹配已知的两条真实语句形态）代替"从 INSERT 关键字
+    //   扫到下一个 JSON.stringify(payload)"这种跨语句漂移的宽口径扫描——踩坑记录：后者曾意外跨过中间
+    //   一条不相关的 completion_overrun_reason INSERT，一路扫到几百行外才收口，把大段无关代码当成"本
+    //   条语句"喂给 attachment_ids 检查，导致假红。
+    for (const code of ['attachment_added', 'attachment_replaced']) {
+        const stmtRe = new RegExp(
+            `INSERT INTO sys_issue_timeline \\(issue_id, event_type, summary, action_code, ref_id, round_no, operator_id, operator_name, payload_json\\)\\s*` +
+            `VALUES \\(\\?, 'note', \\?, '${code}', \\?, \\?, \\?, \\?, \\?\\)\`,\\s*` +
+            `\\[issueId, summary, refId, roundNo, uploader\\.id, uploader\\.name, JSON\\.stringify\\(payload\\)\\]`
+        );
+        const m = indexJsSrc.match(stmtRe);
+        assert.ok(m, `未精确匹配到 '${code}' 的字面量 INSERT 语句（列清单/占位符/绑定数组任一处改动会致本条空转，需同步更新此正则）`);
+        assert.ok(!/attachment_ids/.test(m[0]), `'${code}' 的 INSERT 语句本身不得出现 attachment_ids 字样，实得：${m[0]}`);
+    }
+});
+// [S2 修复批·MED-2·Opus 预筛拦截] attachment_type 枚举现有 4 份物理副本（后端 SYS_ATTACH_TYPES 数组 +
+//   后端 SYS_ATTACH_TYPE_WORD 键集 + 前端 SI_TL_ATTACH_TYPE_WORD 键集 + 前端 attachTypeOk 判据集合），
+//   此前无一条对拍断言——后端若新增第 4 种类型，前端 attachTypeOk 判 false ⇒ arrValid=false ⇒ 整条附件
+//   行静默回退 esc(summary)，展开区（#83 要留的"审计原文"）无声消失，没有任何守卫会红。
+//   同批已把前端 attachTypeOk 从硬编码字面量集合改成读 SI_TL_ATTACH_TYPE_WORD 的 key 集（见
+//   siRenderAttachListHtml 内注释），压掉前端的第二份副本；本条断言锁剩下三方（后端数组 + 后端键集 +
+//   前端键集）互相一致，仿既有 SI_RELEASE_DATE_CHANGE_REASON_MAX 前后端对拍写法（读源码正则提取真值，
+//   而非另写一份硬编码期望值，防"改了真值、断言里的硬编码期望值没跟着改"这种自我复读式假通过）。
+// [codex 595 L1] 三方对拍原实现的成员正则只认单引号字面量（'([a-z_]+)'/([a-z_]+)\s*:），若后端数组新增
+//   双引号成员（"archive"）或后端/前端对象新增计算属性键（['archive']），两种正则都会**静默漏计**，仍与
+//   未改动的另一侧三项相等——守卫显示一致，前端却拒绝新增类型。改为：逐成员用可识别 4 种写法（单引号/
+//   双引号/单引号计算属性/双引号计算属性）的组合正则匹配"键:值"整体（值固定是单引号中文字符串——数组
+//   成员本身即"值"，无需再匹配冒号），再对剥注释后的原文做**完备性检查**（leftover——同 SI_TL_HIDABLE_CODES
+//   /SI_TL_CHANGE_CODES 既有 leftover 先例）：正则命中部分与逗号/空白之外还剩非空内容即判红，防止"两种
+//   成员正则都漏掉同一处新增"这种同源盲区。
+function extractQuotedArrayMembers(listText, label) {
+    const stripped = stripComments(listText);
+    const re = /'([a-z_]+)'|"([a-z_]+)"/g;
+    const items = [];
+    let m;
+    while ((m = re.exec(stripped))) items.push(m[1] || m[2]);
+    const leftover = stripped.replace(/'([a-z_]+)'|"([a-z_]+)"/g, '').replace(/[\s,]/g, '');
+    assert.strictEqual(leftover, '', `${label} 数组字面量里有本断言**无法识别**的内容（残留「${leftover}」，双引号成员正则已覆盖，此处若非空说明有第三种写法未被识别）——静态提取已不完备，可能漏计新增成员`);
+    return items.sort();
+}
+function extractObjectKeysWithValue(bodyText, label) {
+    const stripped = stripComments(bodyText);
+    // 逐个"键:值"整体匹配（键 4 种写法 × 值固定单引号字符串），避免只匹配键导致 leftover 里混进值本身。
+    const entryRe = /'([a-z_]+)'\s*:\s*'[^']*'|"([a-z_]+)"\s*:\s*'[^']*'|\[\s*'([a-z_]+)'\s*\]\s*:\s*'[^']*'|\[\s*"([a-z_]+)"\s*\]\s*:\s*'[^']*'|([a-z_]+)\s*:\s*'[^']*'/g;
+    const items = [];
+    let m;
+    while ((m = entryRe.exec(stripped))) items.push(m[1] || m[2] || m[3] || m[4] || m[5]);
+    const leftover = stripped.replace(entryRe, '').replace(/[\s,]/g, '');
+    assert.strictEqual(leftover, '', `${label} 对象字面量里有本断言**无法识别**的内容（残留「${leftover}」，裸写/单引号/双引号/计算属性键四种写法已覆盖）——静态提取已不完备，可能漏计新增成员`);
+    return items.sort();
+}
+check('[A·#83 D1·MED-2] attachment_type 枚举三方对拍——后端 SYS_ATTACH_TYPES 数组 / 后端 SYS_ATTACH_TYPE_WORD 键集 / 前端 SI_TL_ATTACH_TYPE_WORD 键集，排序后逐一相等（含解析完备性 leftover 检查）', () => {
+    const indexJsSrc = fs.readFileSync(require('path').resolve(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    const mTypes = indexJsSrc.match(/const SYS_ATTACH_TYPES = \[([^\]]*)\];/);
+    assert.ok(mTypes, '未定位到后端 SYS_ATTACH_TYPES 数组字面量（结构锚失效=本条空转，须先红在这里）');
+    const backendTypes = extractQuotedArrayMembers(mTypes[1], '后端 SYS_ATTACH_TYPES');
+    const mWordBackend = indexJsSrc.match(/const SYS_ATTACH_TYPE_WORD = \{([^}]*)\};/);
+    assert.ok(mWordBackend, '未定位到后端 SYS_ATTACH_TYPE_WORD 常量字面量（结构锚失效=本条空转，须先红在这里）');
+    const backendWordKeys = extractObjectKeysWithValue(mWordBackend[1], '后端 SYS_ATTACH_TYPE_WORD');
+    const mWordFrontend = src.match(/const SI_TL_ATTACH_TYPE_WORD = \{([^}]*)\};/);
+    assert.ok(mWordFrontend, '未定位到前端 SI_TL_ATTACH_TYPE_WORD 常量字面量（结构锚失效=本条空转，须先红在这里）');
+    const frontendWordKeys = extractObjectKeysWithValue(mWordFrontend[1], '前端 SI_TL_ATTACH_TYPE_WORD');
+    assert.deepStrictEqual(backendTypes, backendWordKeys, `后端 SYS_ATTACH_TYPES(${JSON.stringify(backendTypes)}) 与后端 SYS_ATTACH_TYPE_WORD 键集(${JSON.stringify(backendWordKeys)}) 不相等——同一侧内部两份副本已漂移`);
+    assert.deepStrictEqual(backendWordKeys, frontendWordKeys, `后端 SYS_ATTACH_TYPE_WORD 键集(${JSON.stringify(backendWordKeys)}) 与前端 SI_TL_ATTACH_TYPE_WORD 键集(${JSON.stringify(frontendWordKeys)}) 不相等——前后端枚举已漂移，后端新增类型会致前端附件行整体静默回退`);
+    // attachTypeOk 已改读 SI_TL_ATTACH_TYPE_WORD（hasOwnProperty），前端第四份硬编码副本已压掉，
+    // 故本条不再单独对拍 attachTypeOk——它与 SI_TL_ATTACH_TYPE_WORD 键集同源，锁源头即锁住它。
+    assert.ok(/hasOwnProperty\.call\(SI_TL_ATTACH_TYPE_WORD, t\)/.test(src), 'attachTypeOk 应读 SI_TL_ATTACH_TYPE_WORD 而非硬编码字面量集合（压掉前端第四份副本，防止两处前端定义各自漂移）');
 });
 // [#67 A1/C10·2026-09-16] SI_TL_CHANGE_CODES 已由 Set 升为 Map<码, 期望 event_type>，本条随之重写。
 // ⚠️ 按 A1① 的「按用途分两类」原则：本条是**纯成员资格 / 集合关系检查**，故按 Map 的 **key 集合**比对，
@@ -2021,11 +2238,13 @@ check('[A·#67 C2] 历史提示豁免集合 ⊆ SI_TL_CHANGE_CODES 的 key 集�
     const outside = exempt.filter((k) => !keys.includes(k));
     assert.deepStrictEqual(outside, [], `豁免集合有成员不在 CHANGE_CODES 里：${outside.join(',')}`);
 });
-check('[A·#67 C2] SI_TL_HIDABLE_SCOPE_CODES 与 SI_TL_CHANGE_CODES 的 key 集合**交集为空**（一个码不能既可隐藏又是变更留痕）', () => {
-    // 语义冲突：变更留痕是「对外承诺被改了、必须始终可见」，可隐藏是「批次内部编排噪音、可折叠」。
+check('[A·#67/#83 C2] SI_TL_HIDABLE_CODES（全 11 项，含附件三码）与 SI_TL_CHANGE_CODES 的 key 集合**交集为空**（一个码不能既可隐藏又是变更留痕）', () => {
+    // 语义冲突：变更留痕是「对外承诺被改了、必须始终可见」，可隐藏是「批次内部编排/附件增删噪音、可折叠」。
     // 交集非空意味着某个码两种语义都占，渲染时就会出现「换了 ✎ 徽章但又被过滤器藏掉」的自相矛盾。
+    // [#83·S2 续做] 按全部 11 项（8 批次编排 + 3 附件）比对，非只比批次编排那 8 个子集——附件三码同样
+    // 不得混进变更留痕语义。
     const keys = parseChangeCodeKeys();
-    const hidable = parseSetMembers('SI_TL_HIDABLE_SCOPE_CODES');
+    const hidable = parseHidableCodesMap().map((p) => p[0]);
     const inter = hidable.filter((k) => keys.includes(k));
     assert.deepStrictEqual(inter, [], `两集合交集应为空，实得：${inter.join(',')}`);
 });
@@ -2104,9 +2323,9 @@ check('[A·乙4 C1③] SI_TL_CHANGE_CODES（A 类）与 SI_TL_CHANGE_ATTACH_CODE
     const inter = aKeys.filter((k) => bKeys.includes(k));
     assert.deepStrictEqual(inter, [], `A/B 两类不得有共同码（语义互斥：覆盖徽章 vs 保留原徽章），实得交集：${inter.join(',')}`);
 });
-check('[A·乙4 C1④] 六新码（A 类三 + B 类三）均不在 SI_TL_HIDABLE_SCOPE_CODES 白名单、也不在 SI_TL_NOTE_OWN_LABEL_CODES 里', () => {
+check('[A·乙4 C1④] 六新码（A 类三 + B 类三）均不在 SI_TL_HIDABLE_CODES 白名单、也不在 SI_TL_NOTE_OWN_LABEL_CODES 里', () => {
     const sixNew = ['estimate_eta', 'set_scheduled_start', 'set_oa_number', 'feasibility_change', 'assign_eta', 'scope_change_deadline'];
-    const hidable = parseSetMembers('SI_TL_HIDABLE_SCOPE_CODES');
+    const hidable = parseHidableCodesMap().map((p) => p[0]);
     const noteOwn = parseSetMembers('SI_TL_NOTE_OWN_LABEL_CODES');
     for (const code of sixNew) {
         assert.ok(!hidable.includes(code), `${code} 不应进可隐藏白名单（改造它的语义与「批次内部编排噪音」无关）`);
@@ -2380,13 +2599,22 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
             // [乙4·2026-09-17 B2/B4] 新增两项装配依赖：B 类附带变更表（Map）+ 历史资格集合（Set）。
             const attachMap = grabMap('SI_TL_CHANGE_ATTACH_CODES');
             const eligibleSet = grabSet('SI_TL_CHANGE_HISTORY_ELIGIBLE_CODES');
-            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabSet('SI_TL_HIDABLE_SCOPE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet];
-            check('[A 徽章前置] siRenderTimeline + siTlChangesHtml + 九张登记表/常量 + 适配器 + 徽章常量 + siTlIsHidableScope 本体均提取成功', () => {
+            // [#83·S2 续做] siRenderTimeline 自本批起依赖 siRenderAttachListHtml（附件三码「读侧校验 +
+            // 展开区列表」，同 siTlChangesHtml 一样是独立具名函数）+ 它引用的 SI_TL_ATTACH_TYPE_WORD 常量
+            // 与 siTlAttachDisplayName 辅助函数——隔离装配同样须一并注入，否则遇到附件行会
+            // ReferenceError: siRenderAttachListHtml is not defined（本组用例已在下方 [A 直调·H1] 一带
+            // 覆盖附件行，装配齐全是这些用例能跑通的前提）。
+            const fnAttachList = grabFnA('siRenderAttachListHtml');
+            const fnAttachDisplayName = grabFnA('siTlAttachDisplayName');
+            const constAttachTypeWord = (src.match(/const SI_TL_ATTACH_TYPE_WORD = \{[\s\S]*?\};/) || [''])[0];
+            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabMap('SI_TL_HIDABLE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet, constAttachTypeWord, fnAttachDisplayName, fnAttachList];
+            check('[A 徽章前置] siRenderTimeline + siTlChangesHtml + siRenderAttachListHtml + 十二张登记表/常量 + 适配器 + 徽章常量 + siTlIsHidableScope 本体均提取成功', () => {
                 assert.ok(fnTimeline, '未提取到 siRenderTimeline');
                 assert.ok(fnChangesHtml, '未提取到 siTlChangesHtml（B4 应已抽出该共用函数）');
+                assert.ok(fnAttachList, '未提取到 siRenderAttachListHtml（#83·S2 续做应已抽出该共用函数）');
                 parts.forEach((p, i) => assert.ok(p, `第 ${i} 项登记/常量未提取到`));
             });
-            if (fnTimeline && fnChangesHtml && parts.every(Boolean)) {
+            if (fnTimeline && fnChangesHtml && fnAttachList && parts.every(Boolean)) {
                 const stubs = {
                     SI_TL_WGATE_LEGACY_SUMMARY: '__wgate__', SI_DEV_FAMILY_STATUSES: ['开发中', '处理中'],
                     siStatusDisplay: (s) => s, siFmtDT: (s) => s, siFmtDTSec: (s) => s, siTlHideReleaseScope: false, siOpenId: 1,
@@ -2478,6 +2706,125 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     const bd = badge(tl([evtHidable], [], ''));
                     assert.ok(bd, 'release_add 行未渲染出徽章');
                     assert.strictEqual(bd.label, '加入上线单', `应取 SCOPE_LABEL 表里的专属标签；若 isReleaseScope 被误改，key 会落到 event_type、标签变成通用「范围变更」。实得「${bd.label}」`);
+                });
+                // ══ [S2 修复批·H1·codex 预筛拦截] 附件三码渲染分支——行为断言（补回被
+                //   verify-sys-timeline-summary-escape.js 白名单挡掉的那层：siRenderAttachListHtml 是本批
+                //   唯一渲染攻击者可控字符串（original_name）的路径，此前 panel-static 零覆盖）══════════
+                const xssImg = '<img src=x onerror=alert(1)>';
+                const xssAttr = '" onmouseover="alert(2)';
+                const addedRow = (originalName, extra) => Object.assign({ id: 81, event_type: 'note', action_code: 'attachment_added', summary: '上传附件：a.png', operator_name: '示例客服B', created_at: '2026-09-17 10:00:00', payload_json: JSON.stringify({ attachments: [{ id: 5, original_name: originalName, attachment_type: 'spec' }], count: 1 }) }, extra);
+                const replacedRow = (originalName) => Object.assign({}, addedRow(originalName), { id: 82, action_code: 'attachment_replaced', payload_json: JSON.stringify({ attachments: [{ id: 6, original_name: originalName, attachment_type: 'delivery' }], count: 1, superseded_id: 5 }) });
+                const removedRow = (originalName) => ({ id: 83, event_type: 'note', action_code: 'attachment_removed', summary: '删除附件：a.png', operator_name: '示例客服B', created_at: '2026-09-17 10:01:00', payload_json: JSON.stringify({ attachment: { id: 7, original_name: originalName, attachment_type: 'screenshot', uploaded_by_name: '张三' } }) });
+                check('[A 直调·H1] 附件展开区两个 XSS 文件名样本在 added/replaced/removed 三路径均被转义——不含裸 <img/onmouseover=，各自含转义后的字面量', () => {
+                    for (const [name, row] of [['added', addedRow], ['replaced', replacedRow], ['removed', removedRow]]) {
+                        const hImg = tl([row(xssImg)], [], '');
+                        assert.ok(!hImg.includes('<img src=x'), `${name} 路径 xssImg 样本应转义 <img，实得片段：${(hImg.match(/<li>[^\n]*<\/li>/) || ['(无)'])[0]}`);
+                        assert.ok(hImg.includes('&lt;img'), `${name} 路径 xssImg 样本应含转义后的 &lt;img，实得片段：${(hImg.match(/<li>[^\n]*<\/li>/) || ['(无)'])[0]}`);
+                        const hAttr = tl([row(xssAttr)], [], '');
+                        assert.ok(!hAttr.includes('" onmouseover="alert'), `${name} 路径 xssAttr 样本不应留原样 onmouseover 属性注入`);
+                        assert.ok(hAttr.includes('&quot; onmouseover'), `${name} 路径 xssAttr 样本应含转义后的 &quot; onmouseover，实得片段：${(hAttr.match(/<li>[^\n]*<\/li>/) || ['(无)'])[0]}`);
+                    }
+                });
+                check('[A 直调·H1] 三码正例——合法 payload 均展开 <details class="si-tl-attach-list">，含 (无文件名) 占位符', () => {
+                    for (const [name, row] of [['added', addedRow], ['replaced', replacedRow], ['removed', removedRow]]) {
+                        const h = tl([row('正常文件名.pdf')], [], '');
+                        assert.ok(h.includes('<details class="si-tl-attach-list">'), `${name} 合法 payload 应展开附件清单 details`);
+                    }
+                    const hNull = tl([addedRow(null)], [], '');
+                    assert.ok(hNull.includes('<details class="si-tl-attach-list">'), 'original_name 显式 null 仍应合法展开');
+                    assert.ok(/（无文件名）#5/.test(hNull), '显式 null 应显示「（无文件名）#id」占位符');
+                });
+                check('[A 直调·H1] 非法 payload 三码均静默回退 esc(summary)，不出 details——added 缺 attachments、replaced 缺 superseded_id、removed 类型非枚举', () => {
+                    const badAdded = tl([Object.assign({}, addedRow('x'), { payload_json: JSON.stringify({ count: 0 }) })], [], '');
+                    assert.ok(!badAdded.includes('si-tl-attach-list'), 'added 缺 attachments 应回退，不出 details');
+                    const badReplaced = tl([Object.assign({}, replacedRow('x'), { payload_json: JSON.stringify({ attachments: [{ id: 6, original_name: 'x', attachment_type: 'delivery' }], count: 1 }) })], [], '');
+                    assert.ok(!badReplaced.includes('si-tl-attach-list'), 'replaced 缺 superseded_id 应回退，不出 details');
+                    const badRemoved = tl([Object.assign({}, removedRow('x'), { payload_json: JSON.stringify({ attachment: { id: 7, original_name: 'x', attachment_type: 'archive', uploaded_by_name: '张三' } }) })], [], '');
+                    assert.ok(!badRemoved.includes('si-tl-attach-list'), 'removed attachment_type 非枚举应回退，不出 details');
+                });
+                // [596B-L1] 表驱动反例补充——上一条只覆盖「缺 attachments/缺 superseded_id/类型非枚举」三个
+                // 缺陷点，未直接锁住 count 与数组长度不符、元素 id 非正整数、缺 original_name、removed 缺
+                // uploaded_by_name、replaced 的 superseded_id 为零或负数这五类。同时补 removed 的
+                // uploaded_by_name:null 合法占位分支（显式 null 与缺键语义不同，不应被合并处理）。
+                check('[A 直调·L1(596B)] 非法 payload 反例表驱动补充——count 与数组长度不符/元素 id 非正整数/缺 original_name/removed 缺 uploaded_by_name/replaced superseded_id 为零或负数均应静默回退（不抛、不出 details、summary 转义保留）；removed 的 uploaded_by_name:null 是合法占位（非缺键）应正常展开', () => {
+                    const summaryX = '恶意<script>alert(9)</script>反例摘要';
+                    const escSummaryFrag = '&lt;script&gt;alert(9)&lt;/script&gt;';
+                    const runBad = (name, actionCode, payload) => {
+                        const row = { id: 91, event_type: 'note', action_code: actionCode, summary: summaryX, operator_name: '示例客服B', created_at: '2026-09-18 10:00:00', payload_json: JSON.stringify(payload) };
+                        let h; let threw = null;
+                        try { h = tl([row], [], ''); } catch (err) { threw = err; }
+                        assert.ok(!threw, `${name} 不应抛错，实抛出：${threw && threw.message}`);
+                        assert.ok(!h.includes('si-tl-attach-list'), `${name} 应静默回退，不出 details，实得：${h}`);
+                        assert.ok(h.includes(escSummaryFrag), `${name} 回退后应保留转义后的 summary，实得：${h}`);
+                    };
+                    runBad('added-count与数组长度不符', 'attachment_added', { attachments: [{ id: 1, original_name: 'a.png', attachment_type: 'delivery' }], count: 2 });
+                    runBad('added-id非正整数(0)', 'attachment_added', { attachments: [{ id: 0, original_name: 'a.png', attachment_type: 'delivery' }], count: 1 });
+                    runBad('added-id非正整数(负数)', 'attachment_added', { attachments: [{ id: -1, original_name: 'a.png', attachment_type: 'delivery' }], count: 1 });
+                    runBad('added-缺original_name键', 'attachment_added', { attachments: [{ id: 1, attachment_type: 'delivery' }], count: 1 });
+                    runBad('replaced-supersededId为0', 'attachment_replaced', { attachments: [{ id: 1, original_name: 'a.png', attachment_type: 'delivery' }], count: 1, superseded_id: 0 });
+                    runBad('replaced-supersededId为负数', 'attachment_replaced', { attachments: [{ id: 1, original_name: 'a.png', attachment_type: 'delivery' }], count: 1, superseded_id: -3 });
+                    runBad('removed-缺uploaded_by_name键', 'attachment_removed', { attachment: { id: 1, original_name: 'a.png', attachment_type: 'delivery' } });
+                    // removed 的 uploaded_by_name:null 是**合法占位**（非缺键）——siRenderAttachListHtml 用
+                    // hasOwnProperty 区分「缺键」与「显式 null」，二者语义不同，不应被合并处理为一律回退。
+                    const removedNullUploader = { id: 92, event_type: 'note', action_code: 'attachment_removed', summary: '删除附件：a.png', operator_name: '示例客服B', created_at: '2026-09-18 10:01:00', payload_json: JSON.stringify({ attachment: { id: 1, original_name: 'a.png', attachment_type: 'delivery', uploaded_by_name: null } }) };
+                    const hOk = tl([removedNullUploader], [], '');
+                    assert.ok(hOk.includes('si-tl-attach-list'), 'removed 的 uploaded_by_name:null 是合法占位，应正常展开 details（不应被误判为缺键回退）');
+                    assert.ok(hOk.includes('（未知上传人）'), 'removed 的 uploaded_by_name:null 展开区应显示「（未知上传人）」占位符');
+                });
+                // ══ [S2 修复批2·codex 595 M1] attachTypeOk 严格类型判据——非字符串（数组会被 hasOwnProperty
+                //   属性键转换误当合法字符串；{toString:null} 这种合法 JSON 值会在属性键转换时抛
+                //   TypeError，中断整条时间线渲染）三码均须不抛错、静默回退，不得被 hasOwnProperty.call 的
+                //   隐式类型转换蒙混过关 ══════════════════════════════════════════════════════
+                check('[A 直调·H1·M1(codex 595)] attachment_type 非字符串（数组/含 toString 陷阱对象）三码均不抛错、静默回退 esc(summary)——不得被属性键隐式转换误判合法或致渲染中断', () => {
+                    const summaryX = '恶意<script>alert(9)</script>摘要';
+                    const escSummaryFrag = '&lt;script&gt;alert(9)&lt;/script&gt;';
+                    const badTypeAdded = (t) => ({ id: 81, event_type: 'note', action_code: 'attachment_added', summary: summaryX, operator_name: '示例客服B', created_at: '2026-09-17 10:00:00', payload_json: JSON.stringify({ attachments: [{ id: 5, original_name: 'x', attachment_type: t }], count: 1 }) });
+                    const badTypeReplaced = (t) => ({ id: 82, event_type: 'note', action_code: 'attachment_replaced', summary: summaryX, operator_name: '示例客服B', created_at: '2026-09-17 10:00:00', payload_json: JSON.stringify({ attachments: [{ id: 6, original_name: 'x', attachment_type: t }], count: 1, superseded_id: 5 }) });
+                    const badTypeRemoved = (t) => ({ id: 83, event_type: 'note', action_code: 'attachment_removed', summary: summaryX, operator_name: '示例客服B', created_at: '2026-09-17 10:01:00', payload_json: JSON.stringify({ attachment: { id: 7, original_name: 'x', attachment_type: t, uploaded_by_name: '张三' } }) });
+                    for (const [name, rowFn] of [['added', badTypeAdded], ['replaced', badTypeReplaced], ['removed', badTypeRemoved]]) {
+                        for (const [caseName, t] of [['数组', ['spec']], ['toString 陷阱对象', { toString: null }]]) {
+                            let h; let threw = null;
+                            try { h = tl([rowFn(t)], [], ''); } catch (err) { threw = err; }
+                            assert.ok(!threw, `${name} 路径 attachment_type=${caseName} 不应抛错，实抛出：${threw && threw.message}`);
+                            assert.ok(!h.includes('si-tl-attach-list'), `${name} 路径 attachment_type=${caseName} 应静默回退，不出 details，实得：${h}`);
+                            assert.ok(h.includes(escSummaryFrag), `${name} 路径 attachment_type=${caseName} 回退后应保留转义后的 summary，实得：${h}`);
+                        }
+                    }
+                });
+                // ══ [S2 修复批2·codex 595 M2] uploaded_by_name 恶意标签样本（文件名保持普通，隔离变量）+
+                //   三码合法/非法 payload 下恶意 summary 均须转义——补白名单挡掉的那层安全回归防护 ══════
+                check('[A 直调·H1·M2(codex 595)] uploaded_by_name 恶意标签样本（文件名普通）在 removed 路径被转义；三码合法/非法 payload 下恶意 summary（<script>/属性注入两种）均被转义、不含裸标签', () => {
+                    const xssUploader = '<img src=x onerror=alert(1)>';
+                    const removedBadUploader = { id: 83, event_type: 'note', action_code: 'attachment_removed', summary: '删除附件：a.png', operator_name: '示例客服B', created_at: '2026-09-17 10:01:00', payload_json: JSON.stringify({ attachment: { id: 7, original_name: '正常文件名.pdf', attachment_type: 'screenshot', uploaded_by_name: xssUploader } }) };
+                    const hUploader = tl([removedBadUploader], [], '');
+                    assert.ok(!hUploader.includes('<img src=x onerror'), `removed 路径 uploaded_by_name 恶意标签应转义，实得片段：${(hUploader.match(/<li>[^<]*<\/li>/) || ['(无)'])[0]}`);
+                    assert.ok(hUploader.includes('&lt;img src=x onerror'), `removed 路径 uploaded_by_name 恶意标签应含转义后字面量，实得片段：${(hUploader.match(/<li>[^<]*<\/li>/) || ['(无)'])[0]}`);
+
+                    const xssSummary = '恶意摘要<script>alert(2)</script>片段';
+                    const escSummary = '&lt;script&gt;alert(2)&lt;/script&gt;';
+                    const xssSummaryAttr = '恶意摘要" onmouseover="alert(3)片段';
+                    const escSummaryAttr = '&quot; onmouseover=&quot;alert(3)';
+                    const cases = [
+                        ['added',
+                            (s) => addedRow('正常文件名.pdf', { summary: s }),
+                            (s) => Object.assign({}, addedRow('x', { summary: s }), { payload_json: JSON.stringify({ count: 0 }) })],
+                        ['replaced',
+                            (s) => Object.assign({}, replacedRow('正常文件名.pdf'), { summary: s }),
+                            (s) => Object.assign({}, replacedRow('x'), { summary: s, payload_json: JSON.stringify({ attachments: [{ id: 6, original_name: 'x', attachment_type: 'delivery' }], count: 1 }) })],
+                        ['removed',
+                            (s) => Object.assign({}, removedRow('正常文件名.pdf'), { summary: s }),
+                            (s) => Object.assign({}, removedRow('x'), { summary: s, payload_json: JSON.stringify({ attachment: { id: 7, original_name: 'x', attachment_type: 'archive', uploaded_by_name: '张三' } }) })],
+                    ];
+                    for (const [name, buildLegal, buildIllegal] of cases) {
+                        for (const [tag, mal, escMal] of [['<script>', xssSummary, escSummary], ['属性注入', xssSummaryAttr, escSummaryAttr]]) {
+                            const hLegal = tl([buildLegal(mal)], [], '');
+                            assert.ok(!hLegal.includes(mal), `${name} 合法 payload + ${tag} summary：不应含裸恶意片段，实得：${hLegal.slice(0, 500)}`);
+                            assert.ok(hLegal.includes(escMal), `${name} 合法 payload + ${tag} summary：应含转义后文本，实得：${hLegal.slice(0, 500)}`);
+                            const hIllegal = tl([buildIllegal(mal)], [], '');
+                            assert.ok(!hIllegal.includes(mal), `${name} 非法 payload + ${tag} summary：不应含裸恶意片段，实得：${hIllegal.slice(0, 500)}`);
+                            assert.ok(hIllegal.includes(escMal), `${name} 非法 payload + ${tag} summary：应保留转义后的 summary（回退路径），实得：${hIllegal.slice(0, 500)}`);
+                        }
+                    }
                 });
                 // ══ [#67 §6.2/C2b/C12·四分支行为断言] ══════════════════════════════════════
                 // 为什么在这里补：C10-b 删掉了两条**源码正则**（锁「三元表达式形态」与「直接传
@@ -3154,9 +3501,11 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     assert.ok(!rulesMutated.some(m => m[1] === 'teal'), '注掉 teal 规则后不应再找到 teal 色族——若仍找到说明未真正剥离 CSS 注释');
                 });
                 check('活体变异对照组·MED-4b：从 SI_TL_NOTE_OWN_LABEL_CODES 删掉 dev_submit_done/dev_no_code 两码——上方 NOTE_OWN 断言须判红', () => {
-                    const before = "'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code']);";
+                    // [#83·S2 续做] 尾部随附件三码登记后延长——锚点更新为含附件三码的完整现状；变异只摘掉
+                    // 本条对照组关心的 dev_submit_done/dev_no_code 两码，附件三码保留不动（不是本条变异对象）。
+                    const before = "'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);";
                     assert.ok(src.includes(before), '变异替换未命中原文——SI_TL_NOTE_OWN_LABEL_CODES 尾部文本已漂移，需同步本条变异对照组');
-                    const mutated = src.replace(before, "'dev_withdraw', 'release_overdue_reason']);");
+                    const mutated = src.replace(before, "'dev_withdraw', 'release_overdue_reason', 'attachment_added', 'attachment_replaced', 'attachment_removed']);");
                     const noteOwnMutatedRaw = (mutated.match(new RegExp('const SI_TL_NOTE_OWN_LABEL_CODES = new Set\\(\\[[\\s\\S]*?\\]\\);')) || [''])[0];
                     assert.ok(noteOwnMutatedRaw, '变异后仍应能提取到 SI_TL_NOTE_OWN_LABEL_CODES Set 字面量本体（否则本条对照组自身失效）');
                     const noteOwnMutated = stripComments(noteOwnMutatedRaw);
