@@ -9,6 +9,7 @@
 //   ⑦ attachments type 分流：未知 type→400 / fix_proof 非 FIXED→409 / error_proof 早期态 admin→成功 / error_proof 被指派开发(非建单人)→403
 //   require routes/corrections 真实 router + _internals（非复刻）。用法：node scripts/verify-correction-requesters-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -130,7 +131,7 @@ async function waitReady(timeoutMs = 3000) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ① 建单 requesters[] 多业务方

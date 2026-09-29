@@ -28,6 +28,7 @@
 //        通道 sent_by 清空（原"换上线开发 → release 组归零"子块随封禁退场，见文件内 tombstone）
 //   [I] 不变量全表扫描：`sent|failed ⟹ sent_by 非空` 且 `not_sent ⟹ sent_by 空`
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -151,7 +152,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

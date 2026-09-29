@@ -8,6 +8,7 @@
 //     ⑤ 响应体带 oa_number: finalOaNumber（H-2"贯穿...响应"）
 //   require routes/corrections 真实 router + _internals（非复刻）。用法：node scripts/verify-correction-datafix-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -109,7 +110,7 @@ async function waitReady(timeoutMs = 3000) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ① 空 oa_number → 自动补 datafix-{id}

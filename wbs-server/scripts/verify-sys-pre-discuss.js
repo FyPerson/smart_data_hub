@@ -25,6 +25,7 @@
 //   变更流集合属方案笔误，SYS_OA_ALLOWED_STATUSES.bug 与方案 v2.1 §4 均已收窄（`2afa103`）。
 //   [OA] 组现含 bug×已暂缓 的显式集外反例断言（S7 末次审要求：争议格裁定后要测进去，不留"绕开"痕迹）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -162,7 +163,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),
     (7,'shenjun','示例发布者','publisher','13800000007'),(13,'wangtaotao','示例对接人','user','19900000024')`);
-  await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness（admin1 / 受理人13 / 技术负责人7 / dev5 / 双身份dual13-admin）');
 
   // ═══ [S] 撤销哨兵：三类型建单均落待受理 + pre-discuss-pass 路由 404 + transitions 无可达路径 ═══

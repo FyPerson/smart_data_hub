@@ -7,6 +7,7 @@
 //   E error_proof 继承（返工子单 detail 返组主单 error_proof）  F M-4 脏数据探针
 // 用法：node scripts/verify-correction-rework-gate.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -115,7 +116,7 @@ async function callGate(id, from, to, payload) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
   const PAST = '2020-01-01 00:00:00';   // REFIXED 新增性基线（fixed_at），插的新 fix_proof created_at=now 必 > 此
 
   // ════ A 普通 single 留证放开（v1.97.1：截图可选 + 文字必填；用 SINGLE_* 码，与返工 REWORK_* 双必填分支独立不外溢）════

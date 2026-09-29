@@ -7,6 +7,7 @@
 //   E 递归链不漂移（child2 parent=child1 但 chain 仍按 root 平铺，非嵌套）
 // 用法：node scripts/verify-correction-rework-detail.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -96,7 +97,7 @@ async function mkFixProof(cid, name) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ── 造链：原单 R（升主单 group_id=R, child_count=2）+ child1(seq1,ARCHIVED)+ child2(seq2,IN_PROGRESS, parent=child1 递归) ──
   const R = await mkRow({ fixed_at: '2026-06-20 10:00:00', archived_at: '2026-06-20 12:00:00' });

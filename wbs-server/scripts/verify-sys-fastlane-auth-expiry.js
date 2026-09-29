@@ -25,6 +25,7 @@
 //   [14] 详情投影 deadline/expired 两态正确
 //   （[13] 占位符守卫权威在 verify-sys-list-badge-fields.js，本文件不重复）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -199,7 +200,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5 / dev2#6 / 受理人13 / 值班20）');
 

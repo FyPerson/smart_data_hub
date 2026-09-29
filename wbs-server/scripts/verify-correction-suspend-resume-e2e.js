@@ -15,6 +15,7 @@
 //          且 DB 真实落库状态与响应一致（不只信 HTTP 响应）
 // 用法：node scripts/verify-correction-suspend-resume-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -149,7 +150,7 @@ async function createCorrection(user) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ══════════════════ [Full] 真实端点全生命周期（含群消息①②）══════════════════

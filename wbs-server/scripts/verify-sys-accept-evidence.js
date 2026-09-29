@@ -26,6 +26,7 @@
 //   [R2]   return reason+ids → payload_json 精确形状 + summary===reason（不变）+ return_count++
 //   [R3]   return ids 非本单 → 400 RETURN_ATTACHMENT_INVALID，状态不变
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -178,7 +179,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin/dev/示例对接人）');
 

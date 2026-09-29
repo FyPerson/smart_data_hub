@@ -7,6 +7,7 @@
 //   2. 守卫①：有派生子单（被引用为 origin）→ 409 SYS_ISSUE_HAS_DERIVED，母单保留；子单本身可删（不影响母单）
 //   3. 守卫②：已挂上线批次（release_id）→ 409 SYS_ISSUE_IN_RELEASE，单保留
 //   4. 边界：不存在 → 404；非 admin → 403（requireAdmin 中间件先拦）；非法 id → 400
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -88,7 +89,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready');
 

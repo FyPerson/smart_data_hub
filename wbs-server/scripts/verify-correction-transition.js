@@ -72,6 +72,35 @@ async function main() {
     await setupSchema();
     ok('schema + users 表就绪（真实 initSchema 建三表 + users：admin 1/4 / user 5 / publisher 7 / viewer 11）');
 
+    // A5d：500/501 边界与 trim 后空白语义；拒绝路径全行及历史零变化。
+    for (const [toStatus, field, tooLongCode] of [
+        ['REJECTED', 'reject_reason', 'REJECT_REASON_TOO_LONG'],
+        ['VOIDED', 'void_reason', 'VOID_REASON_TOO_LONG'],
+    ]) {
+        for (const size of [500, 501, 0]) {
+            const id = await createCorrection();
+            const before = await get('SELECT * FROM correction_requests WHERE id=?', [id]);
+            const history = await all('SELECT * FROM correction_status_history WHERE correction_request_id=? ORDER BY id', [id]);
+            const payload = {[field]: '  '+ '因'.repeat(size)+'  '};
+            const expectedCode = size === 501 ? tooLongCode : size === 0 && toStatus === 'REJECTED' ? 'REJECT_REASON_REQUIRED' : null;
+            if (expectedCode) {
+                await assert.rejects(correctionTransition(id, 'PENDING_ASSIGN', toStatus, actor, payload), error => {
+                    assert.strictEqual(error.httpStatus, 400, '[A5d] '+field+' HTTP 400');
+                    assert.strictEqual(error.code, expectedCode, '[A5d] '+field+' error code');
+                    return true;
+                }, '[A5d] '+field+' '+size+' must reject');
+                assert.deepStrictEqual(await get('SELECT * FROM correction_requests WHERE id=?', [id]), before, '[A5d] 拒绝后全行不变');
+                assert.deepStrictEqual(await all('SELECT * FROM correction_status_history WHERE correction_request_id=? ORDER BY id',[id]),history,'[A5d] 拒绝后历史不变');
+            } else {
+                await correctionTransition(id,'PENDING_ASSIGN',toStatus,actor,payload);
+                const row=await get('SELECT * FROM correction_requests WHERE id=?',[id]);
+                assert.strictEqual(row.status,toStatus,'[A5d] '+field+' 正例状态');
+                assert.strictEqual(row[field],size ? '因'.repeat(size) : null,'[A5d] trim 后理由全等');
+            }
+            ok('[A5d] '+field+' trim 后 '+size+' 字：'+(expectedCode||'通过'));
+        }
+    }
+
     // [1] 流转表结构（9 态 + R-1 完成态不可拒 + 暂缓与列表导出方案 v1.1 SUSPENDED 边）
     assert.strictEqual(CORRECTION_STATUSES.length, 9, '应 9 态（8 态 + SUSPENDED，暂缓方案 v1.1）');
     assert.ok(CORRECTION_STATUS_TRANSITIONS['PENDING_ASSIGN'].includes('ASSIGNED_PENDING_ESTIMATE'), 'PENDING_ASSIGN→指派 合法');

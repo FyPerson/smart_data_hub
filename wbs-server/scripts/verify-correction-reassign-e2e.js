@@ -12,6 +12,7 @@
 //   ⑩ 白盒：乐观锁 WHERE 绑 stale assigned_to → changes=0（CONCURRENT_REASSIGN 守卫 SQL 不变量；真并发 BEGIN IMMEDIATE 序列化单线程不可重现，此处验证 SQL 守卫正确性）
 //   require routes/corrections 真实 router + _internals（非复刻）。用法：node scripts/verify-correction-reassign-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -109,7 +110,7 @@ async function waitReady(timeoutMs = 3000) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ① ASSIGNED 改派成功 + 通知态全清（含 error）+ assigned_* 改写

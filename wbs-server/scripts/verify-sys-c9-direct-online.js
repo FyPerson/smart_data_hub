@@ -31,6 +31,7 @@
 //
 // 断言纪律：精确状态码 + 精确 error code；负例断言"零副作用"（状态/列值/timeline 三查）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -192,7 +193,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise(res => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 
@@ -911,7 +912,7 @@ async function main() {
     assert.strictEqual(row.row.status, '已上线', '[14-①] 已上线');
     assert.strictEqual(row.row.online_source, 'no_commit_acceptance', '[14-①] 列已写本路径标签');
     // ② 归档后 reopen（reopen 的 from 已收窄为仅「已关闭」，故先 close）
-    r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { reason: 'C9-fix2 [14] 归档以便重开' });
+    r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { reason: 'C9-fix2 [14] 归档以便重开', archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 200, `[14-②前置] close 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: 'C9-fix2 [14] 重开新一轮' });
     assert.strictEqual(r.status, 200, `[14-②] reopen 期望 200, got ${r.status} ${JSON.stringify(r.body)}`);

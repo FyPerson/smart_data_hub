@@ -899,6 +899,7 @@ $replacements = @(
     @{ From = '172\.16\.0\.198'; To = '192.168.1.198' },
     @{ From = '172\.16\.0\.192'; To = '192.168.1.192' },
     @{ From = '172\.16\.0\.12'; To = '192.168.1.12' },
+    @{ From = '172\.16\.0\.5(?![0-9])'; To = '192.168.1.5' },  # 信息化资产巡检采集目标机（#99④·2026-09-30）
     @{ From = "'change_me_on_first_login'"; To = "'change_me_on_first_login'" },
     @{ From = 'change_me_on_first_login'; To = 'change_me_on_first_login' },
     @{ From = "'change_me_on_first_login'"; To = "'change_me_on_first_login'" },

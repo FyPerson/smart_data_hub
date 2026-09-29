@@ -22,6 +22,7 @@
 //
 // 断言纪律：钉确切 HTTP 码 + code；固化正例断言三字段精确值（非仅非空）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -118,7 +119,7 @@ async function main() {
     (2,'admin2','管理员乙','admin','active', NULL),
     (5,'dev','开发王','user','active', NULL),
     (13,'wangtaotao','示例对接人','user','active', NULL)`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1[有电话] / admin2[无电话] / dev5 / 示例对接人13）');
 

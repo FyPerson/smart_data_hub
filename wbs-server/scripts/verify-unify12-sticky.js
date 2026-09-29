@@ -34,7 +34,8 @@ function check(name, fn) {
     }
 }
 
-const pub = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
+// 工作区可能是 CRLF（core.autocrlf=true）：读入即规范化，源码片段断言只按 \n 写
+const pub = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8').replace(/\r\n/g, '\n');
 const css = pub('assets/css/components.css');
 const pages = {
     'Data_Correction.html': pub('Data_Correction.html'),

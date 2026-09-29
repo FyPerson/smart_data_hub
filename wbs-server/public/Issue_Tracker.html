@@ -580,7 +580,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script src="assets/js/app.js?v=v1.159.0_debta4"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
@@ -1350,14 +1350,8 @@
                         // codex M-3（2026-07-13）：后端收件人钉钉号未解析时返此，前端原缺处理会误报"尚未读取"
                         // §3.3「无法查询」态模板：`⚠️ {原因}，无法查询已读`
                         box.innerHTML = `<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>`;
-                    } else if (data.read_status === 'unread_expired') {
-                        // §3.3「超窗口未读」态：`⏰` 收编为 `—`，槽 muted。
-                        // ⚠️〔J7·mock-only〕**本分支在 Issue_Tracker 是死代码**：`unread_expired` 全仓唯一产出点
-                        //   是 server.js:15760（Data_Collab 查已读，唯一带 24h 窗口判定的端点）；
-                        //   `/api/issues/:id/notify-read-status`（server.js:12235-12300）无任何窗口判定。
-                        //   保留分支＝零行为变更（J7 裁定），但**验收时只能 route mock 造**，
-                        //   不得当成"本页已有超窗态"记进验收矩阵。
-                        box.innerHTML = `<span class="u-nt-muted">— 未读（已超过钉钉可查询时间）</span>`;
+                    } else if (data.read_status === 'unqueryable') {
+                        box.innerHTML = data.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>';
                     } else {
                         // §3.3「窗口内未读」态：`👀` 收编为 `⏳`（去 label + 去"重查"按钮的既有口径不变）
                         box.innerHTML = `<span class="u-nt-warn">⏳ 尚未读取</span>`;

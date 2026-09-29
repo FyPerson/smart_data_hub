@@ -11,6 +11,7 @@
 //     ⑦ 多文件（3 张）oa_proof 同步上传全部落库
 //   require routes/corrections 真实 router + _internals（非复刻）。用法：node scripts/verify-correction-oa-proof-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -124,7 +125,7 @@ function countFilesRecursive(dir) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ① 真OA + multipart + 1 文件 → 200
@@ -224,7 +225,7 @@ function countFilesRecursive(dir) {
   const app2 = express();
   app2.use(express.json());
   app2.use('/api/corrections', mod2.router);
-  const srv2 = app2.listen(0);
+  const srv2 = await listenOnSafePort(app2, null);
   const PORT2 = srv2.address().port;
   function reqMultipart2(fields, fileField, fileCount, user) {
     return new Promise((resolve) => {

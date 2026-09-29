@@ -5,6 +5,7 @@
 // 覆盖验收表 S2/S3/S4/S5/S6/S7/S8/S9（联合 SSOT §13）。in-process app + 内存库 + 自签 token，同
 // verify-sys-multidev-members.js 范式。每个主要场景 mutate 后跑 runProbes 自证（复用 C0 探针，非新增探针）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -159,7 +160,7 @@ async function main() {
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
     (1,'admin','管理员','admin'),(5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(8,'dev8','开发戊','user')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务');
 
   // ══════════════════════════════════════════════════════════════════════

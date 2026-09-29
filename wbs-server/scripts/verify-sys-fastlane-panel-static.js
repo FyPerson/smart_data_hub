@@ -1155,24 +1155,13 @@ check('siRenderDrawer 已调用 siFastlaneAuthWindowHtml 并拼入 fastlaneBlock
     assert.ok(body, '未提取到 siRenderDrawer 函数体');
     assert.ok(/const fastlaneBlock = siFastlaneAuthWindowHtml\(iss\) \+ siFastlaneExecSectionHtml\(/.test(body), 'siRenderDrawer 未见 fastlaneBlock = siFastlaneAuthWindowHtml(iss) + siFastlaneExecSectionHtml(...) 拼接——窗口提示行算出来了但可能没拼进详情 body');
 });
-check('过期分支：fast_release_auth_expired===1 时渲染"已超时"醒目样式文案', () => {
-    const body = bodyOf('siFastlaneAuthWindowHtml');
-    assert.ok(body.includes('fast_release_auth_expired'), '未见 fast_release_auth_expired 判据');
-    assert.ok(body.includes('已超时'), '未见"已超时"文案');
-    assert.ok(body.includes('转常规验收'), '未见"转常规验收"文案（方案 §6 展示面要求的完整措辞）');
-    assert.ok(/color:\s*#dc2626/.test(body), '过期分支未见醒目红色样式（同列表页"先行上线待补验收（超48h）"同款高亮先例）');
-});
-// [S2-fix MED-1] 判据↔文案邻接绑定——上面两条 includes 断言只证明"两个字符串都在函数体某处出现"，
-//   不证明它们在**同一分支**（若过期支的判据与窗口内支的文案错位拼接，两条 includes 仍会各自为真、
-//   整组照样绿）。改用距离受限正则把"判据字符串"与"其对应文案"绑进同一段邻接文本，才真正钉住"这段
-//   判据后紧跟的是它自己那句文案"。距离阈值按本函数体实测字符距离取（node 实测：expired→已超时=197
-//   字符，active_auth→先行上线窗口截止=551 字符，均含判据条件本身其余部分+LOW-2/LOW-3 新增代码），
-//   各留餘量（220/600）——太紧会把本次 LOW 系列合法新增内容（联判条件、底色样式）挤出窗口误判为
-//   "没绑上"，太松则起不到"抓错位"的效果；两条阈值均已按本文件实际改动后的函数体重新量过，非凭感觉
-//   取整。本组与上面两条 includes 断言互补，不删旧断言。
-check('过期分支判据↔文案邻接绑定：fast_release_auth_expired 后 ≤220 字符内出现"已超时"（非错位拼接）', () => {
-    const body = bodyOf('siFastlaneAuthWindowHtml');
-    assert.ok(/fast_release_auth_expired[\s\S]{0,220}?已超时/.test(body), '未见 fast_release_auth_expired 判据与"已超时"文案在 220 字符内邻接——可能判据与文案被错位拼接到了不同分支');
+check('#73 过期不渲染红条，包含矛盾投影和缺deadline反例', () => {
+    const full = extractFunctionFullText(src, 'siFastlaneAuthWindowHtml');
+    const render = new Function('esc', 'return (' + full + ')')(String);
+    for (const active of [0, 1]) for (const deadline of [null, '2030-01-02 08:00:00']) {
+        assert.strictEqual(render({ fast_release_auth_expired: 1, fast_release_active_auth: active, fast_release_auth_deadline: deadline }), '');
+    }
+    assert.strictEqual(render(null), '');
 });
 check('窗口内分支：fast_release_active_auth===1 且 deadline 非空时渲染截止提示（含"剩余约 N 小时"）', () => {
     const body = bodyOf('siFastlaneAuthWindowHtml');
@@ -1197,28 +1186,14 @@ check('窗口内分支时分渲染服务端值 ${m[4]}:${m[5]}（不硬编码 08
     assert.ok(/\$\{esc\(m\[4\]\)\}:\$\{esc\(m\[5\]\)\}/.test(body), '未见 ${esc(m[4])}:${esc(m[5])} 时分渲染——应取服务端 deadline 自带时分而非硬编码 08:00');
     assert.ok(!/剩余约[\s\S]{0,80}?08:00|08:00[\s\S]{0,80}?剩余约/.test(body), '窗口内文案不应仍出现硬编码 "08:00" 字面量（应已改渲染 m[4]/m[5]）');
 });
-// [S2-fix LOW-2] 过期分支底色——.si-gate-hint 基类默认 amber 底，红字配 amber 底与"醒目红色警示"意图
-//   不符，需显式覆盖背景/边框色。
-check('过期分支 inline 样式含底色覆盖 background:#fef2f2;border-color:#fecaca（红字红底一致，覆盖 .si-gate-hint 默认 amber 底）', () => {
+check('#73 退役红条无残留，恢复旧红条的变异会判红', () => {
     const body = bodyOf('siFastlaneAuthWindowHtml');
-    assert.ok(/background:\s*#fef2f2/.test(body), '过期分支未见 background:#fef2f2 底色覆盖');
-    assert.ok(/border-color:\s*#fecaca/.test(body), '过期分支未见 border-color:#fecaca 边框色覆盖');
-});
-// [S2-fix LOW-3] 过期分支联判补 fast_release_auth_deadline——deadline 与 expired 同源残留门控，零成本
-//   纵深防御：万一 expired 字段被误改成脱离残留语义的口径，deadline 仍保持"仅残留时非空"，联判可让
-//   非残留单免疫误显红标。[S2-fix2 ①] 结构从扁平 `if (A && B)` 改为嵌套 `if (A) { if (B) {...} else
-//   {...console.warn...} }`（联判的逻辑结果不变，仍是"两者皆真才渲染红标"；只是要在"A 真 B 假"这个
-//   理论态上插入观察线索分支，扁平写法表达不了这个三态分岔，改嵌套非改判据方向——codex 424-M1 的
-//   "改判据方向"部分已被主会话驳回，本条改的是控制流结构，不是驳回的那部分）。断言同步改认嵌套结构：
-//   外层 `if (fast_release_auth_expired) === 1)`，内层 `if (iss.fast_release_auth_deadline)` 紧随其后。
-check('过期分支判据联判 fast_release_auth_deadline（嵌套 if 结构：外层 expired===1，内层 deadline 非空才渲染红标）', () => {
-    const body = bodyOf('siFastlaneAuthWindowHtml');
-    assert.ok(/Number\(iss\.fast_release_auth_expired\)\s*===\s*1\)\s*\{[\s\S]{0,60}?if\s*\(iss\.fast_release_auth_deadline\)\s*\{/.test(body), '过期分支未见嵌套结构 "if (expired===1) { if (deadline) { ... } }"——应与 deadline 同源门控形成纵深防御');
-});
-check('联判不满足（expired=1 但 deadline 缺失，理论不可达态）时留 console.warn 观察线索，不渲染红标（codex 424-M1 精神部分采纳）', () => {
-    const body = bodyOf('siFastlaneAuthWindowHtml');
-    assert.ok(/console\.warn\('\[siFastlane\] expired=1 但 deadline 缺失/.test(body), '未见 console.warn(\'[siFastlane] expired=1 但 deadline 缺失...\')——联判不满足的理论态应留观察线索');
-    assert.ok(/console\.warn\([^)]*iss\.id\)/.test(body), 'console.warn 调用未见携带 iss.id——观察线索应能定位到具体单据');
+    assert.ok(!body.includes('已超时') && !body.includes('#dc2626') && !body.includes('#fef2f2'));
+    const full = extractFunctionFullText(src, 'siFastlaneAuthWindowHtml');
+    const mutant = full.replace("if (Number(iss.fast_release_auth_expired) === 1) return '';", "if (Number(iss.fast_release_auth_expired) === 1) return '<div>已超时</div>';");
+    assert.notStrictEqual(mutant, full);
+    const render = new Function('esc', 'return (' + mutant + ')')(String);
+    assert.throws(() => assert.strictEqual(render({ fast_release_auth_expired: 1 }), ''));
 });
 check('非残留（两者皆 0/null）路径最终返回空串（不显示本条）', () => {
     const body = bodyOf('siFastlaneAuthWindowHtml');

@@ -14,6 +14,7 @@
 //       永不相等，同值判断会整个失效 ⇒ 每次重复提交都写库 + 写 timeline + **重复推送业务方钉钉通知**。
 //       断言直接数 timeline 行数，不看返回值（返回值说 unchanged 但实际写了，照样是坏的）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -115,7 +116,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
 
   try {

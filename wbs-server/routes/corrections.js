@@ -10,6 +10,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const dingtalkNotify = require('../utils/dingtalk-notify');
+const { formatNotifyReadTime } = require('../utils/notify-read-time');
 const collabVersioning = require('../utils/collab-attachment-versioning');
 const collabSubmitHelpers = require('../utils/collab-submit-helpers');
 const { ARCHIVE_EXTS, ARCHIVE_MAX_SIZE, ARCHIVE_SIZE_BY_EXT, isArchiveExt } = require('../utils/attachment-archive');   // 附件压缩包支持方案 D1：三模块共用真相源
@@ -1040,6 +1041,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             case 'REJECTED': {
                 const rr = (typeof payload.reject_reason === 'string' ? payload.reject_reason.trim() : '');
                 if (!rr) throw new CorrectionTransitionError(400, 'REJECT_REASON_REQUIRED', '拒绝必须填写原因');
+                if (rr.length > 500) throw new CorrectionTransitionError(400, 'REJECT_REASON_TOO_LONG', '拒绝原因不超过 500 字');
                 setFrags.push("rejected_at = datetime('now','localtime')", 'rejected_by = ?', 'rejected_by_name = ?', 'reject_reason = ?');
                 setParams.push(Number(actor.id) || null, actor.name || null, rr);
                 historyReason = rr;
@@ -1047,6 +1049,7 @@ async function correctionTransition(requestId, expectedFromStatus, toStatus, act
             }
             case 'VOIDED': {
                 const vr = (typeof payload.void_reason === 'string' ? payload.void_reason.trim() : '');   // 建议填不强制（G-14）
+                if (vr.length > 500) throw new CorrectionTransitionError(400, 'VOID_REASON_TOO_LONG', '作废原因不超过 500 字');
                 setFrags.push("voided_at = datetime('now','localtime')", 'voided_by = ?', 'voided_by_name = ?', 'void_reason = ?');
                 setParams.push(Number(actor.id) || null, actor.name || null, vr || null);
                 historyReason = vr || null;
@@ -3603,7 +3606,7 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         if (recipient === 'done') {
             // ── 归档单返工 done 已读（Commit E）：返工子单读【自身行】completion_notify_message_key 查已读，收件人=组主单主业务方，
             //   写自身行 completion_read_at（不走主单 requester 子表）。自包含早返回，不动下方主单/组子表路径。──
-            const selfD = await dbGetAsync('SELECT id, created_by, correction_group_id, rework_parent_id, completion_notify_status, completion_notify_message_key, completion_notify_error, completion_read_at FROM correction_requests WHERE id = ?', [id]);
+            const selfD = await dbGetAsync('SELECT id, created_by, correction_group_id, rework_parent_id, completion_notify_status, completion_notify_message_key, completion_notify_error, completion_read_at, completion_notified_at FROM correction_requests WHERE id = ?', [id]);
             if (!selfD) return res.status(404).json({ error: '修正单不存在' });
             if (selfD.rework_parent_id != null) {
                 const actorR = correctionActor(req);
@@ -3612,13 +3615,15 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
                 if (selfD.completion_notify_status !== 'sent' || !selfD.completion_notify_message_key) {
                     return res.status(400).json({ error: '尚未成功通知业务方二次修复完成', code: 'REQUESTER_NOTIFY_NOT_SENT', read: false, status: selfD.completion_notify_status, notify_error: selfD.completion_notify_error || null });   // 对抗审 NIT-1：回传真实失败原因，与普通 done 路径口径对齐
                 }
-                if (selfD.completion_read_at) return res.json({ recipient, read: true, read_at: selfD.completion_read_at, cached: true });
+                if (selfD.completion_read_at) return res.json({ recipient, read: true, read_status: 'read', read_at: selfD.completion_read_at, cached: true });
                 const masterIdR = Number(selfD.correction_group_id);
                 if (!(masterIdR > 0) || masterIdR === id) return res.status(409).json({ error: '返工单据数据异常（组键不合法），请联系管理员', code: 'REWORK_GROUP_INVARIANT_BROKEN', read: false });   // codex MED-1 同口径
                 const primaryR = await dbGetAsync(`SELECT requester_phone FROM correction_requesters WHERE correction_request_id = ? AND is_primary = 1 ORDER BY seq LIMIT 1`, [masterIdR]);
                 if (!primaryR) return res.status(409).json({ error: '组主单无主业务方记录（历史/异常数据，需修复）', code: 'REQUESTER_ROWS_MISSING', read: false });   // codex MED-2：与 notify-done 同口径，区分「无记录」vs「无手机号」
                 const phoneR = String(primaryR.requester_phone || '').trim();
                 if (!phoneR) return res.status(400).json({ error: '业务方手机号为空，无法查已读', code: 'REQUESTER_PHONE_EMPTY', read: false });
+                // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+                if (dingtalkNotify.isBeyondReadWindow(selfD.completion_notified_at, Date.now())) return res.json({ recipient, ...dingtalkNotify.EXPIRED_READ_FIELDS });
                 const [aK2, aS2, rC2] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
                 if (!aK2 || !aS2 || !rC2) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
                 let tk2;
@@ -3631,16 +3636,16 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
                 let rr3;
                 try { rr3 = await callDingtalkWithTokenRetry(aK2, aS2, tk2, (t) => dingtalkNotify.getReadStatus(t, rC2, selfD.completion_notify_message_key)); }
                 catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
-                const e3 = (rr3.readDetails || []).find(d => String(d.userId).trim() === uidR && d.readStatus === 'READ');
+                const classification = dingtalkNotify.classifyReadStatus(rr3, uidR, selfD.completion_notified_at, Date.now());
+                const e3 = classification.state === 'read' ? classification : null;
                 let readAtR = null;
                 if (e3) {
                     const ts = Number(e3.readTimestamp) || 0;
                     const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-                    const rd = new Date(ms); const p3 = (n) => String(n).padStart(2, '0');
-                    readAtR = `${rd.getFullYear()}-${p3(rd.getMonth() + 1)}-${p3(rd.getDate())} ${p3(rd.getHours())}:${p3(rd.getMinutes())}:${p3(rd.getSeconds())}`;
+                    readAtR = formatNotifyReadTime(ms);   // 东八区统一格式（同 server / sys-iteration 已读写点）
                     try { await dbRunAsync(`UPDATE correction_requests SET completion_read_at = ? WHERE id = ?`, [readAtR, id]); } catch (_) {}   // 首查到 READ 固化自身行
                 }
-                return res.json({ recipient, read: !!e3, read_at: readAtR });
+                return res.json({ recipient, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: !!e3, read_at: readAtR });
             }
             const anchor = await resolveCorrectionGroupAnchor(id);
             if (!anchor) return res.status(404).json({ error: '修正单不存在' });
@@ -3662,9 +3667,11 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
             if (tgt.completion_notify_status !== 'sent' || !tgt.completion_notify_message_key) {
                 return res.status(400).json({ error: '该业务方尚未成功通知完成', code: 'REQUESTER_NOTIFY_NOT_SENT', read: false, requester_id: rid, status: tgt.completion_notify_status, notify_error: tgt.completion_notify_error || null });
             }
-            if (tgt.completion_read_at) return res.json({ recipient, requester_id: rid, read: true, read_at: tgt.completion_read_at, cached: true });
+            if (tgt.completion_read_at) return res.json({ recipient, requester_id: rid, read: true, read_status: 'read', read_at: tgt.completion_read_at, cached: true });
             const tgtPhone = String(tgt.requester_phone || '').trim();
             if (!tgtPhone) return res.status(400).json({ error: '业务方手机号为空，无法查已读', code: 'REQUESTER_PHONE_EMPTY', read: false });
+            // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+            if (dingtalkNotify.isBeyondReadWindow(tgt.completion_notified_at, Date.now())) return res.json({ recipient, requester_id: rid, ...dingtalkNotify.EXPIRED_READ_FIELDS });
             const [aK, aS, rC] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
             if (!aK || !aS || !rC) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
             let tk;
@@ -3677,17 +3684,17 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
             let rr2;
             try { rr2 = await callDingtalkWithTokenRetry(aK, aS, tk, (t) => dingtalkNotify.getReadStatus(t, rC, tgt.completion_notify_message_key)); }
             catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
-            const e2 = (rr2.readDetails || []).find(d => String(d.userId).trim() === uidD && d.readStatus === 'READ');
+            const classification = dingtalkNotify.classifyReadStatus(rr2, uidD, tgt.completion_notified_at, Date.now());
+            const e2 = classification.state === 'read' ? classification : null;
             let readAtD = null;
             if (e2) {
                 const ts = Number(e2.readTimestamp) || 0;
                 const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-                const rd = new Date(ms); const p2 = (n) => String(n).padStart(2, '0');
-                readAtD = `${rd.getFullYear()}-${p2(rd.getMonth() + 1)}-${p2(rd.getDate())} ${p2(rd.getHours())}:${p2(rd.getMinutes())}:${p2(rd.getSeconds())}`;
+                readAtD = formatNotifyReadTime(ms);   // 东八区统一格式（同 server / sys-iteration 已读写点）
                 try { await dbRunAsync(`UPDATE correction_requesters SET completion_read_at = ? WHERE id = ?`, [readAtD, tgt.id]); } catch (_) {}   // 首查到 READ 固化子表
                 if (Number(tgt.is_primary) === 1) { try { await dbRunAsync(`UPDATE correction_requests SET completion_read_at = ? WHERE id = ?`, [readAtD, id]); } catch (_) {} }   // 主业务方回写主表兼容列
             }
-            return res.json({ recipient, requester_id: rid, read: !!e2, read_at: readAtD });
+            return res.json({ recipient, requester_id: rid, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: !!e2, read_at: readAtD });
         }
 
         // 字段名是写死的列名常量（非用户输入），插值进 SELECT 无注入风险
@@ -3709,8 +3716,10 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         else canQuery = isAdmin || isCreator;   // done
         if (!canQuery) return res.status(403).json({ error: '无权查询该通知已读状态', code: 'NOT_AUTHORIZED' });
         if (!c.notified_at || c.notify_status !== 'sent') return res.status(400).json({ error: `尚未成功通知${fm.label}`, code: 'NOT_NOTIFIED', read: false });
-        if (c.read_at) return res.json({ recipient, read: true, read_at: c.read_at, cached: true });   // 已固化直接返
+        if (c.read_at) return res.json({ recipient, read: true, read_status: 'read', read_at: c.read_at, cached: true });   // 已固化直接返
         if (!c.message_key) return res.status(400).json({ error: '缺少消息标识', code: 'NO_MESSAGE_KEY', read: false });
+        // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+        if (dingtalkNotify.isBeyondReadWindow(c.notified_at, Date.now())) return res.json({ recipient, ...dingtalkNotify.EXPIRED_READ_FIELDS });
         const [appKey, appSecret, robotCode] = await Promise.all(['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
         if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'DINGTALK_NOT_CONFIGURED' });
         let token;
@@ -3730,7 +3739,8 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
         let readResult;
         try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, c.message_key)); }
         catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
-        const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === recipientDingUid && d.readStatus === 'READ');
+        const classification = dingtalkNotify.classifyReadStatus(readResult, recipientDingUid, c.notified_at, Date.now());
+        const myEntry = classification.state === 'read' ? classification : null;
         const isRead = !!myEntry;
         let readAt = null;
         if (isRead) {
@@ -3738,11 +3748,10 @@ router.get('/:id/notify-read-status', authenticateToken, requireCorrectionSchema
             // RC-L2（codex 27）：钉钉一般返回 readTimestamp；缺有效时间戳时退 Date.now() 作"首次查到已读"近似时刻（钉钉无取消已读语义，固化近似值优于永远查不到已读态）
             const ts = Number(myEntry.readTimestamp) || 0;
             const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-            const rd = new Date(ms); const p2 = (n) => String(n).padStart(2, '0');
-            readAt = `${rd.getFullYear()}-${p2(rd.getMonth() + 1)}-${p2(rd.getDate())} ${p2(rd.getHours())}:${p2(rd.getMinutes())}:${p2(rd.getSeconds())}`;
+            readAt = formatNotifyReadTime(ms);   // 东八区统一格式（同 server / sys-iteration 已读写点）
             try { await dbRunAsync(`UPDATE correction_requests SET ${fm.read_at} = ? WHERE id = ?`, [readAt, id]); } catch (_) {}   // 首查到 READ 固化
         }
-        res.json({ recipient, read: isRead, read_at: readAt });
+        res.json({ recipient, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: isRead, read_at: readAt });
     } catch (e) {
         logger.error(`[correction-read-status] #${id} 异常：${e.message}`);
         return res.status(500).json({ error: '查询已读状态失败' });

@@ -22,6 +22,7 @@
 //        并入 verify-sys-release-orchestration.js——原专属套件 verify-sys-notify-release-batch.js
 //        已随功能删除，其行为测试同随之作废）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -197,7 +198,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

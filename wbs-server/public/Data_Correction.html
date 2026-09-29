@@ -698,16 +698,16 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script src="assets/js/app.js?v=v1.159.0_debta4"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- S5（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
-         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串统一
-         v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍（verify-export-columns 断言 4）。 -->
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）。
+         [Codex R5] vendor内容不变；helper升uexport2，旧页面仍走缺省写出路径（verify-export-columns断言4）。 -->
     <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
-    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.160.0_uexport2"></script>
     <!-- U2：图片附件 lightbox（复刻数据协作范式；点 overlay/×/ESC 关，点图本身不关） -->
     <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
         <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
@@ -2763,7 +2763,7 @@
         //   版本守卫照 corrInitUPaste 同款范式；columns 抽成页面常量 CORR_EXPORT_COLUMNS 再传标识符
         //   （u-export.js 解析器已支持该形态，预筛 C4c H3）。
         // ============================================================
-        const DC_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+        const DC_UEXPORT_KIT_EXPECTED = 'uexport2';   // 须与 <script src="...u-export.js?v=..._uexport2"> 缓存串尾部一致
 
         // 导出时刻（§3.3）：now 通道已收口进共享层（C5 主会话裁定改 u-export.js）——attachExport 每次点击
         //   现取一次 exportNow 并绑定进 ctx.overdueRule，本页 value() 写 ctx.overdueRule(r) 即得同基准判定，
@@ -3303,13 +3303,8 @@
                     if (data.read_status === 'recipient_unresolved') {
                         // §3.3「无法查询」态：模板化为 `⚠️ {原因}，无法查询已读`
                         box.innerHTML = '<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>';
-                    } else if (data.read_status === 'unread_expired') {
-                        // §3.3「超窗口未读」态：`⏰` 收编为 `—`，槽 muted。
-                        // ⚠️〔J7·mock-only〕**本分支在 DCorr 是死代码**：`unread_expired` 全仓唯一产出点是
-                        //   server.js:15760（Data_Collab 查已读，唯一有 24h 窗口判定的端点），
-                        //   routes/corrections.js 的 read-status **从不返回该值**。保留分支＝零行为变更（J7 裁定
-                        //   「死分支保留换槽」），但**验收时本态只能 route mock 造**，不得当成"本页已有超窗态"。
-                        box.innerHTML = '<span class="u-nt-muted">— 未读（已超过钉钉可查询时间）</span>';
+                    } else if (data.read_status === 'unqueryable') {
+                        box.innerHTML = data.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>';
                     } else {
                         // §3.3「窗口内未读」态：`👀` 收编为 `⏳`
                         box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';

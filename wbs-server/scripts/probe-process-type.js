@@ -3,6 +3,7 @@
 //   harness 同 verify-correction-cross-system-e2e.js：require-cache mock 钉钉 + in-memory sqlite + 真实 router + HTTP。
 //   用法：node scripts/probe-process-type.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -82,7 +83,7 @@ const baseBody = (extra) => Object.assign({ source_system: 'BMS', location_info:
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // [A] 建单入库 + 详情 + 列表 SELECT 返回 process_type
   const A = await reqJson('POST', '/api/corrections', baseBody({ process_type: '报销流程' }), ADMIN);

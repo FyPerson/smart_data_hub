@@ -62,6 +62,7 @@
 //       字段保留不清不留痕 ④event_id 为 NULL 退化态 comment 提交 409 确切码（不因 NULL 比较放空唯一性）
 //       + helper no-op 不误清
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -229,7 +230,7 @@ async function main() {
     (1,'admin','管理员','admin','13800000001'),(2,'admin2','管理员乙','admin','13800000002'),
     (5,'dev','开发王','user','13800000005'),(7,'shenjun','示例发布者','publisher','13800000007'),
     (13,'wangtaotao','示例对接人','user','19900000024')`);
-  await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness（admin1/admin2 / 受理人13 / 技术负责人7 / dev5）');
 
   // ═══ [G] sysTechConsultGateStatus 单一来源：单元直测分流值（v2.1：全类型归一「待受理」）═══

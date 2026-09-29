@@ -13,6 +13,7 @@
 //   结尾输出 PASS n / FAIL m；跨零点（YESTERDAY/TODAY/TOMORROW 顶层常量与真实"今天"脱节）自动重跑一次
 //   子进程（env C1_XMID_RETRY=1 标记），以子进程退出码为准；连续两次跨零点则 ABORT (exit 2)。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -164,7 +165,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   console.log('readiness ready + HTTP harness（admin1 / dev5 / 示例对接人13）');
 

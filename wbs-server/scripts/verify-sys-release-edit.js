@@ -24,6 +24,7 @@
 //
 // 断言纪律：全程精确状态码 + 精确 error code，不用 status>=400 弱判据；正例断言真实落库副作用，非仅状态码。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -177,7 +178,7 @@ async function buildMutantInstance(mutantFactory, deps) {
   mmod.initSchema();
   await waitReadyOn(MI);
   let mserver = null;
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mmod.router); mserver = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mmod.router); mserver = await listenOnSafePort(app); }
   const mcall = makeCaller(() => mserver.address().port);
   return { mod: mmod, internals: MI, call: mcall, close: () => { try { mserver.close(); } catch (_) { /* ignore */ } } };
 }
@@ -212,7 +213,7 @@ async function main() {
     (5,'dev5','开发甲','user','active','13800000005'),
     (6,'dev6','开发乙','user','active','13800000006'),
     (7,'dev7','开发丙','user','active','13800000007')`);
-  await new Promise(res => {
+  {
     const app = express();
     app.use(express.json());
     app.use('/api', mod.router);
@@ -226,8 +227,8 @@ async function main() {
       }
       next(err);
     });
-    server = app.listen(0, '127.0.0.1', res);
-  });
+    server = await listenOnSafePort(app);
+  }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6,7）');
 
@@ -523,7 +524,7 @@ async function main() {
     modCasReal.initSchema();
     await waitReadyOn(modCasReal._internals);
     let casServer;
-    await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', modCasReal.router); casServer = app.listen(0, '127.0.0.1', res); });
+    { const app = express(); app.use(express.json()); app.use('/api', modCasReal.router); casServer = await listenOnSafePort(app); }
     const casCall = makeCaller(() => casServer.address().port);
     const rCas = await casCall('PATCH', `/api/sys-releases/${relId}`, adminTok, { title: '我以为现在还是原值时提交的新标题' });
     casServer.close();

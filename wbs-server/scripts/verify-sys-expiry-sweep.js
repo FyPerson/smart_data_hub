@@ -1,0 +1,78 @@
+'use strict';
+const assert=require('node:assert/strict');
+const start=require('./lib/sys-expiry-fixture');
+const {SYSTEM_ACTOR}=require('../routes/sys-iteration/expiry-sweep');
+const {fakeTimers}=require('./verify-sys-expiry-sweep-scheduler');
+(async()=>{
+ let pass=0;const check=(label,ok)=>{assert.ok(ok,label);pass++;console.log('[OK] '+label);};
+ let now='2030-01-02 07:59:59';const timers=fakeTimers();
+ const f=await start({clock:async()=>now,timers,enabled:true});const job=f.mod._internals.expirySweep;
+ const events=id=>f.all("SELECT * FROM sys_issue_timeline WHERE issue_id=? AND action_code='fast_release_auth_expired' ORDER BY id",[id]);
+ const state=id=>f.get('SELECT * FROM sys_issues WHERE id=?',[id]);
+ try{
+  check('schema就绪生产开关启动一次计时器',timers.tasks.size===1);
+  const old=await f.seed(),edge=await f.seed('2030-01-01 12:00:00'),future=await f.seed('2030-01-02 01:00:00');
+  const oldState=await state(old);await timers.fire();
+  check('启动处理积压但不提前处理8点边界', (await events(old)).length===1&&(await events(edge)).length===0&&(await events(future)).length===0);
+  const cleared=await state(old);for(const key of ['fast_release_auth_by','fast_release_auth_by_name','fast_release_auth_at','fast_release_auth_note','fast_release_revoked_at','fast_release_consumed_at'])assert.equal(cleared[key],null);
+  check('清六列不改主状态',cleared.status===oldState.status);
+  const roster=await f.all('SELECT * FROM sys_fast_release_executors WHERE issue_id=?',[old]);
+  check('pending及done均软删系统审计',roster.length===2&&roster.every(r=>r.removed_at&&r.removed_by===SYSTEM_ACTOR.id&&r.removed_by_name==='系统'));
+  const event=(await events(old))[0];check('系统事件真实落库且列未确认人',event.operator_id===SYSTEM_ACTOR.id&&event.operator_name==='系统'&&event.summary.includes('执行人甲')&&!event.summary.includes('执行人乙'));
+  check('未创建可登录系统用户',!(await f.get('SELECT id FROM users WHERE id=?',[SYSTEM_ACTOR.id])));
+  now='2030-01-02 08:00:00';await timers.fire();check('8点主动终结无需其他API写入',(await events(edge)).length===1&&(await events(future)).length===0);
+  await job.runNow();check('同代次幂等',(await events(edge)).length===1);
+  await f.run("UPDATE sys_issues SET fast_release_auth_at='2030-01-02 09:00:00',fast_release_auth_by=1,fast_release_auth_by_name='测试管理员',fast_release_auth_note='新一代' WHERE id=?",[edge]);
+  now='2030-01-03 08:00:00';await timers.fire();check('新代次到期可新增一条',(await events(edge)).length===2);
+  const revoked=await f.seed(),consumed=await f.seed(),released=await f.seed(),reopened=await f.seed();
+  await f.run("UPDATE sys_issues SET fast_release_revoked_at='2020-01-02 00:00:00' WHERE id=?",[revoked]);
+  await f.run("UPDATE sys_issues SET fast_release_consumed_at='2020-01-02 00:00:00' WHERE id=?",[consumed]);
+  await f.run("UPDATE sys_issues SET released_at='2020-01-02 00:00:00' WHERE id=?",[released]);
+  await f.run("UPDATE sys_issues SET reopened_at='2020-01-02 00:00:00' WHERE id=?",[reopened]);
+  await job.runNow();for(const id of [revoked,consumed,released,reopened])assert.equal((await events(id)).length,0);check('复用残留谓词排除已撤销消费上线跨轮',true);
+  const broken=await f.seed(),good=await f.seed();const beforeBroken=await state(broken);
+  await f.run(`CREATE TEMP TRIGGER fail_expiry BEFORE INSERT ON sys_issue_timeline WHEN NEW.action_code='fast_release_auth_expired' AND NEW.issue_id=${broken} BEGIN SELECT RAISE(ABORT,'test expiry fault'); END`);
+  const result=await job.runNow();check('失败单不拖住后续单',result.failed.includes(broken)&&(await events(good)).length===1);
+  assert.deepEqual(await state(broken),beforeBroken);check('失败单原子回滚无审计半写',(await events(broken)).length===0&&(await f.all('SELECT removed_at FROM sys_fast_release_executors WHERE issue_id=?',[broken])).every(r=>r.removed_at===null));
+  await f.run('DROP TRIGGER fail_expiry');await job.runNow();check('失败恢复后正常清理',(await events(broken)).length===1);
+  const changed=await f.seed();let altered=false;
+  f.hooks.afterRun=async sql=>{if(sql==='COMMIT'&&!altered){altered=true;await f.rawRun("UPDATE sys_issues SET fast_release_auth_at='2040-01-01 12:00:00' WHERE id=?",[changed]);}};
+  await job.runNow();delete f.hooks.afterRun;check('候选发现后重授权不误清',(await events(changed)).length===0&&(await state(changed)).fast_release_auth_at==='2040-01-01 12:00:00');
+  let release,arrive;const held=new Promise(r=>release=r),arrived=new Promise(r=>arrive=r);let heldOnce=false;
+  const slow=await f.seed(),later=await f.seed();
+  f.hooks.beforeRun=async(sql,args)=>{if(!heldOnce&&sql.includes('UPDATE sys_issues SET fast_release_auth_by')&&args[0]===slow){heldOnce=true;arrive();await held;}};
+  const first=job.runNow();await arrived;const second=job.runNow();check('重入合并同一在途任务',first===second);
+  let stopped=false;const stopping=job.stop().then(()=>stopped=true);await new Promise(r=>setImmediate(r));check('停止等待在途单',!stopped);release();await stopping;delete f.hooks.beforeRun;
+  check('停止不再处理后续单或调度',(await events(slow)).length===1&&(await events(later)).length===0&&timers.tasks.size===0);
+  job.start();await timers.fire();check('重启补扫中断剩余单',(await events(later)).length===1);
+  const rollbacks=f.trace.filter(sql=>sql==='ROLLBACK').length;const oldTitle=(await state(changed)).title;
+  await f.rawRun('BEGIN IMMEDIATE');await f.rawRun("UPDATE sys_issues SET title='其他通道未提交写入' WHERE id=?",[changed]);
+  await assert.rejects(job.runNow(),/cannot start a transaction/);
+  check('BEGIN失败不回滚别人的事务',f.trace.filter(sql=>sql==='ROLLBACK').length===rollbacks);
+  check('别人的在途写入仍由原事务持有',(await state(changed)).title==='其他通道未提交写入');
+  await f.rawRun('ROLLBACK');check('原事务仍可自行回滚',(await state(changed)).title===oldTitle);
+  const competing=await f.seed();let releaseSweep,sweepArrived,httpArrived;
+  const waitSweep=new Promise(r=>releaseSweep=r),atSweep=new Promise(r=>sweepArrived=r),atHttp=new Promise(r=>httpArrived=r);
+  f.hooks.beforeRun=async(sql,args)=>{if(sql.includes('UPDATE sys_issues SET fast_release_auth_by')&&args[0]===competing){sweepArrived();await waitSweep;}};
+  f.hooks.onRequest=req=>{if(req.url.endsWith('/fast-release-revoke'))httpArrived();};
+  const sweepRun=job.runNow();await atSweep;const begins=f.trace.filter(sql=>sql==='BEGIN IMMEDIATE').length;
+  const revoke=f.api('POST',`/sys-issues/${competing}/fast-release-revoke`,{});await atHttp;
+  check('真实HTTP操作等同一把sys互斥锁',f.trace.filter(sql=>sql==='BEGIN IMMEDIATE').length===begins);
+  releaseSweep();await sweepRun;const revokedResponse=await revoke;delete f.hooks.beforeRun;delete f.hooks.onRequest;
+  check('扫描与HTTP竞态仅一次终结',revokedResponse.status===409&&revokedResponse.body.code==='FAST_RELEASE_REVOKE_NOT_ALLOWED'&&(await events(competing)).length===1);
+  const collision=await f.seed();await f.run('INSERT INTO users(id,username,display_name,role) VALUES(?,?,?,?)',[SYSTEM_ACTOR.id,'collision','碰撞测试用户','user']);
+  await job.runNow();check('真实用户ID碰撞停扫且不冒名',job.status().halted&&(await events(collision)).length===0&&timers.tasks.size===0);
+ }finally{await f.stop();}
+ const g=await start({clock:async()=>now});
+ try{
+  check('测试工厂默认不启动后台扫描',!g.mod._internals.expirySweep.status().started);
+  const id=await g.seed();let failRollback=true;
+  g.hooks.beforeRun=async sql=>{if(sql.includes('UPDATE sys_issues SET fast_release_auth_by'))throw Error('expiry write failed');if(sql==='ROLLBACK'&&failRollback){failRollback=false;throw Error('rollback not confirmed');}};
+  await g.mod._internals.expirySweep.runNow();delete g.hooks.beforeRun;
+  check('回滚未确认停扫并留错误日志',g.mod._internals.expirySweep.status().halted&&g.logs.some(l=>l.level==='error'&&String(l.args[0]).includes('回滚未确认')));
+  await g.rawRun('ROLLBACK');check('夹具独占连接人工恢复后原数据保留',!!(await g.get('SELECT fast_release_auth_at FROM sys_issues WHERE id=?',[id])).fast_release_auth_at);
+ }finally{await g.stop();}
+ const stoppedTimers=fakeTimers();const h=await start({enabled:true,timers:stoppedTimers,stopBeforeReady:true});
+ try{check('schema晚就绪不会复活已停服扫描',stoppedTimers.tasks.size===0&&!h.mod._internals.expirySweep.status().started);}finally{await h.stop();}
+ console.log(`PASS=${pass} FAIL=0`);
+})().catch(e=>{console.error(e);console.log('PASS=0 FAIL=1');process.exitCode=1;});

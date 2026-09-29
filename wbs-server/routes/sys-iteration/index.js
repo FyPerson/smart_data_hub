@@ -16,11 +16,14 @@
 //   - 导出 { initSchema, router, _internals }，_internals 供 verify require 真实逻辑（RC-L2 根治复刻漂移）
 'use strict';
 const express = require('express');
+const { formatNotifyReadTime } = require('../../utils/notify-read-time');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');     // C2：reassign operation_id 用 randomUUID（§3 events 规格，同 server.js:11 范式）
 const multer = require('multer');     // C3b 附件上传（自建，对齐 corrections.js:9 范式；§10.3 deps 表 multer=自建）
 const T = require('./transitions');   // 状态机常量单一来源（§3.7，T-M4）
+const { createExpirySweep, SYSTEM_ACTOR, civilMillis } = require('./expiry-sweep');
+const archiveOrigin = require('./archive-origin');
 const SF = require('./status-families');   // C0/C2：主状态族常量 + W06 白名单（§4.0/§5.3，联合 SSOT）
 const { assertMainStatusTransition } = require('./status-transition-guard');   // C2 交付物①：不变量 7 三层组合统一入口
 const issueNotify = require('../../utils/issue-notify');   // C5 通知 markdown 安全文本（issueSafeText 复用 dingtalk-notify escapeMarkdown，不新建转义，§10.3 require）
@@ -170,6 +173,9 @@ module.exports = (deps) => {
     //   intake_notify_status 是 NOT NULL 列，同 relay/tech_lead_notify_status 先例整组通知列以 status
     //   锚点代表入 readiness（其余 intake_notify_* 由 verify-sys-schema 全量保障）。
     'intake_liaison_id', 'intake_notify_status',
+    // ← #75 锚点：intake_notified_at 是**被消费的热路径列**——recordSysIntakeNotify 的 UPDATE 显式点名写它，
+    //   查已读按它判 7 天窗口；mid-migration 崩溃（列未补）会让受理通知写入撞 no such column（同 oa_number 先例）。
+    'intake_notified_at',
     // ← 建单优化批 C3b（方案 20260801_v1.3 §6c）锚点：oa_exempt 是**被消费的热路径列**——三创建入口写它
     //   （主建单按提交值/衍生入口恒 0）+ assertSysDevCommitmentOaGuard 的 SELECT 读它做放行判定，
     //   mid-migration 崩溃（列未补）会让这些语句撞 no such column → 500（同 oa_number/intake_liaison_id 先例）。
@@ -866,10 +872,7 @@ module.exports = (deps) => {
         -- ── 建单优化批 C1（方案 20260731_v1.2 §3/§4）：对接人字段 + intake 通知通道 5 列 ──────────
         --   置于表尾（同惯例，与旧库 ALTER ADD COLUMN 追加序一致）。intake_liaison_id 可空（存量单/
         --   导入单无对接人为合法态，§3 改动点1）；intake 通知 5 列逐列镜像 creator_notify_* 范式
-        --   （§4 改动点1，NOT NULL DEFAULT 双路径同 creator_notify_status 先例）——⚠️ 本通道刻意不设
-        --   独立的 intake_notified_at 列（方案 §4 列清单明列 5 列：status/message_key/error/read_at/
-        --   sent_by，不含 notified_at），status/message_key/error/sent_by 四列已足支撑三态流转与查
-        --   已读判定，旧库 ALTER 路径见 runSysMigration [1a-11]。
+        --   #75 的 intake_notified_at 不在本 CREATE 里：同 online_source 之后各列只走 runSysMigration [1a-20] ALTER，新旧库列序一致。
         intake_liaison_id INTEGER,
         intake_notify_status TEXT NOT NULL DEFAULT 'not_sent' CHECK (intake_notify_status IN ('not_sent','sent','failed')),
         intake_notify_message_key TEXT,
@@ -2097,6 +2100,11 @@ module.exports = (deps) => {
       ];
       await alterAddMissingCols('sys_issues', SYS_CONFIG_FLOW_ISSUE_COLS, 'S1a·config流激活_方案_20260907_v1.0 §4 执行方式契约');
 
+      // [1a-20] #75 intake 成功发送时间：同 online_source 之后各列只走 ALTER、不进 CREATE，且须是
+      //   sys_issues 的最后一次 ALTER——新库与旧库迁移后的列序才一致（verify-sys-schema [M2③]/[75] 守）。
+      //   本列已入 SYS_ISSUES_KEY_COLS 锚点，ALTER 在下方 [2] 复查之前完成（顺序铁律同 [1a]）。
+      await alterAddMissingCols('sys_issues', [['intake_notified_at', 'DATETIME']], '#75 intake 成功发送时间');
+
       // [C2·A 块] 上线逾期留痕——2 列（overdue_reason_code/overdue_reason_note），照 :2073-2077
       //   SYS_COMPLETION_OVERRUN_ISSUE_COLS 同款写法（无 DDL CHECK，理由码值域由服务层
       //   RELEASE_OVERDUE_REASON_CODES 校验 + verify 全库探针双层保障）。两列同挂 sys_releases（批次级，
@@ -2501,6 +2509,7 @@ module.exports = (deps) => {
       //   （实测 verify-sys-multidev-reset 连跑 5 次 OK/FAIL/FAIL/OK/FAIL，修正后连跑 6 次全 OK）。
       if (migrationBodyOk && !SYS_SCHEMA_STATE.error) {
         SYS_SCHEMA_STATE.ready = true;
+        if (deps.expirySweepEnabled === true && !expirySweepShutdown) expirySweep.start();
         logger.info(`[系统迭代 C1] ✅ sys ${SYS_REQUIRED_TABLES.length}表就绪 + C0 受理门约束就位，写入口放行。`);
       }
     }
@@ -4835,7 +4844,7 @@ module.exports = (deps) => {
   //   预计算的计数/快照"同款精神）——即便调用方已经判过一次残留∧过期，仍在这里独立复核，事务串行下
   //   两次判定理论必然一致，但不因"理论一致"就省略这层复核（同本文件其余纵深防御范式）。
   const FAST_RELEASE_EXPIRY_TRIGGERS = ['submit_gate', 'exec_confirm', 'roster_add', 'roster_remove',
-    'event_five', 'revoke', 'reauthorize', 'batch_publish', 'submit_withdraw'];
+    'event_five', 'revoke', 'reauthorize', 'batch_publish', 'submit_withdraw', 'sweep'];
   async function terminateExpiredFastReleaseAuthInTxn(issueId, actor, trigger, nowStr) {
     if (!FAST_RELEASE_EXPIRY_TRIGGERS.includes(trigger)) {
       throw new Error(`terminateExpiredFastReleaseAuthInTxn: 未知 trigger="${trigger}"（调用方传参错误，非业务态）`);
@@ -5412,7 +5421,7 @@ module.exports = (deps) => {
                 intake_required,
                 oa_number,
                 intake_liaison_id,
-                liaison_test_cycle_no, liaison_test_attachment_watermark,
+                liaison_test_cycle_no, liaison_test_attachment_watermark, liaison_test_recipient_id,
                 created_at, deadline,
                 eta_overrun_reason_code, eta_overrun_reason_note,   -- [组 C·SC1] §3C.3 写点通知判据（变化时通知建单人）
                 post_release_acceptance,   -- [组 B·SB3·不变量⑥] close 动作需要判 pending 是否禁止关闭，见下方 case 'close'
@@ -5765,7 +5774,7 @@ module.exports = (deps) => {
       let summary = null;
       let timelineRoundNo = null;   // C3b：submit 写本轮交付轮次到 timeline.round_no（其余动作 NULL）
       let timelinePayloadJson = null;   // [codex 291 号 H-2] 结构化留痕，[2026-09-06 决策记录 D3/D4/J4] 现由
-      //   case 'liaison_test_pass' / 'accept' / 'return' 三处写值，其余动作恒 NULL
+      //   case 'liaison_test_pass' / 'accept' / 'return' / 'close' 写值，其余动作恒 NULL
       // [组A·2.2/2.4] 受理 ETA 结果——仅 case 'intake_accept' 写值，其余动作恒 null；makeTransitionEndpoint
       //   据此在响应体里附带 eta 信息块（自动生成/超时受理提示）并按需追加 estimate 通知派发。
       let etaOutcome = null;
@@ -6450,7 +6459,7 @@ module.exports = (deps) => {
             }
           }
           // [方案 D22-④·2026-08-06 批2·codex 291 号 H-1/H-2/M-1 收口] pass 凭证校验：口径="进入本轮待
-          //   对接测试之后新上传的附件" 或 "pass 当场填写的测试说明文字"，至少其一。置于①b 复查**之后**——
+          //   对接测试之后由本轮对接人或操作者本人新上传的附件" 或 "pass 当场填写的测试说明文字"，至少其一。置于①b 复查**之后**——
           //   评估是否放行 pass 这件事，roster/资格/交付完整性是更根本的前置条件，评估顺序上应先判定
           //   "这次 pass 在业务上是否成立"，evidence 是在此基础上追加的"操作者本人是否真的验证过"的补充
           //   约束；也让 [6b]/[6c]/[6d] 等既有 roster/资格反例测试继续精确命中 LIAISON_TEST_PASS_INVARIANT
@@ -6470,12 +6479,14 @@ module.exports = (deps) => {
           //   须严格 id > watermark。[291 号 M-1] 不再因 hasNote=true 短路——无条件查询，拿到真实
           //   attachment_ids 供下方 payload_json 留痕（"说明+附件同时都有"时 evidence='both' 需要两者
           //   都确实成立，短路会让"有说明但其实也传了新附件"这一真三态永远测不到）。
+          // #58：本轮凭证只认本轮对接人或当前操作者上传；历史 recipient=NULL 时只认操作者。
           const passAttRows = await dbAllAsync(
             `SELECT id FROM sys_issue_attachments
                WHERE issue_id = ? AND attachment_type IN ('delivery','screenshot') AND status = 'active'
                  AND id > ?
+                 AND (uploaded_by = ? OR uploaded_by = ?)
                ORDER BY id ASC`,
-            [issueId, row.liaison_test_attachment_watermark || 0]
+            [issueId, row.liaison_test_attachment_watermark || 0, row.liaison_test_recipient_id, actor.id]
           );
           const attachmentIds = passAttRows.map(r => r.id);
           const hasAttachment = attachmentIds.length > 0;
@@ -6605,6 +6616,10 @@ module.exports = (deps) => {
           if (row.post_release_acceptance === 'pending') {
             throw new SysTransitionError(409, 'POST_ACCEPTANCE_PENDING', '该单为先行上线待补验收，请走补验收端点');
           }
+          const origin = archiveOrigin.normalize(payload);
+          if (!origin.value) throw new SysTransitionError(400, origin.code, origin.error);
+          timelinePayloadJson = JSON.stringify({ archive_origin: origin.value });
+          summary = '任务产生原因：' + origin.value.label;
           setFrags.push("closed_at = datetime('now','localtime')");
           break;
         }
@@ -7210,7 +7225,7 @@ module.exports = (deps) => {
   router.get('/sys-issues/meta', authenticateToken, requireSysSchemaReady, (req, res) => {
     // [#56·2026-09-10] execModes 字段已随「执行方式」整组下线（用户拍板），meta 不再下发；
     // 前端 META.execModes 消费点已同步移除（Sys_Iteration.html）。
-    res.json({ ...T.buildMeta(), sources: SYS_SOURCES });
+    res.json({ ...T.buildMeta(), sources: SYS_SOURCES, archiveOriginReasons: archiveOrigin.reasons });
   });
 
   // ── GET /sys-issues/intake-liaisons：对接人下拉候选（建单优化批 C1 §3 改动点5）──────────
@@ -17128,14 +17143,7 @@ module.exports = (deps) => {
       // ⚠️ 新值为 null 是**合法状态**（改期端点 normalizeDeadline 明确「留空可清除」），此时展开区
       //   由既有 siTlChangeValueHtml 渲染成「（空）」，与 summary 的「→ 未设定」一致。
       payload.changes = [{ field: 'planned_date', old: payload.planned_date_old, new: payload.planned_date_new }];
-      // [C4b·Opus 预筛 M1 收口] 零成员批次没有 sys_issue_timeline 行可挂（release_date_change 走"每受
-      //   影响成员各写一条"的既有范式，零成员=零行），本端点（update-planned-date）也不写
-      //   sys_release_audit（批次级审计表——那是 PATCH /sys-releases/:id 与 DELETE 端点专属的审计动作，
-      //   改期端点从未接线过），理由在这种边界态下确无落点。改期本身（CAS UPDATE）已提交，不因"理由
-      //   无处落痕"而拒绝已完成的操作，改为显式 warn 留一条可查日志，不静默吞：
-      if (currentMembers.length === 0 && delta.overdue_change_reason) {
-        logger.warn(`[系统迭代] 逾期改期理由无成员单可落痕 releaseId=${releaseId} reason=${delta.overdue_change_reason}`);
-      }
+      // 改期端点在同事务内写批次审计；零成员批次的理由由该审计保留。
       for (const m of currentMembers) timelineTargets.push({ issueId: m.id, actionCode: 'release_date_change', summary, payload });
     }
     if (delta.schedule_cancelled) {
@@ -18072,7 +18080,7 @@ module.exports = (deps) => {
       // 列已无任何写路径能产出 'sending' 态，转换动作本身变得没有意义（见函数删除处注释）。
       await sysBeginImmediate();
       try {
-        const rel = await dbGetAsync('SELECT id, status, planned_date FROM sys_releases WHERE id = ?', [id]);
+        const rel = await dbGetAsync('SELECT * FROM sys_releases WHERE id = ?', [id]);
         if (!rel) { await sysRollback(); return res.status(404).json({ error: '上线批次不存在', code: 'RELEASE_NOT_FOUND' }); }
         if (rel.status !== '计划中') { await sysRollback(); return res.status(409).json({ error: '批次非「计划中」，不能改期', code: 'RELEASE_NOT_PLANNING' }); }
         const changed = rel.planned_date !== newDate;   // 相同日期（含都为 null）= 差量空
@@ -18132,6 +18140,21 @@ module.exports = (deps) => {
           overdue_change_reason: reasonText,
           overdue_days: overdueDays,
         });
+        if (changed) {
+          // #65：每次真实改期（含空批次）写一条 edit，与 CAS 和成员时间线同事务。
+          // edit 的 reason 列须为 NULL；逾期理由放入 planned_date 变更元素。
+          const dateChange = { field: 'planned_date', old: rel.planned_date, new: newDate };
+          if (reasonText) dateChange.overdue_change_reason = reasonText;
+          const memberIds = (await dbAllAsync('SELECT id FROM sys_issues WHERE release_id = ? ORDER BY id', [id])).map(row => row.id);
+          await dbRunAsync(
+            `INSERT INTO sys_release_audit
+               (release_id, release_no, action, release_json, changes_json, executors_json,
+                member_issue_ids, member_count, reason, operator_id, operator_name)
+             VALUES (?, ?, 'edit', ?, ?, NULL, ?, ?, NULL, ?, ?)`,
+            [id, rel.release_no, JSON.stringify(rel), JSON.stringify([dateChange]),
+             JSON.stringify(memberIds), memberIds.length, actor.id, actor.name]
+          );
+        }
         await sysCommit();
         res.json({ id, planned_date: newDate, changed });
       } catch (txErr) {
@@ -19108,7 +19131,8 @@ module.exports = (deps) => {
   //     'dry_run'                message_key 是演练伪造值，不可查真实已读
   //     'recipient_unresolved'   收件人钉钉号解析不出，查不了
   //     'read'                    已读（cached 快路径或本次活查命中）
-  //     'unread'                  本次活查未命中已读（发了，暂无人读）
+  //     'unread'                  钉钉明确返回该收件人 UNREAD
+  //     'unqueryable'             超窗或钉钉未返回该收件人记录
   router.get('/sys-releases/:id/executors/:userId/read-status', authenticateToken, requireSysSchemaReady, requireAdmin, async (req, res) => {
     const id = parsePositiveId(req.params.id);
     if (!id) return res.status(400).json({ error: '无效的批次 ID', code: 'INVALID_RELEASE_ID' });
@@ -19116,7 +19140,7 @@ module.exports = (deps) => {
     if (!userId) return res.status(400).json({ error: '无效的用户 ID', code: 'INVALID_USER_ID' });
     try {
       const row = await dbGetAsync(
-        `SELECT id, notify_status AS ns, notify_message_key AS mk, read_at AS ra
+        `SELECT id, notify_status AS ns, notify_message_key AS mk, read_at AS ra, notified_at
            FROM sys_release_executors WHERE release_id = ? AND user_id = ? AND removed_at IS NULL`,
         [id, userId]
       );
@@ -19127,6 +19151,8 @@ module.exports = (deps) => {
       //   在读钉钉配置/外呼之前，不能指望"本地凭证恰好没配"兜底（本地实测三项凭证俱全，见 L1 订正）；
       //   否则会拿这个假 key 去真打 getReadStatus，钉钉侧大概率报错，但仍是一次不该发生的真实外呼。
       if (row.mk.startsWith('dryrun-')) return res.json({ read: false, read_at: null, read_status: 'dry_run' });
+      // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+      if (dingtalkNotify.isBeyondReadWindow(row.notified_at, Date.now())) return res.json({ ...dingtalkNotify.EXPIRED_READ_FIELDS, read_user_count: 0 });
       const [appKey, appSecret, robotCode] = await Promise.all(
         ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
       if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
@@ -19139,7 +19165,8 @@ module.exports = (deps) => {
       let readResult;
       try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, row.mk)); }
       catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
-      const my = (readResult.readDetails || []).find(d => String(d.userId).trim() === uid && d.readStatus === 'READ');
+      const classification = dingtalkNotify.classifyReadStatus(readResult, uid, row.notified_at, Date.now());
+      const my = classification.state === 'read' ? classification : null;
       let readAtStr = null;
       if (my) {
         // L6（Opus 预筛）：read_at 改 SQL 侧 datetime('now','localtime') 计算——弃用 toLocaleString
@@ -19154,7 +19181,7 @@ module.exports = (deps) => {
           [readAtStr, row.id, id, userId, row.mk]);
       }
       // 300-L2：活查分支同样补稳定枚举——已读/未读不再只靠裸 read 布尔位区分。
-      res.json({ read: !!my, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length, read_status: my ? 'read' : 'unread' });
+      res.json({ read: !!my, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}) });
     } catch (err) {
       logger.error('[系统迭代] 执行人（行级）查已读失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '查已读失败' });
@@ -20415,16 +20442,13 @@ module.exports = (deps) => {
     warnNotifyWriteMissed('建单人', issueId, sb, ok, ok ? messageKey : error, r);
     return r;
   }
-  // 对接人受理侧落库（建单优化批 C1 §4 改动点1/5；intake_notify_* 5 列，逐字镜像 recordSysCreatorNotify
-  //   格局——含每次发送（含 failed 后重发）无条件清 intake_read_at、恒写 sent_by。⚠️ 本通道无
-  //   intake_notified_at 列（方案 §4 列清单只列 5 列：status/message_key/error/read_at/sent_by，
-  //   不含 notified_at），故 SET 子句比 creator 少一句，其余逐字一致。
+  // 对接人受理通知：成功写本轮发送时间；失败清时间，每次发送均清已读、记录发送人。
   async function recordSysIntakeNotify(issueId, ok, messageKey, error, sentBy) {
     const sb = assertNotifySentBy('recordSysIntakeNotify', sentBy);
     const r = await sysNotifyWriteRun(
-      `UPDATE sys_issues SET intake_notify_status=?,
+      `UPDATE sys_issues SET intake_notify_status=?, intake_notified_at=CASE WHEN ? = 1 THEN datetime('now','localtime') ELSE NULL END,
               intake_notify_message_key=?, intake_notify_error=?, intake_read_at=NULL, intake_notify_sent_by=? WHERE id=?`,
-      [ok ? 'sent' : 'failed', ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId]);
+      [ok ? 'sent' : 'failed', ok ? 1 : 0, ok ? messageKey : null, ok ? null : (error || 'other'), sb, issueId]);
     warnNotifyWriteMissed('对接人受理', issueId, sb, ok, ok ? messageKey : error, r);
     return r;
   }
@@ -21254,7 +21278,7 @@ module.exports = (deps) => {
       //   requester/relay/release-executor）逐字一致的既定契约，非本次新增缺口。残余窗口：通知发送
       //   过程中单据被流转走（如恰好此时受理通过/退回修改），写回会落在新态上；这是自愈的——通知行
       //   仅在「待受理」态渲染（siRenderNotify 按 status 门控），回受理门（intake_return/reactivate）
-      //   整组归零 intake 通知 5 列（SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL），污染既不可见也不跨轮。
+      //   整组归零 intake 通知 6 列（SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL），污染既不可见也不跨轮。
       const liaisonUser = await dbGetAsync('SELECT id, display_name, phone, dingtalk_user_id FROM users WHERE id = ?', [targetLiaisonId]);
       if (!liaisonUser) return res.status(409).json({ error: '对接人用户不存在', code: 'INTAKE_LIAISON_NOT_FOUND' });
 
@@ -21766,34 +21790,34 @@ module.exports = (deps) => {
       }
       if (rsAuthErr) return res.status(rsAuthErr.status).json(rsAuthErr.body);
 
-      let notifyStatus, messageKey, readAt, devRowId = null, devUserId = null;
+      let notifyStatus, messageKey, readAt, notifiedAt, devRowId = null, devUserId = null;
       if (type === 'dev') {
         devUserId = parsePositiveId(req.query.dev_user_id);
         if (!devUserId) return res.status(400).json({ error: '缺少 dev_user_id', code: 'DEV_USER_ID_REQUIRED' });
         const row = await dbGetAsync(
-          `SELECT id, notify_status, notify_message_key, read_at FROM sys_issue_dev_assignees
+          `SELECT id, notify_status, notify_message_key, read_at, notified_at FROM sys_issue_dev_assignees
             WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL`,
           [id, devUserId]
         );
         if (!row) return res.status(404).json({ error: '该开发不在本单指派子表中', code: 'DEV_ASSIGNEE_NOT_FOUND' });
-        notifyStatus = row.notify_status; messageKey = row.notify_message_key; readAt = row.read_at; devRowId = row.id;
+        notifyStatus = row.notify_status; messageKey = row.notify_message_key; readAt = row.read_at; notifiedAt = row.notified_at; devRowId = row.id;
       } else if (type === 'relay') {
-        notifyStatus = issue.relay_notify_status; messageKey = issue.relay_notify_message_key; readAt = issue.relay_read_at;
+        notifyStatus = issue.relay_notify_status; messageKey = issue.relay_notify_message_key; readAt = issue.relay_read_at; notifiedAt = issue.relay_notified_at;
       } else if (type === 'creator') {
-        notifyStatus = issue.creator_notify_status; messageKey = issue.creator_notify_message_key; readAt = issue.creator_read_at;
+        notifyStatus = issue.creator_notify_status; messageKey = issue.creator_notify_message_key; readAt = issue.creator_read_at; notifiedAt = issue.creator_notified_at;
       } else if (type === 'release_executor') {
-        notifyStatus = issue.release_assignee_notify_status; messageKey = issue.release_assignee_notify_message_key; readAt = issue.release_assignee_read_at;
+        notifyStatus = issue.release_assignee_notify_status; messageKey = issue.release_assignee_notify_message_key; readAt = issue.release_assignee_read_at; notifiedAt = issue.release_assignee_notified_at;
       } else if (type === 'intake') {
-        notifyStatus = issue.intake_notify_status; messageKey = issue.intake_notify_message_key; readAt = issue.intake_read_at;
+        notifyStatus = issue.intake_notify_status; messageKey = issue.intake_notify_message_key; readAt = issue.intake_read_at; notifiedAt = issue.intake_notified_at;
       } else {
-        notifyStatus = issue.requester_notify_status; messageKey = issue.requester_notify_message_key; readAt = issue.requester_read_at;
+        notifyStatus = issue.requester_notify_status; messageKey = issue.requester_notify_message_key; readAt = issue.requester_read_at; notifiedAt = issue.requester_notified_at;
       }
 
       if (notifyStatus !== 'sent' || !messageKey) {
         return res.status(400).json({ error: '尚未成功发送该通知', code: 'NOTIFY_NOT_SENT', read: false });
       }
       // 已固化 → 直接返（钉钉无取消已读语义，不再查）
-      if (readAt) return res.json({ type, read: true, read_at: readAt, cached: true });
+      if (readAt) return res.json({ type, read: true, read_status: 'read', read_at: readAt, cached: true });
 
       // requester 快照前置校验（先于钉钉配置获取——"根本没有收件人标识可查"比"钉钉配置缺失"更根本，
       //   fail fast 不浪费一次配置/token 往返；H-5/§6.1：查已读用快照，非当前 requester_phone；
@@ -21806,6 +21830,8 @@ module.exports = (deps) => {
         }
       }
 
+      // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+      if (dingtalkNotify.isBeyondReadWindow(notifiedAt, Date.now())) return res.json({ type, ...dingtalkNotify.EXPIRED_READ_FIELDS, read_user_count: 0 });
       const [appKey, appSecret, robotCode] = await Promise.all(
         ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
       if (!appKey || !appSecret || !robotCode) return res.status(500).json({ error: '钉钉配置未填写', code: 'NO_DINGTALK_CONFIG' });
@@ -21837,14 +21863,15 @@ module.exports = (deps) => {
       try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, messageKey)); }
       catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
 
-      const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === recipientDingUid && d.readStatus === 'READ');
+      const classification = dingtalkNotify.classifyReadStatus(readResult, recipientDingUid, notifiedAt, Date.now());
+      const myEntry = classification.state === 'read' ? classification : null;
       const isRead = !!myEntry;
       let readAtStr = null;
       if (isRead) {
         // codex 12 M-3：readTimestamp 单位兼容归一（不凭印象 *1000）——>1e12 视为毫秒、>1e9 视为秒
         const ts = Number(myEntry.readTimestamp) || 0;
         const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-        readAtStr = new Date(ms).toLocaleString('zh-CN');
+        readAtStr = formatNotifyReadTime(ms);
         if (type === 'dev') {
           await sysNotifyWrite('UPDATE sys_issue_dev_assignees SET read_at = ? WHERE id = ?', [readAtStr, devRowId]);
         } else {
@@ -21856,7 +21883,7 @@ module.exports = (deps) => {
           await sysNotifyWrite(`UPDATE sys_issues SET ${col} = ? WHERE id = ?`, [readAtStr, id]);
         }
       }
-      res.json({ type, read: isRead, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length });
+      res.json({ type, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: isRead, read_at: readAtStr, read_user_count: (readResult.readUserIds || []).length });
     } catch (err) {
       logger.error('[系统迭代] 查已读状态失败:', err && err.message);
       res.status(500).json({ error: (err && err.message) || '查已读状态失败' });
@@ -21866,7 +21893,52 @@ module.exports = (deps) => {
   // ============================================================
   // 四、导出（_internals 供 verify require 真实逻辑，RC-L2）
   // ============================================================
+  // #73 owns only transactions it successfully opened. A failed BEGIN must not
+  // roll back someone else's transaction. Unlike legacy best-effort rollback,
+  // an unconfirmed rollback halts this worker and leaves explicit diagnostics.
+  async function expiryTransaction(operation) {
+    await sysBeginImmediate();
+    try {
+      const value = await operation();
+      await sysCommit();
+      return value;
+    } catch (error) {
+      try { await dbRunAsync('ROLLBACK'); }
+      catch (rollbackError) {
+        error.expirySweepFatal = true;
+        logger.error('[系统迭代 #73] 回滚未确认，停止后台扫描，需检查连接并重启', { message:rollbackError.message });
+      } finally { releaseSysTxn(); }
+      throw error;
+    }
+  }
+  async function expiryReadNow() {
+    const value = deps.expirySweepClock ? await deps.expirySweepClock() : (await dbGetAsync("SELECT datetime('now','localtime') AS nowStr")).nowStr;
+    civilMillis(value);
+    return value;
+  }
+  let expirySweepShutdown = false;
+  const expirySweep = createExpirySweep({
+    isReady:() => SYS_SCHEMA_STATE.ready, readNow:expiryReadNow, logger,
+    setTimer:deps.expirySweepTimers && deps.expirySweepTimers.setTimer,
+    clearTimer:deps.expirySweepTimers && deps.expirySweepTimers.clearTimer,
+    listCandidates:() => expiryTransaction(async () => {
+      const now = await expiryReadNow();
+      const rows = await dbAllAsync(`SELECT id FROM sys_issues WHERE ${FAST_RELEASE_ACTIVE_AUTH_WHERE_SQL}
+        AND datetime(fast_release_auth_at,'start of day','+1 day','+8 hours') <= ? ORDER BY id`, [now]);
+      return rows.map(row => row.id);
+    }),
+    expireOne:id => expiryTransaction(async () => {
+      if (await dbGetAsync('SELECT id FROM users WHERE id=?', [SYSTEM_ACTOR.id])) {
+        const error = new Error('系统审计ID已被用户占用，停止到期扫描');
+        error.expirySweepFatal = true; throw error;
+      }
+      const now = await expiryReadNow();
+      return terminateExpiredFastReleaseAuthInTxn(id, SYSTEM_ACTOR, 'sweep', now);
+    }),
+  });
+
   const _internals = {
+    expirySweep,
     SYS_SCHEMA_STATE,
     // [S4a·A5·#67 六写点补齐] scope-change deadline changes 构造纯函数——供 verify-sys-timeline-trace-coverage.js
     // 直调四格（未传/同值/首次/更新），本函数不接 db、无副作用（RC-L2 防复刻漂移，同本文件既有导出先例）。
@@ -22162,5 +22234,5 @@ module.exports = (deps) => {
     DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS,   // [S2d·codex 493-R M] I0 同对象断言——钉住 index.js 消费的正是 transitions.js 导出的同一引用，非各自维护副本
   };
 
-  return { initSchema, router, _internals };
+  return { initSchema, router, _internals, stopExpirySweep:() => { expirySweepShutdown = true; return expirySweep.stop(); } };
 };

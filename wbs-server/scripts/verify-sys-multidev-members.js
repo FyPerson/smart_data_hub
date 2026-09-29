@@ -6,6 +6,7 @@
 // 跑一遍 runProbes 自证（复用 C0 探针，非新增探针）。in-process app + 内存库 + 自签 token，照
 // verify-sys-multidev-read.js 范式。C2 范围：不碰 W07（/assign /schedule 等）与 RELEASE，故本文件不测这些。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -199,7 +200,7 @@ async function main() {
     (5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(8,'dev8','开发丙','user'),
     (10,'dev10','开发丁','user'),(11,'dev11','开发戊','user'),(12,'dev12','开发己','user'),
     (9,'viewer9','观察员','viewer'),(7,'shenjun','示例发布者','publisher'),(13,'wangtaotao','示例对接人','user')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务');
 
   // ══════════════════════════════════════════════════════════════════════

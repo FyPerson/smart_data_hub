@@ -19,6 +19,7 @@
 // [reassign meta/from 声明侧双向收窄见 verify-sys-meta.js [6]/[6b]（族门-状态级排除唯一权威函数
 //   memberActionAuthoritativeStatuses 的写读同源断言），本文件不重复，只测运行时冻结行为侧。]
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -157,7 +158,7 @@ async function main() {
     (1,'admin','管理员','admin'),
     (5,'dev5','开发甲','user'),(6,'dev6','开发乙','user'),(8,'dev8','开发丙','user'),
     (10,'dev10','开发丁','user'),(11,'dev11','开发戊','user'),(9,'viewer9','观察员','viewer')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务（admin1 / dev5,6,8,10,11 / viewer9）');
 
   // ══════════════════════════════════════════════════════════════════════

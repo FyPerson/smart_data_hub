@@ -13,6 +13,7 @@
 //   8. 下载（C5·§5.4：admin/协调人/在册/历史参与 200，其他 403，不存在 404；作废单下载不再单独 403——
 //      断言变更②，下载列无状态限定，见完成报告契约裁定点）
 //   9. 删除（C5·§5.4：(上传者∧非历史参与∨协调人∨admin) ∧ ∉SYS_TERMINAL；round_no 遗产③=旧"已绑定"判定改判"终态"）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -182,7 +183,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

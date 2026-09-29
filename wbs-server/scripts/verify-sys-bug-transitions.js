@@ -31,6 +31,7 @@
 //   [A] 附件：bug 处理中 delivery 可传（isDevWorkState 放行）/ 待处理拒 409
 //   [T→⑤放开] derive ① 临时闸已拆：feature→bug 派生 201（SYS_BUG_DERIVE_PENDING 不再触发）；bug 语境完整覆盖见 verify-sys-bug-derive.js。feasibility·blocked 端点对 bug 仍 409
 //   [C] 变更流零回归 canary：feature 建单→schedule→assign 正常（assign expectedFrom=null 改动无回归）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -213,7 +214,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 
@@ -772,7 +773,7 @@ async function main() {
     ok('[C6负例] bug reopen from 已上线（未归档）→ 409 ISSUE_NOT_ARCHIVED（须先归档）——与变更流同一段精判代码，附录 A 明列');
 
     // 归档（close）：已上线 → 已关闭。
-    r = await call('POST', `/api/sys-issues/${c6Bug}/close`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${c6Bug}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 200, `[C6] bug close 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     let row = await rowOf(c6Bug);
     assert.strictEqual(row.status, '已关闭', '[C6] bug close → 已关闭');
@@ -790,7 +791,7 @@ async function main() {
     const cfgId = cfgIns.lastID;
     // 实现坏成什么样这条会红：若有人把 [4] 号闸按 type 放行 config（如误加排除条件），本条从 409 变
     //   200（无 assignee 也能 close）；若同时误把 CONFIG_FLOW_TRANSITIONS 的 close 条目删掉，则变回 400。
-    r = await call('POST', `/api/sys-issues/${cfgId}/close`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${cfgId}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 409, `[C6负例] config close（无 assignee）应 409, got ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'NO_ASSIGNEE_FOR_DEV_STATE', '[C6负例] config close → NO_ASSIGNEE_FOR_DEV_STATE（S1a 后 close 是合法转换，[4] 号跨类型通用闸对 config 同样生效，未变）');
     await run("UPDATE sys_issues SET status='已关闭' WHERE id=?", [cfgId]);

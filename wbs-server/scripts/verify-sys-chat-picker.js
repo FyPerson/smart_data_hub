@@ -12,6 +12,7 @@
 //   [Cap]  member_user_ids >30 → 400 TOO_MANY_MEMBERS
 //   [Dedup] 选中与底座同钉钉 → 不重复计
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -100,7 +101,7 @@ async function main() {
     //   只判 status='active'，不判 phone；给了手机号会被本组 [Cand] 候选枚举误收（本组测的是 chat-candidates
     //   候选池，与 intake_liaison_id 无关，不应因新增受理人夹具而改变其精确枚举断言 [7,8,12]）。
   const app = express(); app.use(express.json()); app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness + HTTP harness（模块 mock dingtalk-notify）');
 

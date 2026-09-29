@@ -10,6 +10,7 @@
 //     ⑦ 跨系统建单留空 OA → 子单同样承接主单的"建单人自发现"身份（既有 common 传递机制不变）
 //   require routes/corrections 真实 router + _internals（非复刻）。用法：node scripts/verify-correction-oa-gate-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -110,7 +111,7 @@ async function waitReady(timeoutMs = 3000) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ① validateInputOaNumber 纯函数单测

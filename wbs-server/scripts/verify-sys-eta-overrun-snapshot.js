@@ -30,6 +30,7 @@
 //       resolveEtaOverrunReasonForWrite + isEtaValueChangedForNotify 预演 + 真实端点落库结果交叉验证。
 //   [S] schema/KEY_COLS 静态守卫：PRAGMA 4 新列存在 + SYS_ISSUES_KEY_COLS 含四列锚点。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -194,7 +195,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / 受理人13 / dev5,6）');
 
@@ -801,7 +802,7 @@ async function main() {
     ok('[F1] release 快照写点①：C9 免上线直翻 accept 同事务落 dev_estimated_at_on_release');
 
     // [F1-reopen] 归档后重开：主表 dev_estimated_at 清空，release 快照历史值不清（可回溯）。
-    r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 200, `[F1-reopen-前置] close 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '需要重新处理' });
     assert.strictEqual(r.status, 200, `[F1-reopen] reopen 应 200，实得 ${r.status} ${JSON.stringify(r.body)}`);

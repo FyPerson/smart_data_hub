@@ -10,6 +10,7 @@
 //      task_name 冲突 409 / 目标不存在 404
 //   4. 禁用：合法禁用 200 → 同名可重新注册新 active 任务 / 重复禁用幂等 200 / 目标不存在 404
 //   5. 列表 + 详情：?status 过滤 / 详情含 source_connection 快照信息 / 详情不存在 404
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -103,7 +104,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed db_connections（source×2 + warehouse×1）');
 

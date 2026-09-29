@@ -9,6 +9,7 @@
 //   ⑥ link-new 追加：单系统单升主单 + 追加 → 组内 2 单 / 新单兼容列复制主业务方 / 状态收窄（ARCHIVED 终态 + 已 sent 阻塞）
 // 用法：node scripts/verify-correction-cross-system-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -131,7 +132,7 @@ const setStatus = (id, status, ct) => dbRunAsync(`UPDATE correction_requests SET
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ① 契约 B 建两单
   const cb = await reqMultipartCreate( {

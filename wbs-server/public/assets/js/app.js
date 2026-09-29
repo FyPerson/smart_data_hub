@@ -592,6 +592,7 @@ function updateUserUI() {
                 </div>
             </div>
         `;
+        refreshITLedgerEntry(profileArea);
     }
 
     // 根据角色显示/隐藏发布任务区域
@@ -614,6 +615,38 @@ function updateUserUI() {
             btnTaskTipsConfig.style.display = currentUser && currentUser.role === 'admin' ? 'block' : 'none';
         }
     }
+}
+
+// 信息化资产入口以模块 /me 为准，平台角色不能代替 ACL。
+// 工作台有自己的 profile renderer，也显式调用此钩子。旧响应不得插入新账号菜单。
+const itLedgerEntryRequests = new WeakMap();
+async function refreshITLedgerEntry(profileArea) {
+    const menu = profileArea && profileArea.querySelector('.dropdown-content');
+    const card = document.getElementById('itLedgerExpiryCard');
+    if (card) card.hidden = true;
+    if (!menu) return;
+    const request = {};
+    itLedgerEntryRequests.set(menu, request);
+    menu.querySelector('[data-it-ledger-entry]')?.remove();
+    const token = getToken();
+    try {
+        const response = await authFetch('/api/it-assets/me');
+        if (!response || !response.ok) return;
+        const permission = await response.json();
+        if (token !== getToken() || !menu.isConnected || profileArea.querySelector('.dropdown-content') !== menu || itLedgerEntryRequests.get(menu) !== request) return;
+        if (!['admin', 'write', 'read'].includes(permission.level)) return;
+        const count = Number.isSafeInteger(permission.expiring_count) && permission.expiring_count >= 0 ? permission.expiring_count : 0;
+        const link = document.createElement('a');
+        link.href = '/IT_Ledger.html';
+        link.dataset.itLedgerEntry = 'true';
+        link.textContent = '🖥️ 信息化资产' + (count ? ` · ${count} 项到期提醒` : '');
+        menu.prepend(link);
+        if (card && ['admin', 'write'].includes(permission.level)) {
+            const number = card.querySelector('[data-it-expiry-count]');
+            if (number) number.textContent = String(count);
+            card.hidden = false;
+        }
+    } catch (_) { /* 模块不可用时不影响既有平台导航；下次身份刷新重新查询。 */ }
 }
 
 // 打开修改密码模态框（动态创建，所有页面通用）
@@ -3915,63 +3948,6 @@ function toggleArchived() {
     const el = document.getElementById('archivedTasks');
     el.style.display = el.style.display === 'none' ? 'grid' : 'none';
 }
-
-// ==================== Excel预览功能 ====================
-
-// 预览Excel文件
-async function previewExcel(filename, displayName) {
-    document.getElementById('excelPreviewTitle').innerHTML = `${SVG_ICONS.barChart} ${displayName}`;
-    document.getElementById('excelPreviewBody').innerHTML = '<div style="text-align:center;color:#a0aec0;padding:40px;">加载中...</div>';
-    document.getElementById('excelPreviewModal').style.display = 'flex';
-
-    try {
-        const res = await fetch(`${API_URL}/preview/excel/${encodeURIComponent(filename)}`);
-        const data = await res.json();
-
-        if (data.error) {
-            document.getElementById('excelPreviewBody').innerHTML = `<div style="text-align:center;color:#e53e3e;padding:40px;">加载失败: ${data.error}</div>`;
-            return;
-        }
-
-        // 判断是否为示例数据(行号从0开始)
-        const isSample = displayName && displayName.includes('示例数据');
-        const startIdx = isSample ? 0 : 1;
-
-        // 生成HTML表格
-        let tableHtml = `
-            <div style="margin-bottom:15px;">
-                <span style="background:#d97706;color:white;padding:4px 12px;border-radius:12px;font-size:0.85em;">
-                    ${SVG_ICONS.fileText} 工作表: ${data.sheetName}
-                </span>
-                <span style="margin-left:15px;color:#718096;font-size:0.9em;">
-                    共 ${data.totalRows} 行数据
-                </span>
-            </div>
-            <table class="excel-preview-table">
-                <thead>
-                    <tr>
-                        <th style="width:50px;text-align:center;">#</th>
-                        ${data.headers.map(h => `<th>${h || ''}</th>`).join('')}
-                    </tr>
-                </thead>
-                <tbody>
-                    ${data.rows.map((row, index) => `
-                                <tr>
-                                    <td style="text-align:center;color:#718096;font-weight:bold;">${index + startIdx}</td>
-                                    ${data.headers.map((_, i) => `<td>${row[i] !== undefined ? row[i] : ''}</td>`).join('')}
-                                </tr>
-                            `).join('')}
-                </tbody>
-            </table>
-            `;
-
-        document.getElementById('excelPreviewBody').innerHTML = tableHtml;
-    } catch (err) {
-        document.getElementById('excelPreviewBody').innerHTML = `<div style="text-align:center;color:#e53e3e;padding:40px;">加载失败: ${err.message}</div>`;
-    }
-}
-
-
 
 // 初始加载
 loadTasks();

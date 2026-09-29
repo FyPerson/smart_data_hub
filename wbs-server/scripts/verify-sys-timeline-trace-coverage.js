@@ -17,6 +17,7 @@
 //       ⚠️ 本组只证「拒绝路径、构造函数及 INSERT 静态结构已检查」，不宣称写入分支已验证（该动作当前
 //       对全部四类型均不可达，见方案 §2.1 六处写点表 #5 与 D4 拍板）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -117,7 +118,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / 受理人13 / dev5,6）');
 

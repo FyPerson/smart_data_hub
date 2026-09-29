@@ -19,6 +19,7 @@
 //
 // 本批范围声明：display-no helper 与通知/timeline 接入是下一批 S12-b，本文件不覆盖。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -146,7 +147,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 
@@ -344,7 +345,7 @@ async function main() {
   {
     const originH = await seedBugToOnline();
     const totalBefore = (await get('SELECT COUNT(*) c FROM sys_issues')).c;
-    let r = await call('POST', `/api/sys-issues/${originH}/close`, adminTok, {});
+    let r = await call('POST', `/api/sys-issues/${originH}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 200, `close 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${originH}/reopen`, adminTok, { reason: '验证重开不产生子编号' });
     assert.strictEqual(r.status, 200, `reopen 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
@@ -768,6 +769,12 @@ async function main() {
     //   解，不再靠运气）。带短退避的重试：绝大多数情况下文件锁在几十毫秒内就会被系统释放，重试等这个
     //   窗口过去即可，不是长时间轮询。只吞 EBUSY/EPERM 两类——其余错误（如真正的权限问题、路径非法）
     //   不是"等一下就好"的竞态，原样抛出不吞，防止把真故障伪装成"重试几次就过去了"。
+    // 清理失败只记账不抛：finally 里抛错会盖掉用例本身的断言失败；I 组末尾统一断言记账为空
+    const cleanupFailures = [];
+    async function cleanupTempDb(filePath) {
+      try { await removeWithRetry(filePath); }
+      catch (e) { cleanupFailures.push(filePath + ': ' + (e.code || e.message)); console.error('  临时库清理失败（已记账，I 组末尾判红）：' + filePath + ' ' + e.message); }
+    }
     async function removeWithRetry(filePath, maxRetries = 5) {
       const delays = [50, 100, 200, 200, 200];
       for (let attempt = 0; ; attempt++) {
@@ -784,7 +791,8 @@ async function main() {
     async function buildMinimalStandaloneDb(dbPath, seedFn) {
       const sq = new sqlite3.Database(dbPath);
       const srun = (sql, params = []) => new Promise((res, rej) => sq.run(sql, params, function (e) { e ? rej(e) : res(this); }));
-      await srun(`CREATE TABLE sys_issues (
+      try {
+        await srun(`CREATE TABLE sys_issues (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         origin_issue_id INTEGER,
         derive_root_id INTEGER,
@@ -792,71 +800,86 @@ async function main() {
         derive_seq_alloc INTEGER,
         created_at TEXT DEFAULT (datetime('now','localtime'))
       )`);
-      if (seedFn) await seedFn(srun);
-      await new Promise((res) => sq.close(res));
+        if (seedFn) await seedFn(srun);
+      } finally {
+        await new Promise((res) => sq.close(e => { if (e) cleanupFailures.push(dbPath + ' close: ' + e.message); res(); }));
+      }
     }
     function runBackfillScript(dbPath, extraArgs = []) {
-      return spawnSync(process.execPath, [BACKFILL_SCRIPT, '--db', dbPath, ...extraArgs], { encoding: 'utf8', cwd: WBS_ROOT });
+      const r = spawnSync(process.execPath, [BACKFILL_SCRIPT, '--db', dbPath, ...extraArgs], { encoding: 'utf8', cwd: WBS_ROOT, timeout: 300000, killSignal: 'SIGKILL' });
+      // 超时被杀 / 启动失败时 status 为 null，不能被下方 notStrictEqual(status, 0) 当成「按预期报错」
+      assert.ok(!r.error && r.signal === null && Number.isInteger(r.status),
+        `[I*] 回填脚本必须正常结束才能判退出码：error=${r.error && r.error.message} signal=${r.signal} status=${r.status}`);
+      return r;
     }
 
     // I1（H1①）：零候选但造 alloc 违例（根 alloc=1 < 现存子单 MAX(seq)=5）⇒ dry-run 退出码非 0
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id, derive_seq_alloc) VALUES (NULL, 1)`);   // 根 id=1，alloc=1
-        await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 5)`);   // 已填子单 seq=5（>alloc）
-      });
-      const result = runBackfillScript(dbPath);   // dry-run，不加 --apply
-      assert.notStrictEqual(result.status, 0, `[I1] 零候选+alloc违例应致脚本退出码非 0，实得 status=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`);
-      await removeWithRetry(dbPath);
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id, derive_seq_alloc) VALUES (NULL, 1)`);   // 根 id=1，alloc=1
+          await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 5)`);   // 已填子单 seq=5（>alloc）
+        });
+        const result = runBackfillScript(dbPath);   // dry-run，不加 --apply
+        assert.notStrictEqual(result.status, 0, `[I1] 零候选+alloc违例应致脚本退出码非 0，实得 status=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I1] backfill 脚本零候选分支 fail-open 修复：alloc 不变量违例 → 退出码非 0（实现坏成什么样这条会红：若零候选分支只 console.log 警告仍 exit 0，部署门禁会把这个病库判成功）');
     }
 
     // I2（H1①）：零候选但造重复 (root,seq) 组 ⇒ dry-run 退出码非 0
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id, derive_seq_alloc) VALUES (NULL, 1)`);   // 根 id=1，alloc=1（=maxSeq，隔离 alloc 判据不联动触发）
-        await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 1)`);
-        await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 1)`);   // 与上一行重复 (root=1,seq=1)——本 fixture 无唯一索引，两行都能插进去
-      });
-      const result = runBackfillScript(dbPath);
-      assert.notStrictEqual(result.status, 0, `[I2] 零候选+重复组应致脚本退出码非 0，实得 status=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`);
-      await removeWithRetry(dbPath);
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id, derive_seq_alloc) VALUES (NULL, 1)`);   // 根 id=1，alloc=1（=maxSeq，隔离 alloc 判据不联动触发）
+          await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 1)`);
+          await srun(`INSERT INTO sys_issues (origin_issue_id, derive_root_id, derive_seq) VALUES (1, 1, 1)`);   // 与上一行重复 (root=1,seq=1)——本 fixture 无唯一索引，两行都能插进去
+        });
+        const result = runBackfillScript(dbPath);
+        assert.notStrictEqual(result.status, 0, `[I2] 零候选+重复组应致脚本退出码非 0，实得 status=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I2] backfill 脚本零候选分支 fail-open 修复：重复 (root,seq) 组 → 退出码非 0');
     }
 
     // I3（H1②③）：零候选且部分唯一索引缺失 ⇒ dry-run 明确提示「将补建」+ --apply 后索引存在且 UNIQUE
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 一个干净的根单，零违例、零候选
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 一个干净的根单，零违例、零候选
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);   // 无 --apply
-      assert.strictEqual(dryRunResult.status, 0, `[I3] dry-run 应 exit 0（数据本身无违例），实得 status=${dryRunResult.status}\nstderr=${dryRunResult.stderr}`);
-      assert.ok(/补建/.test(dryRunResult.stdout), `[I3] dry-run 输出应明确提示"--apply 将补建"（实现坏成什么样这条会红：零候选分支缺索引存在性核验，静默放过缺索引的库），实得：${dryRunResult.stdout}`);
+        const dryRunResult = runBackfillScript(dbPath);   // 无 --apply
+        assert.strictEqual(dryRunResult.status, 0, `[I3] dry-run 应 exit 0（数据本身无违例），实得 status=${dryRunResult.status}\nstderr=${dryRunResult.stderr}`);
+        assert.ok(/补建/.test(dryRunResult.stdout), `[I3] dry-run 输出应明确提示"--apply 将补建"（实现坏成什么样这条会红：零候选分支缺索引存在性核验，静默放过缺索引的库），实得：${dryRunResult.stdout}`);
 
-      // 索引此刻确实还不存在——独立验证，不只信脚本自身输出
-      const idxBefore = await new Promise((res, rej) => {
-        const checkDb = new sqlite3.Database(dbPath);
-        checkDb.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
-          (e, row) => { checkDb.close(); e ? rej(e) : res(row); });
-      });
-      assert.ok(!idxBefore, '[I3] 前置：--apply 之前索引确实不存在');
+        // 索引此刻确实还不存在——独立验证，不只信脚本自身输出
+        const idxBefore = await new Promise((res, rej) => {
+          const checkDb = new sqlite3.Database(dbPath);
+          checkDb.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
+            (e, row) => { checkDb.close(); e ? rej(e) : res(row); });
+        });
+        assert.ok(!idxBefore, '[I3] 前置：--apply 之前索引确实不存在');
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.strictEqual(applyResult.status, 0, `[I3] --apply 应 exit 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.strictEqual(applyResult.status, 0, `[I3] --apply 应 exit 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
 
-      const idxAfter = await new Promise((res, rej) => {
-        const checkDb2 = new sqlite3.Database(dbPath);
-        checkDb2.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
-          (e, row) => { checkDb2.close(); e ? rej(e) : res(row); });
-      });
-      assert.ok(idxAfter, '[I3] --apply 之后索引应存在（实现坏成什么样这条会红：零候选 --apply 路径未补建索引，仍和旧版一样什么都不做就 return）');
-      assert.ok(/UNIQUE/i.test(idxAfter.sql), '[I3] 补建的索引应为 UNIQUE（非普通索引）');
+        const idxAfter = await new Promise((res, rej) => {
+          const checkDb2 = new sqlite3.Database(dbPath);
+          checkDb2.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
+            (e, row) => { checkDb2.close(); e ? rej(e) : res(row); });
+        });
+        assert.ok(idxAfter, '[I3] --apply 之后索引应存在（实现坏成什么样这条会红：零候选 --apply 路径未补建索引，仍和旧版一样什么都不做就 return）');
+        assert.ok(/UNIQUE/i.test(idxAfter.sql), '[I3] 补建的索引应为 UNIQUE（非普通索引）');
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I3] backfill 脚本索引核验/补建：dry-run 明确提示缺失将补建 + --apply 后索引真实存在且 UNIQUE（零候选分支现在真的和迁移链"同路径"）');
     }
 
@@ -865,31 +888,34 @@ async function main() {
     // 指引），--apply **不得**静默 no-op 后仍报"已补建"，也不得自作主张自动 DROP 重建。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
-        // 预置同名但非 UNIQUE 的索引——模拟"历史上手工建过一个普通索引，后来才引入本批的 UNIQUE 约束"。
-        await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
+          // 预置同名但非 UNIQUE 的索引——模拟"历史上手工建过一个普通索引，后来才引入本批的 UNIQUE 约束"。
+          await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);   // 无 --apply
-      assert.notStrictEqual(dryRunResult.status, 0, `[I4] dry-run 遇同名非 UNIQUE 索引应退出码非 0（实现坏成什么样这条会红：若 dry-run 只是打印警告仍 exit 0，部署门禁会放行一个索引实际没有唯一约束的库），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
-      assert.ok(/DROP INDEX|人工/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4] dry-run 输出应含人工修复指引（DROP INDEX 字样），实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
+        const dryRunResult = runBackfillScript(dbPath);   // 无 --apply
+        assert.notStrictEqual(dryRunResult.status, 0, `[I4] dry-run 遇同名非 UNIQUE 索引应退出码非 0（实现坏成什么样这条会红：若 dry-run 只是打印警告仍 exit 0，部署门禁会放行一个索引实际没有唯一约束的库），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
+        assert.ok(/DROP INDEX|人工/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4] dry-run 输出应含人工修复指引（DROP INDEX 字样），实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I4] --apply 遇同名非 UNIQUE 索引应退出码非 0（实现坏成什么样这条会红：CREATE UNIQUE INDEX IF NOT EXISTS 对同名索引静默 no-op 不报错，若不做建后二次核验，这里会看到 exit 0 + "已补建"的假成功），实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(/DROP INDEX|人工/.test(applyResult.stdout + applyResult.stderr), `[I4] --apply 输出应含人工修复指引，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
-      assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4] --apply 输出不应出现"已补建/已就位"这类成功措辞（否则就是把 no-op 误报成功），实得：${applyResult.stdout}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I4] --apply 遇同名非 UNIQUE 索引应退出码非 0（实现坏成什么样这条会红：CREATE UNIQUE INDEX IF NOT EXISTS 对同名索引静默 no-op 不报错，若不做建后二次核验，这里会看到 exit 0 + "已补建"的假成功），实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(/DROP INDEX|人工/.test(applyResult.stdout + applyResult.stderr), `[I4] --apply 输出应含人工修复指引，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
+        assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4] --apply 输出不应出现"已补建/已就位"这类成功措辞（否则就是把 no-op 误报成功），实得：${applyResult.stdout}`);
 
-      // 索引本身应保持原样（非 UNIQUE、未被自动 DROP）——脚本不得擅自做任何自动修复动作。
-      const idxRow = await new Promise((res, rej) => {
-        const checkDb = new sqlite3.Database(dbPath);
-        checkDb.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
-          (e, row) => { checkDb.close(); e ? rej(e) : res(row); });
-      });
-      assert.ok(idxRow, '[I4] 索引应仍然存在（脚本不自动 DROP）');
-      assert.ok(!/UNIQUE/i.test(idxRow.sql), '[I4] 索引应仍然是非 UNIQUE（脚本不自动重建/升级约束——留人工核实处理，同熔断哲学）');
+        // 索引本身应保持原样（非 UNIQUE、未被自动 DROP）——脚本不得擅自做任何自动修复动作。
+        const idxRow = await new Promise((res, rej) => {
+          const checkDb = new sqlite3.Database(dbPath);
+          checkDb.get(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
+            (e, row) => { checkDb.close(); e ? rej(e) : res(row); });
+        });
+        assert.ok(idxRow, '[I4] 索引应仍然存在（脚本不自动 DROP）');
+        assert.ok(!/UNIQUE/i.test(idxRow.sql), '[I4] 索引应仍然是非 UNIQUE（脚本不自动重建/升级约束——留人工核实处理，同熔断哲学）');
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I4] backfill 脚本同名非 UNIQUE 索引 fail-closed：dry-run 与 --apply 均退出码非 0 + 输出含 DROP INDEX 人工修复指引，索引原样未被自动 DROP/静默误报成功');
     }
 
@@ -901,21 +927,24 @@ async function main() {
     // 应正确识别为 non_unique。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
-        // 同名非 UNIQUE 的表达式索引，SQL 文本里恰好含字符串字面量 'UNIQUE'（旧文本正则判定的假阳性诱因）。
-        await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues((CASE WHEN id > 0 THEN 'UNIQUE' ELSE 'x' END))`);
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
+          // 同名非 UNIQUE 的表达式索引，SQL 文本里恰好含字符串字面量 'UNIQUE'（旧文本正则判定的假阳性诱因）。
+          await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues((CASE WHEN id > 0 THEN 'UNIQUE' ELSE 'x' END))`);
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);
-      assert.notStrictEqual(dryRunResult.status, 0, `[I4b] dry-run 遇"SQL 文本含 UNIQUE 字面量但实际非 UNIQUE"的索引应退出码非 0（实现坏成什么样这条会红：若判定依据仍是 sqlite_master.sql 文本正则，这里会被字符串字面量 'UNIQUE' 骗过，误判成健康态放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
-      assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4b] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
+        const dryRunResult = runBackfillScript(dbPath);
+        assert.notStrictEqual(dryRunResult.status, 0, `[I4b] dry-run 遇"SQL 文本含 UNIQUE 字面量但实际非 UNIQUE"的索引应退出码非 0（实现坏成什么样这条会红：若判定依据仍是 sqlite_master.sql 文本正则，这里会被字符串字面量 'UNIQUE' 骗过，误判成健康态放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
+        assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4b] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I4b] --apply 遇假阳性索引应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4b] --apply 输出不应出现"已补建/已就位"这类成功措辞（这正是文本正则假阳性会导致的错误行为：no-op 后仍误报成功），实得：${applyResult.stdout}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I4b] --apply 遇假阳性索引应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4b] --apply 输出不应出现"已补建/已就位"这类成功措辞（这正是文本正则假阳性会导致的错误行为：no-op 后仍误报成功），实得：${applyResult.stdout}`);
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I4b] 假阳性变体：同名非 UNIQUE 索引但 SQL 文本含 \'UNIQUE\' 字面量 → dry-run/--apply 仍正确退出码非 0，输出不含"已补建/已就位"（判定依据已改 PRAGMA index_list 结构化元数据，不受索引定义文本内容干扰）');
     }
 
@@ -925,33 +954,36 @@ async function main() {
     // no-op，目标要求的部分唯一约束实际上没有生效。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
-        // 同名 UNIQUE 索引，但列组/WHERE 均不是目标定义（只在 id 上建了个全表唯一索引）。
-        await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);   // 干净根单，零违例、零候选
+          // 同名 UNIQUE 索引，但列组/WHERE 均不是目标定义（只在 id 上建了个全表唯一索引）。
+          await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);
-      assert.notStrictEqual(dryRunResult.status, 0, `[I4c] dry-run 遇"同名 UNIQUE 但结构不符"的索引应退出码非 0（实现坏成什么样这条会红：若判定只看 unique===1，这类索引会被误判健康态放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
-      assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4c] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
-      assert.ok(/结构不符/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4c] dry-run 输出应说明"结构不符"，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
-      assert.ok(/列组不符|非部分索引/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4c] dry-run 输出应指出具体哪项没过（列组不符/非部分索引二者至少一个），实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
+        const dryRunResult = runBackfillScript(dbPath);
+        assert.notStrictEqual(dryRunResult.status, 0, `[I4c] dry-run 遇"同名 UNIQUE 但结构不符"的索引应退出码非 0（实现坏成什么样这条会红：若判定只看 unique===1，这类索引会被误判健康态放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
+        assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4c] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
+        assert.ok(/结构不符/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4c] dry-run 输出应说明"结构不符"，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
+        assert.ok(/列组不符|非部分索引/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4c] dry-run 输出应指出具体哪项没过（列组不符/非部分索引二者至少一个），实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I4c] --apply 遇同款索引应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4c] --apply 输出不应出现"已补建/已就位"这类成功措辞（CREATE UNIQUE INDEX IF NOT EXISTS 对同名索引静默 no-op，目标部分唯一约束实际未生效），实得：${applyResult.stdout}`);
-      assert.ok(/结构不符/.test(applyResult.stdout + applyResult.stderr), `[I4c] --apply 输出应说明"结构不符"，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I4c] --apply 遇同款索引应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4c] --apply 输出不应出现"已补建/已就位"这类成功措辞（CREATE UNIQUE INDEX IF NOT EXISTS 对同名索引静默 no-op，目标部分唯一约束实际未生效），实得：${applyResult.stdout}`);
+        assert.ok(/结构不符/.test(applyResult.stdout + applyResult.stderr), `[I4c] --apply 输出应说明"结构不符"，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
 
-      // 索引本身应保持原样（错误定义未被自动 DROP/重建）。
-      const idxRowsAfter = await new Promise((res, rej) => {
-        const checkDb = new sqlite3.Database(dbPath);
-        checkDb.all(`PRAGMA index_info('idx_sys_issues_derive_root_seq')`,
-          (e, rows) => { checkDb.close(); e ? rej(e) : res(rows); });
-      });
-      assert.strictEqual(idxRowsAfter.length, 1, '[I4c] 索引仍应是原样的单列（id）定义，未被自动纠正为 [derive_root_id,derive_seq] 两列');
-      assert.strictEqual(idxRowsAfter[0].name, 'id', '[I4c] 索引仍应建在 id 列上（脚本未自动重建）');
+        // 索引本身应保持原样（错误定义未被自动 DROP/重建）。
+        const idxRowsAfter = await new Promise((res, rej) => {
+          const checkDb = new sqlite3.Database(dbPath);
+          checkDb.all(`PRAGMA index_info('idx_sys_issues_derive_root_seq')`,
+            (e, rows) => { checkDb.close(); e ? rej(e) : res(rows); });
+        });
+        assert.strictEqual(idxRowsAfter.length, 1, '[I4c] 索引仍应是原样的单列（id）定义，未被自动纠正为 [derive_root_id,derive_seq] 两列');
+        assert.strictEqual(idxRowsAfter[0].name, 'id', '[I4c] 索引仍应建在 id 列上（脚本未自动重建）');
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I4c] 同名 UNIQUE 但结构不符（列组错+非部分索引）→ dry-run/--apply 均正确退出码非 0，输出含"结构不符"+具体项说明，索引原样未被自动纠正');
     }
 
@@ -960,22 +992,25 @@ async function main() {
     // 恒假，索引实际上永远为空，不变量 (derive_root_id,derive_seq) 唯一性形同虚设。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
-        await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(derive_root_id, derive_seq) WHERE derive_root_id IS NOT NULL AND derive_seq IS NOT NULL AND 0`);
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
+          await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(derive_root_id, derive_seq) WHERE derive_root_id IS NOT NULL AND derive_seq IS NOT NULL AND 0`);
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);
-      assert.notStrictEqual(dryRunResult.status, 0, `[I4d] dry-run 遇"WHERE 恒假"反例应退出码非 0（实现坏成什么样这条会红：若判定仍是"文本含两个 IS NOT NULL 子串"，这条 WHERE 两个子串都在，会被误判 'ok' 放行——而索引实际恒空，唯一性形同虚设），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
-      assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4d] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
-      assert.ok(/WHERE 非标准形/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4d] dry-run 输出应含"WHERE 非标准形"说明，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
+        const dryRunResult = runBackfillScript(dbPath);
+        assert.notStrictEqual(dryRunResult.status, 0, `[I4d] dry-run 遇"WHERE 恒假"反例应退出码非 0（实现坏成什么样这条会红：若判定仍是"文本含两个 IS NOT NULL 子串"，这条 WHERE 两个子串都在，会被误判 'ok' 放行——而索引实际恒空，唯一性形同虚设），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
+        assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4d] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
+        assert.ok(/WHERE 非标准形/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4d] dry-run 输出应含"WHERE 非标准形"说明，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I4d] --apply 遇同款反例应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4d] --apply 输出不应出现"已补建/已就位"，实得：${applyResult.stdout}`);
-      assert.ok(/WHERE 非标准形/.test(applyResult.stdout + applyResult.stderr), `[I4d] --apply 输出应含"WHERE 非标准形"说明，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I4d] --apply 遇同款反例应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4d] --apply 输出不应出现"已补建/已就位"，实得：${applyResult.stdout}`);
+        assert.ok(/WHERE 非标准形/.test(applyResult.stdout + applyResult.stderr), `[I4d] --apply 输出应含"WHERE 非标准形"说明，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I4d] codex 403 反例：WHERE 含两 IS NOT NULL 子串但多了 "AND 0"（恒假）→ dry-run/--apply 均正确退出码非 0，输出含"WHERE 非标准形"说明（判定已从"含子串"改"规范化全等"）');
     }
 
@@ -984,21 +1019,24 @@ async function main() {
     // 做了语义化简/等价判断，这条会被放行，说明判定越权替人工做了本不该由程序判断的"这写法算不算数"）。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
-        await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(derive_root_id, derive_seq) WHERE NOT (derive_root_id IS NULL) AND derive_seq IS NOT NULL`);
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
+          await srun(`CREATE UNIQUE INDEX idx_sys_issues_derive_root_seq ON sys_issues(derive_root_id, derive_seq) WHERE NOT (derive_root_id IS NULL) AND derive_seq IS NOT NULL`);
+        });
 
-      const dryRunResult = runBackfillScript(dbPath);
-      assert.notStrictEqual(dryRunResult.status, 0, `[I4e] dry-run 遇语义等价变形应退出码非 0（实现坏成什么样这条会红：若判定做了语义等价判断而非规范化全等比较，这条"NOT (x IS NULL)" 会被当成 "x IS NOT NULL" 放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
-      assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4e] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
-      assert.ok(/WHERE 非标准形/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4e] dry-run 输出应含"WHERE 非标准形"说明，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
+        const dryRunResult = runBackfillScript(dbPath);
+        assert.notStrictEqual(dryRunResult.status, 0, `[I4e] dry-run 遇语义等价变形应退出码非 0（实现坏成什么样这条会红：若判定做了语义等价判断而非规范化全等比较，这条"NOT (x IS NULL)" 会被当成 "x IS NOT NULL" 放行），实得 status=${dryRunResult.status}\nstdout=${dryRunResult.stdout}`);
+        assert.ok(!/已补建|已就位/.test(dryRunResult.stdout), `[I4e] dry-run 输出不应出现"已补建/已就位"，实得：${dryRunResult.stdout}`);
+        assert.ok(/WHERE 非标准形/.test(dryRunResult.stdout + dryRunResult.stderr), `[I4e] dry-run 输出应含"WHERE 非标准形"说明，实得 stdout=${dryRunResult.stdout} stderr=${dryRunResult.stderr}`);
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I4e] --apply 遇同款语义等价变形应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4e] --apply 输出不应出现"已补建/已就位"，实得：${applyResult.stdout}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I4e] --apply 遇同款语义等价变形应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(!/已补建|已就位/.test(applyResult.stdout), `[I4e] --apply 输出不应出现"已补建/已就位"，实得：${applyResult.stdout}`);
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I4e] 语义等价变形（NOT (x IS NULL) 代替 x IS NOT NULL）→ 同样 dry-run/--apply 退出码非 0（证明判定"只认标准形不猜语义"，非语义判断）');
     }
 
@@ -1008,31 +1046,36 @@ async function main() {
     // + 同名非 UNIQUE 索引 ⇒ --apply 应 fail-closed（数据回填已提交、索引核验独立失败，退出码非 0）。
     {
       const dbPath = makeTempDbPath();
-      await buildMinimalStandaloneDb(dbPath, async (srun) => {
-        const rootIns = await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
-        await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (?)`, [rootIns.lastID]);   // 1 条真实待回填候选
-        await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);   // 同名非 UNIQUE
-      });
+      try {
+        await buildMinimalStandaloneDb(dbPath, async (srun) => {
+          const rootIns = await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (NULL)`);
+          await srun(`INSERT INTO sys_issues (origin_issue_id) VALUES (?)`, [rootIns.lastID]);   // 1 条真实待回填候选
+          await srun(`CREATE INDEX idx_sys_issues_derive_root_seq ON sys_issues(id)`);   // 同名非 UNIQUE
+        });
 
-      const applyResult = runBackfillScript(dbPath, ['--apply']);
-      assert.notStrictEqual(applyResult.status, 0, `[I5] 主分支（有候选待写）遇同名非 UNIQUE 索引，--apply 应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
-      assert.ok(/DROP INDEX|人工/.test(applyResult.stdout + applyResult.stderr), `[I5] 输出应含人工修复指引，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
+        const applyResult = runBackfillScript(dbPath, ['--apply']);
+        assert.notStrictEqual(applyResult.status, 0, `[I5] 主分支（有候选待写）遇同名非 UNIQUE 索引，--apply 应退出码非 0，实得 status=${applyResult.status}\nstdout=${applyResult.stdout}\nstderr=${applyResult.stderr}`);
+        assert.ok(/DROP INDEX|人工/.test(applyResult.stdout + applyResult.stderr), `[I5] 输出应含人工修复指引，实得 stdout=${applyResult.stdout} stderr=${applyResult.stderr}`);
 
-      // 数据回填本身应已正常完成（索引核验失败发生在数据写入提交之后，两者独立）——同零候选分支
-      // "不自动 DROP"一致，索引仍应保持非 UNIQUE 原样。
-      const checkDb = new sqlite3.Database(dbPath);
-      const filledRow = await new Promise((res, rej) => checkDb.get(
-        `SELECT derive_root_id, derive_seq FROM sys_issues WHERE origin_issue_id IS NOT NULL`,
-        (e, row) => e ? rej(e) : res(row)));
-      const idxRow5 = await new Promise((res, rej) => checkDb.get(
-        `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
-        (e, row) => { checkDb.close(); e ? rej(e) : res(row); }));
-      assert.ok(filledRow && filledRow.derive_root_id !== null, '[I5] 数据回填应已正常完成（与索引核验失败相互独立——同 alloc/dup 两条既有探针失败时"数据已写入不回滚"的既定行为一致）');
-      assert.ok(idxRow5 && !/UNIQUE/i.test(idxRow5.sql), '[I5] 索引仍应保持非 UNIQUE 原样（主分支同样不自动 DROP/重建）');
+        // 数据回填本身应已正常完成（索引核验失败发生在数据写入提交之后，两者独立）——同零候选分支
+        // "不自动 DROP"一致，索引仍应保持非 UNIQUE 原样。
+        const checkDb = new sqlite3.Database(dbPath);
+        const filledRow = await new Promise((res, rej) => checkDb.get(
+          `SELECT derive_root_id, derive_seq FROM sys_issues WHERE origin_issue_id IS NOT NULL`,
+          (e, row) => e ? rej(e) : res(row)));
+        const idxRow5 = await new Promise((res, rej) => checkDb.get(
+          `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_sys_issues_derive_root_seq'`,
+          (e, row) => { checkDb.close(); e ? rej(e) : res(row); }));
+        assert.ok(filledRow && filledRow.derive_root_id !== null, '[I5] 数据回填应已正常完成（与索引核验失败相互独立——同 alloc/dup 两条既有探针失败时"数据已写入不回滚"的既定行为一致）');
+        assert.ok(idxRow5 && !/UNIQUE/i.test(idxRow5.sql), '[I5] 索引仍应保持非 UNIQUE 原样（主分支同样不自动 DROP/重建）');
 
-      await removeWithRetry(dbPath);
+      } finally {
+        if (fs.existsSync(dbPath)) await cleanupTempDb(dbPath);
+      }
       ok('[I5] 主分支（有候选待写）同款验证：同名非 UNIQUE 索引 --apply fail-closed，数据回填与索引核验独立（回填已提交+索引原样未动），证明 400-H1 修复面扩到主分支真的生效');
     }
+    assert.deepStrictEqual(cleanupFailures, [], '[I-cleanup] I1–I5 临时库全部清理成功');
+    ok('[I-cleanup] I1–I5 临时库全部清理成功（清理失败记账不覆盖用例原始断言）');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -1110,7 +1153,7 @@ async function main() {
       app2.use(express.json());
       app2.use('/api', mod2.router);
       let port2;
-      await new Promise(res => { server2 = app2.listen(0, '127.0.0.1', res); });
+      server2 = await listenOnSafePort(app2);
       port2 = server2.address().port;
       function call2(method, p, tok, body) {
         return new Promise((resolve, reject) => {

@@ -6,6 +6,7 @@
 //   本文件只测「附件二次卡」与「钉钉三态发送判据」两件事，不重复覆盖既有 verify-correction-transition.js
 //   已验证过的状态机本身）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -180,7 +181,7 @@ async function main() {
     const app = express();
     app.use(express.json());
     app.use('/api/corrections', mod.router);
-    srv = app.listen(0);
+    srv = await listenOnSafePort(app, null);
     PORT = srv.address().port;
     ok('in-process app 启动 + readiness ready');
 

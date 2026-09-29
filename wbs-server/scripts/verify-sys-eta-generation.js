@@ -41,6 +41,7 @@
 //       （feature∧有效deadline→隐藏/improvement 或 deadline 无效→仍走原三情形展示逻辑，源码结构层面
 //       两条判断分支均存在，非活体断言）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const fs = require('fs');
@@ -151,7 +152,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / 受理人13 / dev5,6）');
 

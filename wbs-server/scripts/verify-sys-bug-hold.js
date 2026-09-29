@@ -22,6 +22,7 @@
 //       add-issues 负向（§13-4 核实为"天然禁"，按项目规则"天然禁"仍须补负向断言）
 //   [3] §10.7 附件缺口：resume 成功但附件上传失败 → 状态不回滚（口径 #11 best-effort 契约的后端侧证据）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -137,7 +138,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, dingtalk_user_id) VALUES
     (1,'admin','管理员','admin','dt1'),
     (5,'dev5','开发甲','user','dt5'),(6,'dev6','开发乙','user','dt6')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务（admin1 / dev5,6）');
 
   // ══════════════════════════════════════════════════════════════════════

@@ -17,6 +17,7 @@
 // 断言纪律：精确状态码 + 精确 error code；正例断言真实落库副作用（子表行/timeline），非仅状态码；
 //   负例同样断言"零副作用"（子表行数不变/字段不变），不止看状态码本身。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -183,7 +184,7 @@ async function main() {
     (8,'dev8','开发丁','user','active'),
     (9,'viewer9','查看者玖','viewer','active'),
     (10,'dev10','停用者拾','user','inactive')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6,7,8 / viewer9 / 停用 dev10）');
 

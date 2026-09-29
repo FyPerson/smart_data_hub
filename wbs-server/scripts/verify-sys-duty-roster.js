@@ -12,6 +12,7 @@
 //   [5] GET：admin/对接人全量；普通用户仅本人行；缺 from/to→400；非法格式→400；367 天→400；恰 366 天→200（2026-07-30 自 93 天放宽·全年视图）
 //   [6] 断言纪律：全程精确状态码 + 精确 error code，不用 status>=400 弱判据
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -95,7 +96,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6 / 示例发布者7 / viewer8 / disabled9 / 示例对接人13）');
 

@@ -45,6 +45,7 @@
 //        已拒绝/已作废）构造违例行反证判红 + 清理恢复 0（[Y5] 范式，双向证明——不只证"能放行合法态"，
 //        也证"能抓出真违例"）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -197,7 +198,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5 / 受理人13）');
 

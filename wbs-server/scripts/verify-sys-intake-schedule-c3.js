@@ -22,6 +22,7 @@
 //   [D] 竞态/状态机守卫：intake_accept 成功后再 accept 同单 → 400 INVALID_TRANSITION（双条件 WHERE + findTransition 状态机守·防重放/竞态）
 //   [E] meta 单一真相：buildMeta/ACTION_LABELS 含三动作 + roleGuard 后端实现齐（intake_liaison/creator_or_admin ∈ KNOWN_ROLE_GUARDS）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -125,7 +126,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务（受理人 id=13 示例对接人 / 技术负责人 id=7 示例发布者）');
 

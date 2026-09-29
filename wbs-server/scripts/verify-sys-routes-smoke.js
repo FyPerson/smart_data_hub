@@ -8,6 +8,7 @@
 //      a. GET /api/sys-issues/_readiness 返 200 + { ready:true }（带 token mw 放行）
 //      b. ⭐ fall-through：在 router 之后注册的既有路由 /api/existing-probe 不被本 router 提前拦截（07-M2）
 //      c. 未匹配的 sys-* 子路径不存在端点 → 404（不误吞）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -72,7 +73,7 @@ async function main() {
   app.get('/api/existing-probe', (req, res) => res.json({ probe: 'ok' }));
 
   const server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   const port = server.address().port;
 
   try {

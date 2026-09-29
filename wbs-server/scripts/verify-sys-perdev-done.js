@@ -5,6 +5,7 @@
 // in-process app + 内存库 + 自签 token，同 verify-sys-submit-withdraw.js 范式（同一夹具风格，故意不
 // 抽公共模块——两文件各自独立可读、可单独跑，避免夹具耦合导致改一处波及另一处）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 process.env.SYS_TEST_HOOKS = '1';
 
@@ -218,7 +219,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev5','开发甲','user','13800000005'),
     (6,'dev6','开发乙','user','13800000006'),(13,'liaison13','示例对接人','user','19900000024')`);
-  await new Promise((resolve) => {
+  {
     const app = express();
     app.use(express.json());
     // [codex 589 MED-4] 一次性 res.json 故障注入中间件——先于 mod.router 挂载，命中开关时把 res.json
@@ -244,8 +245,8 @@ async function main() {
       next();
     });
     app.use('/api', mod.router);
-    server = app.listen(0, () => { port = server.address().port; resolve(); });
-  });
+    server = await listenOnSafePort(app, null); port = server.address().port;
+  }
   ok('readiness ready + HTTP harness 起服务');
 
   // ══════════════════════════════════════════════════════════════════════

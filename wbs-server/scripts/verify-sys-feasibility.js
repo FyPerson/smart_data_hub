@@ -7,6 +7,7 @@
 //   ⚠️ 跳过评估直接 submit 的守卫（见 [H]，F2b 落地后语义更新）：needs_feasibility=1 单若开发不调 /feasibility 直接 submit，
 //   dev_estimated_at 仍为 NULL（estimate 端点已封口）→ submit 撞通用 ESTIMATE_REQUIRED 拦住，无法绕过评估闸门（F2b 实现 /feasibility 后不再死锁，但守卫不变）。
 //   聚焦验证 submit 闸门 / estimate 封口 / scope_change 禁用 / reassign·return·reopen 换轮清字段 / timeline 冻结 / 跳过评估 submit 守卫[H]。
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -117,7 +118,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

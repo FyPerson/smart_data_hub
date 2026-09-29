@@ -23,6 +23,7 @@
 //       ③引擎层(assertMemberActionFamilyAllowed 抛 409 INVALID_STATUS)。动作集合用**精确契约**枚举（F-0·codex 145
 //       HIGH-1）——不从被测矩阵反射，防「删动作后覆盖自动缩水仍绿」假绿。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -135,7 +136,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务（受理人 13 示例对接人 / 技术负责人 7 示例发布者 / 建单人乙 99）');
 

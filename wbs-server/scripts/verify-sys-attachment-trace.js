@@ -7,6 +7,7 @@
 // 供 persist 五个测试钩子（beforeAttachmentInsertHook / afterAttachmentInsertHook /
 // beforeSupersedeUpdateHook / onSysTxnRelease）与既有 verify-sys-submit-amend.js 共用同一套注入范式。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 process.env.SYS_TEST_HOOKS = '1';
 
 const assert = require('assert');
@@ -277,7 +278,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

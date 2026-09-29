@@ -14,6 +14,7 @@
 //   ⑦ 迁移：suspended_at 列存在；runCorrectionMigration 重跑幂等；老库快照（无该列）迁移后列出现
 // 用法：node scripts/verify-correction-suspend.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -114,7 +115,7 @@ async function waitReady(timeoutMs = 3000) {
   const app = express();
   app.use(express.json());
   app.use('/api/corrections', mod.router);
-  srv = app.listen(0);
+  srv = await listenOnSafePort(app, null);
   PORT = srv.address().port;
 
   // ══════════════════ ① 转移合法性 ══════════════════

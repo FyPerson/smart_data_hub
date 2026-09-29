@@ -27,6 +27,7 @@
 // 覆盖桩（configValue 闭包变量）——默认 null（→回落 transitions.DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS 四
 // 成员默认清单·以生产常量为权威源），E 组显式改值测 replace/JSON/回落。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -165,7 +166,7 @@ async function selfCertifyProbes(label) {
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active')`);
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
     (1,'admin','管理员','admin','active'),(5,'dev5','开发甲','user','active')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
 
   // ══════════════════════════════════════════════════════════════════════
   // A：判定源 + DTO 契约（默认配置 configValue=null → 回落 transitions.DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS 四成员默认清单·以生产常量为权威源）

@@ -9,6 +9,7 @@
 //   V4  screenshot 上传 .zip → 400（fileFilter 联合白名单放行后被二次卡 EXT_NOT_ALLOWED 拒）
 //   附加：SYS_ALLOWED_EXTS 恰为规则表三类 exts 并集且含三压缩扩展名
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -140,7 +141,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

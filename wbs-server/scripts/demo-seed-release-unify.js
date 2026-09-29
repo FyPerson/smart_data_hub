@@ -157,7 +157,7 @@ async function main() {
   await must(await call('POST', `/sys-releases/${relD}/add-issues`, ADMIN, { issue_ids: [d1] }), 200, 'D 加单');
   await pinNotified(relD, 8, '示例开发A');
   await must(await call('POST', `/sys-releases/${relD}/execute`, DEV_A, { release_note: P + '上线完成' }), 200, 'D 执行');
-  await must(await call('POST', `/sys-issues/${d1}/close`, ADMIN, { reason: P + '验证通过，归档' }), 200, 'close');
+  await must(await call('POST', `/sys-issues/${d1}/close`, ADMIN, { reason: P + '验证通过，归档', archive_origin_code: 'system_defect' }), 200, 'close'); // #88：归档必填任务产生原因
   ok(`#${d1} 已上线 → 已归档（界面显示「已归档」）→ admin 可「重开」（bug 补终态后新能力）`);
 
   // ── ⑥ 降级历史演示：已发布单 + 快照被破坏 → degraded 显著提示 ─────────────

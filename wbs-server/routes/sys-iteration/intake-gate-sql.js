@@ -42,7 +42,7 @@ const SYS_CLEAR_RELAY_FIELDS_SQL = [
   'relay_notify_sent_by = NULL',
 ];
 
-// ── 建单优化批 C1（方案 20260731_v1.2 §4 未覆盖·主会话 2026-07-31 补裁）：intake 受理通知 5 列 ──
+// ── 建单优化批 C1（方案 20260731_v1.2 §4 未覆盖·主会话 2026-07-31 补裁）：intake 受理通知 6 列 ──
 //   回受理门=新一轮受理，intake 通知态与 tech_lead_*/relay_* 同定性——都是"这一轮通知发过没"的
 //   轮次状态，不跨轮继承。不归零会让回流单的「通知对接人受理」按钮停在上一轮 sent 态，
 //   对新一轮受理既无法重发也无法如实反映"这一轮还没通知过"。
@@ -55,6 +55,7 @@ const SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL = [
   'intake_notify_error = NULL',
   'intake_read_at = NULL',
   'intake_notify_sent_by = NULL',
+  'intake_notified_at = NULL',
 ];
 
 // ── 回受理门 = 恢复受理门标志 + 清三组轮次痕迹 ────────────────────────────────

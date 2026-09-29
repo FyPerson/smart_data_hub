@@ -20,6 +20,7 @@
 //       bug 侧改走新 G3(assign-release-dev)+G5/G6(execute-release) 流程——mode=hotfix⟹release_id 为空（不建批次），
 //       mode=publish⟹release_id 非空（建批次）。bug 上线编排完整覆盖+越权矩阵见 verify-sys-release-orchestration.js；
 //       本文件 1-11 节纯 release CRUD（变更流为主）保持不变，仅第 12 节的 bug 分支随 C3b 改写。
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -241,7 +242,7 @@ async function main() {
   // id=20：C2b hotfix-publish 执行人闸门测试用第三个合格用户（子表聚合/软删行不出现场景需要 ≥3 名合格
   //   执行人轮换，5/13 两个不够构造"移除一人换一人"的场景）。
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(13,'wangtaotao','示例对接人','user','active'),(20,'dev20','开发丙','user','active')`);
-  await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
 
   // 当天号前缀（与后端 strftime 同源）
   const ymd = (await get("SELECT strftime('%Y%m%d', datetime('now','localtime')) AS ymd")).ymd;
@@ -414,7 +415,7 @@ async function main() {
   //   的结论一致（此处即该结论的真实路由证据）。
   {
     // 用 i2（本节之后无下游引用，i1 后续仍需保持已上线态供 reopen 等测试使用，不可复用）
-    let r2 = await call('POST', `/api/sys-issues/${i2}/close`, adminTok, {});
+    let r2 = await call('POST', `/api/sys-issues/${i2}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r2.status, 200, `close 合法通过（已上线→已关闭）200, got ${r2.status} ${JSON.stringify(r2.body)}`);
     const closedRow = await get('SELECT status, closed_at FROM sys_issues WHERE id=?', [i2]);
     assert.strictEqual(closedRow.status, '已关闭', 'close 落库为已关闭');
@@ -422,7 +423,7 @@ async function main() {
     ok('[W07 证据·close] 合法通过：已上线 admin close → 200 已关闭（+closed_at），不进族不受 roster 影响');
 
     const iReady = await seedToReady();   // 待上线态（未发布）
-    r2 = await call('POST', `/api/sys-issues/${iReady}/close`, adminTok, {});
+    r2 = await call('POST', `/api/sys-issues/${iReady}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r2.status, 400, `close 非法拒绝（待上线→close 无此边）应 400, got ${r2.status} ${JSON.stringify(r2.body)}`);
     assert.strictEqual(r2.body.code, 'INVALID_TRANSITION', 'close from 白名单仅 [已上线]，待上线态被拒');
     ok('[W07 证据·close] 非法拒绝：待上线态 close → 400 INVALID_TRANSITION（from 白名单外）');
@@ -874,7 +875,7 @@ async function main() {
   ok('[C6·§6.5] reopen 收窄：已上线（未归档）直接 reopen → 409 ISSUE_NOT_ARCHIVED（须先归档，附录 A 明列）');
 
   // 先归档（close）：已上线 → 已关闭。
-  r = await call('POST', `/api/sys-issues/${i1}/close`, adminTok, {});
+  r = await call('POST', `/api/sys-issues/${i1}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
   assert.strictEqual(r.status, 200, `[C6] i1 归档应 200, got ${r.status} ${JSON.stringify(r.body)}`);
   assert.strictEqual((await issueRow(i1)).status, '已关闭', '[C6] i1 归档后落库为已关闭');
 
@@ -910,7 +911,7 @@ async function main() {
     assert.strictEqual(gmBefore.members[0].status_at_publish, '已上线', '[C6回环②] 快照冻结的发布时状态=已上线');
 
     // 归档（close）：已上线 → 已关闭。
-    r13 = await call('POST', `/api/sys-issues/${cycId}/close`, adminTok, {});
+    r13 = await call('POST', `/api/sys-issues/${cycId}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r13.status, 200, `[C6回环③] 归档应 200, got ${r13.status} ${JSON.stringify(r13.body)}`);
     assert.strictEqual((await issueRow(cycId)).status, '已关闭', '[C6回环③] 单已归档');
 

@@ -18,6 +18,7 @@
 //   [Y3] 对照组：证明 [Y1]/[Y2] 判据不是恒真——分别构造"注入了去重关键字的假源码"与
 //        "改动前未去重的旧实现"，证明两条判据在这些反例上确实会判红
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const fs = require('fs');
@@ -131,7 +132,7 @@ function parseArr(val, label) {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', () => { port = server.address().port; res(); }); });
+  server = await listenOnSafePort(app); port = server.address().port;
   console.log('  ✓ readiness ready + HTTP harness 起服务');
 
   // ── 夹具 ────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
 //   D 多级返工链 → 每级子单各自 datafix-{自己 id}（不整链复制同一号——修复前的病症）
 // 用法：node scripts/verify-correction-rework-datafix-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -94,7 +95,7 @@ async function mkArchived(o = {}) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ── A 父单为 datafix 占位号 → 子单自洽补号 datafix-{childId} ──
   console.log('— A datafix 父单返工 → 子单补自身占位号 —');

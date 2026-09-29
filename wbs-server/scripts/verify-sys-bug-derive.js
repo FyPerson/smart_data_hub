@@ -13,6 +13,7 @@
 //   [D10] fix_gap_note 闸门 fail-closed（codex M-1 采纳）：origin 查不到 → 409 SYS_ORIGIN_MISSING
 //   （codex 100 号 HIGH-2：D6/D7/D8/D10 在 C3 一度被误判"随旧 submit 退场"而移除，现按 e39e65b 版旧 case
 //    'submit' 逐字复刻回填 first_submitted_at/fix_gap_note 后已恢复，本文件断言相应改回真实路由验证）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -148,7 +149,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

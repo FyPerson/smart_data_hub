@@ -17,6 +17,9 @@ const sqlite3 = require('sqlite3');
 const path = require('path');
 
 const db = new sqlite3.Database(':memory:');
+let sysIssuesCreateSql = '';
+const originalDbRun = db.run;
+db.run = function(sql, ...args) { if (/^CREATE TABLE IF NOT EXISTS sys_issues \(/.test(sql)) sysIssuesCreateSql = sql; return originalDbRun.call(this, sql, ...args); };
 const run = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const all = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 const get = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
@@ -100,8 +103,25 @@ async function main() {
   ok('⭐ C2a 物删审计表：reason DB 层 CHECK(trim 1..200) + 七列 NOT NULL + 零外键（约束漂移由本脚本守，非 readiness）');
 
   // [2] sys_issues 关键列齐全（含三侧通知锚点 + effected_at）
+  assert.ok(sysIssuesCreateSql.length > 0, '[75] CREATE TABLE sys_issues statement captured');
+  assert.doesNotMatch(sysIssuesCreateSql, /^\s*intake_notified_at\s/m, '[75] intake_notified_at is ALTER-only, like every column after online_source (no column definition in CREATE)');
   const issueColRows = await all('PRAGMA table_info(sys_issues)');
   const issueCols = issueColRows.map(r => r.name);
+  assert.deepStrictEqual(issueColRows.filter(r=>r.name==='intake_notified_at').map(r=>({type:r.type,notnull:r.notnull,default:r.dflt_value})),[{type:'DATETIME',notnull:0,default:null}],'[75] intake_notified_at schema exact');
+  assert.ok(I.SYS_ISSUES_KEY_COLS.includes('intake_notified_at'),'[75] readiness includes intake_notified_at');
+  // Fresh schema order is captured before the migration simulation below can re-append the column.
+  const freshOrder = issueColRows.map(r => r.name);
+  assert.strictEqual(freshOrder[freshOrder.length - 1], 'intake_notified_at', '[75] fresh schema (CREATE + migrations) ends with intake_notified_at');
+  // Drop only in this in-memory fixture to simulate the old schema; production never rebuilds.
+  await run('ALTER TABLE sys_issues DROP COLUMN intake_notified_at');
+  await I.runSysMigration();
+  const migratedRows = await all('PRAGMA table_info(sys_issues)');
+  assert.strictEqual(migratedRows.filter(r=>r.name==='intake_notified_at').length,1,'[75] lazy migration adds missing column');
+  assert.deepStrictEqual(migratedRows.map(r => r.name), freshOrder, '[75] migrated column order equals fresh CREATE order');
+  assert.deepStrictEqual(migratedRows.filter(r=>r.name==='intake_notified_at').map(r=>({type:r.type,notnull:r.notnull,default:r.dflt_value})),[{type:'DATETIME',notnull:0,default:null}],'[75] migrated intake_notified_at schema exact');
+  await I.runSysMigration();
+  assert.strictEqual((await all('PRAGMA table_info(sys_issues)')).filter(r=>r.name==='intake_notified_at').length,1,'[75] lazy migration idempotent');
+  ok('[75] intake timestamp nullable DATETIME + readiness + old-schema migration + idempotence');
   const missingKey = I.SYS_ISSUES_KEY_COLS.filter(c => !issueCols.includes(c));
   assert.strictEqual(missingKey.length, 0, `_internals KEY_COLS 在真实表缺失: ${missingKey.join(',')}`);
   ok(`sys_issues._internals KEY_COLS 全部存在于真实建表（readiness 校验与真实 schema 同源，含 effected_at/三侧锚点）`);
@@ -458,7 +478,7 @@ async function main() {
     //   dev_estimated_at_on_release 四列（[1a-16]）+ [§14·S11·2026-08-14] 随后新增的
     //   completion_overrun_reason_code/_note 两列（[1a-17]）+ [§15·S12-a·2026-08-14] 随后新增的
     //   derive_root_id/derive_seq/derive_seq_alloc 三列（[1a-18]）+ [S1a·2026-09-07] exec_mode/
-    //   vendor_name 两列（[1a-19]·config 流激活执行方式契约），不多不少不错序——用显式列表
+    //   vendor_name 两列（[1a-19]·config 流激活执行方式契约）+ [#75] intake_notified_at（[1a-20]·只走 ALTER·新库与旧库迁移后同序，上方 [75] 已证）；不多不少不错序——用显式列表
     //   deepStrictEqual 而非"只要排在它之前"这种宽松判断，保留原断言（"online_source 必须是表尾往下的
     //   固定序列起点"）的精确追责能力：若将来再有新列插进这二十列之间、或表尾又新增了别的列组，这里会
     //   先于下方 [9h-fastrelease]/[9h-fastrelease-acceptance]/[9h-eta-overrun-snapshot]/
@@ -473,8 +493,8 @@ async function main() {
         'eta_overrun_reason_code', 'eta_overrun_reason_note', 'dev_estimated_first_at', 'dev_estimated_at_on_release',
         'completion_overrun_reason_code', 'completion_overrun_reason_note',
         'derive_root_id', 'derive_seq', 'derive_seq_alloc',
-        'exec_mode', 'vendor_name'],
-      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列 + completion_overrun_reason_code/_note 两列 + derive_root_id/derive_seq/derive_seq_alloc 三列 + [S1a·2026-09-07] exec_mode/vendor_name 两列（[1a-19]）（顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
+        'exec_mode', 'vendor_name', 'intake_notified_at'],
+      `[M2③] online_source 之后应恰好是 fast_release_* 六列 + post_release_acceptance/post_accepted_at/post_derive_issue_id 三列 + eta_overrun_reason_code/_note/dev_estimated_first_at/dev_estimated_at_on_release 四列 + completion_overrun_reason_code/_note 两列 + derive_root_id/derive_seq/derive_seq_alloc 三列 + [S1a·2026-09-07] exec_mode/vendor_name 两列（[1a-19]）+ intake_notified_at（前置旧库迁移后追加，顺序不漂移），实得 ${JSON.stringify(colsAfterOnlineSource)}`);
     // 默认值行为：裸插入 → NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('feature', '开发中', 't-online-source-default', 'BMS', 1, 'admin')`);
     const osDefault = await get(`SELECT online_source FROM sys_issues WHERE title='t-online-source-default'`);
@@ -699,13 +719,13 @@ async function main() {
     assert.ok(rootInfo.cid < seqInfo.cid && seqInfo.cid < allocInfo.cid,
       `derive_root_id/derive_seq/derive_seq_alloc 声明顺序应依次递增，实得 root=${rootInfo.cid}/seq=${seqInfo.cid}/alloc=${allocInfo.cid}`);
     // [S1a 补丁 T·T11] derive_seq_alloc 已不再是表尾——[S1a·2026-09-07] exec_mode/vendor_name 两列
-    //   （[1a-19]，config 流激活执行方式契约）新增在其后，vendor_name 现为真正末列（见上方 [9h-c9]
+    //   （[1a-19]，config 流激活执行方式契约）新增在其后，intake_notified_at 经本套件旧库迁移测试后为真正末列（见上方 [9h-c9]
     //   colsAfterOnlineSource 列表已同源钉住该顺序）。derive_root_id/derive_seq/derive_seq_alloc 三列
     //   自身的声明序（root<seq<alloc，见上方 assert.ok）与本组"派生单编号"语义无关的 exec_mode/
     //   vendor_name 无需并入——那是另一个特性的三列内部相对顺序，不是"谁是表尾"这件事。
     const lastColDn = dnCols[dnCols.length - 1];
-    assert.strictEqual(lastColDn.name, 'vendor_name',
-      `[表尾钉死] vendor_name 应是 sys_issues 当前最后一列（S1a exec_mode/vendor_name 两列新增，vendor_name 排在 exec_mode 之后，新增列一律排表尾），实际末列=${lastColDn.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
+    assert.strictEqual(lastColDn.name, 'intake_notified_at',
+      `[表尾钉死] intake_notified_at 应是旧库迁移后最后一列（#75 追加），实际末列=${lastColDn.name}——将来再加新列时本断言会红，提醒把这一行的期望更新为新的末列`);
     // 默认值行为：裸插入 → 三列全 NULL
     await run(`INSERT INTO sys_issues (type, status, title, system_name, created_by, created_by_name) VALUES ('bug', '待受理', 't-derive-num-default', 'BMS', 1, 'admin')`);
     const dnDefault = await get(`SELECT derive_root_id, derive_seq, derive_seq_alloc FROM sys_issues WHERE title='t-derive-num-default'`);

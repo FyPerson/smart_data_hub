@@ -279,7 +279,7 @@
 
     <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
 
-    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script src="assets/js/app.js?v=v1.159.0_debta4"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
@@ -382,7 +382,7 @@
         }
         // 五级回退（映射表 §0.2）：code → reason → 已知中文字面量 → HTTP status → 未知原因
         //   · 本页**无 `NOTIFY_PARTIAL_FAILURE`**（§1 该码只在 DC/DCorr 产出）⇒ **不搬 `failed_step` 子映射**，
-        //     搬了就是本页凭空多一条死分支（同 P13「超窗态不补」的口径）。
+        //     搬了就是本页凭空多一条死分支（仍须按后端真实错误契约接入）。
         //   · HTTP 500 且无 code/reason 时**跳过字面量档**：那档的 `error` 是 `err.message` 原始异常文本
         //     （server.js:13397/13476/13497/13562 四处端点 catch 的 `res.status(500).json({error: err.message})`），
         //     含堆栈/SQL/路径风险 ⇒ 一律「未知原因」。
@@ -880,14 +880,16 @@
                     }
                     if (!box) return;
                     if (j.superseded) {
-                        // 〔矩阵 P21·N2b-fix 补行〕**可达分支**（区别于 P13 的死分支超窗态）：查已读期间该通道被
+                        // 〔矩阵 P21·N2b-fix 补行〕**可达分支**（当前轮次与旧消息回执分离）：查已读期间该通道被
                         //   重发换了 message_key，后端 CAS 固化落空（server.js:13556 返 200 `{superseded:true}`）
                         //   ⇒ 这次查询的是**上一轮**的消息，结论不能记到当前轮次头上。
                         //   文案取冻结映射表 §3 原文；A' 类（结果框是唯一通道，行内不会因这次查询而变）。
                         //   槽选 **muted 不选 idle**：idle 的语义是「查询中占位」（还在转），此处查询已结束、
                         //   只是结果作废 —— 是「留痕缺省/失效」语义，与 muted（借 voided-fg）同族。
-                        //   `—` 前缀是 muted 档的既有形态约定（§3.3「超窗口未读」态 `— 未读（…）`同款），非新增措辞。
+                        //   `—` 前缀是 muted 档的既有形态约定（第三态同样使用 `—` 前缀），非新增措辞。
                         box.innerHTML = '<span class="u-nt-muted">— 该单已进入新一轮，本次结果未计入</span>';
+                    } else if (j.read_status === 'unqueryable') {
+                        box.innerHTML = j.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>';
                     } else if (j.read_status === 'recipient_unresolved') {
                         // §3.3「无法查询」态。〔J7·P14〕本分支是**真缺陷修复**：后端 server.js:13540 真会返
                         //   HTTP 200 `{read:false, read_status:'recipient_unresolved'}`，而原实现只判 `j.read`
@@ -896,8 +898,6 @@
                     } else {
                         // §3.3「窗口内未读」态：措辞补一个「取」字对齐五页（本页现状无待收编 emoji，
                         //   §3.2 收编清单里的那几个本页零命中——此处只统一措辞，不做符号替换）。
-                        // 〔J7·P13〕**超窗态不补**：本页后端（server.js:13503 起）没有 24h 窗口判定，
-                        //   `unread_expired` 全站唯一产出点是 Data_Collab 的查已读端点 ⇒ 在本页补就是造第三条死分支。
                         box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';
                     }
                 } else {

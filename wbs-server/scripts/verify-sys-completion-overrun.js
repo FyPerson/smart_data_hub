@@ -25,7 +25,10 @@
 //   [W5][W6] runWGate feature⑤⑥降级路径——直接从「开发中」跳「待验证」同样受闸（保留，未受迁移影响）
 //   [S] 状态写入汇点审计（NEW-4·2026-08-14 重做：不数 runWGate 调用次数，改逐条核对 index.js 内
 //       全部能写「待对接测试/待验证」的 UPDATE 语句块——精确等值 + 逐站点白名单 + 红灯自证）
+// 2026-09-27 A1：绝对行号锚改为语法归属 + SQL 首段/WHERE 指纹；插入注释不应改变审计结果。
+// 结构检查先于运行时用例，删除 gate 时首红明确落到对应写点；不可达元数据仍需人工核对。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const fs = require('fs');
@@ -186,6 +189,157 @@ async function liaisonTestReturn(id, reason = '[T] 对接测试打回重提探�
 }
 
 async function main() {
+  // [S] Structural anchors: syntax owner + normalized SQL, never source line numbers.
+  {
+    const T14 = require('../routes/sys-iteration/transitions');
+    const featureTransitionsForAudit = T14.TRANSITIONS.feature;
+    const staticForwardEdges = featureTransitionsForAudit.filter(t => t.to === '待验证' || t.to === '待对接测试');
+    const dynamicWGateEdges = featureTransitionsForAudit.filter(t => t.dynamicTarget === 'w_gate'
+      && Array.isArray(t.possibleTargets)
+      && (t.possibleTargets.includes('待验证') || t.possibleTargets.includes('待对接测试')));
+    assert.strictEqual(staticForwardEdges.length, 1, `[S①] feature 流里 to∈{待对接测试,待验证} 的静态边应恰 1 条，实得 ${staticForwardEdges.length}`);
+    assert.strictEqual(staticForwardEdges[0].action, 'liaison_test_pass', `[S①] 唯一静态前进边应是 liaison_test_pass，实得「${staticForwardEdges[0] && staticForwardEdges[0].action}」`);
+    assert.strictEqual(dynamicWGateEdges.length, 1, `[S①] dynamicTarget='w_gate' 且候选含待对接测试/待验证的边应恰 1 条，实得 ${dynamicWGateEdges.length}`);
+    assert.strictEqual(dynamicWGateEdges[0].action, 'submit', `[S①] 唯一动态 GATE 前进边应是 submit，实得「${dynamicWGateEdges[0] && dynamicWGateEdges[0].action}」`);
+    ok('[S①] transitions.js feature 流前进边枚举：静态边=liaison_test_pass(to=待验证) 恰 1 条 / 动态 w_gate 边=submit（possibleTargets 含待对接测试+待验证）恰 1 条，二者合计穷尽全部能落到目标两态的前进边');
+
+
+    const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
+    const comments = [];
+    require('acorn').parse(indexSrc, { ecmaVersion: 'latest', onComment: (_block, _text, start, end) => comments.push({start,end}) });
+    const cleanParts = []; let cleanOffset = 0;
+    for (const comment of comments) {
+      cleanParts.push(indexSrc.slice(cleanOffset, comment.start), indexSrc.slice(comment.start, comment.end).replace(/[^\r\n]/g, ' '));
+      cleanOffset = comment.end;
+    }
+    const indexCleanForWriteAudit = cleanParts.join('') + indexSrc.slice(cleanOffset);
+    const { extractStatusWriteSites, extractDynamicSetSites, countStatusWritesByText } = require('./_sys-status-write-sites');
+    const writeSites = extractStatusWriteSites(indexSrc);
+    assert.strictEqual(writeSites.length, 8, '[S②] status UPDATE 写点总数必须恰为 8');
+    assert.strictEqual(countStatusWritesByText(indexSrc), writeSites.length, '[S②b] 文本计数必须与语法计数全等');
+    // [S②c] SET 子句为空或含变量拼接的写点，写什么列由运行时决定，静态扫描无法判断是否写 status：
+    //   逐条登记「归属 :: SET 子句」，新增或改动任何一处都必须来这里人工核对后登记（硬门，无放行分支）。
+    //   登记时已核：下列片段来源（EDIT_TIER_*_FIELDS / SYS_CLEAR_*_SQL / notifyResetSql / effortSetFrag /
+    //   read_at 列名常量）均不含 status；${setClause} 是通用状态引擎，已计入上方八处。
+    const DYNAMIC_SET_REGISTRY = [
+      "electRepresentative :: assigned_to = ?, assigned_to_name = ?, assigned_at = datetime('now','localtime')${notifyResetSql}",
+      'electRepresentative :: assigned_to = ?, assigned_to_name = ?${notifyResetSql}',
+      'electRepresentative :: assigned_to = NULL, assigned_to_name = NULL, assigned_at = NULL${notifyResetSql}',
+      "terminateExpiredFastReleaseAuthInTxn :: ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')",
+      'sysIssueTransition :: ${setClause}',
+      "clearPendingConsultOnLeave :: ${SYS_CLEAR_TECH_LEAD_FIELDS_SQL.join(', ')}, updated_at=datetime('now','localtime')",
+      "router.post /sys-issues/:id/submit/withdraw :: ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')",
+      "router.post /sys-issues/:id/edit-in-revision :: ${setFrags.join(', ')}, updated_at = datetime('now','localtime')",
+      "router.post /sys-issues/:id/cancel-consult :: ${SYS_CLEAR_TECH_LEAD_FIELDS_SQL.join(', ')}, updated_at=datetime('now','localtime')",
+      "router.post /sys-issues/:id/estimate :: dev_estimated_at = ?, ${effortSetFrag} eta_overrun_reason_code = ?, eta_overrun_reason_note = ?, updated_at = datetime('now','localtime')",
+      "router.post /sys-issues/:id/unblock :: ${SYS_CLEAR_BLOCKED_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')",
+      "router.post /sys-issues/:id/scope-change :: ${setFrags.join(', ')}, updated_at = datetime('now','localtime')",
+      "_publishReleaseCoreInTxn :: ${SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL.join(', ')}, updated_at = datetime('now','localtime')",
+      'router.get /sys-issues/:id/notify-read-status :: ${col} = ?',
+    ];
+    const dynamicKeys = src => extractDynamicSetSites(src).map(s => s.owner + ' :: ' + s.setBody).sort();
+    assert.deepStrictEqual(dynamicKeys(indexSrc), DYNAMIC_SET_REGISTRY.slice().sort(), '[S②c] 动态 SET 写点必须与登记表逐条全等');
+    // [S②d] 登记表只绑名字不绑内容：逐个核登记片段的来源定义（每个名字恰好一处声明），其中任何字符串
+    //   都不得含 status 赋值、也不得是字段名 status——有人往清空常量 / 可编辑字段表里加 status 时在这里红。
+    const { declaredStrings } = require('./_sys-status-write-sites');
+    const intakeGateSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'intake-gate-sql.js'), 'utf8');
+    const FRAGMENT_SOURCES = [
+      [indexSrc, 'SYS_CLEAR_BLOCKED_FIELDS_SQL'], [indexSrc, 'SYS_CLEAR_FAST_RELEASE_AUTH_FIELDS_SQL'],
+      [indexSrc, 'EDIT_TIER_A_FIELDS'], [indexSrc, 'notifyResetSql'], [indexSrc, 'effortSetFrag'],
+      [intakeGateSrc, 'SYS_CLEAR_TECH_LEAD_FIELDS_SQL'],
+    ];
+    for (const [src, name] of FRAGMENT_SOURCES) {
+      const strings = declaredStrings(src, name);
+      assert.ok(Array.isArray(strings) && strings.length > 0, '[S②d] ' + name + ' 必须恰好一处声明且含字符串');
+      assert.deepStrictEqual(strings.filter(s => /\bstatus\s*=/i.test(s) || /^\s*status\s*$/i.test(s)), [], '[S②d] ' + name + ' 不得含 status');
+    }
+    ok('[S②] status UPDATE 写点精确八处（折叠拼接的语法扫描与去注释文本扫描两套计数全等）+ 十四处动态 SET 写点逐条登记 + 六个片段来源不含 status（常规写法回归防护，非完整性证明，见 _sys-status-write-sites.js 头注）');
+    const EXPECTED_STATUS_WRITE_SITES = [
+      { owner: 'runSysMigration', prefix: "UPDATE sys_issues SET status = '待指派'", where: "WHERE type IN ('feature','improvement') AND status IN ('待评估','已排期')", reachable: false },
+      { owner: 'runSysMigration', prefix: "UPDATE sys_issues SET status = '待受理'", where: "WHERE status = '待商议'", reachable: false },
+      { owner: 'runWGate', prefix: "UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime')", where: 'WHERE id = ? AND status = ?', reachable: true, gateKind: 'runWGate' },
+      { owner: 'attemptFastReleaseFlipInTxn', prefix: "UPDATE sys_issues SET status = '已上线',", where: "WHERE id = ? AND type = 'bug' AND status = '待验证' AND ${FAST_RELEASE_CONSUMABLE_AUTH_WHERE_SQL}", reachable: false },
+      { owner: 'sysIssueTransition', prefix: 'UPDATE sys_issues SET ${setClause}', where: 'WHERE id = ? AND status = ?${whereExtra}', reachable: true, gateKind: 'exempt' },
+      { owner: 'router.post /sys-issues', prefix: 'UPDATE sys_issues SET status = ?', where: 'WHERE id = ? AND status = ?', reachable: false },
+      { owner: 'router.post /sys-issues/:id/assign', prefix: "UPDATE sys_issues SET status = ?, updated_at = datetime('now','localtime'), gate_deferred_at = NULL", where: 'WHERE id = ? AND status = ?', reachable: false },
+      { owner: '_publishReleaseCoreInTxn', prefix: "UPDATE sys_issues SET status = '已上线', released_at =", where: "WHERE release_id = ? AND status = '待上线'", reachable: false },
+    ];
+    assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 期望表与写点数全等');
+    const matches = EXPECTED_STATUS_WRITE_SITES.map((expected, i) => {
+      const hits = writeSites.filter(site => site.owner === expected.owner
+        && site.sql.startsWith(expected.prefix)
+        && site.sql.slice(site.sql.indexOf('WHERE ')) === expected.where);
+      assert.strictEqual(hits.length, 1, '[S③] 写点 #' + i + ' 结构锚必须恰好命中一处：' + expected.owner);
+      return hits[0];
+    });
+    assert.deepStrictEqual(matches.map(site => site.start), writeSites.map(site => site.start), '[S③] 八条结构锚的相对顺序必须全等');
+    // Gate metadata below retains its original assertions. This extra syntax check binds the real
+    // completion gate call to the owning function body (nested functions excluded) and to source
+    // order before its status UPDATE. Execution order is proven by the runtime cases further down
+    // ([M-gap3] etc.), not by this check.
+    const gatedSite = matches[2];
+    const calls = [];
+    function collectGateCalls(node) {
+      if (!node || typeof node.type !== 'string') return;
+      if (node !== gatedSite.scope && /^(FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/.test(node.type)) return;
+      if (node.type === 'CallExpression' && node.callee.name === 'resolveCompletionOverrunReasonForWrite'
+          && node.start < gatedSite.start) calls.push(node);
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(collectGateCalls);
+        else if (value && typeof value.type === 'string') collectGateCalls(value);
+      }
+    }
+    collectGateCalls(gatedSite.scope);
+    assert.strictEqual(calls.length, 1, '[S③] 写点 #2 runWGate：同一函数体（不含嵌套函数）内、源码顺序在 UPDATE 之前恰有一个完成理由 gate 调用');
+    const reachableSites = EXPECTED_STATUS_WRITE_SITES.filter(s => s.reachable);
+    assert.strictEqual(reachableSites.length, 2, `[S③] 可达「待对接测试/待验证」的写点应恰 2 处，实得 ${reachableSites.length}`);
+    assert.ok(reachableSites.some(s => s.gateKind === 'runWGate'), '[S③] 可达写点须含 runWGate（§14 闸门覆盖）');
+    assert.ok(reachableSites.some(s => s.gateKind === 'exempt'), '[S③] 可达写点须含通用引擎（liaison_test_pass 显式豁免）');
+    // 豁免子断言——正面证明 case 'liaison_test_pass' 代码块内不含理由闸函数引用（结构性撤闸证据，
+    //   非仅凭①②数量对拍就断言"豁免"，同旧版 [S④] 精神保留）。
+    const ltPassStart = indexCleanForWriteAudit.indexOf(`case 'liaison_test_pass': {`);
+    const ltPassEnd = indexCleanForWriteAudit.indexOf(`case 'return': {`, ltPassStart);
+    assert.ok(ltPassStart > 0 && ltPassEnd > ltPassStart, '[S③豁免子断言前置] 应能定位 case \'liaison_test_pass\' 代码块边界');
+    const ltPassBlock = indexCleanForWriteAudit.slice(ltPassStart, ltPassEnd);
+    assert.ok(!ltPassBlock.includes('resolveCompletionOverrunReasonForWrite'), '[S③豁免子断言] ⭐ case \'liaison_test_pass\' 代码块不应引用 resolveCompletionOverrunReasonForWrite（撤闸未彻底则本断言会红）');
+
+    ok('[S③] 八条写点：语法归属、SQL 指纹唯一命中、相对顺序、原 reachable/gateKind 与豁免块断言、真实 gate 调用检查');
+    const brokenSites = extractStatusWriteSites(indexSrc + '\nvoid "UPDATE sys_issues SET status = ? WHERE id = ?";');
+    assert.notStrictEqual(brokenSites.length, 8, '[S④] 新增旁路写点必须打破八处计数');
+    assert.strictEqual(brokenSites.length, 9, '[S④] 新增一处 status UPDATE 后总数必须恰为九');
+    ok('[S④] 源码副本追加第九写点，计数断言红灯自证');
+    // Retain both original S④b controls: status need not be the first SET field,
+    // while notify_status and other suffix columns must not count as main status.
+    const secondField = extractStatusWriteSites(indexSrc + '\nvoid "UPDATE sys_issues SET foo = ?, status = ? WHERE id = ?";');
+    assert.strictEqual(secondField.length, 9, '[S④b] status 作为 SET 子句第二项追加后总数恰为 9');
+    const suffixOnly = extractStatusWriteSites(indexSrc + '\nvoid "UPDATE sys_issues SET notify_status = ? WHERE id = ?";');
+    assert.strictEqual(suffixOnly.length, 8, '[S④b-反向] 仅写 notify_status 时总数仍为 8');
+    ok('[S④b] 非首项 status 正向计数 + notify_status 后缀反向排除，原有双向反证保留');
+    // [S④c] 旁路写法自证：每种变体都必须打破 [S②]–[S②c] 组合门（语法计数 8、文本计数 8、动态登记全等），
+    //   并钉住三项各自的取值（期望手写，不由被测函数生成）。
+    const bypassVariants = [
+      ['单引号拼接', "\nvoid ('UPDATE sys_issues SET ' + 'status = ? WHERE id = ?');", 9, 9, false],
+      ['双引号拼接', '\nvoid dbRunAsync("UPDATE sys_issues SET " + "status = ? WHERE id = ?", []);', 9, 8, false],
+      ['模板串拼接', '\nvoid (`UPDATE sys_issues SET ` + `status = ? WHERE id = ?`);', 9, 8, false],
+      ['拆开关键字', '\nvoid ("UPDATE " + "sys_issues SET status = ? WHERE id = ?");', 9, 8, false],
+      ['字面量前带 SQL 注释', '\nvoid `-- bump\n UPDATE sys_issues SET status = ? WHERE id = ?`;', 9, 9, false],
+      ['单串多语句', "\nvoid 'BEGIN; UPDATE sys_issues SET status = ? WHERE id = ?';", 9, 9, false],
+      ['小写关键字', "\nvoid 'update sys_issues set status = ? where id = ?';", 9, 9, false],
+      ['变量代入列名', "\nconst __col = 'status'; void `UPDATE sys_issues SET ${__col} = ? WHERE id = ?`;", 8, 8, true],
+      ['+= 追加 SET 子句', "\nlet __q = 'UPDATE sys_issues SET '; __q += 'status = ? WHERE id = ?';", 8, 9, true],
+    ];
+    const registrySorted = DYNAMIC_SET_REGISTRY.slice().sort();
+    for (const [label, tail, expectedAst, expectedText, expectedDynamicChanged] of bypassVariants) {
+      const astCount = extractStatusWriteSites(indexSrc + tail).length;
+      const textCount = countStatusWritesByText(indexSrc + tail);
+      const dynamicChanged = JSON.stringify(dynamicKeys(indexSrc + tail)) !== JSON.stringify(registrySorted);
+      assert.deepStrictEqual([astCount, textCount, dynamicChanged], [expectedAst, expectedText, expectedDynamicChanged], '[S④c] ' + label + ' 三项取值');
+      assert.ok(!(astCount === 8 && textCount === 8 && !dynamicChanged), '[S④c] ' + label + ' 必须打破组合门');
+    }
+    ok('[S④c] 九种旁路写法（三种引号拼接/拆关键字/前置注释/多语句/小写/变量列名/+= 追加）均被组合门判红');
+
+
+  }
   mod.initSchema();
   await waitReady();
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
@@ -194,7 +348,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5,6 / 对接人13）');
 
@@ -727,247 +881,11 @@ async function main() {
     ok('[NEW-3-前端-旧形态] siCompletionOverrunGapFromTimeline 对无 payload_json 的历史行兜底走 summary 正则解析，向后兼容');
   }
 
-  // ══════════════════════════ [S] 状态写入汇点审计（NEW-4·2026-08-14 重做） ══════════════════════════
-  //   【重做动机】旧版只数「await runWGate( 」调用次数（精确=10）——这只能证明"runWGate 被调用的
-  //   地方没变"，防不住"有人新开一条完全不经过 runWGate 的直接 UPDATE，把 status 写成待对接测试/
-  //   待验证"这类旁路：新写点不调用 runWGate，旧断言的计数恒为 10，审计恒绿。重做为**状态写入汇点
-  //   审计**——不看"谁调用了 runWGate"，改看"index.js 里到底有哪些语句能把 status 列写成这两个
-  //   目标态"，逐点核对是否落在闸门覆盖范围内：
-  //   ①程序读 transitions.js 真相源（非正则猜测），枚举 feature 流全部能落到「待对接测试/待验证」
-  //     的前进边（含静态 to 字面量 + to:null 动态 w_gate 解析两类）。
-  //   ②文本扫描 index.js，提取全部「UPDATE sys_issues SET ... WHERE」语句块，逐块判定其 SET 子句
-  //     是否写 status 列——剥注释顺序**先行注释后块注释**：先跑块注释正则会被中文行注释里偶然出现的
-  //     `/*` 序列（markdown 强调符号 `**` 与除号相邻误连）当成块注释起点，吞掉后面上千行真代码直到
-  //     下一个 `*/`（本组编码期实测踩到：4386→6084 共 1700+ 行代码被误删，含 sysIssueTransition 通用
-  //     引擎的 setClause 定义本身），先剥行注释可让这类误连字符跟着所在行一起消失，再剥块注释才安全。
-  //   ③逐写点精确映射白名单（EXPECTED_INSERT_SITE_COUNT 范式）：可达目标态的写点必须落"经 runWGate
-  //     闸门覆盖"或"显式豁免+理由"其一，不可达的写点须证明其写入值结构上不可能是这两态。
-  //     ⚠️ [581-R3 M 落字] 上面这句是**设计意图**，不是本脚本已实现的断言：`reachable` 是清单元数据，
-  //     那 6 处"不可达"的证明靠**人工核对**（每次行号校准时逐条对拍 UPDATE 字面量），
-  //     脚本侧只断了「可达条目恰 2 条 + 含 runWGate 与 exempt + 豁免块内无理由闸引用」。见 S③ 的收窄文案。
-  //   ④红灯自证：源码文本副本追加一处假的"不经 runWGate 的直接 UPDATE"，证明②的精确计数断言真的会破。
-  //
-  //   ⚠️ [预筛 L3·扫描面前提落字] 本审计（②③）的扫描面 = `routes/sys-iteration/index.js` 单文件——
-  //   `fs.readFileSync` 只读这一个文件（见下方 ② 的 indexSrc 定义）。前提：**当前** sys_issues 的
-  //   status 列全部写点都在这一个文件里；`utils/sys-derive-numbering.js`（S12-a 批新增）只写
-  //   derive_root_id/derive_seq/derive_seq_alloc 三列，不写 status，故不在本审计需要覆盖的范围内。
-  //   若未来在 index.js 之外的文件（如某个独立脚本/另一个 utils 模块）新增了 status 列写点，本审计
-  //   扫描不到，需要扩大扫描面（多文件遍历）才能继续提供"结构性穷尽"的保证——这不是自动发生的事，
-  //   是本条注释在提醒下一个改动者。
-  {
-    // ① transitions.js 前进边枚举——直接 require 真相源模块（纯常量文件，无副作用/无 DB 依赖），
-    //   不用正则扫文本猜测（正则猜测本身也可能被同款注释坑误伤，直接读程序对象最可靠）。
-    const T14 = require('../routes/sys-iteration/transitions');
-    const featureTransitionsForAudit = T14.TRANSITIONS.feature;
-    const staticForwardEdges = featureTransitionsForAudit.filter(t => t.to === '待验证' || t.to === '待对接测试');
-    const dynamicWGateEdges = featureTransitionsForAudit.filter(t => t.dynamicTarget === 'w_gate'
-      && Array.isArray(t.possibleTargets)
-      && (t.possibleTargets.includes('待验证') || t.possibleTargets.includes('待对接测试')));
-    assert.strictEqual(staticForwardEdges.length, 1, `[S①] feature 流里 to∈{待对接测试,待验证} 的静态边应恰 1 条，实得 ${staticForwardEdges.length}`);
-    assert.strictEqual(staticForwardEdges[0].action, 'liaison_test_pass', `[S①] 唯一静态前进边应是 liaison_test_pass，实得「${staticForwardEdges[0] && staticForwardEdges[0].action}」`);
-    assert.strictEqual(dynamicWGateEdges.length, 1, `[S①] dynamicTarget='w_gate' 且候选含待对接测试/待验证的边应恰 1 条，实得 ${dynamicWGateEdges.length}`);
-    assert.strictEqual(dynamicWGateEdges[0].action, 'submit', `[S①] 唯一动态 GATE 前进边应是 submit，实得「${dynamicWGateEdges[0] && dynamicWGateEdges[0].action}」`);
-    ok('[S①] transitions.js feature 流前进边枚举：静态边=liaison_test_pass(to=待验证) 恰 1 条 / 动态 w_gate 边=submit（possibleTargets 含待对接测试+待验证）恰 1 条，二者合计穷尽全部能落到目标两态的前进边');
 
-    // ② 文本扫描 index.js：提取全部「写 status 列」的 UPDATE 语句块。
-    const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js'), 'utf8');
-    const stripCommentsForWriteAudit = (src) => {
-      const noLineComments = src.split('\n').map(line => {
-        const idx = line.indexOf('//');
-        return idx === -1 ? line : line.slice(0, idx);
-      }).join('\n');
-      return noLineComments.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ''));
-    };
-    const indexCleanForWriteAudit = stripCommentsForWriteAudit(indexSrc);
-    const lineOfOffset = (text, idx) => text.slice(0, idx).split('\n').length;
-    // SET 子句提取到「WHERE」或反引号/双引号（模板串/普通串收尾）任一先出现者为止——SQL 字面量在本
-    // 仓一律用单引号（'待指派' 这类），故不会与反引号/双引号收尾符冲突；若某条 UPDATE 无 WHERE 子句
-    // （如纯批量迁移语句），靠反引号/双引号先行止住，避免非贪婪匹配跨越到下一条语句的 WHERE 造成误判。
-    const extractStatusWriteSites = (text) => {
-      const re = /UPDATE\s+sys_issues\s+SET\s+([\s\S]*?)(?:\s+WHERE\b|[`"])/g;
-      const sites = [];
-      let mm;
-      while ((mm = re.exec(text))) {
-        const clause = mm[1].trim();
-        // 【2026-08-14 codex 396 NEW-4】判据从"clause 开头是 status="（^锚定）改为"clause 任意位置含
-        // status 赋值"（\b 词边界，非位置锚定）——旧判据存在扫描盲区：`UPDATE sys_issues SET foo = ?,
-        // status = ? WHERE ...` 这类 status 不在 SET 子句第一项的写点会被 ^ 锚定漏判（本仓当前 8 处
-        // 真实写点碰巧都把 status 放第一项，掩盖了这个盲区，不代表未来新写点也会照此惯例）。改用
-        // \bstatus\s*= ——\b 是 \w/\W 边界，"_"属 \w，故 notify_status/tech_lead_notify_status 等含
-        // "status"子串的其它列名前面是 "_"（\w），不构成边界，不会被误判为写主 status 列；真正的
-        // 独立标识符 status（无论出现在子句第几项）前面必是逗号/空白/子句起点（均 \W 或字符串边界），
-        // 边界成立，正确命中。或通用引擎唯一具名整段 SET 子句变量 ${setClause}（sysIssueTransition
-        // 定义，见 index.js :5820 一带）——两种形态覆盖全部真实写法，且不再要求出现在子句最前面。
-        const writesStatus = /\bstatus\s*=/.test(clause) || /\$\{setClause\}/.test(clause);
-        if (writesStatus) sites.push({ line: lineOfOffset(text, mm.index) });
-      }
-      return sites;
-    };
-    const writeSites = extractStatusWriteSites(indexCleanForWriteAudit);
-    assert.strictEqual(writeSites.length, 8, `[S②] index.js 写 status 列的 UPDATE 语句块应恰 8 处，实得 ${writeSites.length}——数量变化需人工核实（含本审计要防的"新增不经 runWGate 的直接 UPDATE"这一具体攻击面）`);
-    ok(`[S②] 文本扫描（先剥行注释再剥块注释）提取 index.js 全部写 status 列的 UPDATE 语句块，精确 8 处：行号 ${writeSites.map(s => s.line).join('/')}`);
-
-    // ③ 逐写点精确映射白名单——EXPECTED_INSERT_SITE_COUNT 范式：条目数须等于②的精确计数，且每条须能
-    //   在 ±3 行内核对到（大段逐字 anchor 对格式改动脆弱，改用行号容差 + 结构性事实描述，同既有 S③ 精神）。
-    const EXPECTED_STATUS_WRITE_SITES = [
-      // ⚠️ [S13-b 补] 行号随本批（B1 列表/详情两处标量子查询投影+B3 删除审计双记 issue_derive_root_id/
-      //   issue_derive_seq 两列迁移+eta-stats 投影等改动）在多处插入注释/代码整体下移——同一批写点，非
-      //   新增/非搬迁，仅源码行号漂移（逐条已人工核对本体 UPDATE 语句字面量与描述一致，同 :804 注释里
-      //   codex 396/397、S12-a 先例的同款维护）。
-      // ⚠️ [S13 收口批再补] LOW-3 在 sys_issue_delete_audit 的 2.10 段 CREATE TABLE 里补插
-      //   issue_derive_root_id/issue_derive_seq 两列定义（8 行，落在本清单全部 8 处写点**之前**），令
-      //   全部 8 处锚点整体再 +8 行——同一批写点、非新增第 9 处（人工核对：8 处行号偏移量完全一致地
-      //   +8，且逐条本体 UPDATE 语句字面量与下方 desc 描述仍一一对应，非巧合命中）。
-      // ⚠️ [先行上线授权超时收回 S1 补] 本批在 index.js 新增两处 fast_release_* 六列清空 UPDATE（超时
-      //   终结内核 :4399/批次发布过期分叉 :14299 一带）——两者 SET 子句只含 fast_release_*/updated_at
-      //   列，逐一确认均不含独立 `status` 赋值（非 `_status` 结尾子串），故②处实测计数仍恰 8 处、非新增
-      //   第 9 处；同批新增/改动其余代码在下方 8 处写点**部分之前、部分之间**穿插插入，导致 8 处锚点行号
-      //   **非均匀位移**（与此前"整体 +N"批次不同，本次逐条按 grep 实测行号取值，禁用「旧锚点+估算净插
-      //   行数」推算——见 :825 一带既有纪律，本次订正正是该纪律的落地）。
-      // ⚠️ [上线单管理体验优化 R-C4·2026-08-26] sys_release_audit 建表落在写点 #1/#2 之前（2.10~2.13
-      //   段之后、2.8 段之前），净增 52 行；readiness [2] checks 数组新增一条注册落在写点 #2 与 #3 之间
-      //   （:2264 一带），净增 2 行——前两条锚点各 +52，其余六条锚点各 +54（52+2）。PATCH /sys-releases/:id
-      //   端点本体插在 update-planned-date 之后（原 :16011 一带），晚于全部 8 处写点，不影响任何一条锚点。
-      //   人工核对：8 处 UPDATE 语句字面量逐字未变，仍是原 8 处同一批写点，非新增第 9 处。
-      // ⚠️ [R-C4·codex 472 审收口批·2026-08-26] 主会话直改 index.js 三处（HIGH-1 finalTitle 等改
-      //   changedFields 驱动/MED-1 body 非法闸+未知字段 400/MED-2 sys_release_audit DDL 补六条 CHECK）
-      //   均落在 sys_release_audit 建表 DDL 段与 PATCH 端点内部——前者仍在全部 8 处写点**之前**，净增
-      //   11 行（DDL 段内的注释+六条 CHECK，checks 数组本身零改动）；后者在全部 8 处写点**之后**——故本批
-      //   8 处锚点**均匀** +11（非本批新增/改动内容位于 #2 与 #3 之间那 2 行 checks 数组附近，那次是 R-C4
-      //   首批的历史差异，本批未再触碰）。人工核对：8 处 UPDATE 语句字面量逐字未变，非新增第 9 处。
-      // ⚠️ [codex 476 收口批 `972fe1b`·2026-08-27] sys_release_audit DDL 追加 member_count 一致性
-      //   CHECK+注释（:1434-1438 一带净增 5 行），位于全部 8 处写点之前 ⇒ 8 锚**均匀 +5**（grep 实测
-      //   1764/1864/4085/4631/6274/6986/7247/14641，UPDATE 字面量逐字未变非新增第 9 处）。⚠️ 本次追平
-      //   系合并后 main 全家族复验才拦获——当批收口亲跑面未含本守卫=「动 index.js 必跑全家族」纪律再犯
-      //   （97c43d7 后第二次），第 7 次追平，backlog #25③ 结构锚改造实例再 +1。
-      // ⚠️ [S3·所属系统「小程序-智荟人力」接入 方案 v1.2 §4·2026-09-02] 在 runWGate 函数体正上方新增
-      //   独立小节（DEFAULT_REQUIRE_LIAISON_TEST_SYSTEMS〔hotfix 2026-09-18 由 DEFAULT_SKIP_LIAISON_TEST_
-      //   SYSTEMS 改名+判定反转，符号数不变〕/isSkipLiaisonTestSystem/isSkipLiaisonTestSystemForIssue
-      //   三符号+注释）+ runWGate 内部新增一段 else-if 分支（⑤变体与⑥之间）+ W_GATE_SKIP_SUMMARY 相关
-      //   注释/键值扩充，三处改动全部落在写点 #3（本清单第 3 条，原 runWGate UPDATE）**之前**，对写点
-      //   #1/#2（1764/1864，两处历史迁移脚本，均在本次改动位置之前）零影响；写点 #3~#8 六条锚点因此
-      //   **均匀 +65**（⚠️ 首版登记 +63/…/14719 是「旧锚 + 插行数」算术推导、未真跑 grep，Opus 预筛按
-      //   HEAD~1 vs HEAD 两次 grep 对拍抓获 #3-#8 各差 2-3 行、#8 压满 ±3 容差零余量——本条起取值纪律回到
-      //   :825「只信 grep 不信算术」；**当前有效值以下方数组为准**（S3 收口注释批后第 16 次校准的 grep 实测
-      //   =1764/1864/4150/4697/6340/7052/7313/14725，见 #8 desc 末尾；本注释不再并存历史值，防两组「实测值」互斥）；
-      //   UPDATE 语句字面量逐字未变，仍是原 8 处同一批写点，非新增第 9 处；:3729 一带 runWGate 签名本身
-      //   位置不变，本次是函数体内部新增分支+函数上方新增小节，非搬迁）。
-      // ⚠️ [2026-09-06 验收说明附件与 admin 闭环放开 S2a 批] sysIssueTransition 内新增共享 helper
-      //   resolveEvidenceAttachmentIds（落在写点 #3 runWGate **之前**，紧邻 analyzeRosterForGate，净增
-      //   约 33 行）+ case 'accept'/'return' 内追加说明/附件校验逻辑（落在写点 #5 通用引擎 UPDATE **之前**，
-      //   净增约 43 行）——本批零新增/零删除 UPDATE sys_issues SET status 语句（②处实测计数仍恰 8，
-      //   逐条核对 8 处 UPDATE 语句字面量未变，非新增第 9 处），故按 :825 纪律 grep 实测重新校准：
-      //   #1/#2（1764/1864）在两处插入点之前，各 +2（一带 DDL 注释批同步扩充，见 payload_json 列注释）；
-      //   #3/#4（runWGate/先行上线翻牌，均在 sysIssueTransition 定义之前）各随 helper 插入 +35；
-      //   #5-#8（通用引擎/建单/assign/批量发布，均在 sysIssueTransition switch 之后）叠加 helper+
-      //   accept/return 两处插入共 +84~+85——**第 17 次校准**，grep 实测 1766/1866/4185/4732/6424/
-      //   7137/7398/14810。
-      // ⚠️ [2026-09-07 config 流激活 S1a（+385/-104）] =第 19 次校准〔用本文件 ②步同款 extractStatusWriteSites
-      //   grep 实测：8 处写点计数仍恰 8（非新增第 9 处），当前锚点=1776/1876/4205/4752/6506/7219/7513/15081〕。
-      // ⚠️ [2026-09-07 S1a 补丁 T（Opus 预筛修复：reassign 族门 override +5 行落 #2/#3 之前、accept payload 落
-      //   online_mode +8 行落 #4/#5 之前、commit 三端点判定下移 +4 行落 #7/#8 之前）] =**第 20 次校准**〔②步
-      //   实测 1776/1876/4210/4757/6519/7232/7526/15098，偏移 0/0/+5/+5/+13/+13/+13/+17 与三处插入量级自洽，
-      //   计数仍恰 8。同一任务内本锚被连续校准两次（第 19/20 次），backlog #25③ 结构锚改造的充分理由再 +1〕。
-      // ⚠️ [2026-09-07 S1a 补丁 V（codex 505-A 采纳项：V5 SYS_EXEC_MODES 反驳注释 +5 行落全部写点之前，均匀
-      //   平移 #1-#8；V2 has-field 判据拆分——accept/assign/reassign 三处各 +4~9 行，落 #5 之后；V1 reassign
-      //   终态校验 +9 行、V3 submit no_code+commits 事务化改造+12 行、V4 resume 目标态第三道校验+9 行，均落
-      //   #6/#7/#8 之前）] =**第 21 次校准**〔②步实测 1781/1881/4215/4762/6528/7241/7542/15159，偏移
-      //   +5/+5/+5/+5/+9/+9/+16/+61 与五处插入量级自洽（越靠后的写点累计的插入越多，符合期望），计数仍恰
-      //   8。同一任务内本锚已累计校准 21 次，backlog #25③ 结构锚改造的充分理由再 +1〕。
-      // ⚠️ [2026-09-09 附件压缩包支持 C1（系统迭代分支）] 在 §附件段（写点 #1-#7 均位于其前，均不受影响）
-      //   新增 require + SYS_ATTACHMENT_RULES 规则表/validateSysAttachmentRule 函数（替换原单表 SYS_ALLOWED_EXTS）
-      //   + 上传端点内逐文件二次卡循环，落在写点 #7（assign 端点，7542）与写点 #8（批量发布，本条）**之间**，
-      //   净增约 60 行——本条锚点随之下移 15159→15219（grep 实测；UPDATE 语句字面量「已上线」未变，仍是同一
-      //   写点，非新增第 9 处，②处实测计数仍恰 8）=**第 22 次校准**。
-      // #78：HEAD 基线已漂移至 7553/7818/16145；本批仅附件读段净增 12 行，末点为 16157。八处 UPDATE 语义均未变。
-      { anchorLine: 1777, reachable: false, desc: 'C1 迁移一次性脚本：字面量写「待指派」（历史 待评估/已排期→待指派迁移），与本闸门目标态无关（[#56·2026-09-10] 行号因 index.js exec_mode/vendor_name 契约整组下线净减行数而上移，非本迁移脚本自身变化）' },
-      { anchorLine: 1877, reachable: false, desc: '预沟通段撤销迁移脚本：字面量写「待受理」（[#56·2026-09-10] 行号因 index.js exec_mode/vendor_name 契约整组下线净减行数而上移）' },
-      { anchorLine: 4435, reachable: true, gateKind: 'runWGate', desc: 'runWGate 内唯一 UPDATE——targetStatus 变量，feature 决策树 ⑤⑤变体【新skip_system】⑥⑦ 分支据 SF.SYS_VERIFY_STATUSES/SF.SYS_LIAISON_TEST_STATUSES 可解析为待验证/待对接测试；§14 闸门（enteringForward && issueType===feature 分支）在本 UPDATE 之前执行，无理由不放行（同一写点，UPDATE 语句字面量未变；行号随 2026-09-06 验收说明附件批 resolveEvidenceAttachmentIds helper 插入 +35 行·grep 实测·第 17 次校准；2026-09-07 补丁 T/V 累计再 +5·第 21 次校准；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批（POST /sys-issues/:id/submit/amend 端点+computeDeliveryRev 版本锁+探针 P16 等，均落在本写点**之前**）累计 +50 行=**第 24 次校准**，grep 实测 4265；2026-09-10 #55 修复批（liaison_test_return 花名册重置精确删除 commit 行，见下方 exempt 写点注释）插入点在本写点**之后**，本条零影响，仅前次 4265 与本次 grep 实测 4262 之间 3 行陈旧漂移一并追平=第 30 次校准，grep 实测 4262；2026-09-10 C1（deadline/planned_date「不早于今天」硬拦批·新增 isBeforeToday 独立判据函数，落在 §2 normalizeDeadline/normalizeDeadlineDT 定义之后，本写点**之前**）+17 行=**第 31 次校准**，grep 实测 4279；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点**之前**）+75 行=**第 32 次校准**，grep 实测 4354，②处实测计数仍恰 8——非新增第 9 处，是同一处 runWGate UPDATE 随前文代码量增长而下移）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-17 #83·S1（附件增删留痕：sysBeginImmediate/releaseSysTxn 一带新增三测试钩子声明+事务 tag/序号变量，落在本写点**之前**）+23 行=**第 37 次校准**，grep 实测 1777/1877/4430/4994/6815/7576/7841/16503（末点额外净增 96 行来自本批 A1-A5 persist 五态重写+spec/delivery 分支改造+删除端点原位补码，均落在本写点**之后**；②处实测计数仍恰 8——非新增第 9 处）；2026-09-17 #83·S1 返工批1（主会话亲核：D-1 beforeTimeline ok:false 检查补漏 + beforeAttachmentResponseHook 测试钩子声明与两处调用点插入，均落在本写点**之前**）+5 行=**第 38 次校准**，grep 实测 1777/1877/4435/4999/6820/7581/7846/16513（末点额外净增 10 行来自本批 D-1 修复 +响应钩子声明与调用点，均落在本写点**之后**）' },
-      { anchorLine: 4999, reachable: false, desc: '先行上线翻牌内核 attemptFastReleaseFlipInTxn：字面量写「已上线」，WHERE 限定 type=bug，与 feature 专属闸门结构上无交集（同一写点，行号随 2026-09-06 验收说明附件批 helper 插入整体下移 +35·grep 实测·第 17 次校准；2026-09-07 补丁 T/V 累计再 +5·第 21 次校准；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批累计 +52=第 24 次校准，grep 实测 4814；2026-09-10 #55 修复批插入点在本写点**之后**，本条零影响，1 行陈旧漂移一并追平=第 30 次校准，grep 实测 4813；2026-09-10 C1（不早于今天硬拦批·isBeforeToday 函数插入，落在本写点**之前**）+17 行=**第 31 次校准**，grep 实测 4830）；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点之前）+75 行=第 32 次校准）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-17 #83·S1 全批（S1 主批 sysBeginImmediate/releaseSysTxn 测试钩子声明+事务 tag 变量 +23 行、返工批1 D-1 beforeTimeline ok:false 检查补漏+beforeAttachmentResponseHook 声明与两处调用点 +5 行，均落在本写点**之前**，本条零结构影响仅行号下移）净 +28 行=**第 37/38 次校准**（与上方 runWGate 写点 :4435 同批同源，grep 实测同批一致：1777/1877/4435/4999/6820/7581/7846/16528）' },
-      { anchorLine: 6820, reachable: true, gateKind: 'exempt', desc: 'sysIssueTransition 通用引擎唯一 UPDATE——toStatus 变量，服务全部声明式 transition；feature 流里能落到目标两态的边只有①核实的 liaison_test_pass 一条，该边已撤闸（显式豁免，见下方子断言核实其代码块不引用理由闸函数；行号随 2026-09-06 验收说明附件批 helper+accept/return 追加逻辑下移 +84·grep 实测·第 17 次校准；2026-09-07 补丁 T/V 累计再 +9·第 21 次校准；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批累计 +83=第 24 次校准，grep 实测 6611；2026-09-10 待对接测试态放开提交修正 D-L1 决策记录批——case 「liaison_test_pass」内插入对接测试通过版本锁校验（expected_delivery_rev 存在即校验+409 比对）与 payload_json 条件写 delivery_rev，均落在本写点**之前**，净 +21 行=第 26 次校准，grep 实测 6632；2026-09-10 #55 修复批（liaison_test_return 花名册重置——事务内先 SELECT「本次真正从 code_submitted/no_code 改为 pending」的在册实例 id 集合→UPDATE→按该集合精确删 sys_issue_dev_commits 行+逐行写 delete-commit 事件 via:liaison_test_return，index.js :6767 一带，净 +36 行）落在本写点（本条 UPDATE 语句本体）**之后**、写点 #6（建单 path A）**之前**——本条自身零影响（本条 UPDATE 之前无任何改动），加 2 行陈旧漂移一并追平=第 30 次校准，grep 实测 6634；2026-09-10 C1（不早于今天硬拦批·isBeforeToday 函数插入，落在本写点**之前**）+17 行=**第 31 次校准**，grep 实测 6651；写点 #6/#7/#8 三条随本次插入整体下移，见各自 desc）；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点之前）+75 行=第 32 次校准）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-17 #83·S1 全批（S1 主批 sysBeginImmediate/releaseSysTxn 测试钩子声明+事务 tag 变量 +23 行、返工批1 D-1 beforeTimeline ok:false 检查补漏+beforeAttachmentResponseHook 声明与两处调用点 +5 行，均落在本写点**之前**，本条零结构影响仅行号下移）净 +28 行=**第 37/38 次校准**（与上方 runWGate 写点 :4435 同批同源，grep 实测同批一致：1777/1877/4435/4999/6820/7581/7846/16528）' },
-      { anchorLine: 7581, reachable: false, desc: '建单 path A 占位状态 UPDATE：finalStatus 恒为受理门初始态（resolveSysInitialStatusForCreate 落态）或「开发中」，结构上不可能是待对接测试/待验证（行号随 2026-09-06 验收说明附件批下移 +85·grep 实测·第 17 次校准；2026-09-07 补丁 T/V 累计再 +9·第 21 次校准；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批累计 +83=第 24 次校准，grep 实测 7324；2026-09-10 待对接测试态放开提交修正 D-L1 决策记录批——case 「liaison_test_pass」版本锁插入（本条写点**之前**）净 +23=第 26 次校准，grep 实测 7347；2026-09-10 #55 修复批（liaison_test_return 花名册重置精确删除 commit 行，见 exempt 写点注释）落在本条写点**之前**，净 +36 行=第 30 次校准，grep 实测 7385，②处实测计数仍恰 8——非新增第 9 处；2026-09-10 C1（不早于今天硬拦批·isBeforeToday 函数 +17 行 + 建单端点 deadline 校验后插入判据调用 +2 行，均落在本写点**之前**）净 +19 行=**第 31 次校准**，grep 实测 7404）；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点之前）+75 行=第 32 次校准）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-17 #83·S1 全批（S1 主批 sysBeginImmediate/releaseSysTxn 测试钩子声明+事务 tag 变量 +23 行、返工批1 D-1 beforeTimeline ok:false 检查补漏+beforeAttachmentResponseHook 声明与两处调用点 +5 行，均落在本写点**之前**，本条零结构影响仅行号下移）净 +28 行=**第 37/38 次校准**（与上方 runWGate 写点 :4435 同批同源，grep 实测同批一致：1777/1877/4435/4999/6820/7581/7846/16528）' },
-      { anchorLine: 7846, reachable: false, desc: '/assign 端点 UPDATE：targetStatus 恒为 SF.SYS_DEV_STATUSES[type][0]（开发中），结构上不可能是待对接测试/待验证（行号随 2026-09-06 验收说明附件批下移 +85·grep 实测·第 17 次校准；2026-09-07 补丁 T/V 累计再 +16·第 21 次校准；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批累计 +84=第 24 次校准，grep 实测 7626；2026-09-10 #56 执行方式契约整组下线，assign 端点内 exec_mode/vendor_name 必填校验与 UPDATE 字段拼接一并删除，净减 36 行=第 25 次校准，grep 实测 7590；同日待对接测试态放开提交修正 D-L1 决策记录批——case 「liaison_test_pass」版本锁插入（本条写点**之前**）净 +22=第 26 次校准，grep 实测 7612；2026-09-10 #55 修复批（liaison_test_return 花名册重置精确删除 commit 行，见 exempt 写点注释）落在本条写点**之前**，净 +38 行（36 行本批插入 + 2 行陈旧漂移一并追平）=第 30 次校准，grep 实测 7650；2026-09-10 C1（不早于今天硬拦批·isBeforeToday +17 行 + 建单端点插入判据调用 +2 行，均落在本写点**之前**）净 +19 行=**第 31 次校准**，grep 实测 7669）；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点之前）+75 行=第 32 次校准）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-17 #83·S1 全批（S1 主批 sysBeginImmediate/releaseSysTxn 测试钩子声明+事务 tag 变量 +23 行、返工批1 D-1 beforeTimeline ok:false 检查补漏+beforeAttachmentResponseHook 声明与两处调用点 +5 行，均落在本写点**之前**，本条零结构影响仅行号下移）净 +28 行=**第 37/38 次校准**（与上方 runWGate 写点 :4435 同批同源，grep 实测同批一致：1777/1877/4435/4999/6820/7581/7846/16528）' },
-      // ⚠️ [2026-08-19「RPA程序」批] 本批在 index.js §10.3 单组清单处新增 6 行说明注释（DEFAULT_SINGLE_
-      //   COMMIT_GROUP_SYSTEMS 上方），位置落在写点 #6(7177) 与 #7(本条) **之间**，故仅本条下移、前 7 条
-      //   行号纹丝未动（这本身就是"同一批写点、非新增第 9 处"的旁证：本批未新增任何 UPDATE 语句，②处
-      //   实测计数仍恰 8）。取值按 :825 纪律走 grep 实测，不用旧锚点加估算插行数推算。
-      //   ⚠️ 本批**一批之内被追平两次**（先 14417→14426，codex 435 收口时又补 5 行登记注释→14431），
-      //   是 backlog #25③「绝对行号锚改结构锚」的又一实例：本条锚点对任何位于 #6 与 #7 之间的注释改动
-      //   都零容忍，而那片区域（§10.3 单组清单）恰是加系统时必改的地方。改结构锚前，加系统必带校准本条。
-      // ⚠️ [「待我处理」全角色卡 Phase P·C2 批·2026-08-26] GET /sys-issues 列表查询构建抽成
-      //   buildSysIssuesListSelect/buildSysIssuesListQuery 两个纯函数 + 新增两派生列（457-H2 冻结），
-      //   落在写点 #6(7177) 与 #7(本条) 之间的区域（:8198 一带起），全文件净增 59 行——本条锚点随之整体
-      //   下移 14431→14485（人工核对：UPDATE 语句字面量逐字未变，仍是"批量发布执行"同一处写点，非新增
-      //   第 9 处）。
-      // ⚠️ [2026-09-09 附件压缩包支持 C1b（Opus 预筛修复）] validateSysAttachmentRule hasOwnProperty 守 +2、fileFilter 消息注释 +2、
-      //   二次卡位置说明注释 +3，均在本写点之前 → 15219→15226（grep 实测；写点计数仍恰 8）=**第 23 次校准**。
-      // ⚠️ [2026-09-17 长任务 A 乙4 S4a] 六处时间线写点补留痕（/estimate、/feasibility、/assign、/scope-change 各多一条
-      //   显式 INSERT 分支 + SELECT 扩列 + buildScopeChangeDeadlineChanges 纯函数），均在本写点之前 → 16172→16281
-      //   （grep 实测 +109；UPDATE 语句字面量逐字未变，写点计数仍恰 8）= **第 39 次校准**。仍是 #25③ 绝对行号锚之债。
-      // ⚠️ [长任务B·S1·2026-09-17 时间线逐人完成事件批] `POST /sys-issues/:id/submit` 的 CAS 成功后新增
-      //   逐人完成 helper（PERDEV_DONE_ACTION_CODE 常量 + buildPerDevDonePayload 纯函数，约 49 行）+
-      //   写点本体（同事务读回 resolved_at/round_no + 一条 INSERT INTO sys_issue_timeline，约 35 行），
-      //   均落在本写点**之前**，净 +90 行 ⇒ 16281→16371（grep 实测；UPDATE 语句字面量逐字未变，写点计数
-      //   仍恰 8）= **第 40 次校准**。仍是 #25③ 绝对行号锚之债。
-      // ⚠️ [长任务B·S1b·2026-09-17 Opus 预筛收口] 逐人行 INSERT 拆两条字面量分支 + 三键校验 + 注释订正，净 +26 行落在本写点之前 ⇒ 16371→16397 = **第 41 次校准**（同日两次，#25③ 结构锚之债再 +1）。
-      // ⚠️ [长任务B·S4a·2026-09-17] 撤回端点 timeline INSERT 补 ref_id/round_no 两列（同事务多读一次 round_no
-      //   + 注释，净 +10 行），落在本写点之前 ⇒ 16397→16407 = **第 42 次校准**（#25③ 结构锚之债再 +1）。
-      { anchorLine: 16537, reachable: false, desc: '（**第 42 次校准·2026-09-17**：长任务B·S4a 撤回端点补 ref_id/round_no 净 +10 ⇒ 16397→16407）（**第 41 次校准·2026-09-17**：长任务B·S1b 预筛收口净 +26 ⇒ 16371→16397）（**第 40 次校准·2026-09-17**：长任务B·S1 时间线逐人完成事件批，见上方注释，净 +90 行 ⇒ 16281→16371）（**第 38 次校准·2026-09-16**：#67 S3 的 B2（/reassign 的 ETA 留痕写点补 payload_json + 旧值展示文本提到分支外，`index.js:8136` 一带）落在本写点**之前**，净 +15 行 ⇒ 16157→16172；已逐字对拍改造前后该处源码**完全相同**，确认仍是同一条「批量发布执行 UPDATE 已上线」，不是巧合新增的第 9 处。以下为历史校准记录：（2026-09-10 C1（deadline/planned_date「不早于今天」硬拦批：isBeforeToday 判据函数 +17 行 + 建单/edit-in-revision/scope-change/derive 四处 deadline 写点各 +2 行插入判据调用，均落在本写点**之前**——建批次/改期两处写点在本写点**之后**不计入）净 +25 行=**第 31 次校准**，grep 实测 15978；上一次=2026-09-10 #55 修复批——liaison_test_return 花名册重置精确删除 commit 行（事务内先 SELECT 精确 id 集合→UPDATE→按集合删 sys_issue_dev_commits 行+逐行写 delete-commit 事件 via:liaison_test_return，index.js :6767 一带），均落在本写点**之前**，净 +36=**第 30 次校准**，grep 实测 15953；上一次=2026-09-10 开发撤回提交批 codex 551 二轮补审——HIGH 收口 bcRows 与 workNoteRows 统一共用 withdrawnEventIdSet（上移到 devAssignees 判空块之外，新增约 14 行）+ 理由校验/审计完整性/事务回滚等测试专属改动（不影响 index.js），均落在本写点**之前**，净 +14=**第 29 次校准**，grep 实测 15917；上一次=2026-09-10 开发撤回提交批 Opus 预筛补审——HIGH 回填过期分叉（terminateExpiredFastReleaseAuthInTxn 二择一分叉+FAST_RELEASE_EXPIRY_TRIGGERS 新增 submit_withdraw+相关注释）与 M13 done SQL 改用 sysFastReleaseExecActiveWhere()，均落在本写点**之前**，净 +36=第 28 次校准，grep 实测 15903；再上一次=2026-09-10 开发撤回提交批——新增 POST /sys-issues/:id/submit/withdraw 端点〔约 210 行〕+ 详情端 workNoteRows/bcRows 补 latest_submit_event_id 与 C0-3 展示过滤〔约 45 行〕，均落在本写点**之前**，净 +255=第 27 次校准，grep 实测 15867；再上一次=2026-09-10 待对接测试态放开提交修正 D-L1 决策记录批——case 「liaison_test_pass」版本锁插入〔本条写点**之前**〕净 +23=第 26 次校准，grep 实测 15612；再上一次=2026-09-10 #56 执行方式契约整组下线，index.js 净减约 131 行=第 25 次校准，grep 实测 15589，本条 desc 其余历史文字保留原样不改，仅行号更新）批量发布执行 UPDATE：字面量写「已上线」（同一写点，flip UPDATE 语句本体未变；行号历经多批注释/重排/纯函数抽取累计下移，见上方各批注释；R-C4 首批 +54、codex 472 审收口批再 +11、476 收口批 DDL CHECK 再 +5——2026-08-27 一天之内被本模块**连续四次**追平：加 4 个 release 侧派生列(+24 行) → 加 my_release_exec_pending(+25 行) → 论证后撤回 release_creator_active(-11 行) → 去重拆除删 release_rep_issue_id 派生列(-4 行)。同一个锚一天校准四遍，backlog #25③「绝对行号锚改结构锚」已不是"应该做"而是"再不做，每次动 index.js 都要重来一遍"，该债已具备立即处理的充分理由；2026-08-28 上线单标识对齐批再+10 行=**第 13 次校准**；2026-09-02 小程序-智荟人力接入 S2 在 §10.3 单组清单与 validateCommitFieldsBody 两处插注释 +9 行=**第 14 次校准**，正是本条上方注释预言的「加系统必带校准本条」；2026-09-02 小程序-智荟人力接入 S3 跳过分支+留痕码消费面 +65 行=第 15 次校准〔首版 +63 算术误记·Opus 预筛 grep 对拍纠正为 14722，#8 曾压满容差零余量〕；S3 收口注释批（W_GATE_SKIP_SUMMARY 方向枚举 +1／last_completed_at 权威口径 +2）再 +3=第 16 次校准〔grep 实测 4697/6340/7052/7313/14725·一日之内本锚被本任务连续校准三次，backlog #25③ 结构锚改造的充分理由再 +1〕；2026-09-06 验收说明附件与 admin 闭环放开 S2a 批（resolveEvidenceAttachmentIds helper+case accept/return 追加逻辑）再 +85=**第 17 次校准**〔grep 实测 1766/1866/4185/4732/6424/7137/7398/14810，backlog #25③ 结构锚改造的充分理由再 +1〕；同批 codex 500 H1 采纳在附件 DELETE 端点（:14317 一带·本条写点**之前**）插入「被时间线凭证引用的附件不可删」引用闸 +19 行，另 helper 注释扩 1 行令 #3-#7 各 +1（容差内不动值）=**第 18 次校准**〔grep 实测 14829〕；2026-09-07 config 流激活 S1a（exec_mode/vendor_name 契约+online_mode 分流+通知四通道+多处守卫，index.js 净 +385/-104 行）再下移 252 行=**第 19 次校准**〔grep 实测 15081，backlog #25③ 结构锚改造的充分理由再 +1〕；同日 S1a 补丁 T（Opus 预筛修复：reassign 族门 override +5 行、accept payload 落 online_mode +8 行、commit 三端点判定下移 +4 行）再 +17=**第 20 次校准**〔grep 实测 15098〕；同日 S1a 补丁 V（codex 505-A 采纳：V1 reassign 终态校验 +9 行、V2 has-field 判据拆分三处 +4~9 行、V3 submit no_code+commits 事务化改造 +12 行、V4 resume 目标态第三道校验 +9 行、V5 SYS_EXEC_MODES 反驳注释 +5 行）再 +61=**第 21 次校准**〔grep 实测 15159，backlog #25③ 结构锚改造的充分理由再 +1〕；2026-09-08~09 附件压缩包支持批（三模块 zip/rar/7z 支持·独立长任务分支合并）再 +67=**第 23 次校准**〔grep 实测 15226〕；2026-09-09~10 提交修正与config指派OA守卫 C3/C3b/C3c/C4 四批（POST /sys-issues/:id/submit/amend 端点+computeDeliveryRev 版本锁+互斥锁+探针 P16+前端修正入口等，均落在本写点**之前**）累计 +494=**第 24 次校准**，grep 实测 15720，backlog #25③ 结构锚改造的充分理由再 +1（本文件同一批次内已连续校准 6 处锚点，是该债"应立即处理"最新一次实证）〕）；2026-09-10 C2（A 块·上线逾期留痕批·sys_releases 两列 ALTER + RELEASE_OVERDUE_REASON_CODES 常量组+校验函数+探针函数，均落在本写点之前）+75 行=第 32 次校准）；2026-09-10 C2c（codex 556 号 MEDIUM 收口·releaseOverdueGroupInvariantViolations 探针口径与写点同源化 trim 判定，均落在本写点之前）+16 行=第 33 次校准；2026-09-11 C4（B 块·改期基准留痕批·resolveReleaseDateChangeReasonInput/resolveReleaseDateChangeOldValueDisplay 两函数+RELEASE_DATE_CHANGE_REASON_MAX 常量，落在写点 #1/#2 之后、本写点之前）+34 行=第 34 次校准，grep 实测 1777/1877/4404/4955/6776/7529/7794/16103；2026-09-11 C5（先行上线授权超时收回补姓名 pending-names 查询批·落在本写点之前）+12 行=第 35 次校准，grep 实测 1777/1877/4407/4967/6788/7541/7806/16115；2026-09-11 C5b（Opus 预筛 M1 hotfix 摘要读回日期批·同事务多读 1 次 sys_releases + L2/L3/L5 三处收口，净 +4 行，均落在本写点之前）=第 36 次校准，grep 实测 1777/1877/4407/4971/6792/7545/7810/16119）；2026-09-11 A 块（时间线改动明细批·edit-in-revision 端点幂等循环内 changes.push +4 行注释与代码、INSERT 补 payload_json 列 +2 行，均落在本写点**之前**）净 +6 行=**第 37 次校准**，grep 实测 1777/1877/4407/4971/6792/7545/7810/16125；2026-09-17 #83·S1 全批（S1 主批 A1-A5 persist 五态重写+spec/delivery 分支改造+删除端点原位补码，净 +96 行；返工批1 D-1 修复+beforeAttachmentResponseHook 声明与两处调用点，净 +10 行；返工批2 L3 files 为空拒绝分支+M7 ROLLBACK 分支注释+L1 注释订正，净 +15 行，均落在本写点**之前**）累计 +121 行 ⇒ 16407→16528=**第 43 次校准**，grep 实测 1777/1877/4435/4999/6820/7581/7846/16528；2026-09-17 codex 594 处置（主会话，S1 返工批3 前置）：targetFn target 契约收紧+sysFinishBrokenResponse 声明及两处调用点+rollbackErr 变量与日志+payload undefined→null 兜底，均落在本写点**之后**，净 +9 行=**第 44 次校准**，grep 实测 1777/1877/4435/4999/6820/7581/7846/16537' },
-    ];
-    assert.strictEqual(EXPECTED_STATUS_WRITE_SITES.length, writeSites.length, '[S③前置] 白名单登记条目数应与②实测写点数一致（防清单本身漂移出真相）');
-    writeSites.forEach((site, i) => {
-      const expected = EXPECTED_STATUS_WRITE_SITES[i];
-      assert.ok(Math.abs(site.line - expected.anchorLine) <= 3,
-        `[S③] 写点 #${i} 实际行号 ${site.line} 与白名单登记行号 ${expected.anchorLine} 偏移超过 3 行——源码结构可能已变化，需人工核实是否仍是登记的同一处写点（而非巧合新增的第 9 处）`);
-    });
-    const reachableSites = EXPECTED_STATUS_WRITE_SITES.filter(s => s.reachable);
-    assert.strictEqual(reachableSites.length, 2, `[S③] 可达「待对接测试/待验证」的写点应恰 2 处，实得 ${reachableSites.length}`);
-    assert.ok(reachableSites.some(s => s.gateKind === 'runWGate'), '[S③] 可达写点须含 runWGate（§14 闸门覆盖）');
-    assert.ok(reachableSites.some(s => s.gateKind === 'exempt'), '[S③] 可达写点须含通用引擎（liaison_test_pass 显式豁免）');
-    // 豁免子断言——正面证明 case 'liaison_test_pass' 代码块内不含理由闸函数引用（结构性撤闸证据，
-    //   非仅凭①②数量对拍就断言"豁免"，同旧版 [S④] 精神保留）。
-    const ltPassStart = indexCleanForWriteAudit.indexOf(`case 'liaison_test_pass': {`);
-    const ltPassEnd = indexCleanForWriteAudit.indexOf(`case 'return': {`, ltPassStart);
-    assert.ok(ltPassStart > 0 && ltPassEnd > ltPassStart, '[S③豁免子断言前置] 应能定位 case \'liaison_test_pass\' 代码块边界');
-    const ltPassBlock = indexCleanForWriteAudit.slice(ltPassStart, ltPassEnd);
-    assert.ok(!ltPassBlock.includes('resolveCompletionOverrunReasonForWrite'), '[S③豁免子断言] ⭐ case \'liaison_test_pass\' 代码块不应引用 resolveCompletionOverrunReasonForWrite（撤闸未彻底则本断言会红）');
-    // ⚠️ [581-R3 M 结论收窄] 本组文案原先写「6 不可达……**均结构性证明**写入值不可能是待对接测试/待验证」，
-    //   这个保证**强于实现**：`reachable` 与 `gateKind` 是**手写清单 EXPECTED_STATUS_WRITE_SITES 的元数据**，
-    //   上面那几条断言核的是**清单自身**（可达条目恰 2 条、含 runWGate 与 exempt），
-    //   **没有**从源码证明那 6 处的写入值结构上不可能是这两态——那部分靠的是**人工核对**（每次校准时逐条对拍）。
-    //   ⇒ 本组能支持的准确结论只有：「**受支持文本形态下**的写点**数量、顺序与位置**核对 + **显式豁免块**检查」。
-    //   ⇒ 已知边界（codex 581-R3 指出，成立）：数量对拍只保证数量、按序行号只保证位置，
-    //   **保持数量与位置不变、只改写入的状态值或替换闸门调用**这类变化，本组**测不出**。
-    //   要真正关闭这条，需从源码验证每个写点所属函数/分支、状态赋值与闸门关系，并补一条
-    //   「保持写点数量和位置、只改状态值或闸门」的变异 ⇒ 属独立改造（并入 PROJECT_STATUS #25③ 一带），
-    //   不在 #67 范围内。
-    ok('[S③] 写点清单核对（**受支持文本形态**）：8 处写 status 列的 UPDATE 语句块逐条落白名单——数量对拍 + 按序 ±3 行位置核对 + 显式豁免块子断言（liaison_test_pass 块内不含理由闸函数引用，非仅数量对拍）。⚠️ 清单里的 reachable/gateKind 是**人工核对的元数据**，本组未从源码证明 6 处不可达写点的写入值，且「保持数量与位置、只改状态值或闸门」的变化本组测不出（581-R3 已登记边界）');
-
-    // ④ 红灯自证：源码文本副本追加一处假的"不经 runWGate"直接 UPDATE，证明②的精确计数断言真的会破——
-    //   这正是本组要防的具体攻击面（新增旁路写点不调用 runWGate，旧版"数调用次数"式审计对此恒绿）。
-    const brokenSrcNew = `${indexCleanForWriteAudit}\nawait dbRunAsync('UPDATE sys_issues SET status = \\'待验证\\' WHERE id = ? AND type = \\'feature\\'', [id]);\n`;
-    const brokenSites = extractStatusWriteSites(brokenSrcNew);
-    assert.notStrictEqual(brokenSites.length, 8, '[S④] 人为追加一处不经 runWGate 的直接状态 UPDATE（写「待验证」）后，写点总数应不再等于 8——证明审计真能抓住新增的旁路写点，非空转绿灯');
-    assert.strictEqual(brokenSites.length, 9, `[S④] 追加 1 处旁路写点后写点总数应恰为 9，实得 ${brokenSites.length}`);
-    ok('[S④] 人为构造第 9 个"不经 runWGate 直接写 status"的 UPDATE 语句块 → 写点总数断言从 8 变 9（不再等于 8）→ 状态写入汇点审计真能抓住本组要防的具体攻击面（旧版调用次数审计对此场景恒绿，新版红灯）');
-
-    // ④b【2026-08-14 codex 396 NEW-4 补证】status 位于 SET 子句第二赋值项（非首项）的旁路 UPDATE——
-    //   本组 codex 396 之前用 `^status\s*=`（开头锚定），这条红灯本会假绿（clause 以 "foo = ?" 开头，
-    //   ^ 锚定命中不到后面的 status）；改用 \bstatus\s*= 后应能在任意位置命中。同时验证不误伤同含
-    //   "status"子串的其它列名（notify_status 等）——避免"改宽了但宽过头，把不相关列名也算成写点"这个
-    //   反方向风险。
-    const brokenSrcStatusSecond = `${indexCleanForWriteAudit}\nawait dbRunAsync('UPDATE sys_issues SET foo = ?, status = ? WHERE id = ? AND type = \\'feature\\'', [x, y, id]);\n`;
-    const brokenSitesStatusSecond = extractStatusWriteSites(brokenSrcStatusSecond);
-    assert.strictEqual(brokenSitesStatusSecond.length, 9, `[S④b] status 作为 SET 子句第二项的旁路 UPDATE 追加后写点总数应恰为 9，实得 ${brokenSitesStatusSecond.length}——若仍为 8 说明判据退回了"开头锚定"的旧扫描盲区`);
-    const brokenSrcNotifyStatusOnly = `${indexCleanForWriteAudit}\nawait dbRunAsync('UPDATE sys_issues SET notify_status = ? WHERE id = ?', [x, id]);\n`;
-    const brokenSitesNotifyStatusOnly = extractStatusWriteSites(brokenSrcNotifyStatusOnly);
-    assert.strictEqual(brokenSitesNotifyStatusOnly.length, 8, `[S④b-反向] 仅写 notify_status（不含独立的主 status 列）追加后写点总数应仍为 8（不应被词边界误判为写主 status 列），实得 ${brokenSitesNotifyStatusOnly.length}`);
-    ok('[S④b] 词边界扫描双向验证：status 位于 SET 子句第二项 → 正确命中（写点总数 8→9，补上旧"开头锚定"盲区）；notify_status 等含 status 子串的其它列名 → 正确不命中（写点总数仍为 8，未被词边界改造误伤扩大化）');
-  }
 
   server.close();
   console.log(`\n✅ verify-sys-completion-overrun 全绿：${passed} 组断言通过`);
-  console.log('  覆盖：gap=2/3 成对边界（服务端时钟锚定夹具防跨零点假红）+ deadline 空/未来/畸形三态 + improvement/bug 对照组 + 缺code/枚举外非法值/缺note/超长四类400零残留(含updated_at/liaison_test_*列组) + 打回重提二次触发双留痕(liaison_test_return) + 期望已过期完成必触发(F2) + SYS_DEADLINE_MALFORMED独立409 + 成组探针(含红灯) + liaison_test_pass撤闸正面证明 + runWGate⑤⑥降级路径 + 状态写入汇点审计(NEW-4：transitions.js前进边枚举+index.js写点文本扫描精确等值+逐站点白名单+红灯自证)');
+  console.log('  覆盖：gap=2/3 成对边界（服务端时钟锚定夹具防跨零点假红）+ deadline 空/未来/畸形三态 + improvement/bug 对照组 + 缺code/枚举外非法值/缺note/超长四类400零残留(含updated_at/liaison_test_*列组) + 打回重提二次触发双留痕(liaison_test_return) + 期望已过期完成必触发(F2) + SYS_DEADLINE_MALFORMED独立409 + 成组探针(含红灯) + liaison_test_pass撤闸正面证明 + runWGate⑤⑥降级路径 + 状态写入汇点审计(NEW-4：transitions.js前进边枚举+index.js语法写点精确等值+结构锚唯一命中与顺序+gate调用+红灯自证)');
 }
 
 main().catch(e => { fail(e && e.stack || e); process.exit(1); });

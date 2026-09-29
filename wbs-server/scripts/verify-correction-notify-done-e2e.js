@@ -12,6 +12,7 @@
 //   ⑩ read-status done 按 requester_id 归属 + 子表 read_at + 主业务方回写主表
 // 用法：node scripts/verify-correction-notify-done-e2e.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -24,6 +25,9 @@ let READ_STUB = { readDetails: [] };   // 可控已读返回
 const INVALID_PHONE = '13900000099';   // 反查不到的手机号（测 requester_invalid）
 const dtPath = require.resolve('../utils/dingtalk-notify');
 require.cache[dtPath] = { id: dtPath, filename: dtPath, loaded: true, exports: {
+  classifyReadStatus: require(dtPath).classifyReadStatus,
+  isBeyondReadWindow: require(dtPath).isBeyondReadWindow,   // 真实已读窗口前置（同 classifyReadStatus，不自造判定）
+  EXPIRED_READ_FIELDS: require(dtPath).EXPIRED_READ_FIELDS,
   getAccessToken: async () => 'tok',
   resolveRequesterDingUserId: async (t, phone) => (String(phone) === INVALID_PHONE) ? { ok: false, reason: 'requester_invalid' } : { ok: true, userid: 'uid_' + phone },
   sendMarkdownToUser: async () => ({ errcode: 0, processQueryKey: 'mk_' + (MK++) }),
@@ -124,7 +128,7 @@ async function createFixed(requesters) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ① 单业务方未传 requester_id → 自动取主业务方 → sent + 回写主表
   const idA = await createFixed([{ name: '主A', phone: '13800000001' }]);
@@ -189,7 +193,13 @@ async function createFixed(requesters) {
   // ⑩ read-status done 按 requester_id（先 not read，再 READ_STUB 命中）
   READ_STUB = { readDetails: [] };
   const rs1 = await reqJson('GET', `/api/corrections/${idA}/notify-read-status?recipient=done`, null, ADMIN);
-  ok(rs1.status === 200 && rs1.body.read === false, 'read-status done 单业务方自动取主 + 未读 → read=false');
+  ok(rs1.status === 200 && rs1.body.read === false, 'read-status done 单业务方自动取主 + 不可查兼容 read=false');
+  assert.strictEqual(rs1.body.read_status,'unqueryable','空列表为不可查');
+  assert.strictEqual(rs1.body.unqueryable_reason,'not_listed');
+  READ_STUB={readDetails:[{userId:'uid_13800000001',readStatus:'UNREAD'}]};
+  const rsUnread=await reqJson('GET',    `/api/corrections/${idA}/notify-read-status?recipient=done`,null,ADMIN);
+  assert.strictEqual(rsUnread.status,200);assert.strictEqual(rsUnread.body.read_status,'unread');assert.strictEqual(rsUnread.body.read,false);
+  ok(true,'显式 UNREAD 返回真未读');
   // 命中 READ：mock 返回该业务方 uid READ
   const phoneA = '13800000001';
   READ_STUB = { readDetails: [{ userId: 'uid_' + phoneA, readStatus: 'READ', readTimestamp: 1718000000000 }] };

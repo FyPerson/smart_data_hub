@@ -1,4 +1,5 @@
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 // [部署闸·2026-08-13] 先行上线授权闸「禁用方向」子进程探针——供 verify-sys-fastrelease-auth.js [11] 组
 //   execFile 调用。为什么独立子进程：routes/sys-iteration 工厂在同一进程内二次实例化会 init 挂起
 //   （进程级单例状态·测试基建限制，非产品缺陷），干净进程单实例=与全部 verify 套件同构的已证可行路径。
@@ -54,7 +55,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   const server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   const port = server.address().port;
   const call = (method, p, body) => new Promise((resolve, reject) => {
     const data = body !== undefined && body !== null ? JSON.stringify(body) : null;

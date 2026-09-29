@@ -12,6 +12,7 @@
 // DB 直接 seed roster（mkIssue/mkMember，同 verify-sys-multidev-commits.js 范式）+ HTTP harness（upload/download/
 // call，同 verify-sys-attachments.js 范式）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -156,7 +157,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES
     (1,'admin','管理员','admin','active'),(5,'dev5','开发甲','user','active'),(6,'dev6','开发乙','user','active'),
     (7,'liaison7','对接人柒','user','active'),(8,'dev8','开发戊','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务（seed admin/dev5/dev6/liaison7(=SYS_BUG_LIAISON_USER_IDS白名单)/dev8）');
 
   // ══════════════════════════════════════════════════════════════════════

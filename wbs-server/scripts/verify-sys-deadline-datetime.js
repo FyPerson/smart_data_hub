@@ -16,6 +16,7 @@
 //   [D] 存量兼容 —— 未传该字段的行不得被动（E2 不刷写存量）。
 //   [E] 排序合同锁 —— 含**反证**：证明「用 date 类型会排错」不是臆想，而是真实可复现的。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const fs = require('fs');
@@ -107,7 +108,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
 
   try {

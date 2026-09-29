@@ -37,6 +37,7 @@
 //
 // 断言纪律：钉确切 HTTP 码 + code；[④] 负控制断言零副作用（字段值 + timeline 行数均对比变更前）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -152,7 +153,7 @@ async function mkTimelineRow(issueId, actionCode) {
 async function main() {
   mod.initSchema();
   await waitReady();
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 建单人小李20 / 路人甲21）');
 

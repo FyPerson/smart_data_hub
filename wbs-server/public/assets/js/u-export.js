@@ -37,7 +37,7 @@
 }(typeof window !== 'undefined' ? window : null, function () {
     'use strict';
 
-    var KIT_VERSION = 'uexport1';
+    var KIT_VERSION = 'uexport2';
 
     // codex S4 复审同款范式（u-paste.js:39-47）：页面侧保留 `<PREFIX>_UEXPORT_KIT_EXPECTED` 常量 +
     //   调用本函数一行；"未加载"分支仍留页面侧（调用本函数之前的前置判断）。
@@ -135,7 +135,9 @@
 
     /**
      * attachExport(config) — 三模块列表导出（Excel）共享 helper。
-     * config = { buttonSelector, getViewRows, columns, filename, overdueRule, onError }
+     * config = { buttonSelector, getViewRows, columns, filename, overdueRule, onError, writeWorkbook? }
+     *   writeWorkbook(wb, filename): optional synchronous client writer for layout metadata.
+     *   Cell normalization still runs through buildExportWorkbook; omitted uses the original writer.
      *   buttonSelector：导出按钮的 CSS 选择器（页面已有按钮，本函数只挂点击行为，不创建按钮元素）。
      *   getViewRows()：返回"当前筛选全量 + 当前视图排序"的行数组（契约必须，helper 不自行排序）。
      *   columns：[{ key, label, value?, deps? }, ...]——无 value 的列 key 兼作字段名（须 ∈ 数据源）；
@@ -240,7 +242,9 @@
                 var ctx = { now: exportNow, overdueRule: function (row) { return overdueRule(row, exportNow); } };
                 var wb = buildExportWorkbook(rows, columns, ctx);
                 var fname = (typeof filenameCfg === 'function') ? filenameCfg() : (filenameCfg || 'export');
-                XLSX.writeFile(wb, fname + '.xlsx');
+                if (config.writeWorkbook !== undefined && typeof config.writeWorkbook !== 'function') throw new Error('writeWorkbook 必须是同步函数');
+                if (typeof config.writeWorkbook === 'function') config.writeWorkbook(wb, fname + '.xlsx');
+                else XLSX.writeFile(wb, fname + '.xlsx');
                 btn.disabled = originalDisabled;
                 btn.innerHTML = originalHtml;
             } catch (err) {

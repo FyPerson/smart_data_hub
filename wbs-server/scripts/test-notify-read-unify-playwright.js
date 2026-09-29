@@ -10,6 +10,11 @@
  *   [数据协作] 未读文案去收件人名
  */
 'use strict';
+// --isolated-three-state exercises actual query functions and CSS without a real DB.
+if(process.argv.includes('--isolated-three-state')){
+ const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'test-notify-three-state-playwright.js')],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
+ process.exit(result.status===0?0:1);
+}
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 const BASE = fx.BASE;

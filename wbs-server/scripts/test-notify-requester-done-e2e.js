@@ -2,7 +2,7 @@
  * 导出人通知业务方 + 发数据 e2e 烟雾测试（2026-05-29，方案 v1.1）
  *
  * 覆盖 notify-requester-done endpoint 的守卫/状态/范围/附件/路径校验 +
- *   notify-read-status?recipient=requester_done 已读分支 + 24h 窗口。
+ *   notify-read-status?recipient=requester_done 已读分支 + 7 天窗口。
  *
  * 钉钉策略（同 test-admin-direct-e2e）：本地无真钉钉环境，三步发送会失败——
  *   故本脚本聚焦"钉钉调用【之前】的守卫逻辑"（权限/状态/范围/附件/路径，T2-T8）+
@@ -12,6 +12,12 @@
  * 运行：先起服务（node server.js），再 node scripts/test-notify-requester-done-e2e.js
  */
 'use strict';
+// Safe isolated mode: the T12 window cases use real production handlers and controlled
+// DingTalk responses (UNREAD / empty / READ), with no task_pool.db access.
+if (process.argv.includes('--isolated-read-status')) {
+    const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'verify-notify-read-endpoints.js'),'--window-only'],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
+    process.exit(result.status===0?0:1);
+}
 
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
@@ -294,25 +300,13 @@ defTest('T11: done_read_at 已固化 → notify-read-status 返 read:true cached
 });
 
 // ============================================================
-// T12：24h 窗口——done_notified_at 超 24h 未固化 read_at → unread_expired（codex 53 M-2）
+// T12：7 天窗口（用户 2026-09-28 拍板）——窗口内查钉钉按证据判定；满 7 天且未固化已读直接答
+//   「超期无法查询」、不外呼。需要可控的钉钉响应与调用计数，故委托隔离钉钉桩套件
+//   （25h UNREAD / 25h READ 毫秒 / 约 6.96 天空列表 / 8 天 UNREAD、空列表、READ 均超期 共六条）
 // ============================================================
-defTest('T12: 通知超 24h 未读 → read_status=unread_expired', async () => {
-    const adminToken = await fx.signAs(fx.ADMIN_ID);
-    const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T12_${Date.now()}`);
-    // 造 25 小时前的通知 + 有 message_key（过 message_key 校验）+ read_at 未固化
-    const past = new Date(Date.now() - 25 * 3600 * 1000);
-    const pad = (n) => String(n).padStart(2, '0');
-    const pastStr = `${past.getFullYear()}-${pad(past.getMonth() + 1)}-${pad(past.getDate())} ${pad(past.getHours())}:${pad(past.getMinutes())}:${pad(past.getSeconds())}`;
-    await fx.setCollabState(id, {
-        done_notified_at: pastStr,
-        done_notify_message_key: 'e2e_fake_key_t12',
-        done_read_at: null
-    });
-    const res = await readStatus(adminToken, id, 'requester_done');
-    if (res.status !== 200) throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
-    if (res.body.read_status !== 'unread_expired') {
-        throw new Error(`expected read_status=unread_expired, got ${JSON.stringify(res.body)}`);
-    }
+defTest('T12: 7 天窗口六条（隔离钉钉桩）', async () => {
+    const result=require('child_process').spawnSync(process.execPath,[path.join(__dirname,'verify-notify-read-endpoints.js'),'--window-only'],{encoding:'utf8',timeout:300000,killSignal:'SIGKILL'});
+    if(result.status!==0)throw Error(result.stdout+result.stderr);
 });
 
 // ============================================================

@@ -12,6 +12,7 @@
 //   [D] intake_required=1 + assign_mode=A/B（bug）→ 400 INTAKE_WITH_ASSIGN_CONFLICT（防绕过·先受理再指派）
 //   [E] 端到端：建单 intake_required=1 → 待受理 → admin intake-accept → 待指派（受理门真正贯通）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -92,7 +93,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

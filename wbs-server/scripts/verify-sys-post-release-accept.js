@@ -33,6 +33,7 @@
 //   [7] 通知 no-op 断言：isAutoNotifyEnabled 恒 false → pass/fail 均不触发真实钉钉，creator_notify_status
 //       停留初值 'not_sent'（结构就位但不可达，同组 A P2 既有登记范式）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -175,7 +176,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5 / 受理人13）');
 
@@ -358,7 +359,7 @@ async function main() {
   // ══════════════════════════ [4] 不变量⑥·pending 禁 close ══════════════════════════
   {
     const id = await bugAtFastlanePending();
-    const r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const r = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 409, `[4a] pending 态 close 应 409，实得 ${r.status} ${JSON.stringify(r.body)}`);
     assert.strictEqual(r.body.code, 'POST_ACCEPTANCE_PENDING', `[4a] 确切码，实得 ${r.body.code}`);
     assert.strictEqual((await issueRow(id)).closed_at, null, '[4a] 拒绝请求应零副作用（closed_at 仍空）');
@@ -367,7 +368,7 @@ async function main() {
     // pass 收口后 close 应恢复可用（passed 不阻断）
     const pass = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
     assert.strictEqual(pass.status, 200, '[4b-前置] pass 应成功');
-    const rClose = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const rClose = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(rClose.status, 200, `[4b] passed 后 close 应恢复 200，实得 ${rClose.status} ${JSON.stringify(rClose.body)}`);
     assert.ok((await issueRow(id)).closed_at, '[4b] closed_at 应已落库');
     ok('[4b] 对照：post_release_acceptance 转为 passed 后 close 恢复可用（仅 pending 一态拦截，非"fastlane 单恒拦"）');
@@ -378,7 +379,7 @@ async function main() {
     //   补一个合法 note 避免被上游闸门先一步拒绝而拿不到 failed_derived 终态。
     const failR = await call('POST', `/api/sys-issues/${idFail}/post-release-accept`, adminTok, { verdict: 'fail', note: '[4c] close 不阻断对照组' });
     assert.strictEqual(failR.status, 200, '[4c-前置] fail 应成功');
-    const rClose2 = await call('POST', `/api/sys-issues/${idFail}/close`, adminTok, {});
+    const rClose2 = await call('POST', `/api/sys-issues/${idFail}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(rClose2.status, 200, `[4c] failed_derived 后 close 应可用，实得 ${rClose2.status} ${JSON.stringify(rClose2.body)}`);
     ok('[4c] 对照：post_release_acceptance 转为 failed_derived 后 close 同样可用（两个补验收终态都不阻断关闭）');
   }

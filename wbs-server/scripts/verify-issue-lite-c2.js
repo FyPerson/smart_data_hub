@@ -10,6 +10,10 @@
  * 用法：node scripts/verify-issue-lite-c2.js（自启 PORT=3399，跑完按端口精确杀 + 清理测试单）
  */
 'use strict';
+if(process.argv.includes('--isolated-read-status')){
+ const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'verify-notify-read-endpoints.js')],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
+ process.exit(result.status===0?0:1);
+}
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const sqlite3 = require('sqlite3');

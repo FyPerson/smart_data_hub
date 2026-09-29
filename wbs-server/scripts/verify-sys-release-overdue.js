@@ -35,6 +35,7 @@
 //     verify-sys-date-not-before-today.js 的 C1_XMID_RETRY 范式）作纵深防御——覆盖正常收尾与异常
 //     捕获两条退出路径，即便上面的清单有遗漏也有兜底，不代表上面的分析是唯一防线。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -229,7 +230,7 @@ async function main() {
     (1,'admin','管理员','admin','active'),
     (5,'dev5','开发甲','user','active'),
     (6,'dev6','开发乙','user','active')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6）');
 

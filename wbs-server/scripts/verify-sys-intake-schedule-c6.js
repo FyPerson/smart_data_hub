@@ -10,6 +10,7 @@
 //        待验证+roster+scheduled_start → return → 开发中 + scheduled_start NULL /
 //        已关闭+roster+scheduled_start → reopen → scheduled_start NULL
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -101,7 +102,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness');
 

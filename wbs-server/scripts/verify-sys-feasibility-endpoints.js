@@ -4,6 +4,7 @@
 // F2b 端点实现后，用真实 HTTP 端点（替代 F2a 的 DB 模拟）测：
 //   [F] feasibility 端点（填评估）/ [BL] blocked 端点（受阻，含 M-1 收口）/ [UB] unblock 端点（解除受阻）
 //   [E2E] F2a 闸门 + F2b 端点真实联动闭环（建单评估→submit 放行 / 受阻→拒→解除→放行 / 不可行→拒）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -114,7 +115,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

@@ -10,6 +10,7 @@
 //   H void 链级守卫（组主单分支①阻断 / 返工子单本身分支②排除自身放行 / 作废后放行 / 无权 403）
 // 用法：node scripts/verify-correction-rework-transition.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -127,7 +128,7 @@ async function mkArchived(o = {}) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ── A 前置守卫 ──
   console.log('— A 前置守卫 —');

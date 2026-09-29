@@ -1,4 +1,5 @@
 // #78: isolated in-memory DB + unique temporary uploads; real HTTP read/write permission checks.
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -138,7 +139,7 @@ async function main() {
   await run(`CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT,display_name TEXT,role TEXT,status TEXT,phone TEXT,dingtalk_user_id TEXT)`);
   for (const id of [1,5,6,20,21]) await run('INSERT INTO users VALUES (?,?,?,?,?,?,NULL)', [id,'person'+id,'Person '+id,id===1?'admin':'user','active','']);
   const app=express(); app.use(express.json()); app.use('/api',mod.router);
-  await new Promise(resolve => { server=app.listen(0,'127.0.0.1',()=>{port=server.address().port;resolve();}); });
+  server = await listenOnSafePort(app); port=server.address().port;
   const rel=await run("INSERT INTO sys_releases(release_no,created_by,created_by_name) VALUES ('TEST-78',1,'Admin')");
   await run("INSERT INTO sys_release_executors(release_id,user_id,user_name,added_by,added_by_name) VALUES (?,20,'Executor',1,'Admin')",[rel.lastID]);
   const batch=await seed('improvement',rel.lastID);

@@ -37,12 +37,12 @@
  * 五入口，新增「上线日志」与「删除审计」同门槛同断言写法（见下方 §④ 新增 check）。
  *
  * 【2026-08-02 变更·用户裁定二】筛选栏右侧改「[⚙️ 管理▾][+ 新建迭代单]」——上线单管理/值班排班/
- * 上线日志/删除审计/流程说明五个入口从平铺按钮收进「⚙️ 管理」下拉菜单；新建迭代单仍是独立主按钮。
+ * 上线日志/删除审计/流程说明/工期统计六个入口从平铺按钮收进「⚙️ 管理」下拉菜单；新建迭代单仍是独立主按钮。
  * ①②③④ 五组断言的 marker 匹配（onclick="siOpenXxx()" 标记文本 + 就近 if 条件）**无需改动就依旧
  * 成立**——onclick 属性值本身逐字保留（下拉的"点菜单项后自动收起"用事件委托实现，不在每个 onclick
  * 里追加 siCloseHeadMenu()，故标记文本没变），各按钮自己的 if 块仍是紧邻自身 marker 的最近 if（哪怕
  * 五个块在函数体内被重新排过序，guardConditionBefore 只认"某个 marker 前最近一个 if"，块内部顺序
- * 互换不影响各自配对关系）。即便如此，新增 §③ 三条**结构性**断言把"这五个入口真的挂在下拉菜单里、
+ * 互换不影响各自配对关系）。即便如此，新增 §③ 三条**结构性**断言把"这六个入口真的挂在下拉菜单里、
  * 新建迭代单真的没被挪进去、下拉本体真的有'至少一个菜单项才渲染'的门控"这三条 2026-08-02 新增的
  * 结构不变量也钉住——防止未来有人把某个入口从 .u-head-menu-item 挪回裸按钮（或反之）却没人发现。
  */
@@ -572,13 +572,13 @@ check('siOpenBatchDetail 函数体（剥注释后）不含 META_OK（三个动�
 });
 
 console.log('— §③（2026-08-02 用户裁定二新增）「⚙️ 管理」下拉结构不变量 —');
-check('五个入口（上线单管理/值班排班/上线日志/删除审计/流程说明）的 onclick 标记均落在 .u-head-menu-item 菜单项模板内', () => {
+check('六个入口（上线单管理/值班排班/上线日志/删除审计/流程说明/工期统计）的 onclick 标记均落在 .u-head-menu-item 菜单项模板内', () => {
     const body = extractFunctionBody(src, 'siRenderHeadActions');
-    const markers = ['onclick="siOpenBatch()"', 'onclick="siOpenDutyRoster()"', 'onclick="siOpenReleaseLog()"', 'onclick="siOpenDeleteAudit()"', 'onclick="siOpenFlowGuide()"'];
+    const markers = ['onclick="siOpenBatch()"', 'onclick="siOpenDutyRoster()"', 'onclick="siOpenReleaseLog()"', 'onclick="siOpenDeleteAudit()"', 'onclick="siOpenFlowGuide()"', 'onclick="siOpenEtaStats()"'];
     for (const marker of markers) {
         const mi = body.indexOf(marker);
         assert.ok(mi >= 0, `未找到标记 "${marker}"`);
-        // 就近往前找 u-head-menu-item 类名——五个入口的模板串写法均为
+        // 就近往前找 u-head-menu-item 类名——六个入口的模板串写法均为
         // `<button ... class="u-head-menu-item" ... onclick="siOpenXxx()">`，class 在 onclick 之前
         // 同一开始标签内，lastIndexOf 能命中同一标签内的类名，不会跨到别的无关标签。
         const classIdx = body.lastIndexOf('u-head-menu-item', mi);

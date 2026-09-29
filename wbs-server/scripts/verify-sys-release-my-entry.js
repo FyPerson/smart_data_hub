@@ -18,6 +18,7 @@
 //   [5] 执行人可见性收口：feature 成员单（issue 级执行人列恒 NULL）批次执行人可打开(200)；
 //       无关用户仍 403（releaseBrief 查询不放宽既有边界）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -85,7 +86,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise((res) => { server = app.listen(0, '127.0.0.1', () => { port = server.address().port; res(); }); });
+  server = await listenOnSafePort(app); port = server.address().port;
 
   // ── 数据构造（直插，intake_required=1 过受理门触发器）──────────────────────────
   // 批次 R1：计划中·已通知执行人 8（新机制：执行人只写批次表）

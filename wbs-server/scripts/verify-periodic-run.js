@@ -13,6 +13,7 @@
 //     注入残留占位符/危险SQL,运行前必须再拦一次) + 下载端点(鉴权/无文件409/文件已清理409/路径穿越防护
 //     自愈missing) + 删除守卫端点(手动清理/幂等/物理已丢失标missing) + requireAdmin 401 覆盖。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -319,7 +320,7 @@ async function endpointTests() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
 
   // ── [1] success：3 行 → status=success, row_count=3, file present ──
@@ -511,7 +512,7 @@ async function endpointTests() {
   await new Promise((res, rej) => { let n = 0; const t = setInterval(() => { if (modTF._internals.PERIODIC_SCHEMA_STATE.ready) { clearInterval(t); res(); } else if (++n > 500) { clearInterval(t); rej(new Error('TF readiness 超时')); } }, 10); });
   const appTF = express(); appTF.use(express.json()); appTF.use('/api', modTF.router);
   const serverTF = http.createServer(appTF);
-  await new Promise((res) => serverTF.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(serverTF);
   const portTF = serverTF.address().port;
   const callTF = (m, p, tok, body) => new Promise((resolve, reject) => {
     const data = body !== undefined ? JSON.stringify(body) : null;

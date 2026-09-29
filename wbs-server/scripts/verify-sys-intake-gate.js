@@ -18,6 +18,7 @@
 //   [H] 工期对接测试与风险等级拆分 方案 v1.1 §3.4·C5：risk_level 受理闸门——feature 必填闸(必填/非法值/
 //       合法三值) + improvement/bug 传值拒(409)/不传仍放行 + 原子性直证 + 存量单合法空读回
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -133,7 +134,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

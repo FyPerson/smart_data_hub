@@ -3,7 +3,7 @@
 //   用法：node scripts/verify-sys-intake-liaison.js
 //
 // 行为面清单制（对齐 verify-sys-executor-remove.js 范式）：
-//   [①] 迁移语义组：6 列存在 + PRAGMA table_info 断言 intake_notify_status notnull=1/dflt_value='not_sent'
+//   [①] 迁移语义组：7 列存在 + PRAGMA table_info 断言 intake_notify_status notnull=1/dflt_value='not_sent'
 //        + 部署硬闸门四项（非法值计数=0 / 非 NULL intake_liaison_id 不在受理人集合计数=0 /
 //        sent 态必有 message_key / read_at 非空时必为 sent 态）
 //   [②] 主入口缺省 intake_liaison_id → 400 / 非受理人 id → 400 / 合法 id → 201 落库
@@ -22,6 +22,7 @@
 // 断言纪律：钉确切 HTTP 码（400 vs 409 分清）；清理类断言先设哨兵值再比对（非 NULL==NULL 假绿）；
 //   负例断言无副作用（落库/timeline 均不变）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -146,7 +147,7 @@ async function main() {
     (5,'dev','开发王','viewer','active'),
     (14,'liaison2','受理人乙','viewer','active'),
     (7,'shenjun','示例发布者','viewer','active')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 示例对接人13 / dev5 / 受理人乙14[非受理人常量，测多人场景时临时入组] / 技术负责人示例发布者7[⑨reactivate前置评估意见]）');
 
@@ -154,13 +155,13 @@ async function main() {
   {
     const cols = await all(`PRAGMA table_info(sys_issues)`);
     const names = cols.map(c => c.name);
-    for (const c of ['intake_liaison_id', 'intake_notify_status', 'intake_notify_message_key', 'intake_notify_error', 'intake_read_at', 'intake_notify_sent_by']) {
+    for (const c of ['intake_liaison_id', 'intake_notify_status', 'intake_notify_message_key', 'intake_notify_error', 'intake_read_at', 'intake_notify_sent_by', 'intake_notified_at']) {
       assert.ok(names.includes(c), `[①] 列存在：${c}`);
     }
     const statusCol = cols.find(c => c.name === 'intake_notify_status');
     assert.strictEqual(statusCol.notnull, 1, '[①] intake_notify_status notnull=1');
     assert.ok(String(statusCol.dflt_value || '').includes('not_sent'), `[①] intake_notify_status dflt_value 含 not_sent，实际=${statusCol.dflt_value}`);
-    ok('[①] 迁移语义：6 列齐全 + intake_notify_status notnull=1 且 dflt_value 含 \'not_sent\'（CREATE TABLE 路径）');
+    ok('[①] 迁移语义：7 列齐全 + intake_notify_status notnull=1 且 dflt_value 含 \'not_sent\'（CREATE TABLE 路径）');
   }
 
   // ═══ [②] 主入口校验：缺省 intake_liaison_id → 400 / 非受理人 id → 400 / 合法 → 201 落库 ═══
@@ -431,6 +432,7 @@ async function main() {
     const r1 = await call('POST', `/api/sys-issues/${sixId}/notify-intake`, adminTok, {});
     assert.strictEqual(r1.status, 200, '[⑥] 首发 200');
     const after1 = await issueRow(sixId);
+    assert.match(after1.intake_notified_at,/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,'[75] intake sent timestamp');
     assert.strictEqual(after1.intake_notify_status, 'sent', '[⑥] 首发后 sent');
     assert.ok(after1.intake_notify_message_key, '[⑥] 首发后 message_key 非空');
     assert.strictEqual(after1.intake_read_at, null, '[⑥] 首发后 read_at 仍 NULL（未读）');
@@ -448,6 +450,7 @@ async function main() {
     assert.strictEqual(r2.status, 200, '[⑥] 重发(failed) 端点本身仍 200（业务失败落 failed 状态，非 HTTP 层错误）');
     assert.strictEqual(r2.body.intake_notify_status, 'failed', '[⑥] 重发失败 → intake_notify_status=failed');
     const afterFail = await issueRow(sixId);
+    assert.strictEqual(afterFail.intake_notified_at,null,'[75] intake failed clears timestamp');
     assert.strictEqual(afterFail.intake_notify_status, 'failed', '[⑥] 落库 failed');
     assert.ok(afterFail.intake_notify_error, '[⑥] failed 态 intake_notify_error 非空');
     assert.strictEqual(afterFail.intake_read_at, null, '[⑥] failed 重发无条件清空 read_at（哨兵值已被清，非"本来就是NULL"的假绿）');
@@ -609,16 +612,18 @@ async function main() {
     intake_notify_error: 'SENTINEL-error-intake',
     intake_read_at: '2020-01-01 00:00:09',
     intake_notify_sent_by: 900009,
+    intake_notified_at: '2020-01-01 00:00:08',
   };
   async function setIntakeSentinels(id) {
     await run(
-      `UPDATE sys_issues SET intake_notify_status=?, intake_notify_message_key=?, intake_notify_error=?, intake_read_at=?, intake_notify_sent_by=? WHERE id=?`,
+      `UPDATE sys_issues SET intake_notify_status=?, intake_notify_message_key=?, intake_notify_error=?, intake_read_at=?, intake_notify_sent_by=?, intake_notified_at=? WHERE id=?`,
       [INTAKE_SENTINEL_SET.intake_notify_status, INTAKE_SENTINEL_SET.intake_notify_message_key,
        INTAKE_SENTINEL_SET.intake_notify_error, INTAKE_SENTINEL_SET.intake_read_at,
-       INTAKE_SENTINEL_SET.intake_notify_sent_by, id]
+       INTAKE_SENTINEL_SET.intake_notify_sent_by, INTAKE_SENTINEL_SET.intake_notified_at, id]
     );
   }
   function assertIntakeNotifyReset(row, label) {
+    assert.strictEqual(row.intake_notified_at,null,'[75] '+label+' intake timestamp cleared');
     assert.strictEqual(row.intake_notify_status, 'not_sent', `${label} intake_notify_status 归零为 not_sent（非哨兵值 'failed'）`);
     assert.strictEqual(row.intake_notify_message_key, null, `${label} intake_notify_message_key 归零为 NULL（非哨兵值）`);
     assert.strictEqual(row.intake_notify_error, null, `${label} intake_notify_error 归零为 NULL（非哨兵值）`);
@@ -669,7 +674,7 @@ async function main() {
     assertIntakeNotifyReset(afterResubmit, '[⑨resubmit]');
     assert.strictEqual(afterResubmit.intake_liaison_id, 13, '[⑨resubmit] intake_liaison_id 保留原值 13');
 
-    ok('[⑨] 回受理门（reactivate + resubmit-intake 两条路径，共用 SYS_BACK_TO_INTAKE_GATE_SQL）：intake 通知 5 列（status/message_key/error/read_at/sent_by）均归零（哨兵值验证非假绿）；intake_liaison_id 保留原值不清零');
+    ok('[⑨] 回受理门（reactivate + resubmit-intake 两条路径，共用 SYS_BACK_TO_INTAKE_GATE_SQL）：intake 通知 6 列（含发送时间）均归零（哨兵值验证非假绿）；intake_liaison_id 保留原值不清零');
   }
 
   // ═══ 部署硬闸门（方案 §7）：全表扫描四项（聚合此刻全部已建数据，含前面各分组产生的行）═══

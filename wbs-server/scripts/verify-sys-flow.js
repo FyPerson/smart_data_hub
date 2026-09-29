@@ -9,6 +9,7 @@
 //   5. scope_change（F2a 起 feature/improvement 全禁 → 409 SCOPE_CHANGE_DISABLED）
 //   6. derive（派生新单 + 防环 M-1 + T-L3 先 created 再 derive）
 //   7. normalizeSysDatetime 用例表（核实#8 / §6.2 L-2）
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -118,7 +119,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin/dev5/dev6/viewer9）');
 

@@ -32,6 +32,7 @@
 // in-process app + 内存库 + 自签 token，同 verify-sys-submit-withdraw.js / verify-sys-liaison-test.js 范式。
 // 用法：node scripts/verify-sys-liaison-return-commit-cleanup.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -179,7 +180,7 @@ async function main() {
     (6,'dev6','开发乙','user','active','13900000006'),(7,'dev7','开发丙','user','active','13900000007'),
     (8,'dev8','开发丁','user','active','13900000008'),(9,'dev9','开发戊','user','active','13900000009'),
     (13,'wangtaotao','示例对接人','user','active','13900000013')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务');
 
   await selfCertifyProbes('[前置] 空库应先满足 P1-P16');

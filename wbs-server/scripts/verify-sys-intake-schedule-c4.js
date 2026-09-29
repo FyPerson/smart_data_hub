@@ -10,6 +10,7 @@
 //       一律 409 INTAKE_MODE_SWITCH_DISABLED / 拒绝早于参数校验与查库（缺 reason·target 非法·不存在 id 均 409）/
 //       requireAdmin 仍在拒绝之前（非 admin 403）/ 零副作用（status·intake_required·timeline 均不变）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -107,7 +108,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

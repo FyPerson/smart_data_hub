@@ -14,6 +14,7 @@
 //   ⑤ estimate 正常 → sent 回写正常
 // 用法：node scripts/verify-correction-notify-recipient-lock.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -145,7 +146,7 @@ function editPhoneHook(id, rowId, name, newPhone) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ① done sent 在途改号
   console.log('① notify-done sent 发送在途改号');

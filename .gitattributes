@@ -1,2 +1,8 @@
 # vendor/minified 资产按原字节存取，不做行尾转换（2026-09-03·P2：autocrlf 把 LF 检出成 CRLF 导致 verify-export-columns N5 与 node_modules 逐字节比对恒红）
 wbs-server/public/assets/vendor/** -text
+
+# it-ledger 后端源码恒以 LF 检出（2026-09-21·Claude 复审实证）：verify-it-ledger-actions.js
+#   的 N7 活体变异用带 \n 的字面量/正则在源码里定位目标片段做变异，autocrlf 把源码检出成
+#   CRLF 后匹配失配，守卫按「不许静默通过」fail-closed 判红（实测 11046/2 ↔ LF 下 11073/0）。
+#   与上面 vendor 那条同源——都是 autocrlf 破坏字节级/行尾敏感比对。
+wbs-server/routes/it-ledger/*.js text eol=lf

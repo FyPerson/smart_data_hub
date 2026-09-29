@@ -17,6 +17,7 @@
 //   [H] 白盒：sysIssueTransition('assign') 在不兼容前置态失败 → 无 assigned_*/无子表行（[C-1] 核心原子性，
 //       不依赖建单 path A 两事务偶然触发的窗口，直接证明底层机制）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -134,7 +135,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

@@ -25,6 +25,7 @@
 //   [6] all 视角（admin/对接人 full scope）不下发 my_executor_*，批次级徽标不受影响
 //   [7] 入口计数（siProbeMyReleasesEntry 同款过滤）：本人 done 的批次不计入"待执行"数
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -119,7 +120,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise((res) => { server = app.listen(0, '127.0.0.1', () => { port = server.address().port; res(); }); });
+  server = await listenOnSafePort(app); port = server.address().port;
 
   // ── 数据构造 ─────────────────────────────────────────────────────────────
   // R-L7-1：计划中·A(8)+B(9) 均已通知（summary=sent）——多执行人主场景

@@ -8,6 +8,7 @@
 //   F 普通主单 done 零回归（仍写 requester 子表 + 主表兼容列）
 // 用法：node scripts/verify-correction-rework-notify.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -21,12 +22,15 @@ let MK = 100;
 const SENDS = [];
 const dtPath = require.resolve('../utils/dingtalk-notify');
 require.cache[dtPath] = { id: dtPath, filename: dtPath, loaded: true, exports: {
+  classifyReadStatus: require(dtPath).classifyReadStatus,
+  isBeyondReadWindow: require(dtPath).isBeyondReadWindow,   // 真实已读窗口前置（同 classifyReadStatus，不自造判定）
+  EXPIRED_READ_FIELDS: require(dtPath).EXPIRED_READ_FIELDS,
   getAccessToken: async () => 'tok',
   resolveRequesterDingUserId: async (t, phone) => ({ ok: true, userid: 'uid_' + phone }),
   sendMarkdownToUser: async (t, robot, uids, title, md) => { SENDS.push({ title, md, uids }); return { errcode: 0, processQueryKey: 'mk_' + (MK++) }; },
   sendFileToUser: async () => ({ errcode: 0 }),
   uploadMedia: async () => 'media1',
-  getReadStatus: async () => ({ readDetails: [] }),   // 默认未读
+  getReadStatus: async () => ({ readDetails: [] }),   // 空列表为不可查
   escapeMarkdown: (x) => x,
   classifyError: () => ({ reason: 'exception', hint: 'err' }),
 } };
@@ -111,7 +115,7 @@ async function mkRework(masterId, o = {}) {
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ── A 返工子单 done 发自身（带附件 + 文案返工语义 + 状态记自身行）──
   console.log('— A 返工子单 done 发自身 —');
@@ -162,8 +166,13 @@ async function mkRework(masterId, o = {}) {
   // ── E read-status 返工分支（读自身行）──
   console.log('— E read-status 返工分支 —');
   const e1 = await reqHttp('GET', `/api/corrections/${child}/notify-read-status?recipient=done`, null, ADMIN);
-  ok(e1.status === 200 && e1.body.read === false, 'E1 返工子单 read-status done → 读自身行 message_key 查钉钉（未读 read=false，不重定向主单）');
+  ok(e1.status === 200 && e1.body.read === false, 'E1 返工子单 read-status done → 读自身行 message_key 查钉钉（不可查兼容 read=false，不重定向主单）');
   const childPending2 = await mkRework(M, { rework_seq: 9, status: 'FIXED' });   // 未发过
+  assert.strictEqual(e1.body.read_status,'unqueryable','返工空列表为不可查');
+  require.cache[dtPath].exports.getReadStatus=async()=>({readDetails:[{userId:'uid_13800000001',readStatus:'UNREAD'}]});
+  const eUnread=await reqHttp('GET',    `/api/corrections/${child}/notify-read-status?recipient=done`,null,ADMIN);
+  assert.strictEqual(eUnread.status,200);assert.strictEqual(eUnread.body.read_status,'unread');assert.strictEqual(eUnread.body.read,false);
+  ok(true,'E1b 显式 UNREAD 返回真未读');
   const e2 = await reqHttp('GET', `/api/corrections/${childPending2}/notify-read-status?recipient=done`, null, ADMIN);
   ok(e2.status === 400 && e2.body.code === 'REQUESTER_NOTIFY_NOT_SENT', 'E2 返工子单未发完成通知 → read-status 400 NOT_SENT（读自身态）');
 

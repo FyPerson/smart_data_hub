@@ -13,6 +13,7 @@
 //   ⑨ 护栏（M-2）：attachment_type 只有 error_proof/fix_proof 两类（NOT NULL + 单一写入口，无脏数据）
 // 用法：node scripts/verify-correction-cross-system-attachment.js
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -121,7 +122,7 @@ const assignDev = (id, devId) => dbRunAsync(`UPDATE correction_requests SET assi
   mod.initSchema();
   await waitReady();
   const app = express(); app.use(express.json()); app.use('/api/corrections', mod.router);
-  srv = app.listen(0); PORT = srv.address().port;
+  srv = await listenOnSafePort(app, null); PORT = srv.address().port;
 
   // ── 建跨系统两单（主单系统1 + 子单系统2）──
   const cb = await reqJson('POST', '/api/corrections', {

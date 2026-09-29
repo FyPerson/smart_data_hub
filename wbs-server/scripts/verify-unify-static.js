@@ -76,7 +76,7 @@ const UNIFY_HELPERS_JS = path.join(PUBLIC_DIR, 'assets', 'js', 'unify-helpers.js
 // ⚠️ 本名单当前语义 = "已迁移页"，不是"全站页"。方案 §2.3 要求的**全 19 页扫描**扩展承接在
 //   S5b 收口（方案 §4-S5b）——那时才把未迁移页（Task_Pool/My_Workspace/Periodic_Fetch/Model_Center 等）
 //   纳入，且需为它们另设断言口径（未迁移页本就允许裸旧类，不能套 MIGRATED_PAGES 的黑名单断言）。
-const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html', 'Statistics.html', 'Quick_Log.html', 'Issue_Lite.html'];
+const MIGRATED_PAGES = ['Data_Correction.html', 'Sys_Iteration.html', 'Issue_Tracker.html', 'Data_Collab.html', 'Statistics.html', 'Quick_Log.html', 'Issue_Lite.html', 'IT_Ledger.html'];
 
 // LOW-9：状态徽章体系的**全部管辖页** = 迁移页 ∪ 徽章 spec 页（后者含 S3 收编的 PF/MC）。
 //   NUL 检查、--sem-* 越界检查这类"与 u- 迁移无关、只跟徽章体系有关"的断言一律用这份，

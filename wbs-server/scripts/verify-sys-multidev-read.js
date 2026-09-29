@@ -12,6 +12,7 @@
 //
 // in-process express app（挂真实 router）+ 内存库 + 自签 token，照 verify-sys-release.js 范式。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -79,7 +80,7 @@ async function main() {
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role) VALUES
     (1,'admin','管理员','admin'), (5,'devwang','开发王','user'), (6,'devli','开发李','user'), (13,'wangtaotao','示例对接人','user')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
 
   // ── 种子1：raw SQL 直插（C2-C7 写入口未接线，只能绕过写路径造数据）──────────
   //   issue1（feature/开发中）：da1(pending,在册) / da2(code_submitted,在册,primary) / da3(code_submitted,已软删,挂commit)

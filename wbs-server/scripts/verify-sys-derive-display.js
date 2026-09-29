@@ -113,9 +113,9 @@ console.log('\n═══ [C2-S] 矩阵可静态断言面：siIssueDisplayNo 系�
   //   （这里=用了该 helper 拼弹窗标题），就会打红一个自己没改过的文件。查"我改了谁"不够，还要查
   //   "我加入了哪些被别人计数的类别"。
   const byIdCalls = [...clean.matchAll(/siIssueDisplayNoById\(/g)].length;
-  assert.strictEqual(byIdCalls, 21, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 21 处（1 处函数定义 + 20 处消费：18 处 siModal 标题 + 2 处批次成员行降级展示，2026-09-07 校准基线 19（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission 弹窗标题 +1 = 20 + 2026-09-10 W2 siModalWithdrawSubmission 弹窗标题 +1 = 21），实抓 ${byIdCalls}——数量变化需人工核实是新增消费点未登记，还是既有消费点被误删`);
+  assert.strictEqual(byIdCalls, 22, `[C2-S③] siIssueDisplayNoById 全文匹配应恰 22 处（1 处定义 + 19 处弹窗标题 + 2 处批次成员展示；2026-09-26 新增 siModalClose 归档表单），实抓 ${byIdCalls}——数量变化需人工核实消费点`);
   const modalTitleCalls = [...clean.matchAll(/siModal\([^;]*?siIssueDisplayNoById\(/gs)].length;
-  assert.strictEqual(modalTitleCalls, 18, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 18 处（2026-09-07 校准 16（siModalReturn +1）+ 2026-09-10 C4 siModalAmendSubmission +1 = 17 + 2026-09-10 W2 siModalWithdrawSubmission +1 = 18），实抓 ${modalTitleCalls}`);
+  assert.strictEqual(modalTitleCalls, 19, `[C2-S③] siModal(...) 调用中直接含 siIssueDisplayNoById(...) 的应恰 19 处（2026-09-26 新增 siModalClose 归档表单），实抓 ${modalTitleCalls}`);
   // [408-M3①] 补删除任务弹窗——此前两条断言都只扫 siIssueDisplayNoById，漏了 siDeleteIssue（:5654 一带）
   // 的删除任务弹窗标题：它走的是 siIssueDisplayNo(iss) **直接传对象**分支（siDetail.issue 现成在手，
   // 不需要像其余弹窗那样只有 issueId 时退化查 siList），不含 "ById" 字样，两条既有正则完全扫不到它——

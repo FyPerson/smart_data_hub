@@ -81,6 +81,7 @@
 //
 // 断言纪律：全程精确状态码 + 精确 error code，不用 status>=400 弱判据；正例断言真实落库副作用，非仅状态码。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -264,7 +265,7 @@ async function main() {
     (5,'dev5','开发甲','user','active','13800000005'),
     (6,'dev6','开发乙','user','active','13800000006'),
     (9,'dev9','开发丙','user','active','13800000009')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 示例对接人13 / dev5,6,9）');
 
@@ -654,7 +655,7 @@ async function main() {
     assert.strictEqual(gm1.source, 'snapshot', '⑬首发后 getReleaseMembers 走 snapshot 源（C4 读源）');
 
     // C6：归档 → 重开（真实 HTTP，非 sysIssueTransition 直调）。
-    const rClose = await call('POST', `/api/sys-issues/${cycIssue}/close`, adminTok, {});
+    const rClose = await call('POST', `/api/sys-issues/${cycIssue}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(rClose.status, 200, `⑬close 应 200, got ${rClose.status} ${JSON.stringify(rClose.body)}`);
     const rReopen = await call('POST', `/api/sys-issues/${cycIssue}/reopen`, adminTok, { reason: 'C8跨阶段冒烟-验证归档重开与真实执行人链路组合' });
     assert.strictEqual(rReopen.status, 200, `⑬reopen 应 200, got ${rReopen.status} ${JSON.stringify(rReopen.body)}`);

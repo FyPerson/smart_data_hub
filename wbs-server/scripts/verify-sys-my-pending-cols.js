@@ -16,6 +16,7 @@
 //   [7]「待处理」预指派场景（N0-6b 增补）：status='待处理' + 开发在册 pending → my_dev_pending=1
 //       （列如实出数——状态门是前端谓词的事，本列只验 SQL 语义）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -104,7 +105,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise((res) => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 开发甲5 / 开发乙6 / 异常令牌 admin）');
 

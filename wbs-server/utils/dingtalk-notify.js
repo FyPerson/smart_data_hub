@@ -381,6 +381,41 @@ function classifyError(input) {
     };
 }
 
+// Window evidence: scripts/probe-notify-read-diagnosis.js:12-16/47-50/305-311.
+const DINGTALK_READ_QUERY_WINDOW_DAYS = 7;
+
+// SQLite local strings represent Asia/Shanghai, independent of the Node process TZ.
+function parseNotifySentAt(value) {
+    if (typeof value !== 'string' || !value.trim()) return NaN;
+    const text = value.trim();
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) return Date.parse(text.replace(' ', 'T') + '+08:00');
+    if (/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(text)) return Date.parse(text);
+    return NaN;
+}
+
+// Absence from a response is unknown, never evidence of UNREAD. nowMs is injected.
+function classifyReadStatus(readResult, recipientUserId, notifiedAt, nowMs) {
+    const uid = String(recipientUserId == null ? '' : recipientUserId).trim();
+    const details = Array.isArray(readResult?.readDetails) ? readResult.readDetails : [];
+    const matches = details.filter(item => uid && item && String(item.userId).trim() === uid);
+    const read = matches.find(item => item.readStatus === 'READ');
+    if (read) return { state: 'read', readTimestamp: read.readTimestamp ?? null };
+    if (matches.some(item => item.readStatus === 'UNREAD')) return { state: 'unread' };
+    const onlyIds = details.length === 0 && !Array.isArray(readResult?.raw?.messageReadInfoList);
+    if (uid && onlyIds && Array.isArray(readResult?.readUserIds)
+        && readResult.readUserIds.some(id => String(id).trim() === uid)) return { state: 'read', readTimestamp: null };
+    return { state: 'unqueryable', reason: isBeyondReadWindow(notifiedAt, nowMs) ? 'expired' : 'not_listed' };
+}
+
+// Read-window precheck (user decision 2026-09-28): a notice sent at least 7 days ago with no persisted
+// read time can only come back as an empty list, so every read-status endpoint answers "expired"
+// before reading DingTalk config or calling out. The expiry is the real reason; a transport error is not.
+function isBeyondReadWindow(notifiedAt, nowMs) {
+    const sentMs = parseNotifySentAt(notifiedAt);
+    return Number.isFinite(sentMs) && nowMs - sentMs >= DINGTALK_READ_QUERY_WINDOW_DAYS * 86400000;
+}
+const EXPIRED_READ_FIELDS = Object.freeze({ read: false, read_at: null, read_status: 'unqueryable', unqueryable_reason: 'expired' });
+
 /**
  * 查询单聊机器人消息的已读状态。
  *
@@ -392,13 +427,14 @@ function classifyError(input) {
  *   - 必须 GET 而非 POST
  *   - robotCode + processQueryKey 都在 query string 里
  *   - token 在 header 里(不是 query)
- *   - 钉钉端约定消息发出后 24h 内可查
+ *   - 生产实测消息发出后约 7 天可查，超窗返回空列表（见 probe-notify-read-diagnosis.js:12-16/47-50/305-311）
  *
  * @param {string} token  access_token
  * @param {string} robotCode  机器人 RobotCode(与 batchSend 时用的同一个)
  * @param {string} processQueryKey  batchSend 返回的 processQueryKey
- * @returns {Promise<{ readUserIds: string[], raw: object }>}
+ * @returns {Promise<{ readUserIds: string[], readDetails: object[], raw: object }>}
  *          readUserIds:已读用户的钉钉 userId 数组(可空)
+ *          readDetails: messageReadInfoList 明细（含 READ/UNREAD、userId、readTimestamp）；兜底格式为空数组
  *          raw:钉钉原始响应,带 errcode 或 code 的话保留供调用方走 classifyError
  * @throws {Error}  HTTP 非 JSON / 5xx / 网络错误
  */
@@ -932,6 +968,11 @@ module.exports = {
     getUserIdByMobile,
     sendMarkdownToUser,
     getReadStatus,
+    classifyReadStatus,
+    isBeyondReadWindow,
+    EXPIRED_READ_FIELDS,
+    parseNotifySentAt,
+    DINGTALK_READ_QUERY_WINDOW_DAYS,
     classifyError,
     clearCachedToken,
     buildCollabNotifyCard,

@@ -5,6 +5,7 @@
 //   对照 C4 审 ultracode CONFIRMED：并发双击 publish 原会交错→R2 ROLLBACK 回滚 R1 事务→
 //   "已发布批次 release_note=NULL 违反闸门③"脏态 + 双 500。加锁后应：恰一胜（200）一负（409 非 500），脏态不可达。
 // in-process express app（挂真实 router）+ 内存库（parallel 模式，与生产同源）+ 自签 token。
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -135,7 +136,7 @@ async function main() {
   //   该函数原不在本文件的 sys 覆盖范围内，users 夹具此前无需 status 列——现补上（DEFAULT 'active'）。
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active'),(5,'dev','开发王','user','active'),(6,'dev6','开发乙','user','active'),(13,'wangtaotao','示例对接人','user','active')`);
-  await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
 
   // ── 1. 并发建单（30 并发）：全 201 + id 互异 + 零 500（无 nested-transaction 交错）──────────
   const N = 30;

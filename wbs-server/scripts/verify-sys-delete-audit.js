@@ -23,6 +23,7 @@
 //   [G] 守卫拒删路径（派生子单 409 / 已挂批次 409 / 不存在 404）→ **不留审计行**（拒绝不是删除）
 //   [P] 审计行不随业务级联删：删 A 后再删 B，A 的审计行仍在（本表不进任何级联清单）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -177,7 +178,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

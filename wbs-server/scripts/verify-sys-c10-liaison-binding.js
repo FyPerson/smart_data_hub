@@ -21,6 +21,7 @@
 //   [9] ⭐ MED-2（C10-fix3）：admin 受理空单→NULL 绑定**不死单**——admin assign/通知/退回均 200（代管推进）；
 //       eligible 非 admin 成员对 NULL 单 403 NOT_BOUND_LIAISON（只 admin 能推进直到 admin 指派定对接人）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -119,7 +120,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise(res => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin/u5·u6·u13=user / pub7=publisher / viewer9=viewer）');
 

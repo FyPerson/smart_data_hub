@@ -32,6 +32,7 @@
 //   ② **每格独立夹具**——不许靠"前一个角色跑成功后 break"省夹具，那会让后续角色一格都不跑。
 //   ③ 负例除状态码外还要断言**状态没被改动**（403 之后落库必须原样）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -264,7 +265,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / 受理人13 / 技术负责人7 / dev5,6）');
 
@@ -340,7 +341,7 @@ async function main() {
     for (const type of TYPES) {
       for (const role of ROLES) {
         const id = await mkOnline(type);
-        const r = await call('POST', `/api/sys-issues/${id}/close`, role.tok, {});
+        const r = await call('POST', `/api/sys-issues/${id}/close`, role.tok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
         assert.strictEqual(r.status, role.isAdmin ? 200 : 403,
           `[M2/close] ${role.who} × ${type} 期望 ${role.isAdmin ? 200 : 403}（关闭仅 admin）, got ${r.status} ${JSON.stringify(r.body)}`);
         assert.strictEqual(await statusOf(id), role.isAdmin ? '已关闭' : '已上线',

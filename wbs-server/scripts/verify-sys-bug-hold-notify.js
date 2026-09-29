@@ -22,6 +22,7 @@
 //   [9] 同轮重复点击 → 明确拒绝（NOTIFY_ALREADY_SENT）；新一轮（真实 hold/resume 走一遍）→ 状态确为 not_sent
 //   [10] self-guard：操作者==建单人时跳过发送，列状态保持 not_sent（不写 sent）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -146,7 +147,7 @@ async function main() {
     (5,'dev5','开发甲','user','dt5'),(6,'dev6','开发乙','user','dt6'),(8,'dev8','开发丙','user','dt8'),
     (9,'viewer9','观察员','viewer',NULL),
     (20,'creator20','建单人甲','user','dt20'),(21,'creator21','建单人乙','user','dt21')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务（admin1 / dev5,6,8 / creator20,21 / viewer9）');
 
   // ══════════════════════════════════════════════════════════════════════
@@ -288,7 +289,7 @@ async function main() {
     assert.strictEqual(r.status, 200, `[4b]：resume 200, got ${r.status} ${JSON.stringify(r.body)}`);
     // 精简范围：SQL 直接跳到已上线（发布/批次机制正交于本测试点，不重复实现），close/reopen 两步全走真实端点。
     await run(`UPDATE sys_issues SET status='已上线', accepted_at=datetime('now'), released_at=datetime('now') WHERE id=?`, [id4b]);
-    r = await call('POST', `/api/sys-issues/${id4b}/close`, adminTok, {});
+    r = await call('POST', `/api/sys-issues/${id4b}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(r.status, 200, `[4b]：真实 close 应 200, got ${r.status} ${JSON.stringify(r.body)}`);
     r = await call('POST', `/api/sys-issues/${id4b}/reopen`, adminTok, { reason: '[4b] 真实链路重开' });
     assert.strictEqual(r.status, 200, `[4b]：真实 reopen 应 200, got ${r.status} ${JSON.stringify(r.body)}`);

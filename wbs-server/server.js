@@ -13,6 +13,7 @@ const sql = require('mssql');
 const compression = require('compression');
 const packageJson = require('./package.json');
 const dingtalkNotify = require('./utils/dingtalk-notify');
+const { formatNotifyReadTime } = require('./utils/notify-read-time');
 const issueNotify = require('./utils/issue-notify');  // v1.74.0 C2：需求跟踪钉钉通知 helper（纯封装）
 const issueLiteNotify = require('./utils/issue-lite-notify');  // 数据开发换壳 C2：极简台账通知 markdown builder（薄编排，复用 issueNotify 无状态部件）
 const collabVersioning = require('./utils/collab-attachment-versioning');
@@ -922,6 +923,10 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         //   实例化仍留在原挂载点（文件后部 ~L20440），此刻 const legacyArchiveModule 已完成赋值
         //   （本回调异步晚于顶层同步执行，同 correction/sys-iteration/periodic 三先例的既有前提）。
         legacyArchiveModule.initSchema();
+        // 信息化资产轻量台账 C1（D10 独立连接）：本模块不复用本 db 共享连接，initSchema 内部
+        //   自行 new sqlite3.Database(DB_FILE) 另开一个连接，故此处调用不依赖本回调的 db 对象，
+        //   只是沿用与上方四先例同位置同时序的惯例（紧跟 legacy-archive 之后）。
+        itLedgerModule.initSchema();
     }
 });
 
@@ -2954,11 +2959,17 @@ async function closeMysqlPools() {
 }
 
 // 进程退出时关闭连接池
-process.on('SIGINT', async () => {
+let serviceStopping = false;
+async function stopService() {
+    if (serviceStopping) return;
+    serviceStopping = true;
+    await sysIterModule.stopExpirySweep();
     await closeMssqlPools();
     await closeMysqlPools();
     process.exit(0);
-});
+}
+process.on('SIGINT', stopService);
+process.on('SIGTERM', stopService);
 
 // ==================== ODS 验收引擎 ====================
 
@@ -6362,57 +6373,6 @@ app.post('/api/tasks/:id/assign', authenticateToken, requirePublisherOrAdmin, (r
             });
         });
     });
-});
-
-// ==================== 文件预览 API ====================
-
-// 预览Excel文件(字段映射文档等)
-app.get('/api/preview/excel/:filename', (req, res) => {
-    const { filename } = req.params;
-
-    // 尝试在uploads和archive目录查找文件
-    let filePath = path.join(UPLOAD_DIR, filename);
-    if (!fs.existsSync(filePath)) {
-        filePath = path.join(ARCHIVE_DIR, filename);
-    }
-
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: '文件不存在' });
-    }
-
-    // 检查是否为Excel文件
-    const ext = path.extname(filename).toLowerCase();
-    if (ext !== '.xlsx' && ext !== '.xls') {
-        return res.status(400).json({ error: '仅支持Excel文件(.xlsx, .xls)预览' });
-    }
-
-    try {
-        // 读取并解析Excel文件
-        const workbook = XLSX.readFile(filePath);
-        const sheetName = workbook.SheetNames[0]; // 读取第一个Sheet
-        const sheet = workbook.Sheets[sheetName];
-
-        // 转换为JSON格式
-        const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-
-        if (data.length === 0) {
-            return res.json({ headers: [], rows: [], sheetName });
-        }
-
-        // 第一行作为表头
-        const headers = data[0] || [];
-        const rows = data.slice(1);
-
-        res.json({
-            sheetName,
-            headers,
-            rows,
-            totalRows: rows.length
-        });
-    } catch (err) {
-        console.error('Excel解析失败:', err);
-        res.status(500).json({ error: 'Excel文件解析失败: ' + err.message });
-    }
 });
 
 // ==================== 文档中心 API ====================
@@ -12777,9 +12737,11 @@ app.get('/api/issues/:id/notify-read-status', authenticateToken, requireIssueSch
             return res.status(400).json({ error: `尚未成功通知${fm.label}`, code: 'NOT_NOTIFIED', read: false });
         }
         // 已固化 → 直接返（钉钉无取消已读语义，不再查）
-        if (issue.read_at) return res.json({ recipient, read: true, read_at: issue.read_at, cached: true });
+        if (issue.read_at) return res.json({ recipient, read: true, read_status: 'read', read_at: issue.read_at, cached: true });
         if (!issue.message_key) return res.status(400).json({ error: '缺少消息标识', code: 'NO_MESSAGE_KEY', read: false });
 
+        // 已读窗口前置（用户 2026-09-28）：发出满 7 天且未固化已读 → 钉钉只会返回空列表，直接答「超期」，不外呼
+        if (dingtalkNotify.isBeyondReadWindow(issue.notified_at, Date.now())) return res.json({ recipient, ...dingtalkNotify.EXPIRED_READ_FIELDS, read_user_count: 0 });
         // 取凭证 + token
         const [appKey, appSecret, robotCode] = await Promise.all(
             ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
@@ -12805,18 +12767,19 @@ app.get('/api/issues/:id/notify-read-status', authenticateToken, requireIssueSch
         try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, issue.message_key)); }
         catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
 
-        const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === recipientDingUid && d.readStatus === 'READ');
+        const classification = dingtalkNotify.classifyReadStatus(readResult, recipientDingUid, issue.notified_at, Date.now());
+        const myEntry = classification.state === 'read' ? classification : null;
         const isRead = !!myEntry;
         let readAt = null;
         if (isRead) {
             // codex 12 M-3：readTimestamp 单位兼容归一（不凭印象 *1000）——>1e12 视为毫秒、>1e9 视为秒
             const ts = Number(myEntry.readTimestamp) || 0;
             const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-            readAt = new Date(ms).toLocaleString('zh-CN');
+            readAt = formatNotifyReadTime(ms);
             // 首次查到 READ 固化（动态写回对应 read_at 列）
             await dbRunAsync(`UPDATE issues SET ${fm.read_at} = ? WHERE id = ?`, [readAt, id]);
         }
-        res.json({ recipient, read: isRead, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
+        res.json({ recipient, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: isRead, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
     } catch (err) {
         logger.error('查已读状态失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -14057,8 +14020,10 @@ app.get('/api/issue-lite/:id/notify-read-status', authenticateToken, requireIssu
         const rec = await dbGetAsync(`SELECT id, notify_target_id, requester_phone, ${fm.sc} AS st, ${fm.ac} AS at, ${fm.kc} AS mkey, ${fm.rc} AS read_at FROM issue_lite WHERE id = ?`, [id]);
         if (!rec) return res.status(404).json({ error: '登记单不存在' });
         if (!rec.at || rec.st !== 'sent') return res.status(400).json({ error: '尚未成功通知', code: 'NOT_NOTIFIED', read: false });
-        if (rec.read_at) return res.json({ recipient, read: true, read_at: rec.read_at, cached: true });
+        if (rec.read_at) return res.json({ recipient, read: true, read_status: 'read', read_at: rec.read_at, cached: true });
         if (!rec.mkey) return res.status(400).json({ error: '缺少消息标识', code: 'NO_MESSAGE_KEY', read: false });
+        // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼
+        if (dingtalkNotify.isBeyondReadWindow(rec.at, Date.now())) return res.json({ recipient, ...dingtalkNotify.EXPIRED_READ_FIELDS, read_user_count: 0 });
 
         const [appKey, appSecret, robotCode] = await Promise.all(
             ['dingtalk_app_key', 'dingtalk_app_secret', 'dingtalk_robot_code'].map(readSystemConfig));
@@ -14083,20 +14048,21 @@ app.get('/api/issue-lite/:id/notify-read-status', authenticateToken, requireIssu
         try { readResult = await callDingtalkWithTokenRetry(appKey, appSecret, token, (t) => dingtalkNotify.getReadStatus(t, robotCode, rec.mkey)); }
         catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, reason: cls.reason }); }
 
-        const myEntry = (readResult.readDetails || []).find(d => String(d.userId).trim() === dingUid && d.readStatus === 'READ');
+        const classification = dingtalkNotify.classifyReadStatus(readResult, dingUid, rec.at, Date.now());
+        const myEntry = classification.state === 'read' ? classification : null;
         let readAt = null;
         if (myEntry) {
             const ts = Number(myEntry.readTimestamp) || 0;
             const ms = ts > 1e12 ? ts : (ts > 1e9 ? ts * 1000 : Date.now());
-            readAt = new Date(ms).toLocaleString('zh-CN');
+            readAt = formatNotifyReadTime(ms);
             // CAS 固化（防查询期重发换 message_key 误标）——列名写死常量
             const casUpd = await dbRunAsync(`UPDATE issue_lite SET ${fm.rc}=? WHERE id=? AND ${fm.sc}='sent' AND ${fm.kc}=? AND ${fm.rc} IS NULL`, [readAt, id, rec.mkey]);
             if (casUpd.changes === 0) {
                 const fresh = await dbGetAsync(`SELECT ${fm.rc} AS read_at FROM issue_lite WHERE id = ?`, [id]);
-                return res.json({ recipient, read: !!(fresh && fresh.read_at), read_at: fresh ? fresh.read_at : null, superseded: true });
+                return res.json({ recipient, read: !!(fresh && fresh.read_at), read_at: fresh ? fresh.read_at : null, read_status: fresh && fresh.read_at ? 'read' : 'unqueryable', ...(fresh && fresh.read_at ? {} : { unqueryable_reason: 'not_listed' }), superseded: true });
             }
         }
-        res.json({ recipient, read: !!myEntry, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
+        res.json({ recipient, read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}), read: !!myEntry, read_at: readAt, read_user_count: (readResult.readUserIds || []).length });
     } catch (err) {
         logger.error('[数据开发换壳] 查已读失败:', err.message);
         res.status(500).json({ error: err.message });
@@ -16225,7 +16191,7 @@ app.post('/api/collab/requests/:id/notify', authenticateToken, requireNonViewer,
 });
 
 // 6. 查询钉钉已读状态(Day 3 增补 · 方案 1 pull 模式)
-// 钉钉端约定:消息发出后 24h 内可查;processQueryKey 在 notify 成功时已落到对应 message_key 列
+// 生产实测:消息发出后约 7 天可查，超窗为空列表；processQueryKey 在 notify 成功时落到对应 message_key 列
 // v1.66.1 加 ?recipient=contact|developer 参数：
 //   - recipient=developer（默认，向后兼容）：查 notify_message_key + 落 read_at（PENDING/SUBMITTED+ 用）
 //   - recipient=contact：查 contact_notify_message_key + 落 contact_read_at（PENDING_ASSIGN 用）
@@ -16311,38 +16277,24 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
                 // 兼容旧前端字段名（recipient=developer 时返 developer_name；recipient=contact 时返 contact_person_name 风格）
                 developer_name: name0,
                 recipient_name: name0,
-                read: true,
+                read: true, read_status: 'read',
                 read_at: collab.read_at,
                 cached: true,
                 queried_at: new Date().toISOString()
             });
         }
 
-        // codex 56-D M-1：message_key 缺失校验放在 24h 判断【之前】——
-        //   老协作单/钉钉未返消息号时仍返原 400（不改变 contact/developer 既有语义，避免回归）
+        // codex 56-D M-1：message_key 缺失校验放在 7 天窗口判断【之前】——老协作单/钉钉未返消息号时仍返原 400
+        //   （不改变 contact/developer 既有语义，避免回归）。
         if (!collab.message_key) {
             return res.status(400).json({ error: `该${fieldMap.label}通知缺少消息标识,无法查询已读状态(老协作单或钉钉端未返回消息号)` });
         }
 
-        // codex 53 M-2：24h 查询窗口（钉钉端约定消息发出后 24h 内可查）——三路一致顺手补齐
-        //   未固化 read_at 且 notified_at 超 24h → 停查钉钉，返 unread_expired（避免前端长期空查钉钉）
-        //   注：24h 判断在 message_key 校验之后，只作用于"真发过通知"的单（codex 56-D M-1）
-        //   L-1：notified_at 为 SQLite datetime('now','localtime') 格式，Date.parse 按 Node 进程本地时区解析，
-        //        隐式依赖"Node TZ == SQLite localtime TZ"（当前生产单机一致）。24h 是软边界，时区偏移几小时无实质影响。
-        const notifiedMs = Date.parse(String(collab.notified_at).replace(' ', 'T'));
-        if (Number.isFinite(notifiedMs) && (Date.now() - notifiedMs) > 24 * 60 * 60 * 1000) {
+        // 已读窗口前置（用户 2026-09-28）：满 7 天未固化已读 → 直接答「超期」，不外呼（六端点同一口径）
+        if (dingtalkNotify.isBeyondReadWindow(collab.notified_at, Date.now())) {
             const nameExp = await resolveDisplayName();
-            return res.json({
-                recipient,
-                notified_at: collab.notified_at,
-                developer_name: nameExp,
-                recipient_name: nameExp,
-                read: false,
-                read_at: null,                  // M-2：与现有 read:false 分支字段对齐
-                read_status: 'unread_expired',  // 未读且已超钉钉可查询窗口
-                read_user_count: 0,             // M-2：与现有分支字段对齐
-                queried_at: new Date().toISOString()
-            });
+            return res.json({ recipient, notified_at: collab.notified_at, developer_name: nameExp, recipient_name: nameExp,
+                ...dingtalkNotify.EXPIRED_READ_FIELDS, read_user_count: 0, queried_at: new Date().toISOString() });
         }
 
         // 取钉钉凭证(readStatus 需要 robotCode)
@@ -16410,17 +16362,18 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             });
         }
 
-        // 成功:判断收件人 userId 是否在已读列表里
-        const isRead = recipientDingUserId && readResult.readUserIds.includes(recipientDingUserId);
+        // 成功：统一三态，列表缺席不等于未读。
+        const classification = dingtalkNotify.classifyReadStatus(readResult, recipientDingUserId, collab.notified_at, Date.now());
+        const isRead = classification.state === 'read';
 
         // 提取 readTimestamp 转本地时间字符串
         let readAt = null;
         if (isRead && Array.isArray(readResult.readDetails)) {
             const myEntry = readResult.readDetails.find(item => item.userId === recipientDingUserId && item.readStatus === 'READ');
             if (myEntry && myEntry.readTimestamp) {
-                const d = new Date(myEntry.readTimestamp * 1000);
-                const pad = (n) => String(n).padStart(2, '0');
-                readAt = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+                // 单位兼容归一（同其余已读端点：>1e12 毫秒、>1e9 秒）+ 东八区统一格式
+                const ts = Number(myEntry.readTimestamp) || 0;
+                if (ts > 1e9) readAt = formatNotifyReadTime(ts > 1e12 ? ts : ts * 1000);
             }
         }
 
@@ -16434,6 +16387,7 @@ app.get('/api/collab/requests/:id/notify-read-status', authenticateToken, async 
             notified_at: collab.notified_at,
             developer_name: recipientDisplayName,  // 兼容旧前端
             recipient_name: recipientDisplayName,
+            read_status: classification.state, ...(classification.state === 'unqueryable' ? { unqueryable_reason: classification.reason } : {}),
             read: !!isRead,
             read_at: readAt,
             read_user_count: readResult.readUserIds.length,
@@ -21339,6 +21293,7 @@ const sysIterModule = require('./routes/sys-iteration')({
   //   verify 体系进程内自建 app 不传本字段 ⇒ 模块内缺省启用（测试生态零改动）；生产由本行显式注入，
   //   忘配 env 的失败方向=禁用（对"暂不上线"诉求 fail-closed）。两步化上线时生产 .env 置 1 开启。
   fastlaneAuthorizeEnabled: process.env.SYS_FASTLANE_ENABLE === '1',
+  expirySweepEnabled: true, // #73: schema ready starts catch-up and daily 08:00 expiry, even if new authorization is disabled.
 });
 app.use('/api', sysIterModule.router);
 
@@ -21392,6 +21347,15 @@ const legacyArchiveModule = require('./routes/legacy-archive')({
   logger, dbRunAsync, dbGetAsync, dbAllAsync, authenticateToken, requireAdmin, UPLOAD_DIR,
 });
 app.use('/api', legacyArchiveModule.router);
+
+// ============================================================
+// 信息化资产轻量台账（长任务 D · C1 事务底座）：D10 独立连接 itDb（同一 DB_FILE 另开连接）+
+//   itTxnMutex 读写串行；deps 不注入共享连接助手（方案 §12）。
+// ============================================================
+const itLedgerModule = require('./routes/it-ledger')({
+  logger, DB_FILE, authenticateToken, requireAdmin,
+});
+app.use('/api', itLedgerModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询

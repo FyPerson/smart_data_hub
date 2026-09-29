@@ -45,6 +45,7 @@ const ASSETS = [
         sha256: '81dd4ef8f68a0d82e840cd543bfea1c9ed34fa624fb792d4f104761eb4a5e94d',
         // 期望引用页**显式清单**（双向对拍，新增/下线页面必须显式改这里）
         pages: [
+            'IT_Ledger.html', // C7 新页面，加入双向覆盖；共享 CSS 未改变。
             'Data_Collab.html', 'Data_Correction.html', 'Issue_Lite.html', 'Issue_Tracker.html',
             'Legacy_Archive.html',   // 2026-08-27 补登记：Phase A cherry-pick 上主干时新增页漏登记（守卫双向对拍抓出）
             'Model_Center.html', 'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html',
@@ -63,6 +64,7 @@ const ASSETS = [
         // 本次未改 style.css，登记现状即可——它同为多页共享 CSS，同样的忘 bump 会同样出事
         //   （codex 352 号 LOW 建议后续单独守；配置表化后顺手纳入，零额外成本）
         pages: [
+            'IT_Ledger.html', // C7 新页面，与 components.css 同步登记。
             'admin.html', 'Asset_Center.html', 'Dashboard.html', 'Data_Collab.html', 'Data_Correction.html',
             'Domain_Manager.html', 'Issue_Lite.html', 'Issue_Tracker.html',
             'Legacy_Archive.html',   // 2026-08-27 补登记：同上（components.css 条目的说明）

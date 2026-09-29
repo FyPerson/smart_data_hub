@@ -999,7 +999,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script src="assets/js/app.js?v=v1.159.0_debta4"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
          抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
@@ -1007,11 +1007,11 @@
          （S5 起版本比对逻辑下沉共享层，见 u-paste.js checkVersion()）。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
-         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串与数据修正/
-         数据协作页同串同 KIT 尾缀 v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）。
+         [Codex R5] vendor内容不变；helper升uexport2，旧页面仍走缺省写出路径
          （verify-export-columns 断言 4）。 -->
     <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
-    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.160.0_uexport2"></script>
     <script>
     /* ============================================================
        系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
@@ -4039,7 +4039,7 @@
         //   ⭐ S5：通知未发送红条置最顶（先于血缘），attention 优先级高于血缘展示。
         siRevokeAttThumbs();   // 重渲前先 revoke 上次缩略图 objectURL，防内存泄漏
         document.getElementById('siDBody').innerHTML =
-            notifyAlertHtml + lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + devMembers + devCommitsBlock + deliverySection + orchBlock + fastlaneBlock + notify + chat + tl;
+            notifyAlertHtml + lineageHtml + '<div class="u-action-bar u-action-bar-sticky" id="siDActions"></div>' + info + siRenderArchiveOrigin(iss, tlEvents) + devMembers + devCommitsBlock + deliverySection + orchBlock + fastlaneBlock + notify + chat + tl;
 
         // 操作区（填充 body 顶部的 #siDActions 占位）
         siRenderActions(iss);
@@ -4129,20 +4129,8 @@
     //   前端不自行推算 deadline，只做展示；"剩余约 N 小时"为加载时一次性粗算，不做秒级/分钟级 tick。
     function siFastlaneAuthWindowHtml(iss) {
         if (!iss) return '';
-        // [S2-fix LOW-3] 联判补 fast_release_auth_deadline——deadline 与 expired 同源残留门控（后端详情
-        //   端点同一次 isActiveFastReleaseAuth 判定产出），零成本纵深：万一 expired 字段未来被改成"可
-        //   消费取反"这类与残留脱钩的口径，deadline 仍保持"仅残留时非空"（LOW-3 既有收口），本联判让
-        //   非残留的普通单免疫误显红色"已超时"标——两个字段任一算错都不会单独触发误报。
-        // [S2-fix2 ①·codex 424-M1 精神部分采纳] 联判本身不动（主会话驳回改判据方向，理由已归档：改联判
-        //   会削弱而非加强上面这条纵深防御）——但联判不满足这个理论上不可达的组合态（后端投影两列本应
-        //   同源不可能漂移，若真出现说明详情端点两列计算脱钩）不该静默吞掉，留 console.warn 观察线索，
-        //   不升级为红标（避免把一个后端数据一致性问题误导成"这单真的超时了"）。
-        if (Number(iss.fast_release_auth_expired) === 1) {
-            if (iss.fast_release_auth_deadline) {
-                return `<div class="si-gate-hint" style="color:#dc2626;font-weight:600;background:#fef2f2;border-color:#fecaca">⏰ 已超时（次日 8:00 未启用，转常规验收）</div>`;
-            }
-            console.warn('[siFastlane] expired=1 但 deadline 缺失——后端投影两列漂移，请核详情端点', iss.id);
-        }
+        // #73: expiration is a persisted timeline event, never a synthetic warning row.
+        if (Number(iss.fast_release_auth_expired) === 1) return '';
         if (Number(iss.fast_release_active_auth) === 1 && iss.fast_release_auth_deadline) {
             // deadline='YYYY-MM-DD HH:MM:SS'（服务端 datetime('now','localtime') 出品，本地时区）——分量
             //   构造 Date，禁止整串扔给 new Date() 解析（同本文件其余日期处理既有纪律：整串解析在纯日期/
@@ -4999,7 +4987,12 @@
             const baseSummaryHtml = (e.event_type === 'estimate' && e.summary)
                 ? esc('预计完成：' + e.summary)
                 : (e.summary ? esc(e.summary) : '');
-            if (key === 'release_published' && e.summary) {
+            if (key === 'close') {
+                const origin = siArchiveOriginSnapshot(e, parsedPayload);
+                summaryHtml = origin
+                    ? `<div>任务产生原因：${esc(origin.label)}</div>${origin.note ? `<div style="white-space:pre-wrap;overflow-wrap:anywhere">补充说明：${esc(origin.note)}</div>` : ''}`
+                    : '任务产生原因：未记录';
+            } else if (key === 'release_published' && e.summary) {
                 const info = siFormatReleasePublishedSummary(e.summary, currentTitle);
                 if (info.ok) {
                     const statusLine = info.statusAtPublish
@@ -5867,7 +5860,7 @@
     }
 
     // 对接人受理侧（建单优化批 C1 §4 改动点2·前端 C2，方案 v1.2 §4.8）：仅「待受理」态渲染——回受理门
-    //   （reactivate/resubmit-intake）会把 intake 通知 5 列整组归零（intake-gate-sql.js
+    //   （reactivate/resubmit-intake）会把 intake 通知 6 列整组归零（intake-gate-sql.js
     //   SYS_CLEAR_INTAKE_NOTIFY_FIELDS_SQL），过了「待受理」这个状态本行不再有意义，不留 ghost 行。
     //   权限=**仅 admin**（后端路由级 requireAdmin，唯一放行条件——不同于其余四通道 admin∨受理人：
     //   受理人是通知对象本人，不给自己发，故本行 canOperate/canQueryRead 由调用方传 isAdminUser，
@@ -5902,10 +5895,8 @@
             btns += `<button class="u-btn-secondary u-nb-btn" onclick="siQueryReadStatus('intake')">查询已读</button>`;
             readBoxId = siReadBoxId('intake');   // 〔D6·S16〕
         }
-        // intake 通道无 notified_at 列（方案 §4 列清单明列 5 列：status/message_key/error/read_at/sent_by，
-        //   不含 notified_at）——siNotifyStatusText 的 notifiedAt 传 null 时天然回退「✅ 已通知」（无时刻）文案。
-        //   〔J18·§1.3〕故本通道**只能出单时刻**：查已读命中已读后行内是 `📖 已读 · 于 {已读时间}`，不得宣称双时刻。
-        return siNotifyRowHtml(label, iss.intake_notify_status, iss.intake_read_at, null, btns, undefined, iss.intake_notify_error, readBoxId);   // intake 无 notified_at 列（J18 单时刻）
+        // #75：受理通知成功发送时间与已读时间均可展示；未回填历史行由公共渲染器兼容。
+        return siNotifyRowHtml(label, iss.intake_notify_status, iss.intake_read_at, iss.intake_notified_at, btns, undefined, iss.intake_notify_error, readBoxId);
     }
 
     // 对接测试侧（工期对接测试与风险等级拆分 方案 v1.1 §6/§7·C4b）：D19 触发主体=开发视角——权限=本单
@@ -6563,12 +6554,12 @@
             //   可选两步链），siModalReason 其余调用点不动。
             case 'return': return siModalReturn(iss);
             // [工期对接测试与风险等级拆分 方案 v1.1 §7·C4b] 对接测试通过/打回——对接人视角两按钮。
-            //   [方案 D22-④·批2 2026-08-06] pass 改带测试说明文本框（凭证二选一：本轮已传附件可留空，
+            //   [方案 D22-④·批2 2026-08-06] pass 改带测试说明文本框（凭证二选一：本轮对接人或您本人已传合格测试附件可留空，
             //   否则须填）——见 siModalLiaisonTestPass；return 原因必填不变（同 return/reopen 等既有
             //   "打回类"动作复用 siModalReason，不新写一套弹窗）。
             case 'liaison_test_pass': return siModalLiaisonTestPass(iss);
             case 'liaison_test_return': return siModalReason(iss, 'liaison_test_return', '对接测试打回', '打回原因', '/liaison-test-return');
-            case 'close': return siConfirmSimple(iss, 'close', '确认归档（观察期结束）？', '/close');
+            case 'close': return siModalClose(iss);
             case 'hold': return siModalReason(iss, 'hold', '暂缓', '暂缓原因', '/hold');
             // S4（bug暂缓方案 §6.2/§6.3）：resume 改走专用弹窗 siModalResume——不再走 siConfirmSimple。
             //   ⚠️ codex 238 risk-1：siConfirmSimple（下方定义处）恒传 body:{}，S1 给 resume 加 reason 必填
@@ -6929,11 +6920,8 @@
     //     显示 `📖 已读 · …`，是真收益）；查询中/未读/无法查询/查询失败四态**后端零状态变化，刷新纯负收益**，
     //     一律只写结果框、**不得调 siAfterAction**。改动这里前先想清楚这条。
     //
-    //   持久化边界（J18·§1.3）：本函数覆盖的 5 个通道里 **intake 无 `intake_notified_at` 列** ⇒ 该通道
-    //     行内固化后只能出**单时刻** `📖 已读 · 于 {已读时间}`（由 siRenderIntakeNotifyRow 传 null 保证）；
-    //     结果框本身按 §3.3 就是"即时回执·单时刻简式"，五通道同一句，不区分。
-    //   闭口（J7）：本端点**从不产出 `unread_expired`**（全仓唯一产出点是 Data_Collab 查已读），故
-    //     不实现「超窗口未读」态——不是遗漏，是**显式闭口**，补了就是又一条死分支。
+    //   通知行可显示发送与已读时间；本查询结果框保持即时回执的单时刻简式。
+    //   第三态 unqueryable：按 expired/not_listed 分别展示超期或暂时无法查询。
     //   登记（S15 边界）：抽屉侧 5 颗「查询已读」按钮**有意不做点击禁用**——S15/J23 管的是"发送中"
     //     （发送有真实副作用，连点＝多条钉钉推送），而查已读是只读查询、固化 read_at 幂等，连点最多多打
     //     一次远程读；且结果框立刻显示「查询中…」已是在途反馈。与四页基准实现 Data_Correction
@@ -6968,7 +6956,7 @@
         if (d.read) {
             // §3.3 态②「已读」——**唯一触发固化刷新的分支**（后端本次请求已 UPDATE read_at 落库）。
             //   先把结论写进结果框（刷新失败时它就是保底），再刷新。
-            //   时间过 siFmtDT 归一（后端 read_at 是 `toLocaleString('zh-CN')` 原始串，同页所有时间展示都归一）。
+            //   时间过 siFmtDT 归一（后端 read_at 为稳定本地时间串，兼容历史 zh-CN 串，同页所有时间展示都归一）。
             const readTxt = d.read_at ? esc(siFmtDT(d.read_at)) : '—';
             if (box) box.innerHTML = `<span class="u-nt-ok">📖 已读 · 于 ${readTxt}</span>`;
             // 结果框挂不上（DOM 与预期不符）⇒ 回落 toast，与下面两处 `!box` 同一条纪律：宁可飘一条，也不静默。
@@ -6989,10 +6977,12 @@
             return;
         }
         if (!box) {   // 非已读态且结果框挂不上 ⇒ 回落 toast（同上：宁可飘一条，也不静默）
-            showToast(d.read_status === 'recipient_unresolved' ? '收件人未解析，无法查询已读' : '尚未读取', 'warning');
+            showToast(d.read_status === 'unqueryable' ? (d.unqueryable_reason === 'expired' ? '超期无法查询' : '暂时无法查询') : d.read_status === 'recipient_unresolved' ? '收件人未解析，无法查询已读' : '尚未读取', 'warning');
             return;
         }
-        if (d.read_status === 'recipient_unresolved') {
+        if (d.read_status === 'unqueryable') {
+            box.innerHTML = d.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>';
+        } else if (d.read_status === 'recipient_unresolved') {
             box.innerHTML = '<span class="u-nt-warn">⚠️ 收件人未解析，无法查询已读</span>';   // §3.3 态⑤
         } else {
             box.innerHTML = '<span class="u-nt-warn">⏳ 尚未读取</span>';   // §3.3 态③（`👀` 收编为 `⏳`）
@@ -7004,6 +6994,58 @@
     //   其余调用点不传 = undefined = 不渲染，零影响。
     //   ⚠️ 可信 HTML 通道（note() 直拼模板串不转义，最终进 innerHTML）：仅允许传静态字面量，
     //     禁止拼接用户输入/接口响应数据——否则形成 DOM XSS（codex 审 177 号 L-2：参数名带 trusted 前缀立约束）。
+    function siArchiveOriginSnapshot(event, parsedPayload) {
+        if (!event || event.action_code !== 'close' || event.event_type !== 'status_change') return null;
+        try {
+            const payload = parsedPayload === undefined ? JSON.parse(event.payload_json || 'null') : parsedPayload;
+            const origin = payload && payload.archive_origin;
+            if (!origin || origin.version !== 1 || typeof origin.code !== 'string' || !origin.code
+                || typeof origin.label !== 'string' || !origin.label || typeof origin.note !== 'string') return null;
+            return origin;
+        } catch (_) { return null; }
+    }
+    function siRenderArchiveOrigin(iss, timeline) {
+        if (!iss || iss.status !== '已关闭') return '';
+        const events = (timeline || []).filter(e => e.event_type === 'status_change' && e.to_status);
+        const latest = events.reduce((last, e) => !last || Number(e.id) > Number(last.id) ? e : last, null);
+        // Be conservative if an overlapping refresh observes a newer reopen event.
+        const origin = latest && latest.to_status === '已关闭' ? siArchiveOriginSnapshot(latest) : null;
+        return `<div class="u-detail-section" id="siArchiveOriginDetail"><h3>任务产生原因</h3><div>${origin ? esc(origin.label) : '未记录'}</div>${origin && origin.note ? `<div style="white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px">${esc(origin.note)}</div>` : ''}</div>`;
+    }
+    function siModalClose(iss) {
+        const reasons = META && META.archiveOriginReasons;
+        if (!Array.isArray(reasons) || !reasons.length) { showToast('归档选项尚未加载，请刷新后重试', 'error'); return; }
+        const labels = Object.fromEntries(reasons.map(r => [r.code, r.label]));
+        labels[''] = '请选择任务产生原因';
+        const current = siDetail && siDetail.issue && Number(siDetail.issue.id) === Number(iss.id) ? siDetail : null;
+        const members = iss.type === 'bug' && current ? (current.bug_cause_records || []).filter(d =>
+            !d.removed && (current.dev_assignees || []).some(member => member.id === d.dev_assignee_id && ['code_submitted', 'no_code'].includes(member.dev_status))
+            && typeof d.bug_cause_note === 'string' && d.bug_cause_note.trim()) : [];
+        const reference = members.length ? `<div class="u-form-group"><label>本轮开发原因（参考）</label>${members.map(d =>
+            `<div style="white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px">${esc(d.user_name || '开发人员')} · ${d.round_no ? '第' + esc(d.round_no) + '轮' : '轮次未记录'}：${esc(d.bug_cause_note)}</div>`).join('')}</div>` : '';
+        siModal('归档 ' + siIssueDisplayNoById(iss.id), [
+            note('观察期结束后归档。请选择促使本次任务产生的主要原因，多项因素可在说明中补充。'),
+            ...(reference ? [{ html: reference }] : []),
+            fSelectMap('archive_origin_code', '任务产生原因', ['', ...reasons.map(r => r.code)], '', labels),
+            fTextarea('archive_origin_note', '<span id="siArchiveOriginNoteLabel">补充说明（选填）</span>', '', false, '最多 500 字；选择其他时必填。')
+        ], async v => {
+            if (!reasons.some(r => r.code === v.archive_origin_code)) { showToast('请选择任务产生原因', 'error'); return false; }
+            const text = (v.archive_origin_note || '').trim();
+            if (v.archive_origin_code === 'other' && !text) { showToast('选择其他时请填写补充说明', 'error'); return false; }
+            if ([...text].length > 500) { showToast('补充说明不能超过 500 字', 'error'); return false; }
+            const result = await siApi('/sys-issues/' + iss.id + '/close', { method: 'POST', body: { archive_origin_code: v.archive_origin_code, archive_origin_note: text } });
+            if (!result.ok) { if (result.status >= 500) showToast('归档失败，请稍后重试；填写内容已保留', 'error'); else siApiErr(result); return false; }
+            showToast('归档完成', 'success'); return true;
+        }, '确认归档');
+        const select = document.getElementById('f_archive_origin_code');
+        const updateRequired = () => {
+            const required = select.value === 'other';
+            document.getElementById('siArchiveOriginNoteLabel').textContent = required ? '补充说明（必填）' : '补充说明（选填）';
+            document.getElementById('f_archive_origin_note').setAttribute('aria-required', String(required));
+        };
+        select.addEventListener('change', updateRequired);
+        updateRequired();
+    }
     function siModalReason(iss, action, title, label, path, trustedNoteHtml) {
         siModal(title, [
             ...(trustedNoteHtml ? [note(trustedNoteHtml)] : []),
@@ -7946,7 +7988,7 @@
         });
         siModal('对接测试通过 ' + siIssueDisplayNoById(iss.id), [
             note('确认对接测试通过？通过后单据进入「待验收」。'),
-            fTextarea('test_note', '测试说明', '', false, '本轮已传测试截图可留空；若本轮尚未上传测试附件，请填写测试说明作为凭证。', '本轮已传测试截图可留空'),
+            fTextarea('test_note', '测试说明', '', false, '仅本轮对接人或您本人在本轮上传的测试截图、交付附件可作凭证；否则请填写测试说明。', '本轮对接人或您本人已传测试凭证可留空'),
             // [D-L1] 版本冲突阻断区——默认隐藏，仅 liaison-test-pass 409 DELIVERY_CHANGED 后展示（同
             //   accept 弹层逐字同款 html，元素 id 复用同一组，两弹层互斥不冲突）。
             { k: null, html: `<div id="siAcceptConflictBanner" style="display:none;margin-top:6px">
@@ -10934,8 +10976,8 @@
         //   concurrent→发送未成功；唯一 quiet＝dry_run（理由见上）。
         if (!refreshed && !quiet) showToast(`${rowLabel}：${sentOk ? '已发送' : '发送未成功'}，批次详情刷新失败，可重新打开批次详情查看`, 'error');
     }
-    // 行级查已读（read_status 五值枚举单套判定，方案 §4.5 第2条尾注·登记清单④）：no_message_key/dry_run/
-    // recipient_unresolved/read/unread——不再有旧批次级"未发送即 400"这条独立错误码语义需要兼容。
+    // 行级查已读（read_status 六值枚举单套判定，方案 §4.5 第2条尾注·登记清单④）：no_message_key/dry_run/
+    // recipient_unresolved/read/unread/unqueryable——不再有旧批次级"未发送即 400"这条独立错误码语义需要兼容。
     // L4（codex 预筛）：点击即禁用按钮至请求返回（finally 恢复）——钉钉已读查询是真实外呼（同步远程接口），
     // 连点会打出多次不必要的外呼，与"发通知"按钮防重复点击同一顾虑。
     // ===== 〔D6 · 矩阵 T35-T40/T44 · 方案 §3.3〕结果同样从 toast 切**行内驻留结果框** =====
@@ -10976,7 +11018,11 @@
                     }
                     break;
                 }
-                // §3.3 态③「窗口内未读」（`👀` 收编为 `⏳`）。超窗态 unread_expired 本端点无产出（J7）⇒ 不实现。
+                // 只有明确 UNREAD 证据才展示未读；第三态保持灰色，不刷新详情。
+                case 'unqueryable': {
+                    put(d.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>', d.unqueryable_reason === 'expired' ? '超期无法查询' : '暂时无法查询');
+                    break;
+                }
                 case 'unread': put('<span class="u-nt-warn">⏳ 尚未读取</span>', '尚未读取'); break;
                 // §3.3 态⑤「无法查询」＝ `⚠️ {原因}，无法查询已读`，原因短语取自冻结映射表 §6.5：
                 //   no_message_key→尚无有效发送记录 / dry_run→演练发送（未真实外呼）/ recipient_unresolved→收件人未解析
@@ -12205,7 +12251,7 @@
     //   版本守卫/columns 常量标识符三件套照 Data_Correction.html corrInitExport 现范式（now 通道已收进
     //   共享层，本页 value() 直接写 ctx.overdueRule(r) 即得）。
     // ============================================================
-    const SI_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+    const SI_UEXPORT_KIT_EXPECTED = 'uexport2';   // 须与 <script src="...u-export.js?v=..._uexport2"> 缓存串尾部一致
 
     // 系统迭代日期纪律与数据修正/数据协作不同（§3.3 统一规则原文）：按**日期分量**比较、时长只报天——
     //   避免 deadline 日期/日期时间混存形态带来的时区/解析坑。判定用 isValidDatePrefix 取前 10 位字典序

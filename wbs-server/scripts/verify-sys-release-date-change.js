@@ -16,7 +16,7 @@
 //   [8] 理由超长 400 TOO_LONG
 //   [9] 非字符串理由 400 INVALID
 //   [10] C1 硬拦仍先于理由闸（旧值过期 + 改成昨天 → PLANNED_DATE_BEFORE_TODAY，不是理由码）
-//   [11] 零成员批次逾期后带理由改期 → 200（不拒绝）+ 零 timeline 行 + 理由无处落痕改走 warn 日志（M1）
+//   [11] 零成员批次逾期后带理由改期 → 200（不拒绝）+ 零 timeline 行 + 批次审计保留理由，零 warn
 //
 // 断言纪律：精确状态码 + 精确 error code；正例断言真实落库副作用（timeline summary/payload_json 逐值核对，
 //   执行人子表软删与否）；负例同样断言"零副作用"（planned_date 未变、无新 timeline 行）。
@@ -24,6 +24,7 @@
 // 时钟纪律（照 verify-sys-release-overdue.js C2c·M2 范式）：overdue_days 精确值用 `pastDateStr(N)` 构造
 //   旧值 + 断言时现查 `todayStr()` 现算期望差值，不写死天数；整个文件包一层跨零点检测 + 子进程重跑保护。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -53,11 +54,16 @@ const authenticateToken = (req, res, next) => {
 };
 const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin') ? next() : res.status(403).json({ error: '需要 admin' });
 
-// [C4b·M1] 捕获 warn 日志——供「零成员批次带理由」用例断言日志真实出现（不能静默吞）。
+// #65：捕获 warn，断言零成员改期理由已入审计，不再依靠日志保留。
 const warnLogs = [];
+let injectCasConflict = false, injectAuditFailure = false;
 const mod = require('../routes/sys-iteration')({
   logger: { info: noop, warn: (...args) => { warnLogs.push(args.join(' ')); }, error: noop, debug: noop },
-  db, dbRunAsync: run, dbGetAsync: get, dbAllAsync: all,
+  db, dbRunAsync: async (sql, params) => {
+    if (injectCasConflict && sql.startsWith('UPDATE sys_releases SET planned_date = ?')) return {changes:0};
+    if (injectAuditFailure && sql.trim().startsWith('INSERT INTO sys_release_audit')) throw new Error('injected audit failure');
+    return run(sql, params);
+  }, dbGetAsync: get, dbAllAsync: all,
   authenticateToken, requireAdmin,
   ...require('./_sys-attach-test-deps'),
 });
@@ -158,7 +164,7 @@ async function main() {
   await waitReady();
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, status) VALUES (1,'admin','管理员','admin','active')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1）');
 
@@ -385,7 +391,7 @@ async function main() {
     ok('[10] 旧值已过期 + 新值早于今天（且未带 reason）：命中 C1 硬拦 PLANNED_DATE_BEFORE_TODAY，而非理由闸（校验顺序 C1 在理由闸之前）');
   }
 
-  // ═══ [11]（C4b·Opus 预筛 M1 收口）零成员批次·逾期后带理由改期 → 200 + 无处落痕改走 warn 日志 ═══
+  // ═══ [11]（C4b·Opus 预筛 M1 收口）零成员批次·逾期后带理由改期 → 200 + 批次审计保留理由 ═══
   {
     const oldDate = await pastDateStr(2);
     const rel11 = await mkRelease({ title: '[11]零成员逾期带理由', plannedDate: oldDate });   // 未 addIssueTo，零成员
@@ -398,12 +404,56 @@ async function main() {
     assert.strictEqual(await plannedDateOf(rel11), newDate, '[11] planned_date 已更新');
     const tl11 = await timelineByCode(rel11, 'release_date_change');
     assert.strictEqual(tl11.length, 0, '[11] 零成员=零 timeline 行（release_date_change 走"每受影响成员各写一条"，无成员即无行）');
-    const newWarns = warnLogs.slice(warnCountBefore);
-    assert.strictEqual(newWarns.length, 1, `[11] 应恰产生 1 条 warn 日志，实得 ${newWarns.length}：${JSON.stringify(newWarns)}`);
-    assert.ok(newWarns[0].includes(`releaseId=${rel11}`) && newWarns[0].includes('RELDC 零成员夹具·理由无处落痕'), `[11] warn 日志应含 releaseId 与理由原文，实际 ${newWarns[0]}`);
-    ok('[11] 零成员批次逾期后带理由改期：200 成功（不因理由无处落痕而拒绝已完成的操作）+ 零 timeline 行 + 恰 1 条 warn 日志含 releaseId 与理由原文（登记接受：本端点不写 sys_release_audit，零成员是纯理论边界，见 applyReleaseChange 内 M1 注释）');
+    const audit = await all('SELECT * FROM sys_release_audit WHERE release_id=?', [rel11]);
+    assert.strictEqual(audit.length, 1, '[11] 零成员改期恰一条批次审计');
+    assert.strictEqual(audit[0].action, 'edit', '[11] action=edit');
+    assert.deepStrictEqual(JSON.parse(audit[0].changes_json), [{field:'planned_date',old:oldDate,new:newDate,overdue_change_reason:'RELDC 零成员夹具·理由无处落痕'}], '[11] changes_json 全等');
+    assert.strictEqual(audit[0].member_count, 0, '[11] member_count=0');
+    assert.deepStrictEqual(JSON.parse(audit[0].member_issue_ids), [], '[11] member_issue_ids=[]');
+    assert.strictEqual(audit[0].reason, null, '[11] reason 列保持 NULL');
+    assert.strictEqual(JSON.parse(audit[0].release_json).planned_date, oldDate, '[11] 审计快照保存旧日期');
+    assert.strictEqual(warnLogs.length-warnCountBefore, 0, '[11] 零 warn');
+    ok('[11] 零成员逾期改期：恰一条 edit 审计，changes_json 与成员集合全等，零 warn');
   }
 
+
+  // [12] 有成员的普通改期：审计与成员时间线共同写入，无逾期理由键。
+  {
+    const oldDate=await futureDateStr(4),newDate=await futureDateStr(5);
+    const rel=await mkRelease({plannedDate:oldDate}),member=await mkIssue();
+    await addIssueTo(rel,member);
+    const r=await call('POST', '/api/sys-releases/'+rel+'/update-planned-date', adminTok, {planned_date:newDate});
+    assert.strictEqual(r.status,200,'[12] 有成员普通改期 200');
+    const audit=await all('SELECT * FROM sys_release_audit WHERE release_id=?',[rel]);
+    assert.strictEqual(audit.length,1,'[12] 恰一条审计');
+    assert.strictEqual(audit[0].action,'edit','[12] action=edit');
+    assert.deepStrictEqual(JSON.parse(audit[0].changes_json),[{field:'planned_date',old:oldDate,new:newDate}],'[12] 普通改期没有 overdue_change_reason 键');
+    assert.strictEqual(audit[0].member_count,1,'[12] 成员数');
+    assert.deepStrictEqual(JSON.parse(audit[0].member_issue_ids),[member],'[12] 成员集合');
+    const timeline=await timelineByCode(rel,'release_date_change');
+    assert.strictEqual(timeline.length,1,'[12] 成员时间线恰一条');
+    assert.deepStrictEqual(JSON.parse(timeline[0].payload_json),{planned_date_old:oldDate,planned_date_new:newDate,overdue_days:null,reason:null,release_no:await releaseNoOf(rel),changes:[{field:'planned_date',old:oldDate,new:newDate}]},'[12] 原成员时间线 payload 不变');
+    const noopResponse=await call('POST','/api/sys-releases/'+rel+'/update-planned-date',adminTok,{planned_date:newDate});
+    assert.strictEqual(noopResponse.body.changed,false,'[12] 同值 no-op');
+    assert.strictEqual((await all('SELECT id FROM sys_release_audit WHERE release_id=?',[rel])).length,1,'[12] no-op 不新增审计');
+    ok('[12] 有成员普通改期一条审计，无理由键，原时间线不变；同值不新增审计');
+  }
+  // [13/14] Inject only the database outcome at the existing dependency boundary.
+  for(const failure of ['cas','audit']) {
+    const oldDate=await futureDateStr(4),newDate=await futureDateStr(5),rel=await mkRelease({plannedDate:oldDate});
+    const member=await mkIssue();await addIssueTo(rel,member);
+    let r;
+    try {
+      injectCasConflict=failure==='cas';injectAuditFailure=failure==='audit';
+      r=await call('POST','/api/sys-releases/'+rel+'/update-planned-date',adminTok,{planned_date:newDate});
+    }finally{injectCasConflict=false;injectAuditFailure=false;}
+    assert.strictEqual(r.status,failure==='cas'?409:500,'[13/14] '+failure+' status');
+    if(failure==='cas')assert.strictEqual(r.body.code,'CONCURRENT_STATE_CHANGE','[13] CAS error code');
+    assert.strictEqual(await plannedDateOf(rel),oldDate,'[13/14] 日期回滚');
+    assert.deepStrictEqual(await all('SELECT id FROM sys_release_audit WHERE release_id=?',[rel]),[],'[13/14] 零审计');
+    assert.deepStrictEqual(await timelineByCode(rel,'release_date_change'),[],'[13/14] 零改期时间线');
+    ok('[13/14] '+failure+' 失败：日期、审计、时间线零残留');
+  }
   console.log(`\n✅ 全部 ${passed} 项通过\n`);
   finishWithCrossMidnightGuard(0);
 }

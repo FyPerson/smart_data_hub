@@ -19,6 +19,11 @@
  *   截图落 scripts/__screenshots__/notify-unify/（首次运行即基线；已存在则另存 .actual.png 供人工比对）
  */
 'use strict';
+// --isolated-three-state exercises actual query functions and CSS without a real DB.
+if(process.argv.includes('--isolated-three-state')){
+ const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'test-notify-three-state-playwright.js')],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
+ process.exit(result.status===0?0:1);
+}
 
 const path = require('path');
 const fs = require('fs');
@@ -184,6 +189,8 @@ async function siRow(page, issueId, labelKeyword) {
         console.log('\n── B 组：SI 查已读六态（route 拦截接管·真实端点与钉钉零触达）──');
         await setDevNotify(idA, { notify_status: 'sent', notified_at: '2026-08-09 10:00:00', read_at: null, notify_error: null, notify_message_key: 'dryrun-5c-fake' });
         const B_CASES = [
+            { key: 'expired', body: { read:false, read_status:'unqueryable', unqueryable_reason:'expired' }, want:'— 超期无法查询', slot:'u-nt-muted', title:'钉钉只保留约 7 天的已读记录' },
+            { key: 'not_listed', body: { read:false, read_status:'unqueryable', unqueryable_reason:'not_listed' }, want:'— 暂时无法查询', slot:'u-nt-muted', title:'钉钉未返回该收件人的已读记录，可稍后再查' },
             { key: 'unread', body: { read: false, read_status: 'unread' }, want: '⏳ 尚未读取', slot: 'u-nt-warn' },
             { key: 'unresolved', body: { read: false, read_status: 'recipient_unresolved' }, want: '⚠️ 收件人未解析，无法查询已读', slot: 'u-nt-warn' },
             // 〔read 态特殊〕它是**唯一会触发固化刷新**的分支。mock 下后端并没真落 read_at，
@@ -219,11 +226,17 @@ async function siRow(page, issueId, labelKeyword) {
                 const el = document.querySelector('[id^="siReadBox_"]');
                 if (!el) return null;
                 const s = el.querySelector('[class*="u-nt-"]');
-                return { text: el.textContent.trim(), slot: s ? [...s.classList].find((c) => c.startsWith('u-nt-')) : null };
+                const ref=document.createElement('span');ref.className='u-nt-muted';document.body.appendChild(ref);
+                const plain=document.createElement('span');document.body.appendChild(plain);
+                const mutedColor=getComputedStyle(ref).color,plainColor=getComputedStyle(plain).color;ref.remove();plain.remove();
+                return { text: el.textContent.trim(), slot: s ? [...s.classList].find((c) => c.startsWith('u-nt-')) : null, title:s?.title, color:s?getComputedStyle(s).color:null, mutedColor, plainColor };
             });
             if (c.want !== null) {
                 if (must(!!box, `B/${c.key} 行内结果框存在（D6：结果不再走 toast）`)) {
                     must(box.text.includes(c.want), `B/${c.key} 结果框文案命中「${c.want}」`, `实得："${box.text}"`);
+                    if(c.body.read_status==='unqueryable') {
+                        must(box.text===c.want,'第三态文案全等');must(box.title===c.title,'第三态 title 全等');must(box.color===box.mutedColor,'第三态计算样式与 muted 相同');must(box.mutedColor!==box.plainColor,'muted 参照色不同于正文色（样式规则真实生效）');
+                    }
                     must(box.slot === c.slot, `B/${c.key} 结果框槽类=${c.slot}`, `实得 ${box.slot}`);
                 }
             }
@@ -237,9 +250,7 @@ async function siRow(page, issueId, labelKeyword) {
             await shot(pB, `B-read-${c.key}-1440`);
             await pB.unroute('**/api/sys-issues/*/notify-read-status*');
         }
-        // 超窗态：SI 后端零产出（J7 显式闭口）——不实现即不应有该文案，反向断言
-        must(!(await pB.content()).includes('已超过钉钉可查询时间'),
-            'B/超窗态 J7 显式闭口：SI 不实现 unread_expired（页面无该文案＝没造死分支）');
+        // 第三态由上方 expired/not_listed 两格正向验证。
         await ctxB.close();
 
         // ══════ C 组 · R1 批量五态（route 拦截）══════

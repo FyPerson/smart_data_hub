@@ -348,7 +348,7 @@ const IMPROVEMENT_FLOW_TRANSITIONS = [
     action: 'close',                        // 关闭：已上线 → 已关闭（admin）—— 端点 C4
     from: ['已上线'], to: '已关闭',
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],
+    requiredPayload: ['archive_origin_code'],
     sideEffects: ['closed_at=now'],
     timelineEvent: 'status_change', actionCode: 'close',
     notifyAfterCommit: null,
@@ -686,7 +686,7 @@ const FEATURE_FLOW_TRANSITIONS = [
     action: 'close',                        // 关闭：已上线 → 已关闭（admin）—— 端点 C4
     from: ['已上线'], to: '已关闭',
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],
+    requiredPayload: ['archive_origin_code'],
     sideEffects: ['closed_at=now'],
     timelineEvent: 'status_change', actionCode: 'close',
     notifyAfterCommit: null,
@@ -1085,7 +1085,7 @@ const BUG_FLOW_TRANSITIONS = [
     action: 'close',                        // 关闭（归档）：已上线 → 已关闭（admin）—— §6.5
     from: ['已上线'], to: '已关闭',
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],
+    requiredPayload: ['archive_origin_code'],
     sideEffects: ['closed_at=now'],
     timelineEvent: 'status_change', actionCode: 'close',
     notifyAfterCommit: null,
@@ -1289,7 +1289,7 @@ const CONFIG_FLOW_TRANSITIONS = [
     action: 'close',                        // 关闭：已上线 → 已关闭（同 improvement，无差异）
     from: ['已上线'], to: '已关闭',
     roleGuard: 'admin', ownerGuard: null,
-    requiredPayload: [],
+    requiredPayload: ['archive_origin_code'],
     sideEffects: ['closed_at=now'],
     timelineEvent: 'status_change', actionCode: 'close',
     notifyAfterCommit: null,

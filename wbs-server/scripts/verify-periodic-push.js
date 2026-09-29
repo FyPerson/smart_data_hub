@@ -20,6 +20,7 @@
 //     其余(§6.2 J)、发送成功/invalidStaffIdList部分失败→failed、钉钉凭证缺失(no_config)整体502不落库、
 //     push留痕(recipient_name_snapshot=录入姓名)+push必须绑定run_id；H-1 userid 硬 gate；requireAdmin 401。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');
@@ -431,7 +432,7 @@ async function endpointTests() {
   await new Promise((res, rej) => { let n = 0; const t = setInterval(() => { if (modWF._internals.PERIODIC_SCHEMA_STATE.ready) { clearInterval(t); res(); } else if (++n > 500) { clearInterval(t); rej(new Error('WF readiness 超时')); } }, 10); });
   const appWF = express(); appWF.use(express.json()); appWF.use('/api', modWF.router);
   const serverWF = http.createServer(appWF);
-  await new Promise((res) => serverWF.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(serverWF);
   const portWF = serverWF.address().port;
   const callWF = (m, p, tok, body) => new Promise((resolve, reject) => {
     const data = body !== undefined ? JSON.stringify(body) : null;
@@ -566,7 +567,7 @@ async function endpointTests() {
   appBad.use(express.json());
   appBad.use('/api', modBad.router);
   const serverBad = http.createServer(appBad);
-  await new Promise((res) => serverBad.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(serverBad);
   const portBad = serverBad.address().port;
   const callBad = (method, p, tok, body) => new Promise((resolve, reject) => {
     const data = body !== undefined ? JSON.stringify(body) : null;
@@ -645,7 +646,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
 
   await unitTests();

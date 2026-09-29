@@ -7,6 +7,7 @@
 // （建单直连 SQL + POST /submit 拿到真实 submit/no_code 事件），仅"查无事件 500"用例刻意直连 SQL 伪造
 // dev_status（模拟数据不变量被绕过的异常态，验证 fail-closed 行为，非常规路径）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 process.env.SYS_TEST_HOOKS = '1';   // 与其余 sys verify 脚本一致（虽本脚本未用注入钩子，保持环境一致）
 
@@ -199,7 +200,7 @@ async function main() {
     (1,'admin','管理员','admin','13800000001'),(5,'dev5','开发甲','user','13800000005'),
     (6,'dev6','开发乙','user','13800000006'),(9,'dev9','开发丙（非在册）','user','13800000009'),
     (13,'liaison13','示例对接人','user','19900000024')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务');
 
   // ══════════════════════════════════════════════════════════════════════

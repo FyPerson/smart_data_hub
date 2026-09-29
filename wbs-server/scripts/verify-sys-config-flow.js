@@ -43,6 +43,7 @@
 //       **不是**独立证明 sysTxnMutex 事务级串行化本身（未做服务端插桩记录两请求进入临界区的实际
 //       顺序，不把本测试当作 mutex 判别证据）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const path = require('path');   // [S1d·L4] 前后端常量对拍需读取 Sys_Iteration.html 源文件
@@ -219,7 +220,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1/admin2 / 受理人13 / 技术负责人7 / dev5,6,8）');
 
@@ -627,7 +628,7 @@ async function main() {
     //   verify-sys-bug-transitions.js [C6负例]「裸插入无 assignee → 409 NO_ASSIGNEE_FOR_DEV_STATE」
     //   互为镜像：那条证"没有开发负责人时 close 被挡"，本组证"有开发负责人时 close 确实能成功"。
     //   独立成组 [H-close]（而非并入 [H] 末尾 ok）——单据结构直接复用 [H] direct 分支的 id2，不另起新单。
-    const closeR = await call('POST', `/api/sys-issues/${id2}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id2}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[H-close] config close（有 assignee）应 200, got ${closeR.status} ${JSON.stringify(closeR.body)}`);
     const id2RowAfterClose = await rowOf(id2);
     assert.strictEqual(id2RowAfterClose.status, '已关闭', '[H-close] config close → 已关闭');
@@ -863,7 +864,7 @@ async function main() {
     assert.strictEqual(reopen1.body.code, 'INVALID_TRANSITION', '[M] code=INVALID_TRANSITION（config 无 reopen 条目，findTransition 恒 null）');
 
     // 已关闭态
-    await call('POST', `/api/sys-issues/${id1}/close`, adminTok, {});
+    await call('POST', `/api/sys-issues/${id1}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(await statusOf(id1), '已关闭', 'M 夹具：id1 已关闭');
     const reopen2 = await call('POST', `/api/sys-issues/${id1}/reopen`, adminTok, { reason: '重开试试2' });
     assert.strictEqual(reopen2.status, 400, `[M] 已关闭态 reopen 应同码 400, got ${reopen2.status} ${JSON.stringify(reopen2.body)}`);

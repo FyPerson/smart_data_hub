@@ -30,6 +30,7 @@
 //   ③ [PG] 组升全序列比对（deepStrictEqual 而非 min/max + 无交集）。
 //   ④ before_id 解析加严（regex + Number.isSafeInteger），[PG] 组补加严专项用例。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -107,7 +108,7 @@ async function main() {
   await run(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT DEFAULT 'active', phone TEXT, dingtalk_user_id TEXT)`);
   await run(`INSERT INTO users (id, username, display_name, role, phone) VALUES
     (1,'admin','管理员','admin','13800000001'),(5,'dev','开发王','user','13800000005'),(13,'wangtaotao','示例对接人','user','19900000024')`);
-  await new Promise((res) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; res(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   okReady('readiness ready + HTTP harness（admin1 / 受理人13 / dev5）');
 
   // ═══ [P] 权限：非 admin 403（列表 + 详情两个端点）+ 未登录 401 ═══

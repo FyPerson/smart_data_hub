@@ -16,6 +16,7 @@
 //   [328a 回卷] S6/F6/S8 补齐完整零副作用 snapshot（row 全字段深比对 + timeline 计数，此前 S6 只比对
 //     dev_estimated_at 单字段、S8 完全没有 snapshot）。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -153,7 +154,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

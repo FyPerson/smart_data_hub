@@ -14,6 +14,7 @@
 //   原因→400（第二轮同样拦）→带原因→200（+ bug_cause_records 两轮历史可见性） ⑧非 string 类型→400
 //   （328a 回卷：8a/8b 各自失败后独立 snapshot，不再共用一个前后对照）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -135,7 +136,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 

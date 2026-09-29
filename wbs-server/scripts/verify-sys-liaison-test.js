@@ -40,6 +40,7 @@
 // in-process app + 内存库 + 自签 token，照 verify-sys-multidev-members.js 范式：issue/roster 直接 raw SQL
 // 造数（本文件测的是 runWGate 决策树与两条新引擎边，非建单/受理/指派链路本身），真实 HTTP 调用触发被测端点。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -336,7 +337,7 @@ async function main() {
   await run(`INSERT INTO users (id, username, display_name, role, status, phone) VALUES
     (1,'admin','管理员','admin','active','13900000001'),(5,'dev5','开发甲','user','active','13900000005'),(6,'dev6','开发乙','user','active','13900000006'),
     (7,'dev7','开发丙','user','active','13900000007'),(8,'dev8','开发丁','user','active','13900000008'),(13,'wangtaotao','示例对接人','user','active','13900000013')`);
-  await new Promise((resolve) => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app, null); port = server.address().port; }
   ok('readiness ready + HTTP harness 起服务');
 
   // ══════════════════════════════════════════════════════════════════════
@@ -484,6 +485,32 @@ async function main() {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // #58: run this table before legacy positives so removing the uploader filter
+  // fails first on the developer-upload negative, not an incidental later assertion.
+  for (const sample of [
+    {name:'开发上传', uploader:5, token:liaisonTok, recipient:13, status:400},
+    {name:'对接人上传并通过', uploader:13, token:liaisonTok, recipient:13, status:200},
+    {name:'admin 上传并通过', uploader:1, token:adminTok, recipient:13, status:200},
+    {name:'admin 上传对接人通过', uploader:1, token:liaisonTok, recipient:13, status:400},
+    {name:'admin 采用本轮对接人凭证', uploader:13, token:adminTok, recipient:13, status:200},
+    {name:'历史 NULL 本人上传', uploader:1, token:adminTok, recipient:null, status:200},
+    {name:'历史 NULL 他人上传', uploader:13, token:adminTok, recipient:null, status:400},
+  ]) {
+    const {id} = await mkFreshLiaisonTestIssue();
+    if (sample.recipient === null) {
+      // Simulate the explicitly supported historical row before recipient snapshots existed.
+      await run('UPDATE sys_issues SET liaison_test_recipient_id=NULL, liaison_test_recipient_name=NULL WHERE id=?', [id]);
+    }
+    const attachment = await run(      `INSERT INTO sys_issue_attachments (issue_id,attachment_type,file_name,original_name,status,uploaded_by,uploaded_by_name)
+       VALUES (?, 'delivery', 'evidence.zip', '测试凭证.zip', 'active', ?, '凭证上传人')`, [id, sample.uploader]);
+    const response = await call('POST', '/api/sys-issues/' + id + '/liaison-test-pass', sample.token, {});
+    assert.strictEqual(response.status, sample.status, '[58] ' + sample.name + ' HTTP 状态');
+    assert.strictEqual(response.body.code, sample.status === 400 ? 'LIAISON_TEST_PASS_EVIDENCE_REQUIRED' : undefined, '[58] ' + sample.name + ' 错误码');
+    assert.strictEqual(await statusOf(id), sample.status === 400 ? '待对接测试' : '待验证', '[58] ' + sample.name + ' 单据状态');
+    if (sample.status === 200) assert.deepStrictEqual(JSON.parse((await latestTimeline(id)).payload_json).attachment_ids, [attachment.lastID], '[58] 合格附件精确留痕');
+    ok('[58] ' + sample.name + ' → ' + sample.status);
+  }
+
   // [6] liaison_test_pass：正例 + ①b 复查（roster 被绕过写坏 → 409）+ hasDeliverable 反例
   // ══════════════════════════════════════════════════════════════════════
   {
@@ -514,7 +541,7 @@ async function main() {
     //   AUTOINCREMENT id 严格递增、不依赖挂钟精度，同秒场景天然消解）。
     const insId1b = await run(
       `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-       VALUES (?, 'screenshot', 'x.png', '测试截图.png', 'active', 5, '开发甲')`,
+       VALUES (?, 'screenshot', 'x.png', '测试截图.png', 'active', 1, '管理员')`,
       [id1b]
     );
     const passAdminR = await call('POST', `/api/sys-issues/${id1b}/liaison-test-pass`, adminTok, {});
@@ -662,7 +689,7 @@ async function main() {
       const { id } = await mkFreshLiaisonTestIssue();
       const insDelivery = await run(
         `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-         VALUES (?, 'delivery', 'd.zip', '交付物.zip', 'active', 5, '开发甲')`,
+         VALUES (?, 'delivery', 'd.zip', '交付物.zip', 'active', 13, '示例对接人')`,
         [id]
       );
       const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, {});
@@ -682,7 +709,7 @@ async function main() {
       const { id } = await mkFreshLiaisonTestIssue();
       const insBoth = await run(
         `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-         VALUES (?, 'delivery', 'both.zip', '两者皆有.zip', 'active', 5, '开发甲')`,
+         VALUES (?, 'delivery', 'both.zip', '两者皆有.zip', 'active', 13, '示例对接人')`,
         [id]
       );
       const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, { test_note: '说明与附件同时提供' });
@@ -711,7 +738,7 @@ async function main() {
       // 第一轮进入之后新插入一个附件（id 必然 > 第一轮水位 0）。
       const ins1 = await run(
         `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-         VALUES (?, 'screenshot', 'r1.png', '第一轮截图.png', 'active', 5, '开发甲')`,
+         VALUES (?, 'screenshot', 'r1.png', '第一轮截图.png', 'active', 13, '示例对接人')`,
         [id]
       );
       assert.ok(ins1.lastID > row1.liaison_test_attachment_watermark, '[6h] 前置：新附件 id 确实 > 第一轮水位（正面凭证的构造前提）');
@@ -756,7 +783,7 @@ async function main() {
       // 反证收尾：本轮补一个新附件（id > 第二轮水位）后应能正常通过，证闸门本身没坏，只精确卡在"水位"这一条件上。
       const ins2 = await run(
         `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-         VALUES (?, 'screenshot', 'r2.png', '第二轮截图.png', 'active', 5, '开发甲')`,
+         VALUES (?, 'screenshot', 'r2.png', '第二轮截图.png', 'active', 13, '示例对接人')`,
         [id]
       );
       assert.ok(ins2.lastID > row2.liaison_test_attachment_watermark, '[6h] 前置：第二轮新附件 id 确实 > 第二轮水位');
@@ -774,7 +801,7 @@ async function main() {
       const { id } = await mkFreshLiaisonTestIssue();
       await run(
         `INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, status, uploaded_by, uploaded_by_name)
-         VALUES (?, 'spec', 's.pdf', '需求材料.pdf', 'active', 5, '开发甲')`,
+         VALUES (?, 'spec', 's.pdf', '需求材料.pdf', 'active', 13, '示例对接人')`,
         [id]
       );
       const r = await call('POST', `/api/sys-issues/${id}/liaison-test-pass`, liaisonTok, {});
@@ -1941,7 +1968,7 @@ async function main() {
     realAuthApp.use(express.json());
     realAuthApp.use('/api', authenticateTokenReal, mod.router);
     let realAuthServer, realAuthPort;
-    await new Promise((resolve) => { realAuthServer = realAuthApp.listen(0, () => { realAuthPort = realAuthServer.address().port; resolve(); }); });
+    realAuthServer = await listenOnSafePort(realAuthApp, null); realAuthPort = realAuthServer.address().port;
     function callReal(method, p, tok, body) {
       return new Promise((resolve, reject) => {
         const data = body !== undefined ? JSON.stringify(body) : null;

@@ -18,6 +18,7 @@
 //   本文件转为**封禁契约锁定**（防日后被重新接活却没人发现回归）：4 端点 × 多角色 × 多种 body 形态
 //   一律 409 同一个 code，且事后回读落库零副作用。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -141,7 +142,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务');
 

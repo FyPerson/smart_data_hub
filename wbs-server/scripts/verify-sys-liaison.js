@@ -16,6 +16,7 @@
 //       （纯数字→id / 否则→oa_number；不硬校验不 join；correction 表异常吞为 null 由 try/catch 兜底，此处正路径验证）
 //   [C] 变更流零回归 canary：admin assign feature 正常 200 / 非 admin 非白名单(dev5) feature assign 403（中间件层不变）
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -136,7 +137,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   ok('readiness ready + HTTP harness 起服务（对接人 id=7 示例发布者/13 示例对接人，对齐生产语义）');
 

@@ -43,6 +43,7 @@
 //
 // 断言纪律：全程精确状态码 + 精确 error code，不用 status>=400 弱判据；正例断言真实落库副作用，非仅状态码。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -171,7 +172,7 @@ async function buildMutantInstance(mutantFactory, deps) {
   mmod.initSchema();
   await waitReadyOn(MI);
   let mserver = null;
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mmod.router); mserver = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mmod.router); mserver = await listenOnSafePort(app); }
   const mcall = makeCaller(() => mserver.address().port);
   return { mod: mmod, internals: MI, call: mcall, close: () => { try { mserver.close(); } catch (_) { /* ignore */ } } };
 }
@@ -206,7 +207,7 @@ async function main() {
     (5,'dev5','开发甲','user','active','13800000005'),
     (6,'dev6','开发乙','user','active','13800000006'),
     (7,'dev7','开发丙','user','active','13800000007')`);
-  await new Promise(res => {
+  {
     const app = express();
     app.use(express.json());
     app.use('/api', mod.router);
@@ -216,8 +217,8 @@ async function main() {
       }
       next(err);
     });
-    server = app.listen(0, '127.0.0.1', res);
-  });
+    server = await listenOnSafePort(app);
+  }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6,7）');
 
@@ -788,7 +789,7 @@ async function main() {
     modThrowLogger.initSchema();
     await waitReadyOn(modThrowLogger._internals);
     let throwServer = null;
-    await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', modThrowLogger.router); throwServer = app.listen(0, '127.0.0.1', res); });
+    { const app = express(); app.use(express.json()); app.use('/api', modThrowLogger.router); throwServer = await listenOnSafePort(app); }
     const throwCall = makeCaller(() => throwServer.address().port);
     try {
       // 前置对象图走**主实例**既有 helper 构造（同 [9c]/[9d] 既有手法）——建单/加单端点未被替换 logger，

@@ -33,6 +33,7 @@
 // 断言纪律：精确状态码 + 精确 error code，不用 status>=400 弱判据；正例断言真实落库副作用，非仅状态码；
 //   负例同样断言"零副作用"（release_id/执行人两列/通知列/token/timeline 全不变），不止看状态码本身。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -186,7 +187,7 @@ async function main() {
     (1,'admin','管理员','admin','active','13800000001'),
     (5,'dev5','开发甲','user','active','13800000005'),
     (6,'dev6','开发乙','user','active','13800000006')`);
-  await new Promise(res => { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = app.listen(0, '127.0.0.1', res); });
+  { const app = express(); app.use(express.json()); app.use('/api', mod.router); server = await listenOnSafePort(app); }
   port = server.address().port;
   ok('readiness ready + HTTP harness（admin1 / dev5,6）');
 

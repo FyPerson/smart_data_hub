@@ -19,6 +19,7 @@
 //   [F] 直调 computeSysEtaStatsForRows/round1Pct 边界：released_total=0（无样本）→ rate=null 非
 //       NaN/Infinity；deadline 畸形（理论不可达，防御性）→ 不计入分子分母，不抛异常。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -162,7 +163,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users');
 
@@ -267,7 +268,7 @@ async function main() {
     app2.use(express.json());
     app2.use('/api', mod2.router);
     const server2 = http.createServer(app2);
-    await new Promise((res) => server2.listen(0, '127.0.0.1', res));
+    await listenOnSafePort(server2);
     const port2 = server2.address().port;
     function call2(method, p, tok, body) {
       return new Promise((resolve, reject) => {

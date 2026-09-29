@@ -5,7 +5,7 @@
 //   单命令跑全量（静态可分析·可白名单），同时保持退出码校验制（任一套件红 ⇒ 本脚本 exit 1，
 //   杜绝管道 |tail 吞退出码类事故——见 13354ac 沉淀）。
 // 行为契约：
-//   - 扫描面 = scripts/verify-sys-*.js 全部 + 静态守卫（见文件内 GUARDS 数组——数量与具体名单
+//   - 扫描面 = scripts/verify-sys-*.js 全部 + 台账矩阵/对账两个专项成员 + #95 两个成员（端口助手自检 verify-listen-safe-port、禁系统分配端口守卫 verify-no-listen-zero，均计入 PASS）+ 静态守卫（见文件内 GUARDS 数组——数量与具体名单
 //     以该数组为准，不在本注释里重复罗列/计数，避免像 R5〔12a-L1〕之前那样"三静态守卫"这句话
 //     随数组扩容悄悄过期失真）；新增 verify-sys-* 套件零配置自动纳入。
 //   - 成功套件静默只计数；失败套件立即打印其完整输出（stdout+stderr）便于定位。
@@ -19,8 +19,8 @@ const path = require('path');
 const serverRoot = path.resolve(__dirname, '..');
 process.chdir(serverRoot);
 
-function runOne(rel) {
-  const r = spawnSync(process.execPath, [rel], { cwd: serverRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+function runOne(rel, args = []) {
+  const r = spawnSync(process.execPath, [rel, ...args], { cwd: serverRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`, status: r.status };
 }
 
@@ -38,9 +38,22 @@ for (const f of familyFiles) {
   console.log(`\n===== RED ${f} (exit=${r.status}) =====`);
   console.log(r.out);
 }
+// C12: all ledger invariants/actions share one explicitly registered FAMILY member.
+const ledgerMember = runOne(path.join('scripts', 'verify-it-ledger.js'), ['--matrix']);
+if (ledgerMember.ok) pass++;
+else { failed.push('verify-it-ledger --matrix'); console.log(ledgerMember.out); }
+const reconcileMember = runOne(path.join('scripts', 'verify-it-reconcile.js'));
+if (reconcileMember.ok) pass++;
+else { failed.push('verify-it-reconcile'); console.log(reconcileMember.out); }
+// #95: loopback fixtures must bind through scripts/lib/listen-safe-port.js (helper self-check + static no-listen(0) guard).
+for (const name of ['verify-listen-safe-port', 'verify-no-listen-zero']) {
+  const member = runOne(path.join('scripts', `${name}.js`));
+  if (member.ok) pass++;
+  else { failed.push(name); console.log(member.out); }
+}
 console.log(`FAMILY PASS=${pass} FAIL=${failed.length}${failed.length ? ' FAILED: ' + failed.join(' ') : ''}`);
 
-const GUARDS = ['verify-unify-static', 'verify-badge-alias', 'verify-shared-css-cache-bust', 'verify-collab-validation-status-coverage', 'verify-db-connections-writers'];
+const GUARDS = ['verify-unify-static', 'verify-badge-alias', 'verify-shared-css-cache-bust', 'verify-collab-validation-status-coverage', 'verify-db-connections-writers', 'verify-it-ledger-panel-static'];
 let guardRed = 0;
 for (const g of GUARDS) {
   const r = runOne(path.join('scripts', `${g}.js`));

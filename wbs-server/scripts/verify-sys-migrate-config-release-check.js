@@ -24,6 +24,7 @@
 //   seq=14343>maxId=14333 一致）。[Z4-PIPELINE] 组另建两个专用 fixture（注释贴在目标 CHECK 前 / 含
 //   特殊字符串内容的 decoy CHECK），不与主 fixture 混用，避免互相干扰既有断言。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -452,9 +453,7 @@ async function agMakeApp(dbPath) {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  const server = await new Promise((resolve) => {
-    const s = app.listen(0, '127.0.0.1', () => resolve(s));
-  });
+  const server = await listenOnSafePort(app);
   const port = server.address().port;
   function call(method, p, tok, body) {
     return new Promise((resolve, reject) => {

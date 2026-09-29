@@ -192,6 +192,7 @@
 //       同时成立——钉死"原始信号不掺 active_auth 这道授权闸"的契约，未来若子查询被人补一句 AND
 //       active_auth，本条立即判红。
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -409,7 +410,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5 / dev2#6 / 受理人13 / 值班员甲#20 / [S4] 永久查看者21 / 永久停用22 / [MED-3] tab-display_name 用户23/24 + tab-admin25）');
 
@@ -904,13 +905,13 @@ async function main() {
     const afterDirect = await issueRow(id);
     assert.deepStrictEqual(I.fastlaneAcceptanceInvariantViolations(afterDirect), [], '[10-前置] 造态落库后应无违例');
 
-    const closeBlocked = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeBlocked = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeBlocked.status, 409, `[10-close-被拦] pending 态 close 应 409，实得 ${closeBlocked.status} ${JSON.stringify(closeBlocked.body)}`);
     assert.strictEqual(closeBlocked.body.code, 'POST_ACCEPTANCE_PENDING', `[10-close-被拦] 确切码，实得 ${closeBlocked.body.code}`);
     const praR = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
     assert.strictEqual(praR.status, 200, `[10-补验收] pass 应 200，实得 ${praR.status} ${JSON.stringify(praR.body)}`);
 
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[10-close] 补验收通过后 close 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
     const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '验证重开清补验收字段组' });
     assert.strictEqual(reopenR.status, 200, `[10-reopen] 应 200，实得 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);
@@ -948,7 +949,7 @@ async function main() {
     assert.strictEqual(acceptR.body.online_source, 'no_commit_acceptance', '[11a-前置验收] 应走免上线直翻（与 fastlane 直上是两条不同的既有路径，此处只是借用它到达已上线态以触发 B1 终结事件）');
     const rowAfterAcceptTermination = await issueRow(id);
     assert.strictEqual(rowAfterAcceptTermination.fast_release_auth_at, null, '[11a-前置] accept 直翻已上线已同事务终结活跃授权（B1 既有行为，未受 S2 影响）');
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[11a-前置关闭] 应 200，实得 ${closeR.status}`);
     const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '负例验证（B1 后六列已空，reopen 无事可清）' });
     assert.strictEqual(reopenR.status, 200, `[11a-前置重开] 应 200，实得 ${reopenR.status}`);
@@ -986,7 +987,7 @@ async function main() {
     assert.strictEqual(feAfterRound1[0].removed_at, null, '[11b-前置提交] 首轮挂牌行此刻应仍在册（未软删）');
     const acceptR11b = await call('POST', `/api/sys-issues/${id11b}/accept`, adminTok, {});
     assert.strictEqual(acceptR11b.status, 200, `[11b-前置验收] 应 200，实得 ${acceptR11b.status}`);
-    await call('POST', `/api/sys-issues/${id11b}/close`, adminTok, {});
+    await call('POST', `/api/sys-issues/${id11b}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     const reopenR11b = await call('POST', `/api/sys-issues/${id11b}/reopen`, adminTok, { reason: '11b 对照：reopen 后重新授权' });
     assert.strictEqual(reopenR11b.status, 200, `[11b-前置重开] 应 200，实得 ${reopenR11b.status}`);
     const rowAfterReopen11b = await issueRow(id11b);
@@ -2713,7 +2714,7 @@ async function main() {
 
     const praR = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
     assert.strictEqual(praR.status, 200, `[51-前置] 补验收 pass 应 200，实得 ${praR.status} ${JSON.stringify(praR.body)}`);
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[51-前置] close 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
     const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '51-重开重走' });
     assert.strictEqual(reopenR.status, 200, `[51-前置] reopen 应 200，实得 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);
@@ -2774,7 +2775,7 @@ async function main() {
       assert.strictEqual(confirmR.body.flipped, true, `[${tag}-前置] gen1 应末位翻牌`);
       const praR = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
       assert.strictEqual(praR.status, 200, `[${tag}-前置] 补验收 pass 应 200，实得 ${praR.status} ${JSON.stringify(praR.body)}`);
-      const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+      const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
       assert.strictEqual(closeR.status, 200, `[${tag}-前置] close 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
       const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: `${tag}-reopen重走` });
       assert.strictEqual(reopenR.status, 200, `[${tag}-前置] reopen 应 200，实得 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);
@@ -2829,7 +2830,7 @@ async function main() {
     assert.strictEqual(confirmR.body.flipped, true, '[53-前置] gen1 应末位翻牌（consumed）');
     const praR = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
     assert.strictEqual(praR.status, 200, `[53-前置] 补验收 pass 应 200，实得 ${praR.status} ${JSON.stringify(praR.body)}`);
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[53-前置] close 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
     const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '53-reopen重走' });
     assert.strictEqual(reopenR.status, 200, `[53-前置] reopen 应 200，实得 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);
@@ -2954,7 +2955,7 @@ async function main() {
     assert.strictEqual(confirmR.body.flipped, true, '[56-前置] gen1 应末位翻牌（consumed_at 写入）');
     const praR = await call('POST', `/api/sys-issues/${id}/post-release-accept`, adminTok, { verdict: 'pass' });
     assert.strictEqual(praR.status, 200, `[56-前置] 补验收 pass 应 200，实得 ${praR.status} ${JSON.stringify(praR.body)}`);
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[56-前置] close 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
     const reopenR = await call('POST', `/api/sys-issues/${id}/reopen`, adminTok, { reason: '56-重开供故障注入' });
     assert.strictEqual(reopenR.status, 200, `[56-前置] reopen 应 200，实得 ${reopenR.status} ${JSON.stringify(reopenR.body)}`);

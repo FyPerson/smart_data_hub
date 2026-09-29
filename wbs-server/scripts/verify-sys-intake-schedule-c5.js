@@ -20,6 +20,7 @@
 //   [RS] resend-tech-consult（⭐ C10-fix M2：admin∨该单对接人·expected_request_event_id·建单人分支已移除）：
 //       admin/受理人/建单人 200 / 非授权(dev6) 403 / expected 不一致 409 VERSION_CONFLICT / 未发起 409 NO_TECH_CONSULT / 缺 expected 400
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -121,7 +122,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise(res => { server = app.listen(0, '127.0.0.1', res); });
+  server = await listenOnSafePort(app);
   port = server.address().port;
   assert.deepStrictEqual(I.SYS_TECH_LEAD_IDS, [7], 'SYS_TECH_LEAD_IDS=[7] 示例发布者');
   ok('readiness ready + HTTP harness（受理人 13 / 技术负责人 7）+ SYS_TECH_LEAD_IDS=[7]');

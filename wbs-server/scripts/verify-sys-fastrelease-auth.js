@@ -26,6 +26,7 @@
 //       scripts/verify-sys-fastrelease-termination.js，本组只覆盖 accept 这一条边作为回归锚点。
 //   [10] note 边界：trim 空白视同未填 / 恰 200 字放行 / 201 字 400 / 非字符串 400
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const assert = require('assert');
 const http = require('http');
@@ -202,7 +203,7 @@ async function main() {
   app.use(express.json());
   app.use('/api', mod.router);
   server = http.createServer(app);
-  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  await listenOnSafePort(server);
   port = server.address().port;
   ok('in-process app 启动 + readiness ready + seed users（admin1 / dev5 / 受理人13）');
 
@@ -692,7 +693,7 @@ async function main() {
     assert.strictEqual(terminatedTl[0].summary, '直上授权已失效（上线翻牌）', `[9-accept 后] 终结行 summary 精确文案，实得="${terminatedTl[0].summary}"`);
     assert.strictEqual(await timelineCount(id), beforeAcceptTl + 2, '[9-accept 后] timeline 恰新增 2 条（accept 主流转行 + 终结留痕行）');
 
-    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, {});
+    const closeR = await call('POST', `/api/sys-issues/${id}/close`, adminTok, { archive_origin_code: 'other', archive_origin_note: '既有归档回归夹具' });
     assert.strictEqual(closeR.status, 200, `[9-close] 应 200，实得 ${closeR.status} ${JSON.stringify(closeR.body)}`);
     assert.strictEqual(await statusOf(id), '已关闭', '[9-close] 落库 status=已关闭');
 

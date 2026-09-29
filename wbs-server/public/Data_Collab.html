@@ -1451,16 +1451,16 @@
         <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.158.0_legacy1"></script>
+    <script src="assets/js/app.js?v=v1.159.0_debta4"></script>
     <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
     <!-- S5（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
          S5 checkVersion 下沉后的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
     <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
     <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
-         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）；两者缓存串与数据修正页
-         同串同 KIT 尾缀 v1.157.0_uexport1，与 u-export.js 内 KIT_VERSION='uexport1' 对拍（verify-export-columns 断言 4）。 -->
+         xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）。
+         [Codex R5] vendor内容不变；helper升uexport2，旧页面仍走缺省写出路径（verify-export-columns断言4）。 -->
     <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
-    <script src="assets/js/u-export.js?v=v1.157.0_uexport1"></script>
+    <script src="assets/js/u-export.js?v=v1.160.0_uexport2"></script>
     <script>
         // v1.74.3 纯只读领导账号 id 名单（与后端 server.js READONLY_LEADER_IDS 同步！改动需两处一起改）
         //   示例只读领导A(id=11) / 示例只读领导B(id=6) 为纯只读领导，不参与偏技术类工作，不可被设为协作单数据导出人(exporter)。
@@ -5821,14 +5821,10 @@
                         }
                     // 〔N2b-fix2·S3 裁定〕**不补 `recipient_unresolved` 分支**：本页查已读端点
                     //   （server.js:15690-15800）全域零产出该值——它只出现在 DCorr/IL/SI 的 read-status 端点。
-                    //   N2b 一度按"六态齐全"补了一条，那是**主动造死分支**，与 IL 的 P13（超窗态不补）
+                    //   N2b 一度按"六态齐全"补了一条，那是**主动造死分支**，与各页按后端契约接入展示的原则
                     //   同一条口径，本批删回。判据统一为「该页后端真产出才接」，不按态表凑数。
-                    } else if (data.read_status === 'unread_expired') {
-                        // §3.3「超窗口未读」态：`⏰` 收编为 `—`，槽 muted。
-                        // ⭐ **本页是全站唯一真能走到这一态的页面**——`unread_expired` 的唯一产出点就是本页端点
-                        //   （server.js:15757-15771 的 24h 窗口判定）；IT/DCorr 的同名分支都是死代码。
-                        //   故本态在本页是**可真实验收**的，不标 mock-only。
-                        box.innerHTML = `<span class="u-nt-muted">— 未读（已超过钉钉可查询时间）</span>`;
+                    } else if (data.read_status === 'unqueryable') {
+                        box.innerHTML = data.unqueryable_reason === 'expired' ? '<span class="u-nt-muted" title="钉钉只保留约 7 天的已读记录">— 超期无法查询</span>' : '<span class="u-nt-muted" title="钉钉未返回该收件人的已读记录，可稍后再查">— 暂时无法查询</span>';
                     } else {
                         // §3.3「窗口内未读」态：`👀` 收编为 `⏳`
                         box.innerHTML = `<span class="u-nt-warn">⏳ 尚未读取</span>`;
@@ -6199,7 +6195,7 @@
         //   版本守卫/columns 常量标识符/日期工具三件套照 Data_Correction.html corrInitExport 现范式
         //   （C5 已收口，now 通道已收进共享层——本页 value() 直接写 ctx.overdueRule(r) 即得，无需自管时间闭包）。
         // ============================================================
-        const COLLAB_UEXPORT_KIT_EXPECTED = 'uexport1';   // 须与 <script src="...u-export.js?v=..._uexport1"> 缓存串尾部一致
+        const COLLAB_UEXPORT_KIT_EXPECTED = 'uexport2';   // 须与 <script src="...u-export.js?v=..._uexport2"> 缓存串尾部一致
 
         // 时分从存储串（'YYYY-MM-DD HH:MM:SS'）手工拆分构造本地 Date（§3.3 日期纪律，同 corrParseDatetimeLocal）。
         function collabParseDatetimeLocal(s) {

@@ -24,6 +24,7 @@
 //       GET /sys-releases/:id 详情 issues 字段名向后兼容（id/type/title/status）+ 顶层 source/degraded/
 //       unavailable_fields 正确透传
 'use strict';
+const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
 const express = require('express');
@@ -140,7 +141,7 @@ async function main() {
   const app = express();
   app.use(express.json());
   app.use('/api', mod.router);
-  await new Promise((resolve) => { server = app.listen(0, () => { port = server.address().port; resolve(); }); });
+  server = await listenOnSafePort(app, null); port = server.address().port;
   console.log('\n══════ C4 getReleaseMembers 统一读源验证 ══════');
 
   // ═══ [1] live（计划中）═══
