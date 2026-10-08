@@ -2445,13 +2445,18 @@ const CORRECTION_PENDING_BASE = path.join(CORRECTION_UPLOAD_BASE, '_pending');
 if (!fs.existsSync(CORRECTION_UPLOAD_BASE)) {
     fs.mkdirSync(CORRECTION_UPLOAD_BASE, { recursive: true });
 }
-// §9.26：fix_proof/error_proof/oa_proof 限图片/PDF/xlsx（比 collab union 窄——结果证明截图/示例表场景，不含 sql/txt/docx）
+// §9.26：fix_proof/error_proof/oa_proof 限图片/PDF/xlsx（比 collab union 窄——结果证明截图/示例表场景，不含 sql/txt；docx 仅 error_proof 另收，见下）
 // 附件压缩包支持方案 D4：三类均放开压缩包（≤50MB 特例，其余类型上限不动）；不新增「可发送集」常量——
 //   钉钉发送判据只用归一化 ext + isArchiveExt（03-M3，见 D5 两处发送点）。
+// 2026-10-08（用户口径「建单与补传需求文件要支持 docx」）：仅 error_proof（待修复数据＝需求文件）另收 .docx，
+//   上限沿用 20MB；.doc 不收；oa_proof / fix_proof 不变。并集 CORRECTION_ALLOWED_EXTS 因此含 .docx（multer 第一道
+//   放行），逐类型拒收靠 correctionValidateFilesOr400 四挂点二次卡。前端 Data_Correction.html CORR_ERR_PROOF_EXTRA_EXTS
+//   与本常量同值（verify-correction-attach-archive-static ③c 对拍）。
 const CORRECTION_BASE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf', '.xlsx', '.xls'];
+const CORRECTION_ERROR_PROOF_EXTRA_EXTS = ['.docx'];
 const CORRECTION_ATTACHMENT_RULES = {
     oa_proof:    { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
-    error_proof: { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
+    error_proof: { exts: CORRECTION_BASE_EXTS.concat(CORRECTION_ERROR_PROOF_EXTRA_EXTS, ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
     fix_proof:   { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
 };
 // 派生联合白名单（符号名保留，供 fileFilter / _internals / probe-correction-symbols 既有消费者不变）。
@@ -2514,10 +2519,15 @@ const correctionUpload = multer({
     //   累计字节数 fileSize===fileSizeLimit 时即判 truncated——恰好等于上限的文件会被误判超限。方案 §5 V2b
     //   要求「恰 50MB → 2xx」，limit 设为 ARCHIVE_MAX_SIZE+1 补偿，真实边界=「50MB 通过 / 50MB+1 字节拒绝」。
     limits: { fileSize: ARCHIVE_MAX_SIZE + 1, files: 5 },
+    // 2026-10-08（codex 95T M-2 补测暴露的既有缺陷，干净 main 30/30 复现）：multer 2.0.2 的 file 事件处理不检查本请求
+    //   是否已出错——同批里非法文件在前时，它报错结束请求，但随后已解析出的合法文件仍会写进 _pending 且无人清理。
+    //   本请求一旦因文件名或扩展名拒收（下面两处置标记），后续文件一律不写盘（cb(null, false) → multer 直接丢弃该文件流）。
+    //   只覆盖这一类：大小超限 / 数量超限 / 解析或存储错误不置标记，是否有同类残留另立项调查（PROJECT_STATUS #111·codex 95-R）。
     fileFilter: function (req, file, cb) {
+        if (req._correctionUploadRejected) return cb(null, false);
         const ext = normalizeAttachmentExt(file.originalname);
-        if (!ext) return cb(new Error('文件名为空或包含非法字符'));
-        if (!CORRECTION_ALLOWED_EXTS.includes(ext)) return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${CORRECTION_ALLOWED_EXTS.join('/')}`));
+        if (!ext) { req._correctionUploadRejected = true; return cb(new Error('文件名为空或包含非法字符')); }
+        if (!CORRECTION_ALLOWED_EXTS.includes(ext)) { req._correctionUploadRejected = true; return cb(new Error(`不支持的扩展名 ${ext}，仅允许 ${CORRECTION_ALLOWED_EXTS.join('/')}`)); }
         cb(null, true);
     }
 });

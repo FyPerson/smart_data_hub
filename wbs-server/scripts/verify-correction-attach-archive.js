@@ -132,6 +132,30 @@ function reqMultipart(method, p, fields, fileFieldName, fileName, fileBuf, user)
         r.write(bodyBuf); r.end();
     });
 }
+// codex 95T M-2：多文件版本（不改上面的单文件 reqMultipart，避免波及既有用例）；files = [{ name, buf }]，按数组顺序写入同一字段
+function reqMultipartFiles(method, p, fields, fileFieldName, files, user) {
+    return new Promise((resolve) => {
+        const boundary = '----CorrArchMulti' + (p.length * 7919 + Date.now() + Math.floor(Math.random() * 1e6));
+        const chunks = [];
+        for (const [k, v] of Object.entries(fields || {})) {
+            if (v === undefined || v === null) continue;
+            chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+        }
+        for (const f of files) {
+            chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${fileFieldName}"; filename="${f.name}"\r\nContent-Type: application/octet-stream\r\n\r\n`));
+            chunks.push(f.buf || Buffer.from('x'));
+            chunks.push(Buffer.from('\r\n'));
+        }
+        chunks.push(Buffer.from(`--${boundary}--\r\n`));
+        const bodyBuf = Buffer.concat(chunks);
+        const r = http.request({ host: 'localhost', port: PORT, method, path: p,
+            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length,
+                'x-test-user': Buffer.from(JSON.stringify(user || ADMIN)).toString('base64') } },
+            (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { let j = {}; try { j = JSON.parse(d || '{}'); } catch (_) {} resolve({ status: res.statusCode, body: j }); }); });
+        r.on('error', e => resolve({ status: 0, error: e.message }));
+        r.write(bodyBuf); r.end();
+    });
+}
 async function waitReady() {
     const t0 = Date.now();
     while (!I.CORRECTION_SCHEMA_STATE.ready) { if (I.CORRECTION_SCHEMA_STATE.error) throw new Error(I.CORRECTION_SCHEMA_STATE.error); if (Date.now() - t0 > 3000) throw new Error('timeout'); await new Promise(r => setTimeout(r, 30)); }
@@ -174,6 +198,15 @@ function buildDirPendingFiles() {   // 建单 oa_proof 挂点（无 rid）走 _p
     const dir = path.join(UPLOAD_DIR, 'correction', '_pending', '_new');
     try { return fs.readdirSync(dir).filter(d => { try { return fs.readdirSync(path.join(dir, d)).length > 0; } catch (_) { return false; } }); } catch (_) { return []; }
 }
+// codex 95T M-1：拒收前后的业务副作用快照——单据状态、状态历史条数、本单全部附件条数（不分类型）、正式目录文件数
+async function sideEffectSnap(rid) {
+    const row = await dbGetAsync('SELECT status FROM correction_requests WHERE id=?', [rid]);
+    const h = await dbGetAsync('SELECT COUNT(*) AS n FROM correction_status_history WHERE correction_request_id=?', [rid]);
+    const a = await dbGetAsync('SELECT COUNT(*) AS n FROM correction_attachments WHERE correction_request_id=?', [rid]);
+    let finalFiles = 0;
+    try { finalFiles = fs.readdirSync(path.join(UPLOAD_DIR, 'correction', String(rid))).length; } catch (_) {}
+    return { status: row && row.status, history: h.n, attachments: a.n, finalFiles };
+}
 
 async function main() {
     mod.initSchema();
@@ -212,6 +245,124 @@ async function main() {
             assert.strictEqual(r.status, 200, `[V1] fix_proof .${ext} 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
         }
         ok('[V1] fix_proof zip/rar/7z 各 1 字节 → 200 入库（实现坏成什么样它会红：白名单/规则表任一漏放压缩包 → 400）');
+    }
+
+    // ── V-docx（2026-10-08 用户口径「建单与补传需求文件要支持 docx」）：只有 error_proof（待修复数据）收 .docx；
+    //   .doc 不收；oa_proof / fix_proof 收到 .docx 由逐类型二次卡拒（multer 并集已含 .docx，第一道放行）──
+    {
+        for (const name of ['需求说明.docx', 'UPPER.DOCX']) {
+            const rid = await mkRow({ status: 'PENDING_ASSIGN' });
+            const r = await reqMultipart('POST', `/api/corrections/${rid}/attachments`, { attachment_type: 'error_proof' }, 'files', name, Buffer.from('x'), ADMIN);
+            assert.strictEqual(r.status, 200, `[V-docx] error_proof ${name} 应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+            const att = await dbGetAsync('SELECT attachment_type, original_name, file_size, file_name FROM correction_attachments WHERE id=?', [r.body.attachments[0].id]);
+            assert.strictEqual(att.attachment_type, 'error_proof', `[V-docx] ${name} 入库类型应为 error_proof`);
+            assert.strictEqual(att.original_name, name, `[V-docx] ${name} 原名入库正确`);
+            assert.strictEqual(att.file_size, 1, `[V-docx] ${name} file_size 入库正确`);
+            assert.ok(fs.existsSync(path.join(UPLOAD_DIR, att.file_name)), `[V-docx] ${name} 已落正式目录（${att.file_name}）`);
+        }
+        ok('[V-docx] error_proof .docx / .DOCX 各 1 字节 → 200 入库（类型 / 原名 / 大小 / 落盘均正确）');
+
+        const ridDoc = await mkRow({ status: 'PENDING_ASSIGN' });
+        const docBefore = await sideEffectSnap(ridDoc);
+        let r = await reqMultipart('POST', `/api/corrections/${ridDoc}/attachments`, { attachment_type: 'error_proof' }, 'files', '旧版.doc', Buffer.from('x'), ADMIN);
+        assert.strictEqual(r.status, 400, `[V-docx] error_proof .doc 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'UPLOAD_ERROR', `[V-docx] .doc 不在三类并集里，应由 multer fileFilter 拒（UPLOAD_ERROR），实际 code=${r.body.code}`);
+        assert.deepStrictEqual(pendingDirFiles(ridDoc), [], `[V-docx] .doc 拒绝后 pending 目录（issue=${ridDoc}）无残留`);
+        assert.deepStrictEqual(await sideEffectSnap(ridDoc), docBefore, `[V-docx] .doc 拒绝后本单状态 / 历史 / 附件 / 正式目录应不变`);
+        ok('[V-docx] error_proof .doc → 400 UPLOAD_ERROR（.doc 三类都不收），本单零副作用');
+
+        const ridBig = await mkRow({ status: 'PENDING_ASSIGN' });
+        const bigBefore = await sideEffectSnap(ridBig);
+        r = await reqMultipart('POST', `/api/corrections/${ridBig}/attachments`, { attachment_type: 'error_proof' }, 'files', 'big.docx', Buffer.alloc(20 * 1024 * 1024 + 1, 5), ADMIN);
+        assert.strictEqual(r.status, 400, `[V-docx] error_proof 20MB+1 .docx 应 400，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        assert.strictEqual(r.body.code, 'ATTACHMENT_RULE_VIOLATION');
+        assert.strictEqual(r.body.reason, 'SIZE_EXCEEDED');
+        assert.strictEqual(r.body.limit_mb, 20);
+        assert.deepStrictEqual(pendingDirFiles(ridBig), [], `[V-docx] 超限 .docx 拒绝后 pending 目录（issue=${ridBig}）无残留`);
+        assert.deepStrictEqual(await sideEffectSnap(ridBig), bigBefore, `[V-docx] 超限 .docx 拒绝后本单状态 / 历史 / 附件 / 正式目录应不变`);
+        ok('[V-docx] error_proof 20MB+1 .docx → 400 SIZE_EXCEEDED limit_mb=20，本单零副作用');
+
+        const expectExtReject = (res, where) => {
+            assert.strictEqual(res.status, 400, `[V-docx] ${where} .docx 应 400，实际 ${res.status} ${JSON.stringify(res.body)}`);
+            assert.strictEqual(res.body.code, 'ATTACHMENT_RULE_VIOLATION', `[V-docx] ${where} .docx 应由逐类型二次卡拒，实际 code=${res.body.code}`);
+            assert.strictEqual(res.body.reason, 'EXT_NOT_ALLOWED', `[V-docx] ${where} .docx reason 应为 EXT_NOT_ALLOWED，实际 ${res.body.reason}`);
+        };
+        // codex 95T M-1：建单拒收不得建出单据（行数不变、无该 OA 号）
+        const reqCountBefore = (await dbGetAsync('SELECT COUNT(*) AS n FROM correction_requests')).n;
+        r = await reqMultipart('POST', '/api/corrections', {
+            source_system: 'BMS', location_info: 'V-docx oa_proof', correction_type: 'single', oa_number: '700300',
+            reason: 'V-docx oa_proof fixture 原因文本', requester_name: '业务张', requester_phone: '13800000001',
+        }, 'oa_proof_files', 'oa.docx', Buffer.from('x'), ADMIN);
+        expectExtReject(r, '建单 oa_proof');
+        assert.deepStrictEqual(buildDirPendingFiles(), [], '[V-docx] 建单 oa_proof .docx 拒绝后 _pending/_new 下无残留非空目录');
+        assert.strictEqual((await dbGetAsync('SELECT COUNT(*) AS n FROM correction_requests')).n, reqCountBefore, '[V-docx] 建单 oa_proof .docx 拒绝后修正单行数应不变');
+        assert.strictEqual((await dbGetAsync("SELECT COUNT(*) AS n FROM correction_requests WHERE oa_number='700300'")).n, 0, '[V-docx] 建单 oa_proof .docx 拒绝后不应存在 oa_number=700300 的单');
+        // complete / resubmit / attachments(fix_proof)：状态、状态历史、本单全部附件、正式目录均不变
+        const cases = [
+            { where: '/complete fix_proof', status: 'IN_PROGRESS', path: (id) => `/api/corrections/${id}/complete`, fields: {} },
+            { where: '/resubmit fix_proof', status: 'REFIXED', path: (id) => `/api/corrections/${id}/resubmit`, fields: {} },
+            { where: '/attachments fix_proof', status: 'FIXED', path: (id) => `/api/corrections/${id}/attachments`, fields: { attachment_type: 'fix_proof' } },
+        ];
+        for (const c of cases) {
+            const rid = await mkRow({ status: c.status });
+            const before = await sideEffectSnap(rid);
+            expectExtReject(await reqMultipart('POST', c.path(rid), c.fields, 'files', 'f.docx', Buffer.from('x'), ADMIN), c.where);
+            assert.deepStrictEqual(pendingDirFiles(rid), [], `[V-docx] ${c.where} 拒绝后 pending 目录（issue=${rid}）无残留`);
+            assert.deepStrictEqual(await sideEffectSnap(rid), before, `[V-docx] ${c.where} 拒绝后本单状态 / 历史 / 附件 / 正式目录应不变`);
+        }
+        const leaked = await dbGetAsync("SELECT COUNT(*) AS n FROM correction_attachments WHERE attachment_type IN ('oa_proof','fix_proof') AND lower(original_name) LIKE '%.docx'");
+        assert.strictEqual(leaked.n, 0, `[V-docx] oa_proof / fix_proof 不应有任何 .docx 入库，实得 ${leaked.n}`);
+        ok('[V-docx] oa_proof（建单）/ fix_proof（complete / resubmit / attachments）收到 .docx → 400 ATTACHMENT_RULE_VIOLATION EXT_NOT_ALLOWED，pending 均已清；建单不建单据，其余三处状态 / 历史 / 附件 / 正式目录均不变（实现坏成什么样它会红：把 .docx 加进三类共用清单 → 这几处变 200；把二次卡挪到落附件或状态转移之后 → 副作用快照变化）');
+
+        // codex 95T M-2：合法 + 非法混在同一批——整批拒收、整批零入库、无正式文件与 pending 残留；非法文件位置前后各一次
+        const png = { name: 'ok.png', buf: Buffer.from('p') };
+        const mixed = [
+            { where: 'error_proof 第一道（.doc）', status: 'PENDING_ASSIGN', path: (id) => `/api/corrections/${id}/attachments`, fields: { attachment_type: 'error_proof' }, bad: { name: '旧版.doc', buf: Buffer.from('d') }, code: 'UPLOAD_ERROR' },
+            { where: '/attachments fix_proof 第二道（.docx）', status: 'FIXED', path: (id) => `/api/corrections/${id}/attachments`, fields: { attachment_type: 'fix_proof' }, bad: { name: 'f.docx', buf: Buffer.from('w') }, code: 'ATTACHMENT_RULE_VIOLATION' },
+            { where: '/complete fix_proof 第二道（.docx）', status: 'IN_PROGRESS', path: (id) => `/api/corrections/${id}/complete`, fields: {}, bad: { name: 'f.docx', buf: Buffer.from('w') }, code: 'ATTACHMENT_RULE_VIOLATION' },
+            // codex 95-R R-L2：第一道混批补标完成接口（建单入口无 rid，另见下方专段）
+            { where: '/complete fix_proof 第一道（.doc）', status: 'IN_PROGRESS', path: (id) => `/api/corrections/${id}/complete`, fields: {}, bad: { name: '旧版.doc', buf: Buffer.from('d') }, code: 'UPLOAD_ERROR' },
+        ];
+        for (const c of mixed) {
+            for (const order of [[png, c.bad], [c.bad, png]]) {
+                const rid = await mkRow({ status: c.status });
+                const before = await sideEffectSnap(rid);
+                const res = await reqMultipartFiles('POST', c.path(rid), c.fields, 'files', order, ADMIN);
+                const label = `${c.where}［${order.map(f => f.name).join(' + ')}］`;
+                // 第一道（multer fileFilter）拒收时，缺陷形态是「响应已发出、随后的合法文件才迟到写盘」——证明「没有迟到写入」
+                //   无信号可等，只能用有界窗口；300ms 在探针里对未修复代码 30/30 抓到残留（2026-10-08 干净 main 复现）
+                if (c.code === 'UPLOAD_ERROR') await new Promise((r) => setTimeout(r, 300));
+                assert.strictEqual(res.status, 400, `[V-docx] ${label} 应 400，实际 ${res.status} ${JSON.stringify(res.body)}`);
+                assert.strictEqual(res.body.code, c.code, `[V-docx] ${label} code 应为 ${c.code}，实际 ${res.body.code}`);
+                { const left = pendingDirFiles(rid); assert.deepStrictEqual(left, [], `[V-docx] ${label} 拒绝后 pending 目录（issue=${rid}）无残留，实得 ${JSON.stringify(left)}`); }
+                assert.deepStrictEqual(await sideEffectSnap(rid), before, `[V-docx] ${label} 拒绝后本单状态 / 历史 / 附件 / 正式目录应不变（整批零入库）`);
+            }
+        }
+        // codex 95-R R-L2：建单入口（oa_proof_files，无 rid、暂存 _pending/_new/<buildKey>/）的第一道混批——不建单、暂存目录无残留
+        let oaMixSeq = 700400;
+        for (const order of [[png, { name: '旧版.doc', buf: Buffer.from('d') }], [{ name: '旧版.doc', buf: Buffer.from('d') }, png]]) {
+            const oaNo = String(oaMixSeq++);
+            const countBefore = (await dbGetAsync('SELECT COUNT(*) AS n FROM correction_requests')).n;
+            const res = await reqMultipartFiles('POST', '/api/corrections', {
+                source_system: 'BMS', location_info: 'V-docx 建单混批', correction_type: 'single', oa_number: oaNo,
+                reason: 'V-docx 建单混批 fixture 原因文本', requester_name: '业务张', requester_phone: '13800000001',
+            }, 'oa_proof_files', order, ADMIN);
+            const label = `建单 oa_proof 第一道（.doc）［${order.map(f => f.name).join(' + ')}］`;
+            assert.strictEqual(res.status, 400, `[V-docx] ${label} 应 400，实际 ${res.status} ${JSON.stringify(res.body)}`);
+            assert.strictEqual(res.body.code, 'UPLOAD_ERROR', `[V-docx] ${label} code 应为 UPLOAD_ERROR，实际 ${res.body.code}`);
+            await new Promise((r) => setTimeout(r, 300));   // 同上：证明「没有迟到写入」只能用有界窗口
+            { const left = buildDirPendingFiles(); assert.deepStrictEqual(left, [], `[V-docx] ${label} 拒绝后 _pending/_new 下应无残留非空目录，实得 ${JSON.stringify(left)}`); }
+            assert.strictEqual((await dbGetAsync('SELECT COUNT(*) AS n FROM correction_requests')).n, countBefore, `[V-docx] ${label} 拒绝后修正单行数应不变`);
+            assert.strictEqual((await dbGetAsync('SELECT COUNT(*) AS n FROM correction_requests WHERE oa_number=?', [oaNo])).n, 0, `[V-docx] ${label} 拒绝后不应存在 oa_number=${oaNo} 的单`);
+        }
+        // 对照组：待修复数据 png + docx 同批 → 200 两个都入库
+        const ridMixOk = await mkRow({ status: 'PENDING_ASSIGN' });
+        r = await reqMultipartFiles('POST', `/api/corrections/${ridMixOk}/attachments`, { attachment_type: 'error_proof' }, 'files', [png, { name: '需求.docx', buf: Buffer.from('w') }], ADMIN);
+        assert.strictEqual(r.status, 200, `[V-docx] 对照：error_proof png + docx 同批应 200，实际 ${r.status} ${JSON.stringify(r.body)}`);
+        const okNames = (await dbAllAsync('SELECT original_name FROM correction_attachments WHERE correction_request_id=? ORDER BY id', [ridMixOk])).map(x => x.original_name);
+        assert.deepStrictEqual(okNames, ['ok.png', '需求.docx'], `[V-docx] 对照：两个文件都应入库，实得 ${JSON.stringify(okNames)}`);
+        assert.strictEqual((await sideEffectSnap(ridMixOk)).finalFiles, 2, '[V-docx] 对照：正式目录应有 2 个文件');
+        ok('[V-docx] 合法 + 非法同批（第一道 .doc × /attachments(error_proof)、/complete、建单 oa_proof；第二道 .docx × /attachments(fix_proof)、/complete；均非法在前 / 在后）→ 400、整批零入库（建单不建单据）、无正式文件与 pending 残留；对照组 error_proof png + docx 同批 → 两个都入库');
     }
 
     // ── V2b：52428801 字节 .zip → multer LIMIT_FILE_SIZE；52428800 字节 → 2xx ──

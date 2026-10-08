@@ -459,9 +459,9 @@
                 <div class="u-form-group" id="errProofGroup">
                     <label>待修复数据（可选）</label>
                     <textarea id="formErrorProofNote" rows="2" maxlength="1000" placeholder="可补充说明（如：表格第几列是待改字段），选填"></textarea>
-                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls,.zip,.rar,.7z" style="margin-top:6px;" onchange="corrPickerOnPick('createErrProofPicked')">
+                    <input type="file" id="formErrorProofFiles" multiple accept="image/*,.pdf,.xlsx,.xls,.docx,.zip,.rar,.7z" style="margin-top:6px;" onchange="corrPickerOnPick('createErrProofPicked')">
                     <div id="createErrProofPicked"></div>
-                    <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
+                    <div class="u-hint" id="errProofFilesHint">待修复数据附件（表格清单为主，图片/PDF/xlsx/Word(.docx)/压缩包 zip/rar/7z，压缩包单个≤50MB、其余≤20MB，≤5 个文件）+ 选填文字备注；建单后两步上传到本单（上传失败不影响建单，详情页可补传）。</div>
                 </div>
             </div>
             <div class="u-modal-footer">
@@ -1543,7 +1543,7 @@
                 if (/\.pdf$/i.test(name)) {
                     return `<div class="u-att-item">📄 <a href="${url}" target="_blank" rel="noopener" title="点击新窗口预览">${safeName}</a>${meta}${delBtn}</div>`;
                 }
-                const icon = /\.(xlsx?|xls)$/i.test(name) ? '📊' : '📎';
+                const icon = /\.(xlsx?|xls)$/i.test(name) ? '📊' : /\.docx$/i.test(name) ? '📃' : '📎';
                 return `<div class="u-att-item">${icon} <a href="${url}" target="_blank" download="${safeAttr}">${safeName}</a>${meta}${delBtn}</div>`;
             }).join('') : `<div style="color:#9ca3af; font-size:12px;">${emptyText}</div>`;
             // B2（方案 §2.4 L-10）：oa_proof 单级展示，仅本单自身（后端 SQL 已不合并 anchor），复用 renderAtts 但不复用 error_proof 的 anchor 逻辑；
@@ -2416,11 +2416,13 @@
         const CORR_ATTACH_MAX = 5;
         const CORR_ATTACH_MAX_SIZE = 20 * 1024 * 1024;
         const CORR_ATTACH_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf', 'xlsx', 'xls'];
+        // 待修复数据（error_proof＝需求文件）另收 Word .docx（2026-10-08 用户口径；.doc 不收）——与后端 corrections.js
+        //   CORRECTION_ERROR_PROOF_EXTRA_EXTS 同值（守卫 ③c 对拍）；OA 截图 / 结果证明不收。
+        const CORR_ERR_PROOF_EXTRA_EXTS = ['docx'];
         const CORR_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
         // 附件压缩包支持方案 D1/D10：三扩展名与 50MB 上限须与后端 utils/attachment-archive.js 真相源同值——
         //   本页是静态 HTML 无法 require，字面量由 scripts/verify-correction-attach-archive-static.js 与真相源对拍。
-        //   fix_proof/error_proof 均放开压缩包（方案 D4），故本弹窗（补充附件，两类型共用同一裸 input）扩展名闸
-        //   直接并入 CORR_ATTACH_EXTS，无需按 attachType 分流。
+        //   三类附件均放开压缩包（方案 D4）；按类型分流的只有上面的 Word（见 corrFileGateReject 的 attachType 参数）。
         const CORR_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
         const CORR_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
 
@@ -2428,11 +2430,13 @@
         //   （corrPickerCollect）共用。此前 6 个入口零校验：选了 .docx 照常出卡片，提交时才被后端白名单拒，
         //   前端只显示笼统的「上传文件失败」（生产 #344 报告：上传 docx 后详情里不显示）。
         //   白名单与后端 corrections.js CORRECTION_BASE_EXTS 同值（verify-correction-attach-archive-static 对拍）；
+        //   attachType（'oa_proof' | 'error_proof' | 'fix_proof'）只决定是否另收 CORR_ERR_PROOF_EXTRA_EXTS：仅 'error_proof'
+        //   收，其余值（含缺失 / 未知）一律不收——与后端按类型二次卡同口径。
         //   扩展名取法按后端实际看到的文件名推：multer 底层 busboy 先截到最后一个 / 或 \ 之后（preservePath 默认关，
         //   「.」「..」视为空），再经 normalizeAttachmentExt（trim → 含控制字符＝无扩展名 → 取最后一个点之后，点在
         //   首位如「.png」＝无扩展名）。不是 path.extname 的完整实现，放行结论与后端逐名一致的范围以守卫 ③d 语料为准。
         //   返回 null＝放行；否则返回拒收文案（文案用完整原名），调用方 showToast 后跳过该文件。
-        function corrFileGateReject(f) {
+        function corrFileGateReject(f, attachType) {
             const rawName = String((f && f.name) || '');
             const name = rawName.trim();
             let base = rawName.slice(Math.max(rawName.lastIndexOf('/'), rawName.lastIndexOf('\\')) + 1);
@@ -2441,9 +2445,13 @@
             const dot = base.lastIndexOf('.');
             const ext = (/[\x00-\x1F\x7F]/.test(base) || dot <= 0) ? '' : base.slice(dot + 1).toLowerCase();
             const isArchive = CORR_ARCHIVE_EXTS.includes(ext);
-            if (!isArchive && !CORR_ATTACH_EXTS.includes(ext)) {
+            const takesWord = attachType === 'error_proof';
+            if (!isArchive && !CORR_ATTACH_EXTS.includes(ext) && !(takesWord && CORR_ERR_PROOF_EXTRA_EXTS.includes(ext))) {
+                if (ext === 'doc' && takesWord) return `不支持旧版 Word（.doc）：${name}，请另存为 .docx 或 PDF 后上传`;
                 if (ext === 'doc' || ext === 'docx') return `不支持 Word 文档：${name}，请另存为 PDF 后上传`;
-                return `不支持的格式：${name}（仅支持图片、PDF、Excel、zip/rar/7z 压缩包）`;
+                return takesWord
+                    ? `不支持的格式：${name}（仅支持图片、PDF、Excel、Word（.docx）、zip/rar/7z 压缩包）`
+                    : `不支持的格式：${name}（仅支持图片、PDF、Excel、zip/rar/7z 压缩包）`;
             }
             // 附件压缩包支持方案 D10：大小提示按扩展名分流，压缩包 50MB / 其余按既有 20MB，句式统一。
             const sizeLimit = isArchive ? CORR_ARCHIVE_MAX_SIZE : CORR_ATTACH_MAX_SIZE;
@@ -2456,11 +2464,13 @@
         // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时
         //   只 showToast 不抛异常）——返回本次实际接收数，供 u-paste.js 贴图 dual 路径据实提示。
         //   扩展名/大小两道在 corrFileGateReject（上方），顺序不变：数量 → 扩展名 → 大小 → 去重。
+        //   本弹窗两用（fix_proof 补充附件 / error_proof 上传待修复数据），类型取 openAttach 写入的 #attachType。
         function corrAttachCollectFiles(fileList) {
             let accepted = 0;
+            const attachType = (document.getElementById('attachType') || {}).value;
             for (const f of Array.from(fileList || [])) {
                 if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
-                const reject = corrFileGateReject(f);
+                const reject = corrFileGateReject(f, attachType);
                 if (reject) { showToast(reject, 'error'); continue; }
                 if (corrAttachFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
@@ -2499,7 +2509,7 @@
                         <div style="max-width:120px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
                     </div>`;
                 }
-                const icon = ext === 'pdf' ? '📄' : '📊';
+                const icon = ext === 'pdf' ? '📄' : ext === 'docx' ? '📃' : '📊';
                 return `<div style="position:relative;" title="${safeAttr}">
                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:120px;height:90px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
                         <span style="font-size:26px;line-height:1;">${icon}</span>
@@ -2520,12 +2530,14 @@
             document.getElementById('attachType').value = t;
             document.getElementById('attachModalTitle').textContent = isErr ? '上传待修复数据' : '补充附件';
             document.getElementById('attachModalHint').textContent = isErr
-                ? '待修复数据附件（表格清单为主，图片/PDF/xlsx/压缩包 zip/rar/7z）。单次最多 5 个文件；压缩包单个≤50MB、其余≤20MB；仅补充材料，不改变状态。'
+                ? '待修复数据附件（表格清单为主，图片/PDF/xlsx/Word(.docx)/压缩包 zip/rar/7z）。单次最多 5 个文件；压缩包单个≤50MB、其余≤20MB；仅补充材料，不改变状态。'
                 : '仅补充证据留存，不改变状态、不计入提交次数。单次最多 5 个文件；压缩包 zip/rar/7z 单个≤50MB、其余≤20MB。';
             document.getElementById('attachModalLabel').innerHTML = (isErr ? '待修复数据附件' : '补充附件') + ' <span class="u-req">*</span>';
             corrAttachSession++;   // H-1：新会话开始，令旧上传响应的清理逻辑失效
             const fileInput = document.getElementById('formAttachFiles');
             fileInput.value = '';
+            // 对话框默认筛选随类型切换（只是提示，真闸在 corrFileGateReject）：待修复数据多一个 .docx
+            fileInput.accept = CORR_ATTACH_EXTS.concat(isErr ? CORR_ERR_PROOF_EXTRA_EXTS : [], CORR_ARCHIVE_EXTS).map(e => '.' + e).join(',');
             // H-2（codex U1 复审）：控件状态与数据同属会话生命周期——新会话起点双控件都归位
             //   （旧请求挂起中重开时，按钮若不复位新会话没法提交）
             fileInput.disabled = false;
@@ -2613,24 +2625,26 @@
             createOaProofPicked: [], createErrProofPicked: [], completeFilesPicked: [],
             completeBatchFilesPicked: [], resubmitFilesPicked: [], resubmitBatchFilesPicked: [],
         };
-        // key（chip 容器 id）→ 对应裸 input id + 数量上限——取代原 CORR_PASTE_RAW_TARGETS，S1 起
+        // key（chip 容器 id）→ 对应裸 input id + 数量上限 + 附件类型——取代原 CORR_PASTE_RAW_TARGETS，S1 起
         //   兼作 picker 渲染/重置/粘贴收集的唯一映射源（原贴图专用映射与 picker 映射本就是同一份数据）。
+        //   type 与提交时的 attachment_type 一致，供 corrFileGateReject 按类型分流（只有 error_proof 收 Word .docx）。
         const CORR_PICKER_TARGETS = {
-            createOaProofPicked: { inputId: 'formOaProofFiles', max: 5 },
-            createErrProofPicked: { inputId: 'formErrorProofFiles', max: 5 },
-            completeFilesPicked: { inputId: 'formCompleteFiles', max: 5 },
-            completeBatchFilesPicked: { inputId: 'formCompleteBatchFiles', max: 5 },
-            resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5 },
-            resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5 },
+            createOaProofPicked: { inputId: 'formOaProofFiles', max: 5, type: 'oa_proof' },
+            createErrProofPicked: { inputId: 'formErrorProofFiles', max: 5, type: 'error_proof' },
+            completeFilesPicked: { inputId: 'formCompleteFiles', max: 5, type: 'fix_proof' },
+            completeBatchFilesPicked: { inputId: 'formCompleteBatchFiles', max: 5, type: 'fix_proof' },
+            resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5, type: 'fix_proof' },
+            resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5, type: 'fix_proof' },
         };
-        // 追加前过扩展名/大小两道闸（corrFileGateReject），拒收的 showToast 后跳过；不去重、不拦数量（见上方注释）。
+        // 追加前过扩展名/大小两道闸（corrFileGateReject，按本入口的 type 分流），拒收的 showToast 后跳过；不去重、不拦数量（见上方注释）。
         //   返回本次实际接收数，供贴图 collect 透传给 u-paste.js（拒收后不再谎报「已粘贴 N 张」）。
         function corrPickerCollect(key, files) {
             const arr = CORR_PICKER_FILES[key];
             if (!arr) return 0;
+            const type = (CORR_PICKER_TARGETS[key] || {}).type;
             let accepted = 0;
             for (const f of Array.from(files || [])) {
-                const reject = corrFileGateReject(f);
+                const reject = corrFileGateReject(f, type);
                 if (reject) { showToast(reject, 'error'); continue; }
                 arr.push(f);
                 accepted++;
@@ -2672,7 +2686,7 @@
                         <div style="max-width:90px;font-size:10px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">${safeName}</div>
                     </div>`;
                 }
-                const icon = ext === 'pdf' ? '📄' : '📊';
+                const icon = ext === 'pdf' ? '📄' : ext === 'docx' ? '📃' : '📊';
                 return `<div class="corr-picker-item" style="position:relative;display:inline-block;margin:0 6px 6px 0;vertical-align:top;" title="${safeAttr}">
                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:90px;height:68px;background:#fef3c7;color:#92400e;border-radius:6px;border:1px solid #fde68a;">
                         <span style="font-size:20px;line-height:1;">${icon}</span>
