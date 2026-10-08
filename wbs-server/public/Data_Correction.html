@@ -2424,21 +2424,44 @@
         const CORR_ARCHIVE_EXTS = ['zip', 'rar', '7z'];
         const CORR_ARCHIVE_MAX_SIZE = 52428800;   // 50×1024×1024，精确字节
 
+        // 扩展名 + 大小两道闸（2026-10-08 从 corrAttachCollectFiles 抽出）：补充附件弹窗与 6 个裸 input 入口
+        //   （corrPickerCollect）共用。此前 6 个入口零校验：选了 .docx 照常出卡片，提交时才被后端白名单拒，
+        //   前端只显示笼统的「上传文件失败」（生产 #344 报告：上传 docx 后详情里不显示）。
+        //   白名单与后端 corrections.js CORRECTION_BASE_EXTS 同值（verify-correction-attach-archive-static 对拍）；
+        //   扩展名取法按后端实际看到的文件名推：multer 底层 busboy 先截到最后一个 / 或 \ 之后（preservePath 默认关，
+        //   「.」「..」视为空），再经 normalizeAttachmentExt（trim → 含控制字符＝无扩展名 → 取最后一个点之后，点在
+        //   首位如「.png」＝无扩展名）。不是 path.extname 的完整实现，放行结论与后端逐名一致的范围以守卫 ③d 语料为准。
+        //   返回 null＝放行；否则返回拒收文案（文案用完整原名），调用方 showToast 后跳过该文件。
+        function corrFileGateReject(f) {
+            const rawName = String((f && f.name) || '');
+            const name = rawName.trim();
+            let base = rawName.slice(Math.max(rawName.lastIndexOf('/'), rawName.lastIndexOf('\\')) + 1);
+            if (base === '.' || base === '..') base = '';
+            base = base.trim();
+            const dot = base.lastIndexOf('.');
+            const ext = (/[\x00-\x1F\x7F]/.test(base) || dot <= 0) ? '' : base.slice(dot + 1).toLowerCase();
+            const isArchive = CORR_ARCHIVE_EXTS.includes(ext);
+            if (!isArchive && !CORR_ATTACH_EXTS.includes(ext)) {
+                if (ext === 'doc' || ext === 'docx') return `不支持 Word 文档：${name}，请另存为 PDF 后上传`;
+                return `不支持的格式：${name}（仅支持图片、PDF、Excel、zip/rar/7z 压缩包）`;
+            }
+            // 附件压缩包支持方案 D10：大小提示按扩展名分流，压缩包 50MB / 其余按既有 20MB，句式统一。
+            const sizeLimit = isArchive ? CORR_ARCHIVE_MAX_SIZE : CORR_ATTACH_MAX_SIZE;
+            if (f.size > sizeLimit) return `${name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`;
+            return null;
+        }
         // S4：校验闸门抽成独立函数（原内联在 corrAttachFilesChange 里）——贴图 collect 适配器与文件选择
         //   onchange 现在共用同一份数量上限/白名单/大小/去重逻辑，零漂移风险（对齐 corrAttachCollectFiles
         //   命名习惯，无行为变化：与原内联代码逐字相同，只是包了一层函数）。
         // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时
         //   只 showToast 不抛异常）——返回本次实际接收数，供 u-paste.js 贴图 dual 路径据实提示。
+        //   扩展名/大小两道在 corrFileGateReject（上方），顺序不变：数量 → 扩展名 → 大小 → 去重。
         function corrAttachCollectFiles(fileList) {
             let accepted = 0;
             for (const f of Array.from(fileList || [])) {
                 if (corrAttachFiles.length >= CORR_ATTACH_MAX) { showToast(`最多 ${CORR_ATTACH_MAX} 个文件`, 'error'); break; }
-                const ext = f.name.split('.').pop().toLowerCase();
-                const isArchive = CORR_ARCHIVE_EXTS.includes(ext);
-                if (!isArchive && !CORR_ATTACH_EXTS.includes(ext)) { showToast(`不支持的格式：${f.name}`, 'error'); continue; }
-                // 附件压缩包支持方案 D10：大小提示按扩展名分流，压缩包 50MB / 其余按既有 20MB，句式统一。
-                const sizeLimit = isArchive ? CORR_ARCHIVE_MAX_SIZE : CORR_ATTACH_MAX_SIZE;
-                if (f.size > sizeLimit) { showToast(`${f.name} 超过 ${Math.round(sizeLimit / 1024 / 1024)}MB`, 'error'); continue; }
+                const reject = corrFileGateReject(f);
+                if (reject) { showToast(reject, 'error'); continue; }
                 if (corrAttachFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified)) {
                     showToast(`该文件已选：${f.name}`, 'info'); continue;
                 }
@@ -2563,8 +2586,8 @@
         //   入口"的痛点（此前贴错一张只能点"选择文件"重选，而重选会把之前已选的全部清空）。
         //   key 沿用原 chip 容器 id，值=已选 File[]；对应裸 input 只在 onchange 一次性读取后立即清空
         //   （input 不再是真相源，避免 input.files 与数组两份状态互相打架）。
-        //   不新增任何校验——S4 既有裸 input 链本就没有扩展名/大小/去重校验闸门；数量>max 拦截口径按
-        //   上传点分两档（本次未改，均沿用改造前既有行为）：
+        //   校验口径（2026-10-08 起）：扩展名/大小两道闸在 corrPickerCollect 内拦（同补充附件弹窗，共用
+        //   corrFileGateReject）；去重仍不做；数量>max 拦截口径按上传点分两档（沿用改造前既有行为）：
         //   ① 建单路径（createOaProofPicked/createErrProofPicked）：submitCorrection 内有**两道**前端 >5 校验——
         //      (a) 提交前：待修复数据无条件校验、OA 截图仅 hasOa 真OA模式下校验，超限直接阻止提交；
         //      (b) 建单成功后、两步上传 error_proof 前再校验一次待修复数据，超限则**单已建但跳过上传**，
@@ -2574,7 +2597,7 @@
         //      resubmitBatchFilesPicked）：前端无数量拦截，真正拦截靠后端 multer limits:{files:5}
         //      （400 由 correctionUploadMw 包装返回）。
         //   预览层（corrPickerRender）本身对两档一视同仁：只在超 max 时显示警示文案，从不阻止选择——
-        //   拦截职责在提交/后端，不在预览。本次只补预览与删除，扩校验属行为变更、超出本次范围。
+        //   数量拦截职责在提交/后端，不在预览。
         const CORR_PICKER_FILES = {
             createOaProofPicked: [],
             createErrProofPicked: [],
@@ -2600,11 +2623,19 @@
             resubmitFilesPicked: { inputId: 'formResubmitFiles', max: 5 },
             resubmitBatchFilesPicked: { inputId: 'formResubmitBatchFiles', max: 5 },
         };
-        // 纯追加，不做任何校验（见上方注释——裸 input 链本无扩展名/大小/去重闸门，此处零新增）
+        // 追加前过扩展名/大小两道闸（corrFileGateReject），拒收的 showToast 后跳过；不去重、不拦数量（见上方注释）。
+        //   返回本次实际接收数，供贴图 collect 透传给 u-paste.js（拒收后不再谎报「已粘贴 N 张」）。
         function corrPickerCollect(key, files) {
             const arr = CORR_PICKER_FILES[key];
-            if (!arr) return;
-            for (const f of Array.from(files || [])) arr.push(f);
+            if (!arr) return 0;
+            let accepted = 0;
+            for (const f of Array.from(files || [])) {
+                const reject = corrFileGateReject(f);
+                if (reject) { showToast(reject, 'error'); continue; }
+                arr.push(f);
+                accepted++;
+            }
+            return accepted;
         }
         function corrPickerRevokeUrls(key) {
             (CORR_PICKER_URLS[key] || []).forEach(u => { if (u) URL.revokeObjectURL(u); });
@@ -2709,7 +2740,8 @@
         //   ① 裸 input 类（6 个：OA截图/待修复数据/完成×2/重传×2）——S1（2026-08-04）起已升级为数组
         //     持态 + 预览/删除（见上方 CORR_PICKER_* 系列），粘贴口径仍为"追加"（而非重选覆盖）——全站
         //     其余 picker（Sys_Iteration/零星事项）粘贴语义均为追加，用户心智统一更重要，且"贴图误删
-        //     已选文件"比"贴图追加"更容易造成实际损失；不新增任何扩展名/大小/去重校验（沿用既有口径）。
+        //     已选文件"比"贴图追加"更容易造成实际损失；2026-10-08 起经 corrPickerCollect 过扩展名/大小两道闸
+        //     （与文件选择同源），仍不去重。
         //   ② 数组类（1 个：补充附件 formAttachFiles/attachModal）——已有 corrAttachFiles 数组 + 独立
         //     校验闸门 corrAttachCollectFiles（S4 抽出，见上）+ renderCorrAttachPreview 预览，贴图直接复用。
         //   scopeResolver：createModal/completeModal/resubmitModal/attachModal 四个弹窗互斥，逐个查
@@ -2747,13 +2779,13 @@
                 keyOf: (el) => el.id,
                 collect: (key, files) => {
                     // S2c·R1：corrAttachPreview 走 corrAttachCollectFiles（真实拒收路径），透传其实际
-                    //   接收数；其余 6 个 CORR_PICKER_TARGETS key 走 corrPickerCollect（纯追加零校验，
-                    //   见其定义旁注），维持不返回（undefined 旧行为对它们才是正确语义——从未拒收过任何
-                    //   文件，files.length 本就等于接收数，无需改动）。
+                    //   接收数；其余 6 个 CORR_PICKER_TARGETS key 走 corrPickerCollect——2026-10-08 起它也有
+                    //   扩展名/大小拒收路径（超 20MB 的贴图会被拒），同样透传实际接收数。
                     if (key === 'corrAttachPreview') { const accepted = corrAttachCollectFiles(files); renderCorrAttachPreview(); return accepted; }
                     if (!CORR_PICKER_TARGETS[key]) return;
-                    corrPickerCollect(key, files);
+                    const accepted = corrPickerCollect(key, files);
                     corrPickerRender(key);
+                    return accepted;
                 },
             });
         }
