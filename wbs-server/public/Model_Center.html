@@ -13989,7 +13989,7 @@ ${window.generatedScripts.incremental}`;
                         <button type="button" class="model-open-btn" data-model-id="${m.id}" title="${escapeHtml(m.table_name)}${m.companion_of ? ' [变更追踪伴生表]' : ''}${m.config_mode === 'custom' ? ' [手工模式]' : ''}（点击查看详情）">${m.companion_of ? '<span style="color:#15803d; margin-right:3px; font-family:sans-serif;" title="变更追踪伴生表，由主表配置自动管理">●</span>' : ''}${m.config_mode === 'custom' ? '<span style="color:#d97706; margin-right:3px; font-family:sans-serif;" title="完全手工编写DDL和ETL脚本，无标准配置">●</span>' : ''}${m.model_type === 'DICT' ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>' : ''}${escapeHtml(m.table_name)}</button>
                     </td>
                     <td style="padding:10px 8px; font-size:${(m.table_comment || '').length > 8 ? '0.75em' : '0.85em'}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                        <span style="display:flex; align-items:center; gap:4px; min-width:0;"><button type="button" class="model-open-btn" data-model-id="${m.id}" style="flex:1; min-width:0;" title="${escapeHtml(m.table_comment)}（点击查看详情）">${escapeHtml(m.table_comment)}</button>${m.design_notes ? `<button type="button" style="flex-shrink:0; cursor:pointer; color:#6366f1; background:none; border:0; padding:0; line-height:1;" title="查看设计说明" onclick="event.stopPropagation(); showDesignNotesPopover(this, ${JSON.stringify(escapeHtml(m.design_notes)).replace(/"/g, '&quot;')})"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}</span>
+                        <span style="display:flex; align-items:center; gap:4px; min-width:0;"><button type="button" class="model-open-btn" data-model-id="${m.id}" style="flex:1; min-width:0;" title="${escapeHtml(m.table_comment)}（点击查看详情）">${escapeHtml(m.table_comment)}</button>${m.design_notes ? `<button type="button" style="flex-shrink:0; cursor:pointer; color:#6366f1; background:none; border:0; padding:0; line-height:1;" title="查看设计说明" onclick="event.stopPropagation(); showDesignNotesPopover(this, ${Number(m.id)})"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}</span>
                     </td>
                     <td style="padding:10px 8px; white-space:nowrap;">
                         <div style="font-size:0.85em;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 2px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(m.tech_owner) || '-'}</div>
@@ -14128,15 +14128,24 @@ ${window.generatedScripts.incremental}`;
         }
 
         // 设计备注气泡卡片
-        function showDesignNotesPopover(iconEl, htmlContent) {
+        // P29（2026-10-08）：按钮只传模型 id，正文从 allModelsData 取、用 textContent 写入。
+        // 不要再把 design_notes 内联进 onclick：HTML 属性解码会还原 escapeHtml 的转义，内容再进 innerHTML 就成了存储型 XSS。
+        function showDesignNotesPopover(iconEl, modelId) {
             // 关闭已有的 popover
             closeDesignNotesPopover();
+            const model = allModelsData.find(m => String(m.id) === String(modelId));
+            const notes = model && model.design_notes ? String(model.design_notes) : '';
+            if (!notes) return;
             const rect = iconEl.getBoundingClientRect();
             const pop = document.createElement('div');
             pop.id = 'designNotesPopover';
             pop.style.cssText = 'position:fixed; z-index:9999; background:white; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 8px 30px rgba(0,0,0,0.15); padding:16px 18px; max-width:420px; min-width:240px; font-size:0.88em; line-height:1.7; color:#334155; word-break:break-word; white-space:pre-wrap;';
             // 标题行
-            pop.innerHTML = '<div style="font-weight:600; color:#6366f1; margin-bottom:8px; font-size:0.85em; display:flex; align-items:center; gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>设计备注</div><div style="color:#475569;">' + htmlContent + '</div>';
+            pop.innerHTML = '<div style="font-weight:600; color:#6366f1; margin-bottom:8px; font-size:0.85em; display:flex; align-items:center; gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>设计备注</div>';
+            const body = document.createElement('div');
+            body.style.color = '#475569';
+            body.textContent = notes;
+            pop.appendChild(body);
             document.body.appendChild(pop);
             // 定位：图标下方居中，超出屏幕则调整
             let left = rect.left + rect.width / 2 - pop.offsetWidth / 2;
