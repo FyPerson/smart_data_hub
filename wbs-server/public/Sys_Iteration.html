@@ -399,7 +399,9 @@
         .si-tl-release-json summary { cursor: pointer; color: #374151; }
         .si-tl-release-json summary:hover { color: #1e293b; }
         /* max-height 240→150（发布留痕降噪批）：原文里对人有意义的字段已被上方结构化小表逐个透出，
-           这块 <pre> 只服务"人工核对冻结原文"这一窄场景，不该按第一阅读对象的体量占位。 */
+           这块 <pre> 只服务"人工核对冻结原文"这一窄场景，不该按第一阅读对象的体量占位。
+           2026-10-12 起解析成功的发布留痕不再展示原文，本规则只服务解析失败分支（「查看改动」展开区
+           复用本 class 但内容是 div，不受本规则影响）。 */
         .si-tl-release-json pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
         /* [长任务B·S2b·Opus 预筛 LOW-6] 逐人完成 no_code 原因展开区——专名 class（不复用
            .si-tl-release-json，那是发布留痕专用命名），规则逐条复制自上方 .si-tl-release-json 三条
@@ -4514,7 +4516,8 @@
         //      （本函数在 siRenderTimeline 的 map 里，一条炸掉整个时间线不出）；
         //   ③ 跨类型 String() 归一后两侧可能"意外相等"而触发同名隐藏，违背"逐字相同才去重"的语义。
         //   这三种都只可能来自被污染/历史异常的快照载荷（正常路径 title_snapshot 取自 TEXT 列的 issue.title），
-        //   按"无标题快照"如实标注即可——真值一字未动，仍在下方二级折叠的审计原文里可查（§6.6b 不伪造精神）。
+        //   按"无标题快照"如实标注即可——真值一字未动，仍原样存在库里该行的 summary 中（§6.6b 不伪造精神）。
+        //   [原始快照折叠下线·2026-10-12] 页面不再展示原始 JSON，此类异常真值只能查库，不再能在页面上翻到。
         const rawTitle = parsed.title_snapshot;
         const hasTitle = typeof rawTitle === 'string' && rawTitle.length > 0;
         const curTitle = (typeof currentTitle === 'string') ? currentTitle : null;
@@ -4523,12 +4526,14 @@
             : ` · 发布时标题：${rawTitle}`;
         // C5c（详情页体验优化批·发布留痕展开视图结构化）：commits 数组与快照级字段 status_at_publish
         // 一并透出，供 siRenderReleasePublishedCommits 渲小表 + summaryHtml 拼「发布时状态」行——
-        // issue_id/schema_version 两个快照级字段不透出（对读者无展示价值，只在下方二级折叠的原始 JSON
-        // 里保留）；title_snapshot 按上面三分支条件透出，非无条件拼进摘要行。
+        // issue_id/schema_version 两个快照级字段不透出（对读者无展示价值，只留在库里的 summary 原文中）；
+        // title_snapshot 按上面三分支条件透出，非无条件拼进摘要行。
+        // [原始快照折叠下线·2026-10-12] 解析成功分支不再返回 raw——调用方已不展示原始 JSON（见
+        //   siRenderTimeline release_published 分支注释）；raw 只留在解析失败分支，那里它是展开区唯一内容。
         const commits = Array.isArray(parsed.commits) ? parsed.commits : [];
         return {
             ok: true, brief: `${typeLabel}${titleSeg} · ${commits.length} 条 commit`,
-            raw: JSON.stringify(parsed, null, 2), commits, statusAtPublish: parsed.status_at_publish || null,
+            commits, statusAtPublish: parsed.status_at_publish || null,
         };
     }
     // C5c：dev_user_id → 姓名——快照 payload 冻结 schema（§6.6a 三源统一字段集）只含 dev_user_id，
@@ -4548,7 +4553,9 @@
     // ⭐ [发布留痕降噪批·2026-08-26] 列集从「开发/组件/commit_ref」三列扩到**五列**，两处新增：
     //   ① `时间`＝快照 commits 行的 `created_at`（后端 snapshotReleaseCommitsInTxn 的 SELECT 已冻结该列，
     //      见 routes/sys-iteration/index.js 该函数）——它此前是**原始 JSON 里唯一对人有价值却没被结构化
-    //      区透出的字段**，提上来后二级折叠的 JSON 才真正只剩内部主键/schema_version。列名用「时间」而非
+    //      区透出的字段**。[codex 599 L-2 订正] 原写「提上来后二级折叠的 JSON 才真正只剩内部主键/
+    //      schema_version」不准——commits 行内的 updated_at 也没透出，它不是主键；完整的不展示字段清单
+    //      见 siRenderTimeline release_published 分支注释（2026-10-12 该二级折叠已整层去掉）。列名用「时间」而非
     //      「提交时间」：这是 commit 记录**被录入平台**的时间，不是 git commit 时间，措辞与活动 commit 表
     //      siRenderDevCommits 的表头逐字对齐（同一语义同一叫法，不制造两套词）。格式同走 siFmtDT（到分）。
     //      ⚠️ 老快照若无该字段，siFmtDT(undefined) 返回「—」，不伪造时间（同 §6.6b 不伪造精神）。
@@ -4974,10 +4981,16 @@
             // release_published：折叠——原生 <details> 默认收起，摘要行只给三个人读得懂的字段。
             //   C5c（详情页体验优化批·发布留痕展开视图结构化）：点开后不再是裸 JSON——commits 渲染成
             //   开发/组件/commit_ref/时间/📋 小表（列集见 siRenderReleasePublishedCommits），顶部一行
-            //   「发布时状态」，原始 JSON 降为小表下方的二级折叠
-            //   （审计原文不丢，只是不再是展开区第一眼看到的东西）。解析失败（info.ok===false）分支
-            //   维持现状不动——那种情况下 info.commits/statusAtPublish 恒 null，走不到结构化这条路径。
-            //   （esc() 后再拼进 <pre>，不走 innerHTML 之外的第二次 DOM 赋值，字符串已按 HTML 语境转义，无 XSS 风险）。
+            //   「发布时状态」。
+            //   ⭐ [原始快照折叠下线·2026-10-12 用户拍板] C5c 时留在小表下方的「原始快照（审计原文）」二级折叠
+            //   整层去掉：阅读所需信息由结构化区提供（type/title_snapshot→摘要行，status_at_publish→发布时状态行，
+            //   commits 的 dev_user_id/component/commit_ref/created_at→小表+📋 复制完整 ref）。不展示的快照字段
+            //   （字段集以 index.js 写 release_published 行处与 snapshotReleaseCommitsInTxn 的 SELECT 为准）：
+            //   顶层 issue_id/schema_version，commits 行内 commit_id/dev_assignee_id 两个内部编号与 updated_at
+            //   （commit 记录在平台上的最后修改时间）。[codex 599 L-2 订正：原写「独有只剩 issue_id/schema_version」]
+            //   数据本身不动——原文仍原样存在库里该行的 summary，审计查库。
+            //   解析失败（info.ok===false）分支**保留**原文 <pre>：那里没有结构化区，原文是展开区唯一内容，
+            //   去掉就成了空展开。（esc() 后再拼进 <pre>，字符串已按 HTML 语境转义，无 XSS 风险）。
             let summaryHtml;
             // [乙4·2026-09-17 B3·时间线留痕覆盖面补齐 v0.2 §5 B3] 摘要前缀统一生成一次，供下方 A/B 类
             //   配对分支的 ok/history/broken 三种出口复用——estimate 事件类型专属前缀「预计完成：」不再
@@ -4998,7 +5011,7 @@
                     const statusLine = info.statusAtPublish
                         ? `<div class="si-muted" style="font-size:11px;margin:4px 0">发布时状态：${esc(info.statusAtPublish)}</div>` : '';
                     const commitsTable = siRenderReleasePublishedCommits(info.commits);
-                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary>${statusLine}${commitsTable}<details class="si-tl-release-json" style="display:block;margin-top:6px"><summary>原始快照（审计原文）</summary><pre>${esc(info.raw)}</pre></details></details>`;
+                    summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary>${statusLine}${commitsTable}</details>`;
                 } else {
                     summaryHtml = `<details class="si-tl-release-json"><summary>${esc(info.brief)}</summary><pre>${esc(info.raw)}</pre></details>`;
                 }

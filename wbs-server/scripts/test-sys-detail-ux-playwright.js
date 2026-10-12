@@ -75,7 +75,7 @@
  *   [T7] 发布留痕（release_published）展开视图结构化——正例：一条合法快照 JSON（commits 两条，一条
  *        dev_user_id 映射得到真名〔用 seed 的 admin.id〕、一条映射不到〔99999→回退显 #99999，
  *        不伪造〕）→ 展开后 commits 小表行数=2、两行姓名/组件/commit_ref/时间精确匹配、顶部「发布时
- *        状态：已上线」小字、小表下方二级折叠「原始快照（审计原文）」含 schema_version；对照：非法 JSON
+ *        状态：已上线」小字、（2026-10-12 前）小表下方二级折叠「原始快照（审计原文）」含 schema_version；对照：非法 JSON
  *        → 维持现状「原始记录（解析失败）」文案不动、且不渲染结构化小表（info.ok===false 分支
  *        未被新代码路径影响）。<details> 展开用 page.evaluate 直接置 `.open = true`（验证展开后
  *        内容对不对，不测原生 HTML 折叠交互机制本身）。
@@ -100,6 +100,12 @@
  *             不借用别行参数、5 格不塌陷。这把 siJsStringAttr 的安全性从"读实现认为对"升到
  *             "有行为断言守"（该函数 = 内层 JSON.stringify 转 JS 字面量 + 外层 esc 转 HTML 属性，
  *             实现见 Sys_Iteration.html 该函数处注释）。
+ *        ⭐ [原始快照折叠下线·2026-10-12 用户拍板] 上面 ③⑤ 里涉及「二级折叠原文」的断言全部反转：
+ *          解析成功的行（正例 + 同名组，共用 assertNoRawSnapshot）——展开区内无嵌套 details 且整条条目
+ *          .si-tl-body 内只有展开区这 1 个 details、整条条目内无 <pre>、整条条目文本不含
+ *          schema_version / 原始快照 / 审计原文；解析失败对照组**保留**原文——展开区内与整条条目内都
+ *          恰 1 个 <pre> 且内容精确等于原文，max-height 150px 断言随之挪到这一组（原文 <pre> 现只剩这里有）。
+ *          [codex 599 L-1] 检查范围由展开区扩到整条条目、两组统一，三种回退各做了单独变异（见 T7 段末注释）。
  *
  * F6 新增（估时并发乐观锁前端接线：F2 提示+B1 后端拦截+本件自动刷新，组合缺口闭环）：
  *   [T8] 全程走真实 UI 提交路径（page.fill + page.click('#siMConfirm')，非直接 fetch）：
@@ -885,8 +891,9 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                 const body = item.querySelector('.si-tl-body');
                 const outerDetails = body ? body.querySelector('details.si-tl-release-json') : null;
                 if (outerDetails) outerDetails.open = true;   // 展开一级
-                const innerDetails = outerDetails ? outerDetails.querySelector('details.si-tl-release-json') : null;
-                if (innerDetails) innerDetails.open = true;   // 展开二级（原始快照）
+                // [原始快照折叠下线·2026-10-12] 二级折叠已去掉，这里只取它是否存在（正例与同名组应为 false）。
+                //   查任意嵌套 details，不限 class——换个 class 名把原文折叠塞回来也要判红。
+                const innerDetails = outerDetails ? outerDetails.querySelector('details') : null;
                 const summaryEl = outerDetails ? outerDetails.querySelector(':scope > summary') : null;
                 const statusLineEl = outerDetails ? outerDetails.querySelector(':scope > div.si-muted') : null;
                 const table = outerDetails ? outerDetails.querySelector('table.si-commit-table') : null;
@@ -908,14 +915,16 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                     return { texts: tds.map(td => td.textContent.trim()), tdCount: tds.length, btnCount: btns.length, copyArg };
                 });
                 const rowTexts = rowData.map(r => r.texts);   // 既有断言沿用此形态，不改口径
-                const rawPre = innerDetails ? innerDetails.querySelector('pre') : null;
-                // [codex 本批 MED-3] 表头文本 + 二级折叠文案：两者都是本批改动的**可见契约**（三列扩五列、
-                //   「查看原始快照」→「原始快照（审计原文）」），此前只在注释里声称、无断言守——实现改错
-                //   或漏改时守卫不会红。
+                // [原始快照折叠下线·2026-10-12] 原文 <pre> 改为在整个展开区里找（不再限二级折叠内）：
+                //   解析成功的行应一个都没有，解析失败的行应恰有一个且内容是原文。
+                const pres = outerDetails ? [...outerDetails.querySelectorAll('pre')] : [];
+                const rawPre = pres.length === 1 ? pres[0] : null;
+                // [codex 本批 MED-3] 表头文本是本批改动的**可见契约**（三列扩五列），此前只在注释里声称、
+                //   无断言守——实现改错或漏改时守卫不会红。
                 const headTexts = table ? [...table.querySelectorAll('thead th')].map(th => th.textContent.trim()) : null;
-                const innerSummaryEl = innerDetails ? innerDetails.querySelector(':scope > summary') : null;
                 // [codex 本批 LOW-2] max-height 是本批用户拍板的可见结果（240px→150px），CSS 无运行时自证
                 //   途径，只能读 computed style 锁住（读最终计算值，不依赖具体 CSS 规则排列或注释）。
+                //   [2026-10-12] 原文 <pre> 只剩解析失败分支还有，该断言随之挪到解析失败对照组。
                 const preMaxHeight = rawPre ? window.getComputedStyle(rawPre).maxHeight : null;
                 // [codex 本批 HIGH 驳回后的衍生断言] 转义链击穿的**直接行为证据**：恶意 ref 里的
                 //   `<img src=x onerror=...>` 若被当作标签解析，这里就能查到一个真实 img 节点。
@@ -931,11 +940,18 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                     rowTexts,
                     rowData,
                     headTexts,
-                    innerSummaryText: innerSummaryEl ? innerSummaryEl.textContent.trim() : null,
                     preMaxHeight,
                     injectedNodeCount,
                     hasInnerDetails: !!innerDetails,
+                    preCount: pres.length,
                     rawText: rawPre ? rawPre.textContent : null,
+                    // 整个展开区的文本（含折叠内未显示部分）——用来断言内部字段名不再出现在页面上。
+                    outerText: outerDetails ? outerDetails.textContent : null,
+                    // [codex 599 L-1] 负向检查扩到整条条目的 .si-tl-body：原文若被挪到展开区**旁边**
+                    //   （body 内与 outerDetails 平级），只查 outerDetails 内部会漏。details 总数含 outerDetails 自身。
+                    bodyDetailsCount: body ? body.querySelectorAll('details').length : null,
+                    bodyPreCount: body ? body.querySelectorAll('pre').length : null,
+                    bodyText: body ? body.textContent : null,
                 };
             };
             return {
@@ -946,7 +962,7 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             };
         }, { ok: OP_RELEASE, bad: OP_RELEASE_BAD, same: OP_RELEASE_SAME, evil: OP_RELEASE_EVIL });
 
-        // 正例：结构化小表 + 二级折叠原始快照
+        // 正例：结构化小表（2026-10-12 起不再有二级折叠原始快照）
         const relOk = releaseInfo.ok;
         must(!!relOk && relOk.hasOuterDetails === true,
             `[T7] 前置：合法快照行应渲染出 details.si-tl-release-json，实得 ${JSON.stringify(relOk)}`);
@@ -981,22 +997,32 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
                 `[T7] ⭐ 降噪批：commit_ref="${ref}" 那一行应恰有 1 个 📋 且其复制入参精确等于本行 ref，`
                 + `实得 ${JSON.stringify(row)}`);
         }
-        // [codex 本批 MED-3] 表头（三列扩五列）与二级折叠文案——本批的可见契约，须逐字锁住。
+        // [codex 本批 MED-3] 表头（三列扩五列）——本批的可见契约，须逐字锁住。
         must(!!relOk && Array.isArray(relOk.headTexts)
              && JSON.stringify(relOk.headTexts) === JSON.stringify(['开发', '组件', 'commit_ref', '时间', '']),
             `[T7] ⭐ 降噪批：commits 小表表头应为 [开发, 组件, commit_ref, 时间, <空操作列>]，`
             + `实得 ${JSON.stringify(relOk && relOk.headTexts)}`);
-        must(!!relOk && relOk.innerSummaryText === '原始快照（审计原文）',
-            `[T7] ⭐ 降噪批：二级折叠文案应精确为「原始快照（审计原文）」（旧文案「查看原始快照」已废），`
-            + `实得 "${relOk && relOk.innerSummaryText}"`);
-        // [codex 本批 LOW-2] pre 高度 240px→150px 是用户拍板的可见结果，读 computed style 锁住。
-        must(!!relOk && relOk.preMaxHeight === '150px',
-            `[T7] ⭐ 降噪批：原始快照 <pre> 的 max-height 计算值应为 150px（降噪拍板值），`
-            + `实得 "${relOk && relOk.preMaxHeight}"`);
-        must(!!relOk && relOk.hasInnerDetails === true,
-            `[T7] ⭐ C5c：小表下方应有二级折叠（文案由上面「原始快照（审计原文）」那条精确断言守），实得 ${JSON.stringify(relOk)}`);
-        must(!!relOk && !!relOk.rawText && relOk.rawText.includes('schema_version'),
-            `[T7] 二级折叠内容应含原始 JSON（含 schema_version 字段，审计原文不丢），实得 rawText 前 100 字="${relOk && relOk.rawText && relOk.rawText.slice(0, 100)}"`);
+        // ⭐ [原始快照折叠下线·2026-10-12 用户拍板] 原「二级折叠存在 + 文案逐字 + 含 schema_version」三条
+        //   正向断言反转为负向：解析成功的行，整条条目里不得再有嵌套折叠、不得有原文 <pre>、
+        //   文本里不得出现只存在于原始 JSON 的字段名 schema_version 与旧折叠标题。
+        //   三条各拦一种回退：原样放回（嵌套 details）、去掉折叠但直接摆原文（pre）、换别的元素塞原文（文本）。
+        // [codex 599 L-1] 检查抽成一个函数，正例与同名组统一执行（原先同名组漏了文本检查）；范围从展开区
+        //   扩到整条条目 .si-tl-body（原文挪到展开区旁边也要判红）。outerDetails 内的嵌套 details 照查——
+        //   body 级 details 总数只能证明「多出一个」，查不出多出的那个是不是嵌在展开区里。
+        //   三种回退各自的变异运行结果见本段末尾注释。
+        const assertNoRawSnapshot = (tag, info) => {
+            must(!!info && info.hasInnerDetails === false && info.bodyDetailsCount === 1,
+                `[T7] ⭐ 折叠下线·${tag}：展开区内不得有嵌套折叠、整条条目里只能有展开区这一个 details`
+                + `（原「原始快照（审计原文）」已去掉），实得 hasInner=${info && info.hasInnerDetails} bodyDetails=${info && info.bodyDetailsCount}`);
+            must(!!info && info.preCount === 0 && info.bodyPreCount === 0,
+                `[T7] ⭐ 折叠下线·${tag}：整条条目里不得有原文 <pre>，`
+                + `实得 preCount=${info && info.preCount} bodyPreCount=${info && info.bodyPreCount}`);
+            must(!!info && typeof info.bodyText === 'string' && !info.bodyText.includes('schema_version')
+                 && !info.bodyText.includes('原始快照') && !info.bodyText.includes('审计原文'),
+                `[T7] ⭐ 折叠下线·${tag}：整条条目文本不得含 schema_version / 原始快照 / 审计原文（原始 JSON 不再展示），`
+                + `实得 bodyText 前 200 字="${info && info.bodyText && info.bodyText.slice(0, 200)}"`);
+        };
+        assertNoRawSnapshot('正例', relOk);
 
         // 对照：解析失败维持现状——单层 details+pre「原始记录（解析失败）」文案，无结构化小表
         const relBad = releaseInfo.bad;
@@ -1006,6 +1032,20 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             `[T7] ⭐ C5c 对照：解析失败分支应维持现状文案「原始记录（解析失败）」不动，实得 summaryBrief="${relBad && relBad.summaryBrief}"`);
         must(!!relBad && relBad.hasTable === false,
             `[T7] ⭐ C5c 对照：解析失败行不应渲染结构化 commits 小表（info.ok===false 分支不动，走不到新代码路径），实得 hasTable=${relBad && relBad.hasTable}`);
+        // ⭐ [原始快照折叠下线·2026-10-12] 解析失败分支**保留**原文：那里没有结构化区，原文是展开区唯一内容。
+        //   同时是上面三条负向断言的对照组——证明「找 pre」的取证路径本身能找到原文（否则负向断言可能恒真）。
+        //   [codex 599 L-1] 同时核整条条目范围的计数（bodyPreCount / bodyDetailsCount），给 assertNoRawSnapshot
+        //   里 body 级取证路径同样配上「能找到真实节点」的对照。
+        must(!!relBad && relBad.preCount === 1 && relBad.bodyPreCount === 1 && relBad.bodyDetailsCount === 1
+             && relBad.rawText === '这不是合法JSON{',
+            `[T7] ⭐ 折叠下线对照：解析失败行仍应恰有 1 个原文 <pre>（展开区内与整条条目内都恰 1 个）且内容精确等于原文，`
+            + `实得 preCount=${relBad && relBad.preCount} bodyPreCount=${relBad && relBad.bodyPreCount} `
+            + `bodyDetails=${relBad && relBad.bodyDetailsCount} rawText="${relBad && relBad.rawText}"`);
+        // [codex 本批 LOW-2·2026-10-12 挪位] pre 高度 240px→150px 是用户拍板的可见结果，读 computed style 锁住；
+        //   原文 <pre> 现只剩解析失败分支有，断言随之从正例挪到这里。
+        must(!!relBad && relBad.preMaxHeight === '150px',
+            `[T7] ⭐ 降噪批：原文 <pre> 的 max-height 计算值应为 150px（降噪拍板值），`
+            + `实得 "${relBad && relBad.preMaxHeight}"`);
 
         // ── ⭐ [发布留痕降噪批·2026-08-26] 反向对照组：快照标题 == 当前单标题 ⇒ 摘要行不重复标题 ──
         //   与上面 relOk（标题不同→显示）成对，两条合起来才证明"改过名才显示"这个判定的**两个方向**。
@@ -1017,16 +1057,17 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
             + `（既不重复标题、也不留「发布时标题：」前缀与空的 · 分隔符），实得 summaryBrief="${relSame && relSame.summaryBrief}"`);
         must(!!relSame && !!relSame.summaryBrief && !relSame.summaryBrief.includes(REL_ISSUE_TITLE),
             `[T7] ⭐ 降噪批反向：摘要行不得含当前单标题「${REL_ISSUE_TITLE}」，实得 summaryBrief="${relSame && relSame.summaryBrief}"`);
-        // 去标题**只影响摘要行**：展开区其余部分（状态行 / 小表 / 二级折叠原文）一个都不少——
+        // 去标题**只影响摘要行**：展开区其余部分（状态行 / 小表）一个都不少——
         //   否则一个"同名时整块降级不渲染"的实现也能让上面两条断言绿。
+        //   [2026-10-12] 二级折叠原文已整层下线，原「原文里 title_snapshot 一字未删」一半改为「同名组也不出原文」。
         must(!!relSame && relSame.rowCount === 1 && Array.isArray(relSame.rowTexts)
              && relSame.rowTexts.some(r => r[2] === REL_REF_SAME && r[3] === '2026-08-11 09:30'),
             `[T7] ⭐ 降噪批反向：同名标题行的 commits 小表仍应正常渲染（1 行 + commit_ref + 时间），`
             + `实得 rowCount=${relSame && relSame.rowCount} rowTexts=${JSON.stringify(relSame && relSame.rowTexts)}`);
-        must(!!relSame && !!relSame.statusLineText && relSame.statusLineText.includes('发布时状态：已上线')
-             && relSame.hasInnerDetails === true && !!relSame.rawText && relSame.rawText.includes(REL_ISSUE_TITLE),
-            `[T7] ⭐ 降噪批反向：同名标题行的「发布时状态」行与二级折叠原文仍在，且原文里 title_snapshot 一字未删`
-            + `（去重只发生在摘要行，审计原文不受影响），实得 statusLine="${relSame && relSame.statusLineText}" hasInner=${relSame && relSame.hasInnerDetails}`);
+        must(!!relSame && !!relSame.statusLineText && relSame.statusLineText.includes('发布时状态：已上线'),
+            `[T7] ⭐ 降噪批反向：同名标题行的「发布时状态」行仍在（去重只发生在摘要行），`
+            + `实得 statusLine="${relSame && relSame.statusLineText}"`);
+        assertNoRawSnapshot('同名组', relSame);
 
         // ── ⭐ [codex 本批 HIGH 驳回衍生 + LOW-1] 转义链行为取证 + 空 commit_ref 分支 ──
         const relEvil = releaseInfo.evil;
@@ -1053,6 +1094,10 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         must(!!emptyRow && emptyRow.tdCount === 5 && emptyRow.texts[3] === '2026-08-12 08:05',
             `[T7] ⭐ 空 commit_ref 分支对照：该行仍应是完整 5 格（列数不因空 ref 塌陷）且时间列照常渲染，`
             + `实得 ${JSON.stringify(emptyRow)}`);
+        // [codex 599 L-1·2026-10-12 变异实测] assertNoRawSnapshot 三项检查对三种回退各自判红（隔离实例跑整套，
+        //   改动后 141/0）：A 原样放回二级折叠（main 原版页面）135/6——两组 × 折叠/pre/文本全红；
+        //   B 去掉折叠直接在展开区摆 <pre>${esc(e.summary)}</pre> 137/4——两组 × pre/文本；
+        //   C 原文换成 div 放到展开区旁边（</details> 之后）139/2——两组 × 文本，这一种只有扩到整条条目后才拦得住。
 
         await page.evaluate(() => { if (window.siCloseModal) siCloseModal(); if (window.siCloseDrawer) siCloseDrawer(); });
         await page.waitForTimeout(200);

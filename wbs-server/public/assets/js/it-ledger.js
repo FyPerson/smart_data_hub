@@ -11,6 +11,11 @@
   const categories = { server: '服务器', disk: '硬盘', laptop: '笔记本', desktop: '台式机', ap: '无线 AP', other: '其他设备', software: '软件', subscription: '订阅' };
   const statuses = { in_service: '在用', in_depot: '可用', faulty: '故障', to_retire: '待报废', retired: '已报废', active: '有效', cancelled: '已停用' };
   const statusClasses = { in_service: 'sem-active', in_depot: 'sem-staging', faulty: 'sem-failed', to_retire: 'sem-hold', retired: 'sem-archived', active: 'sem-active', cancelled: 'sem-voided' };
+  // All-assets table (codex 50, plan D): category | asset (brand + model, name as sub-line) | purpose / extra info | status | SN.
+  // Sortable keys are the columns themselves; the restore whitelist is derived from this list, never kept as a second copy.
+  const subtypeLabels = { switch: '交换机', security: '安全设备', storage: '存储', printer: '打印机', ups: 'UPS' };
+  const nameFlags = { 采集告警: 'alert', 暂定: 'tentative' };
+  const allColumns = [['category', '类别'], ['asset_label', '资产'], ['purpose_label', '用途 / 补充信息'], ['status', '状态'], ['sn', '序列号']];
   const actionNames = { register: '登记', update: '编辑资料', rack_in: '上架', rack_out: '下架', rack_move: '迁柜', rack_relocate: '柜内移位', mark_status: '调整库房状态', retire: '报废', disk_mount: '装盘', disk_unmount: '拆盘', disk_swap: '换盘', disk_move: '移盘', assign: '领用', reassign: '更换保管人', return: '归还', place: '放置', relocate: '移动位置', ap_place: '安装 AP', ap_relocate: '移动 AP', ap_unmount: '拆下 AP', renew: '续费', cancel: '停用' };
   const fields = { name: '名称', category: '类别', status: '状态', brand: '品牌', model: '型号', sn: '序列号', asset_no: '资产编号', owner_name: '责任人', owner_dept: '责任部门', asset_class: '资产分类', purchased_at: '购置日期', expires_at: '到期日期', u_height: '占用 U 数', slot_count: '盘位数', rack_id: '机柜', u_start: '起始 U', parent_asset_id: '宿主', slot_no: '盘位', custodian_name: '保管人', custodian_user_id: '保管人用户编号', location_text: '位置', floor_id: '楼层', room_id: '房间', pos: '房间内坐标', attrs: '类别属性', note: '备注', fin_amount: '购置金额', fin_vendor: '供应商', fin_contract_no: '合同编号', fin_changed: '财务字段变更', version: '版本', created_at: '登记时间', updated_at: '更新时间', disk_id: '硬盘编号' };
   const tabs = { all: '全部资产', racks: '机房', depot: '库房', aps: 'AP 房间', terminals: '终端与其他', software: '软件与订阅', stocktakes: '盘点', reconciles: '对账', inspections: '巡检' };
@@ -36,7 +41,7 @@
         if(Object.hasOwn(categories,c.category))state.category=c.category;
         if(Object.hasOwn(statuses,c.status))state.status=c.status;
         state.density=c.density==='compact'?'compact':'comfortable';
-        state.sortBy=['name','category','status','asset_no','sn','owner_name'].includes(c.sortBy)?c.sortBy:null;state.sortDir=c.sortDir==='asc'?'asc':'desc';
+        state.sortBy=allColumns.some(([key])=>key===c.sortBy)?c.sortBy:null;state.sortDir=c.sortDir==='asc'?'asc':'desc';
         state.tablePage=Number.isSafeInteger(c.tablePage)&&c.tablePage>0?c.tablePage:1;
         if(c.viewContexts&&typeof c.viewContexts==='object')state.viewContexts=c.viewContexts;
         if(c.scrollContexts&&typeof c.scrollContexts==='object')state.scrollContexts=c.scrollContexts;
@@ -182,6 +187,47 @@
   }
   const children = asset => state.assets.filter(a => a.parent_asset_id === asset.id);
   function assetButton(asset) { return `<button type="button" class="itl-link itl-card-name" data-detail="${asset.id}">${esc(asset.name)}</button>`; }
+  // ── All-assets table cells (codex 50) ──
+  const modelLabel = a => [a.brand, a.model].filter(Boolean).join(' ');
+  const ipOf = a => a.attrs?.ip || a.attrs?.mgmt_ip || '';
+  // Own keys only: a free-text sub-type such as "constructor" must not resolve to an Object prototype member (codex 52 M-1).
+  const subtypeLabel = a => a.category === 'other' && a.attrs?.subtype ? (Object.hasOwn(subtypeLabels, a.attrs.subtype) ? subtypeLabels[a.attrs.subtype] : String(a.attrs.subtype)) : '';
+  // Known leading markers in the free-text name (e.g. 【采集告警】) become text tags so they stay visible when the name
+  // drops to the sub-line; unknown 【…】 text stays in the name untouched.
+  function nameParts(name) {
+    let rest = String(name ?? ''); const flags = []; let m;
+    while ((m = /^【([^】]+)】/.exec(rest)) && Object.hasOwn(nameFlags, m[1])) { flags.push(m[1]); rest = rest.slice(m[0].length); }
+    return { flags, rest };
+  }
+  // Per-category extra information: structured fields only, never parsed out of free-text notes.
+  function purposeInfo(a) {
+    const at = a.attrs || {}; const join = (...v) => v.filter(x => x !== null && x !== undefined && x !== '').map(String).join(' · ');
+    const due = a.expires_at ? '到期 ' + a.expires_at : '';
+    switch (a.category) {
+      case 'server': return { main: join(at.purpose), sub: join(at.ip) };
+      case 'other': return { main: join(at.ip), sub: '' };
+      case 'disk': return { main: join(at.capacity, at.interface, at.form_factor), sub: '' };
+      case 'ap': return { main: join(at.mgmt_ip), sub: at.ssid_group ? 'SSID 组 ' + at.ssid_group : '' };
+      case 'laptop': case 'desktop': return { main: join(at.cpu, at.ram, at.os), sub: '' };
+      case 'software': return { main: join(at.version, at.license_count !== undefined && at.license_count !== null && at.license_count !== '' ? at.license_count + ' 个许可' : ''), sub: due };
+      case 'subscription': return { main: join(at.cycle, at.account_name), sub: due };
+      default: return { main: '', sub: '' };
+    }
+  }
+  function listRow(a) {
+    // A name made only of markers leaves nothing to show once they become tags; the accessible name keeps the raw name (codex 52 L-1).
+    const info = purposeInfo(a), { flags, rest } = nameParts(a.name), label = modelLabel(a) || rest || '未命名资产';
+    return { ...a, asset_label: label, purpose_label: [info.main, info.sub].filter(Boolean).join(' '), _info: info, _flags: flags, _rest: rest };
+  }
+  function categoryCell(a) { const sub = subtypeLabel(a); return type(a.category) + (sub ? `<div class="itl-cell-sub">${esc(sub)}</div>` : ''); }
+  function assetCell(r) {
+    const purpose = r.attrs?.purpose || '', ip = ipOf(r);
+    // The sub-line repeats nothing: the name is hidden only when it is empty or exactly the label, the purpose, or "purpose IP".
+    const redundant = !r._rest || [r.asset_label, purpose, `${purpose} ${ip}`.trim()].includes(r._rest);
+    const tags = r._flags.map(f => `<span class="itl-flag itl-flag-${nameFlags[f]}">${esc(f)}</span>`).join('');
+    return `<div class="itl-cell-main"><button type="button" class="itl-link itl-card-name" data-detail="${r.id}" aria-label="${esc(r.name)}">${esc(r.asset_label)}</button>${tags}</div>${redundant ? '' : `<div class="itl-cell-sub">${esc(r._rest)}</div>`}`;
+  }
+  function purposeCell(r) { return `${r._info.main ? esc(r._info.main) : (r._info.sub ? '' : '—')}${r._info.sub ? `<div class="itl-cell-sub">${esc(r._info.sub)}</div>` : ''}`; }
   function menu(asset) {
     if (!canWrite()) return '';
     const actions = [{ key: 'edit', label: '编辑资料' }];
@@ -207,14 +253,22 @@
     }).join('')}</div>`;
   }
   function renderAll() {
-    $('#itlContent').innerHTML = `<div class="u-filter-bar itl-toolbar"><label>搜索 <input id="itlSearch" type="search" value="${esc(state.search)}" placeholder="名称 / SN / 编号 / 责任人"></label><label>类别 <select id="itlCategory"><option value="">全部类别</option>${Object.entries(categories).map(([k,v]) => `<option value="${k}"${k === state.category ? ' selected' : ''}>${v}</option>`).join('')}</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>${Object.entries(statuses).map(([k,v]) => `<option value="${k}"${k === state.status ? ' selected' : ''}>${v}</option>`).join('')}</select></label>${ITLedger.recordScopeControl('active')}</div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table"><thead><tr>${[['name','资产'],['category','类别'],['status','状态'],['asset_no','编号'],['sn','序列号'],['owner_name','责任人']].map(([key,label]) => `<th class="u-sortable" data-sort-by="${key}">${label}<span class="u-sort-icon">⇅</span></th>`).join('')}<th>当前位置</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div><div class="itl-density" role="group" aria-label="表格密度"><button type="button" data-density="comfortable" aria-pressed="${state.density==='comfortable'}">舒适</button><button type="button" data-density="compact" aria-pressed="${state.density==='compact'}">紧凑</button></div></div>`;
+    $('#itlContent').innerHTML = `<div class="u-filter-bar itl-toolbar"><label>搜索 <input id="itlSearch" type="search" value="${esc(state.search)}" placeholder="型号 / 用途 / IP / 名称 / SN / 编号"></label><label>类别 <select id="itlCategory"><option value="">全部类别</option>${Object.entries(categories).map(([k,v]) => `<option value="${k}"${k === state.category ? ' selected' : ''}>${v}</option>`).join('')}</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>${Object.entries(statuses).map(([k,v]) => `<option value="${k}"${k === state.status ? ' selected' : ''}>${v}</option>`).join('')}</select></label>${ITLedger.recordScopeControl('active')}</div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table"><thead><tr>${allColumns.map(([key,label]) => `<th class="u-sortable" data-sort-by="${key}">${label}<span class="u-sort-icon">⇅</span></th>`).join('')}<th>当前位置</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div><div class="itl-density" role="group" aria-label="表格密度"><button type="button" data-density="comfortable" aria-pressed="${state.density==='comfortable'}">舒适</button><button type="button" data-density="compact" aria-pressed="${state.density==='compact'}">紧凑</button></div></div>`;
     $('#itlTable').classList.toggle('itl-table-compact',state.density==='compact');
     document.querySelectorAll('[data-density]').forEach(b=>b.addEventListener('click',()=>{state.density=b.dataset.density;$('#itlTable').classList.toggle('itl-table-compact',state.density==='compact');document.querySelectorAll('[data-density]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.density===state.density)));}));
-    const sorter = UnifyHelpers.attachTableSort({ tableSelector: '#itlTable', fieldTypes: { name: 'string', category: 'labelMap', status: 'labelMap', asset_no: 'string', sn: 'string', owner_name: 'string' }, labelMaps: { category: categories, status: statuses }, defaultSort: { field: 'id', dir: 'desc' }, pagination: { containerSelector: '#itlPager', pageSize: 25 }, getList: () => state.assets.filter(a => (!state.category || a.category === state.category) && (!state.status || a.status === state.status) && [a.name,a.sn,a.asset_no,a.owner_name,a.owner_dept].some(v => String(v || '').toLowerCase().includes(state.search.toLowerCase()))), render: rows => {
-      $('#itlTable tbody').innerHTML = rows.length ? rows.map(a => `<tr data-detail-row="${a.id}" tabindex="0" aria-label="查看${esc(a.name)}"><td>${assetButton(a)}</td><td>${type(a.category)}</td><td>${badge(a.status)}</td><td>${esc(a.asset_no || '—')}</td><td>${esc(a.sn || '—')}</td><td>${esc(a.owner_name || '—')}</td><td>${esc(location(a))}<div class="itl-locate-entry">${locateButton(a)}</div></td><td>${canWrite() ? `<button type="button" class="itl-link" data-action="edit" data-id="${a.id}">编辑</button>` : '—'}</td></tr>`).join('') : '<tr><td colspan="8" class="itl-empty">没有符合条件的资产</td></tr>';
+    const sorter = UnifyHelpers.attachTableSort({ tableSelector: '#itlTable', fieldTypes: { id: 'number', category: 'labelMap', asset_label: 'string', purpose_label: 'string', status: 'labelMap', sn: 'string' }, labelMaps: { category: categories, status: statuses }, defaultSort: { field: 'id', dir: 'desc' }, pagination: { containerSelector: '#itlPager', pageSize: 25 }, getList: () => {
+      // Hidden columns (asset_no / owner) stay searchable; the display de-duplication never narrows what search can find.
+      const q = state.search.toLowerCase();
+      return state.assets.filter(a => (!state.category || a.category === state.category) && (!state.status || a.status === state.status)).map(listRow)
+        .filter(r => !q || [r.name, r.brand, r.model, modelLabel(r), r.attrs?.purpose, r.purpose_label, ipOf(r), r.sn, r.asset_no, r.owner_name, r.owner_dept, r.attrs?.subtype, subtypeLabel(r)].some(v => String(v ?? '').toLowerCase().includes(q)));
+    }, render: rows => {
+      $('#itlTable tbody').innerHTML = rows.length ? rows.map(r => `<tr data-detail-row="${r.id}" tabindex="0" aria-label="查看${esc(r.name)}"><td>${categoryCell(r)}</td><td>${assetCell(r)}</td><td>${purposeCell(r)}</td><td>${badge(r.status)}</td><td>${esc(r.sn || '—')}</td><td>${esc(location(r))}<div class="itl-locate-entry">${locateButton(r)}</div></td><td>${canWrite() ? `<button type="button" class="itl-link" data-action="edit" data-id="${r.id}">编辑</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="${allColumns.length + 2}" class="itl-empty">没有符合条件的资产</td></tr>`;
     } });
     const pageToRestore=state.tablePage;sorter.init();
-    if(state.sortBy){const th=$('#itlTable th[data-sort-by="'+state.sortBy+'"]');th.click();if(state.sortDir==='asc')th.click();}else sorter.render();
+    // A saved sort whose column is no longer shown (e.g. a context from before the 2026-10 column change) falls back
+    // to the default order instead of clicking a header that does not exist (codex 50 H-2).
+    const sortTh=state.sortBy?$('#itlTable th[data-sort-by="'+state.sortBy+'"]'):null;
+    if(sortTh){sortTh.click();if(state.sortDir==='asc')sortTh.click();}else{state.sortBy=null;sorter.render();}
     sorter.pager.goToPage(pageToRestore);allSorter=sorter;state.tablePage=sorter.getState().page;
     $('#itlTable').addEventListener('click',e=>{if(e.target.closest('[data-sort-by]'))captureContext();});
     $('#itlPager').addEventListener('click',captureContext);

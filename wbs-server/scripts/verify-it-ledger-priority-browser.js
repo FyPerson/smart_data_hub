@@ -14,14 +14,26 @@ async function main(){
   browser=await chromium.launch({headless:true});const c=await browser.newContext({viewport:{width:1440,height:960}});await c.addInitScript(()=>{if(!localStorage.getItem('token'))localStorage.setItem('token','fixture-1');});
   const p=await c.newPage(),errors=[],writes=[];p.on('pageerror',e=>errors.push(e.message));p.on('request',r=>{if(r.url().includes('/api/it-assets')&&r.method()!=='GET')writes.push(r.url());});
   await p.goto(f.base+'/IT_Ledger.html#all');await p.locator('#itlTable').waitFor();
-  await p.locator('#itlSearch').fill('批量');await p.locator('#itlCategory').selectOption('laptop');await p.locator('#itlStatus').selectOption('in_depot');await p.locator('th[data-sort-by="name"]').click();await p.locator('th[data-sort-by="name"]').click();await p.locator('[data-page-nav="next"]').click();
+  // Default order is numeric id descending (2026-10-11 hotfix: production compared ids as text and showed 9..4,38,37..).
+  // Asserted on the rendered rows' own asset ids against the API id list, never on button text (same-model rows share it).
+  const allIds=(await f.api('GET','')).body.items.map(a=>a.id).sort((a,b)=>b-a);assert.ok(allIds.length>50,'fixture spans three pages');
+  const pageNo=async()=>Number((await p.locator('#itlPager').innerText()).match(/第 (\d+)/)[1]);
+  const rowIds=()=>p.locator('#itlTable tbody tr[data-detail-row]').evaluateAll(trs=>trs.map(t=>Number(t.dataset.detailRow)));
+  const onSlice=async n=>(await pageNo())===n&&JSON.stringify(await rowIds())===JSON.stringify(allIds.slice((n-1)*25,n*25));
+  check('默认顺序为编号数值倒序（第 1 页）',await onSlice(1));
+  await p.locator('[data-page-nav="next"]').click();check('默认顺序第 2 页为数值切片',await onSlice(2));
+  await p.reload();await p.locator('#itlTable tbody tr[data-detail-row]').first().waitFor();check('浏览器刷新后默认顺序第 2 页切片不变',await onSlice(2));
+  for(let i=0;i<3;i++)await p.locator('th[data-sort-by="sn"]').click();
+  check('三次点击表头回到默认数值倒序',await onSlice(await pageNo()));
+  while(await pageNo()>1)await p.locator('[data-page-nav="prev"]').click();check('回到第 1 页继续原流程',await onSlice(1));
+  await p.locator('#itlSearch').fill('批量');await p.locator('#itlCategory').selectOption('laptop');await p.locator('#itlStatus').selectOption('in_depot');await p.locator('th[data-sort-by="asset_label"]').click();await p.locator('th[data-sort-by="asset_label"]').click();await p.locator('[data-page-nav="next"]').click();
   check('筛选结果第二页',await p.locator('#itlPager').innerText().then(s=>s.includes('第 2 / 3')));
-  const firstName=await p.locator('#itlTable [data-detail]').first().innerText();
+  const firstRow=await p.locator('#itlTable tbody tr[data-detail-row]').first().getAttribute('data-detail-row');
   await p.locator('#itlTable [data-detail]').first().click();await p.locator('.itl-detail-group').first().waitFor();check('详情分为三组',await p.locator('.itl-detail-group h3').allTextContents().then(x=>x.join(',')==='基本信息,位置与归属,采购与财务'));
-  await p.locator('#itlDrawerClose').click();check('关闭详情保留页码与排序',await p.locator('#itlTable [data-detail]').first().innerText()===firstName&&(await p.locator('#itlPager').innerText()).includes('第 2'));
+  await p.locator('#itlDrawerClose').click();check('关闭详情保留页码与排序',await p.locator('#itlTable tbody tr[data-detail-row]').first().getAttribute('data-detail-row')===firstRow&&(await p.locator('#itlPager').innerText()).includes('第 2'));
   // #itlRefresh removed: this check is specifically about an in-place refresh preserving page/sort context,
   // distinct from the full-reload persistence check three lines below — trigger ITLedger.refresh() directly.
-  await p.evaluate(()=>ITLedger.refresh());check('刷新保留页码与排序',await p.locator('#itlTable [data-detail]').first().innerText()===firstName&&(await p.locator('#itlPager').innerText()).includes('第 2'));
+  await p.evaluate(()=>ITLedger.refresh());check('刷新保留页码与排序',await p.locator('#itlTable tbody tr[data-detail-row]').first().getAttribute('data-detail-row')===firstRow&&(await p.locator('#itlPager').innerText()).includes('第 2'));
   // refresh() re-renders and schedules its own scroll restore via requestAnimationFrame (restoreContext); let that
   // pending frame settle before this block drives scroll itself, or the two race and the manual scroll gets undone.
   await p.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
@@ -30,7 +42,7 @@ async function main(){
   check('浏览器刷新恢复滚动位置',Math.abs((await p.evaluate(()=>scrollY))-scrollBefore)<5);
   await p.locator('[data-page-nav="next"]').click();for(const a of bulk.slice(50)){assert.equal((await f.api('POST','/'+a.id+'/actions/mark_status',{expected_version:a.version,status:'faulty'})).status,200);}
   await p.evaluate(()=>ITLedger.refresh());check('结果页数减少时回退到末页',(await p.locator('#itlPager').innerText()).includes('第 2 / 2'));
-  await p.locator('#itlTable [data-action="edit"]').first().click();await p.locator('[name="note"]').fill('验证编辑返回上下文');const edited=p.waitForResponse(r=>r.request().method()==='PUT'&&/\/api\/it-assets\/\d+$/.test(r.url()));await p.locator('#itlSubmit').click();check('编辑真实200',(await edited).status()===200);await p.locator('.itl-detail-group').first().waitFor();await p.locator('#itlDrawerClose').click();check('编辑返回仍是原页原顺序',await p.locator('#itlTable [data-detail]').first().innerText()===firstName&&(await p.locator('#itlPager').innerText()).includes('第 2'));
+  await p.locator('#itlTable [data-action="edit"]').first().click();await p.locator('[name="note"]').fill('验证编辑返回上下文');const edited=p.waitForResponse(r=>r.request().method()==='PUT'&&/\/api\/it-assets\/\d+$/.test(r.url()));await p.locator('#itlSubmit').click();check('编辑真实200',(await edited).status()===200);await p.locator('.itl-detail-group').first().waitFor();await p.locator('#itlDrawerClose').click();check('编辑返回仍是原页原顺序',await p.locator('#itlTable tbody tr[data-detail-row]').first().getAttribute('data-detail-row')===firstRow&&(await p.locator('#itlPager').innerText()).includes('第 2'));
   await p.locator('#itlSearch').fill('批量资产00');check('主动筛选回第一页',(await p.locator('#itlPager').innerText()).includes('第 1 / 1'));
   await p.locator('#itlCategory').selectOption('');await p.locator('#itlStatus').selectOption('');await p.locator('#itlSearch').fill('可定位服务器');await p.locator('#itlTable [data-detail]').click();await p.locator('.itl-detail-group').first().waitFor();check('管理员财务值保留',(await p.locator('#itlDrawerBody').innerText()).includes('7890'));await p.screenshot({path:path.join(f.dir,'priority-detail-groups.png'),fullPage:true});
   await p.locator('#itlDrawerClose').click();const writesBefore=writes.length;await p.locator('#itlTable [data-locate]').click();await p.locator('.itl-face-device.itl-selected').waitFor();check('只定位服务器不进入写模式',await p.locator('.itl-face-device.itl-selected').getAttribute('data-select-rack-asset')===String(host.id)&&await p.locator('[data-rack-command="cancel"]').count()===0&&writes.length===writesBefore);

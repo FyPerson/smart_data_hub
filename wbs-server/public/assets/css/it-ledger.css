@@ -234,6 +234,13 @@ body.unified-page { background: var(--color-bg-page); }
 .itl-page .u-corr-table-wrap { overflow:auto; }
 .itl-page .u-corr-table .itl-card-name { font-size:13px; font-weight:500; }
 .itl-page .itl-table-compact td { padding-top:8px; padding-bottom:8px; }
+/* All-assets table cells (codex 50): main line + muted sub-line; known name markers as text tags, not colour alone. */
+.itl-page .u-corr-table .itl-cell-main { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.itl-page .u-corr-table .itl-cell-sub { margin-top:3px; font-size:12px; line-height:1.5; color:var(--color-text-secondary); overflow-wrap:anywhere; }
+.itl-page .itl-table-compact .itl-cell-sub { margin-top:1px; }
+.itl-flag { display:inline-block; padding:0 6px; border:1px solid currentColor; border-radius:4px; font-size:12px; line-height:18px; font-weight:600; white-space:nowrap; }
+.itl-flag-alert { color:var(--color-danger); background:var(--color-danger-bg); }
+.itl-flag-tentative { color:var(--color-warning); background:var(--color-warning-bg); }
 .itl-table-footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px; }
 .itl-density { display:flex; gap:3px; padding:3px; background:var(--color-border); border-radius:5px; }
 .itl-density button { background:transparent; border:0; border-radius:3px; padding:5px 10px; color:var(--color-text-secondary); font-size:12px; }

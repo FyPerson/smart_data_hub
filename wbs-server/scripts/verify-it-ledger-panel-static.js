@@ -1,6 +1,6 @@
 // IT ledger panel registration + exact label coverage. Sys-specific guards stay unchanged.
 'use strict';
-const fs=require('fs'),path=require('path'),assert=require('assert/strict'),acorn=require('acorn');
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict'),acorn=require('acorn');
 const publicRoot=path.resolve(__dirname,'../public');
 const read=p=>fs.readFileSync(path.join(publicRoot,p),'utf8');
 const modules=['it-ledger','it-ledger-forms','it-ledger-records','it-ledger-racks','it-ledger-disks','it-ledger-category-views','it-ledger-aps','it-ledger-stocktakes','it-ledger-evidence','it-ledger-inspection-sheets','it-ledger-inspections','it-ledger-export-layout','it-ledger-reconciles'];
@@ -73,4 +73,64 @@ check('backend asset events have labels',()=>{
  assert.deepEqual(keys,all);const labels=literalObject(acorn.parse(sources['it-ledger'],{ecmaVersion:'latest'}),'actionNames');
  for(const key of all.slice(0,21))assert.equal(typeof labels[key],'string',key);
 });
+// Every attachTableSort table that falls back to the id default must order ids as numbers. Proven by running
+// the real shared comparator on 2 / 10 / 9: string comparison yields 9,2,10 (the 2026-10-11 production list showed 9..4,38,37..).
+// Unrecognised shapes fail closed instead of being guessed (codex 51): both call spellings are found, config objects
+// must be plain literals with each key once, and an explicit defaultSort must name its field.
+function isAttachTableSortCall(n){
+ if(n.type!=='CallExpression'||n.callee.type!=='MemberExpression')return false;
+ const p=n.callee.property;
+ return n.callee.computed?p.type==='Literal'&&p.value==='attachTableSort':p.name==='attachTableSort';
+}
+function plainObject(node,where){
+ assert.equal(node&&node.type,'ObjectExpression',where+' is a literal object');
+ const props=new Map();
+ for(const p of node.properties){
+  assert.equal(p.type,'Property',where+' has no spread');
+  assert.ok(!p.computed,where+' keys are static');
+  const key=p.key.name??p.key.value;
+  assert.ok(!props.has(key),where+' declares '+key+' once');
+  props.set(key,p.value);
+ }
+ return props;
+}
+function literalValue(node,where){assert.equal(node.type,'Literal',where+' is a literal');return node.value;}
+function defaultIdSortOrders(srcs){
+ const win={escapeHtml:s=>String(s)};vm.runInNewContext(read('assets/js/unify-helpers.js'),{window:win});
+ const found=[];
+ for(const m of modules)walk(acorn.parse(srcs[m],{ecmaVersion:'latest'}),n=>{
+  if(!isAttachTableSortCall(n))return;
+  const cfg=plainObject(n.arguments[0],m+' attachTableSort config');
+  const where=m+' '+(cfg.has('tableSelector')?literalValue(cfg.get('tableSelector'),m+' tableSelector'):'(no selector)');
+  // Shared layer: defaultSort omitted => { field:'id', dir:'desc' }; null => no default; an object is used as written.
+  let field='id',dir='desc';
+  if(cfg.has('defaultSort')){
+   const ds=cfg.get('defaultSort');
+   if(ds.type==='Literal'&&ds.value===null)return;
+   const dsProps=plainObject(ds,where+' defaultSort');
+   assert.ok(dsProps.has('field'),where+' explicit defaultSort declares field');
+   field=literalValue(dsProps.get('field'),where+' defaultSort.field');
+   if(dsProps.has('dir'))dir=literalValue(dsProps.get('dir'),where+' defaultSort.dir');
+  }
+  if(field!=='id')return;
+  const fieldTypes={};
+  if(cfg.has('fieldTypes'))for(const [k,v] of plainObject(cfg.get('fieldTypes'),where+' fieldTypes'))fieldTypes[k]=literalValue(v,where+' fieldTypes.'+k);
+  found.push({where,dir,sorted:win.UnifyHelpers.sortByField([{id:2},{id:10},{id:9}],'id',dir,{fieldTypes}).map(r=>r.id)});
+ });
+ return found;
+}
+function validateDefaultIdSort(srcs){
+ const found=defaultIdSortOrders(srcs);
+ assert.ok(found.some(t=>t.where==='it-ledger #itlTable'),'#itlTable defaults to id');
+ for(const t of found)assert.deepEqual(t.sorted,t.dir==='asc'?[2,9,10]:[10,9,2],t.where+' default id order is numeric');
+}
+// Every mutation must actually change the source exactly once, so a no-op replace cannot pass as "fails closed".
+function mutate(src,from,to){assert.equal(src.split(from).length-1,1,'mutation target found exactly once: '+from);const out=src.replace(from,to);assert.notEqual(out,src);return out;}
+const withSource=(m,fn)=>({...sources,[m]:fn(sources[m])});
+check('default id sort is numeric (real shared comparator)',()=>validateDefaultIdSort(sources));
+check('id without number type fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger',s=>mutate(s,"fieldTypes: { id: 'number', ",'fieldTypes: { '))),/it-ledger #itlTable default id order is numeric/));
+check('explicit defaultSort without field fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger',s=>mutate(s,"defaultSort: { field: 'id', dir: 'desc' }","defaultSort: { dir: 'desc' }"))),/#itlTable explicit defaultSort declares field/));
+check('bracket-access call is checked too',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers['attachTableSort']({ tableSelector: '#probeTable', fieldTypes: { name: 'string' } });")),/it-ledger-forms #probeTable default id order is numeric/));
+check('duplicate config key fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers.attachTableSort({ tableSelector: '#probeTable', fieldTypes: { id: 'number' }, fieldTypes: {} });")),/declares fieldTypes once/));
+check('spread config fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers.attachTableSort({ ...probeConfig, tableSelector: '#probeTable' });")),/attachTableSort config has no spread/));
 console.log(`PASS=${pass} FAIL=0`);
