@@ -1423,7 +1423,7 @@ async function main() {
         const c6Require = "require('./stocktakes')"; if (mutated0.split(c6Require).length !== 2) throw new Error('C6依赖改写必须恰一次');
         const r2Require = "require('./reconciles')"; if (mutated0.split(r2Require).length !== 2) throw new Error('R2依赖改写必须恰一次');
         let mutated = mutated0.replace("require('./invariants')", `require(${JSON.stringify(invAbsPath)})`).replace(c5Require, `require(${JSON.stringify(path.resolve(itLedgerDir, 'single-asset-actions.js'))})`).replace(c6Require, `require(${JSON.stringify(path.resolve(itLedgerDir, 'stocktakes.js'))})`).replace(r2Require, `require(${JSON.stringify(path.resolve(itLedgerDir, 'reconciles.js'))})`);
-        for (const name of ['inspections','inspection-collector','inspection-collect','record-management','inspection-sheets','inspection-photo-files']) {
+        for (const name of ['asset-health','inspections','inspection-collector','inspection-collect','record-management','inspection-sheets','inspection-photo-files']) {
           const needle = `require('./${name}')`;
           if (mutated.split(needle).length !== 2) throw new Error('巡检依赖改写必须恰一次');
           mutated = mutated.replace(needle, `require(${JSON.stringify(path.resolve(itLedgerDir,name+'.js'))})`);

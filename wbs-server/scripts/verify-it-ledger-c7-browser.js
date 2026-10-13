@@ -94,7 +94,7 @@ async function main() {
     const placements=[
       {category:'server',kind:'rack',values:{'placement.rack_id':String(rack.id),'placement.u_start':'5'},check:a=>a.rack_id===rack.id&&a.u_start===5},
       {category:'disk',kind:'host',values:{'placement.parent_asset_id':String(host.id),'placement.slot_no':'2'},check:a=>a.parent_asset_id===host.id&&a.slot_no===2},
-      {category:'laptop',kind:'custodian',values:{'placement.custodian_name':'张三','placement.location_text':'201'},check:a=>a.custodian_name==='张三'&&a.location_text==='201'},
+      {category:'laptop',kind:'custodian',values:{'placement.custodian_name':'张三'},check:a=>a.custodian_name==='张三'&&a.location_text===null},
       {category:'other',kind:'place',values:{'placement.location_text':'档案室'},check:a=>a.location_text==='档案室'&&a.u_height===0},
       // AP 登记落库房：三个房间位置列必须留空，坐标只能由 AP 平面上的 ap_place 写入。
       {category:'ap',kind:'depot',values:{'placement.status':'in_depot'},check:a=>a.status==='in_depot'&&a.floor_id===null&&a.room_id===null&&a.pos===null},
@@ -105,7 +105,7 @@ async function main() {
     for(const scenario of placements) {
       if(await page.locator('#itlDrawer').evaluate(el=>el.classList.contains('open'))) await page.locator('#itlDrawerClose').click();
       await page.locator('#itlRegister').click();
-      await page.locator('[name="category"]').selectOption(scenario.category);
+      await page.locator('[name="business_type"]').selectOption(scenario.category);
       await page.locator('[name="name"]').fill('C7-'+scenario.category);
       if(scenario.kind) await page.locator('[name="placement.kind"]').selectOption(scenario.kind);
       for(const [key,value] of Object.entries(scenario.values)) {
@@ -126,7 +126,7 @@ async function main() {
     // Negative lock: the registration form must offer AP no placement kind but depot.
     //   Re-adding 'room' here would silently restore synthetic room-centre coordinates.
     await page.locator('#itlRegister').click();
-    await page.locator('[name="category"]').selectOption('ap');
+    await page.locator('[name="business_type"]').selectOption('ap');
     const apKinds=await page.locator('[name="placement.kind"] option').evaluateAll(list=>list.map(option=>option.value));
     check('AP 登记位置方式恰为库房一项',JSON.stringify(apKinds)==='["depot"]');
     check('AP 登记表单不含楼层与房间控件',await page.locator('[name="placement.floor_id"]').count()===0&&await page.locator('[name="placement.room_id"]').count()===0);

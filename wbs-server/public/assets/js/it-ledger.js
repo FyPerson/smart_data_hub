@@ -8,27 +8,28 @@
   'use strict';
   const $ = (selector, root = document) => root.querySelector(selector);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const businessTypes = window.ITAssetTypes;
   const categories = { server: '服务器', disk: '硬盘', laptop: '笔记本', desktop: '台式机', ap: '无线 AP', other: '其他设备', software: '软件', subscription: '订阅' };
-  const statuses = { in_service: '在用', in_depot: '可用', faulty: '故障', to_retire: '待报废', retired: '已报废', active: '有效', cancelled: '已停用' };
+  const statuses = { in_service: '在用', in_depot: '库房', faulty: '故障', to_retire: '待报废', retired: '已报废', active: '有效', cancelled: '已停用' };
   const statusClasses = { in_service: 'sem-active', in_depot: 'sem-staging', faulty: 'sem-failed', to_retire: 'sem-hold', retired: 'sem-archived', active: 'sem-active', cancelled: 'sem-voided' };
   // All-assets table (codex 50, plan D): category | asset (brand + model, name as sub-line) | purpose / extra info | status | SN.
   // Sortable keys are the columns themselves; the restore whitelist is derived from this list, never kept as a second copy.
   const subtypeLabels = { switch: '交换机', security: '安全设备', storage: '存储', printer: '打印机', ups: 'UPS' };
   const nameFlags = { 采集告警: 'alert', 暂定: 'tentative' };
-  const allColumns = [['category', '类别'], ['asset_label', '资产'], ['purpose_label', '用途 / 补充信息'], ['status', '状态'], ['sn', '序列号']];
+  const allColumns = [['category', '类别'], ['asset_label', '资产'], ['purpose_label', '用途'], ['status', '状态'], ['sn', '序列号']];
   const actionNames = { register: '登记', update: '编辑资料', rack_in: '上架', rack_out: '下架', rack_move: '迁柜', rack_relocate: '柜内移位', mark_status: '调整库房状态', retire: '报废', disk_mount: '装盘', disk_unmount: '拆盘', disk_swap: '换盘', disk_move: '移盘', assign: '领用', reassign: '更换保管人', return: '归还', place: '放置', relocate: '移动位置', ap_place: '安装 AP', ap_relocate: '移动 AP', ap_unmount: '拆下 AP', renew: '续费', cancel: '停用' };
   const fields = { name: '名称', category: '类别', status: '状态', brand: '品牌', model: '型号', sn: '序列号', asset_no: '资产编号', owner_name: '责任人', owner_dept: '责任部门', asset_class: '资产分类', purchased_at: '购置日期', expires_at: '到期日期', u_height: '占用 U 数', slot_count: '盘位数', rack_id: '机柜', u_start: '起始 U', parent_asset_id: '宿主', slot_no: '盘位', custodian_name: '保管人', custodian_user_id: '保管人用户编号', location_text: '位置', floor_id: '楼层', room_id: '房间', pos: '房间内坐标', attrs: '类别属性', note: '备注', fin_amount: '购置金额', fin_vendor: '供应商', fin_contract_no: '合同编号', fin_changed: '财务字段变更', version: '版本', created_at: '登记时间', updated_at: '更新时间', disk_id: '硬盘编号' };
   const tabs = { all: '全部资产', racks: '机房', depot: '库房', aps: 'AP 房间', terminals: '终端与其他', software: '软件与订阅', stocktakes: '盘点', reconciles: '对账', inspections: '巡检' };
   const navGroups=[[null,['all']],['按位置',['racks','depot','aps']],['按类型',['terminals','software']],['核对作业',['stocktakes','reconciles','inspections']]];
   const errors = { VERSION_CONFLICT: '资料已被其他操作更新。已刷新列表，请关闭后重新打开，核对最新资料再提交。', INSPECTION_PHASE_CHANGED: '巡检提交状态已变化，已更新为最新状态，请重新上传。', LEDGER_FORBIDDEN: '访问权限已变化，请重新打开页面。', LEDGER_BUSY: '台账正忙，请稍后手动重试。', LEDGER_UNAVAILABLE: '台账暂不可用，请稍后重试。', SN_CONFLICT: '此序列号已经登记。', U_HEIGHT_LOCKED: '在架设备须先下架，才能修改占用高度。', RETIRE_BLOCKED_BY_DISKS: '设备仍有随装盘，请先逐盘拆出。', NO_OP_TRANSITION: '目标与当前状态相同，无需操作。' };
-  const state = { level: null, assets: [], racks: [], floors: [], tab: 'all', search: '', category: '', status: '', density: 'comfortable', detailId: null, sortBy: null, sortDir: 'desc', tablePage: 1, viewContexts: {}, scrollContexts: {}, views: {}, busy: false };
+  const state = { level: null, assets: [], racks: [], floors: [], tab: 'all', search: '', category: '', status: '', listScope:'all', showAssetNo:false, showOwner:false, health:{}, healthDirty:false, detailId: null, sortBy: null, sortDir: 'desc', tablePage: 1, viewContexts: {}, scrollContexts: {}, views: {}, busy: false };
   let refreshSequence = 0, detailSequence = 0, drawerCleanupTimer, toastTimer, returnFocus, modalSubmit = null, modalBusy = false, modalStale = false, modalToken = 0;
   let lastRefreshAt = 0; const AUTO_REFRESH_MIN_MS = 10000;
   const contextKey='itl-workspace-context-v1';
   let contextOwner='',contextToken=null,contextReady=false,restoringContext=false,allSorter=null,contextFrame=0;
   function saveContext(){
     if(!contextReady||!state.level||getToken()!==contextToken)return;
-    try{sessionStorage.setItem(contextKey,JSON.stringify({owner:contextOwner,tab:state.tab,search:state.search,category:state.category,status:state.status,density:state.density,sortBy:state.sortBy,sortDir:state.sortDir,tablePage:state.tablePage,viewContexts:state.viewContexts,scrollContexts:state.scrollContexts}));}catch(_){}
+    try{sessionStorage.setItem(contextKey,JSON.stringify({owner:contextOwner,tab:state.tab,search:state.search,category:state.category,status:state.status,listScope:state.listScope,showAssetNo:state.showAssetNo,showOwner:state.showOwner,sortBy:state.sortBy,sortDir:state.sortDir,tablePage:state.tablePage,viewContexts:state.viewContexts,scrollContexts:state.scrollContexts}));}catch(_){}
   }
   async function loadContext(){
     if(contextReady)return;
@@ -38,10 +39,10 @@
       const c=JSON.parse(sessionStorage.getItem(contextKey)||'null');
       if(c?.owner===contextOwner){
         if(typeof c.search==='string')state.search=c.search.slice(0,500);
-        if(Object.hasOwn(categories,c.category))state.category=c.category;
+        if(Object.hasOwn(businessTypes.byKey,c.category))state.category=c.category;
+        state.listScope=['all','equipment','parts'].includes(c.listScope)?c.listScope:'all';state.showAssetNo=c.showAssetNo===true;state.showOwner=c.showOwner===true;
         if(Object.hasOwn(statuses,c.status))state.status=c.status;
-        state.density=c.density==='compact'?'compact':'comfortable';
-        state.sortBy=allColumns.some(([key])=>key===c.sortBy)?c.sortBy:null;state.sortDir=c.sortDir==='asc'?'asc':'desc';
+        state.sortBy=[...allColumns,['asset_no'],['owner_name']].some(([key])=>key===c.sortBy)?c.sortBy:null;state.sortDir=c.sortDir==='asc'?'asc':'desc';
         state.tablePage=Number.isSafeInteger(c.tablePage)&&c.tablePage>0?c.tablePage:1;
         if(c.viewContexts&&typeof c.viewContexts==='object')state.viewContexts=c.viewContexts;
         if(c.scrollContexts&&typeof c.scrollContexts==='object')state.scrollContexts=c.scrollContexts;
@@ -74,8 +75,8 @@
   function toast(message) { $('#itlToast').textContent = message; $('#itlToast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#itlToast').hidden = true; }, 4500); }
   function notice(message) { $('#itlNotice').textContent = message; $('#itlNotice').hidden = !message; }
   function clearData() {
-    contextReady=false;contextOwner='';contextToken=null;allSorter=null;state.search='';state.category='';state.status='';state.sortBy=null;state.sortDir='desc';state.tablePage=1;state.viewContexts={};state.scrollContexts={};cancelAnimationFrame(contextFrame);restoringContext=false;try{sessionStorage.removeItem(contextKey);}catch(_){}
-    refreshSequence++; detailSequence++; state.assets = []; state.racks = []; state.floors = [];
+    contextReady=false;contextOwner='';contextToken=null;allSorter=null;state.search='';state.category='';state.status='';state.sortBy=null;state.sortDir='desc';state.tablePage=1;state.listScope='all';state.showAssetNo=false;state.showOwner=false;state.viewContexts={};state.scrollContexts={};cancelAnimationFrame(contextFrame);restoringContext=false;try{sessionStorage.removeItem(contextKey);}catch(_){}
+    refreshSequence++; detailSequence++; state.assets = []; state.health = {}; state.healthDirty=false; state.racks = []; state.floors = [];
     Object.values(state.views).forEach(view => { if (view.onAccessLost) view.onAccessLost(); });
     closeModal(true); closeDrawer(); $('#itlDrawerBody').replaceChildren(); $('#itlContent').replaceChildren(); $('#itlContent').removeAttribute('aria-busy');
   }
@@ -109,6 +110,7 @@
       }
       throw Object.assign(new Error(errors[body.code] || body.message || body.error || `请求失败（${response.status}）`), body, { message: errors[body.code] || body.message || body.error || `请求失败（${response.status}）`, status: response.status });
     }
+    if(path.startsWith('/inspections/sheets')&&['POST','PUT','DELETE'].includes(String(options.method||'GET').toUpperCase()))state.healthDirty=true;
     return body;
   }
   // capture=false: a tab switch refreshes before the new view has rendered, so the scroll position on screen still
@@ -134,7 +136,7 @@
       const [assets, racks, floors] = await Promise.all([api(), api('/racks'), api('/floors')]);
       if (seq !== refreshSequence) return;
       if(refreshToken!==getToken()){resetAccessUI('尚未获准访问');notice('登录状态已变化，请重新打开页面。');return;}
-      state.assets = assets.items; state.racks = racks.items; state.floors = floors.items;
+      state.assets = assets.items; state.health = assets.health||{}; state.healthDirty=false; state.racks = racks.items; state.floors = floors.items;
       state.expiringCount = permission.expiring_count;
       $('#itlAccess').textContent = `台账共 ${state.assets.length} 项${{ admin: '', write: ' · 可登记与维护', read: ' · 只读查阅' }[state.level]}`;
       $('#itlRegister').hidden = !canWrite(); $('#itlTabs').hidden = false; renderTabs(); render();
@@ -158,7 +160,7 @@
   // Returns true when a refresh started.
   function autoRefresh() {
     if ($('#itlModal').classList.contains('open') || modalBusy) return false;
-    if (performance.now() - lastRefreshAt < AUTO_REFRESH_MIN_MS) return false;
+    if (performance.now() - lastRefreshAt < AUTO_REFRESH_MIN_MS && !(state.tab==='all'&&state.healthDirty)) return false;
     notice(''); refresh({ capture: false }); return true;
   }
   // One primary action per screen: in work views (stocktakes, reconciles, room inspection) the view's own action leads.
@@ -180,10 +182,13 @@
     // Render from cache only when no refresh is starting: the refresh renders the view itself once data arrives.
     if (autoRefresh()) $('#itlContent').innerHTML = '<div class="itl-empty">正在读取…</div>'; else render(); }
   function location(asset) {
+    if(asset.category==='laptop')return asset.custodian_name||(asset.custodian_user_id?'用户 #'+asset.custodian_user_id:asset.status==='in_service'?'保管人未填写':'未领用');
     if (asset.parent_asset_id) { const host = state.assets.find(a => a.id === asset.parent_asset_id); return `${host?.name || '宿主 #'+asset.parent_asset_id} · 盘位 ${asset.slot_no}`; }
     if (asset.rack_id) { const rack = state.racks.find(r => r.id === asset.rack_id); return `${rack?.name || '机柜 #'+asset.rack_id} · U${asset.u_start}–${asset.u_start + asset.u_height - 1}`; }
     if (asset.floor_id) { const floor = state.floors.find(f => f.id === asset.floor_id); return `${floor?.name || asset.floor_id} · ${floor?.rooms?.find(r => r.id === asset.room_id)?.name || asset.room_id}`; }
-    return [asset.custodian_name, asset.location_text].filter(Boolean).join(' · ') || statuses[asset.status] || '—';
+    if(asset.category==='software')return String(asset.attrs?.installed_on||'安装位置未填写');
+    if(asset.category==='subscription')return '不适用';
+    return [asset.custodian_name, asset.location_text].filter(Boolean).join(' · ') || (asset.status==='in_depot'?'位置待确认':(['software','subscription'].includes(asset.category)?'使用范围未填写':'位置未登记'));
   }
   const children = asset => state.assets.filter(a => a.parent_asset_id === asset.id);
   function assetButton(asset) { return `<button type="button" class="itl-link itl-card-name" data-detail="${asset.id}">${esc(asset.name)}</button>`; }
@@ -191,7 +196,7 @@
   const modelLabel = a => [a.brand, a.model].filter(Boolean).join(' ');
   const ipOf = a => a.attrs?.ip || a.attrs?.mgmt_ip || '';
   // Own keys only: a free-text sub-type such as "constructor" must not resolve to an Object prototype member (codex 52 M-1).
-  const subtypeLabel = a => a.category === 'other' && a.attrs?.subtype ? (Object.hasOwn(subtypeLabels, a.attrs.subtype) ? subtypeLabels[a.attrs.subtype] : String(a.attrs.subtype)) : '';
+  const subtypeLabel = a => businessTypes.kind(a);
   // Known leading markers in the free-text name (e.g. 【采集告警】) become text tags so they stay visible when the name
   // drops to the sub-line; unknown 【…】 text stays in the name untouched.
   function nameParts(name) {
@@ -200,32 +205,19 @@
     return { flags, rest };
   }
   // Per-category extra information: structured fields only, never parsed out of free-text notes.
-  function purposeInfo(a) {
-    const at = a.attrs || {}; const join = (...v) => v.filter(x => x !== null && x !== undefined && x !== '').map(String).join(' · ');
-    const due = a.expires_at ? '到期 ' + a.expires_at : '';
-    switch (a.category) {
-      case 'server': return { main: join(at.purpose), sub: join(at.ip) };
-      case 'other': return { main: join(at.ip), sub: '' };
-      case 'disk': return { main: join(at.capacity, at.interface, at.form_factor), sub: '' };
-      case 'ap': return { main: join(at.mgmt_ip), sub: at.ssid_group ? 'SSID 组 ' + at.ssid_group : '' };
-      case 'laptop': case 'desktop': return { main: join(at.cpu, at.ram, at.os), sub: '' };
-      case 'software': return { main: join(at.version, at.license_count !== undefined && at.license_count !== null && at.license_count !== '' ? at.license_count + ' 个许可' : ''), sub: due };
-      case 'subscription': return { main: join(at.cycle, at.account_name), sub: due };
-      default: return { main: '', sub: '' };
-    }
-  }
+  function purposeInfo(a) { return {main:a.attrs?.purpose==null?'':String(a.attrs.purpose),sub:ipOf(a)}; }
   function listRow(a) {
     // A name made only of markers leaves nothing to show once they become tags; the accessible name keeps the raw name (codex 52 L-1).
     const info = purposeInfo(a), { flags, rest } = nameParts(a.name), label = modelLabel(a) || rest || '未命名资产';
     return { ...a, asset_label: label, purpose_label: [info.main, info.sub].filter(Boolean).join(' '), _info: info, _flags: flags, _rest: rest };
   }
-  function categoryCell(a) { const sub = subtypeLabel(a); return type(a.category) + (sub ? `<div class="itl-cell-sub">${esc(sub)}</div>` : ''); }
+  function categoryCell(a) { const sub = subtypeLabel(a); return esc(businessTypes.label(a)) + (sub ? `<div class="itl-cell-sub">${esc(sub)}</div>` : ''); }
   function assetCell(r) {
     const purpose = r.attrs?.purpose || '', ip = ipOf(r);
     // The sub-line repeats nothing: the name is hidden only when it is empty or exactly the label, the purpose, or "purpose IP".
     const redundant = !r._rest || [r.asset_label, purpose, `${purpose} ${ip}`.trim()].includes(r._rest);
-    const tags = r._flags.map(f => `<span class="itl-flag itl-flag-${nameFlags[f]}">${esc(f)}</span>`).join('');
-    return `<div class="itl-cell-main"><button type="button" class="itl-link itl-card-name" data-detail="${r.id}" aria-label="${esc(r.name)}">${esc(r.asset_label)}</button>${tags}</div>${redundant ? '' : `<div class="itl-cell-sub">${esc(r._rest)}</div>`}`;
+    const tags = r._flags.filter(f=>f!=='采集告警').map(f => `<span class="itl-flag itl-flag-${nameFlags[f]}">${esc(f)}</span>`).join('');
+    return `<div class="itl-cell-main"><button type="button" class="itl-link itl-card-name" data-detail="${r.id}" aria-label="${esc(r.name)}">${esc(r.asset_label)}</button>${healthCell(r)}${tags}</div>${redundant ? '' : `<div class="itl-cell-sub">${esc(r._rest)}</div>`}`;
   }
   function purposeCell(r) { return `${r._info.main ? esc(r._info.main) : (r._info.sub ? '' : '—')}${r._info.sub ? `<div class="itl-cell-sub">${esc(r._info.sub)}</div>` : ''}`; }
   function menu(asset) {
@@ -252,27 +244,55 @@
       }).join('') : `<div class="itl-empty">暂无${statuses[status]}设备</div>`}</section>`;
     }).join('')}</div>`;
   }
+  function locationIntent(a) {
+    if(!canWrite()||a.record_inactive||['retired','cancelled'].includes(a.status))return null;
+    if(a.category==='software')return {key:'edit',label:'编辑安装位置'};
+    if(a.category==='subscription')return null;
+    if(a.category==='disk'){
+      if(a.parent_asset_id){const host=state.assets.find(h=>h.id===a.parent_asset_id);return host&&host.u_height>0&&host.slot_count>0&&['in_service','in_depot','faulty','to_retire'].includes(host.status)?{key:'disk_positions',label:'管理盘位'}:null;}
+      return a.status==='in_depot'?{key:'disk_mount',label:'装盘定位'}:null;
+    }
+    if(a.category==='server'||a.category==='other'&&a.u_height>0)return a.status==='in_depot'?{key:'rack_in',label:'上架设置位置'}:a.status==='in_service'&&a.rack_id?{key:'rack_position',label:'编辑机柜位置'}:null;
+    if(a.category==='ap')return a.status==='in_depot'?{key:'ap_place',label:'安装定位'}:a.status==='in_service'?{key:'ap_relocate',label:'编辑安装位置'}:null;
+    if(a.category==='laptop')return null;
+    if(a.category==='desktop')return a.status==='in_depot'?{key:'assign',label:'领用并设置位置'}:a.status==='in_service'?{key:'relocate',label:'编辑位置'}:null;
+    if(a.category==='other'&&a.u_height===0)return a.status==='in_depot'?{key:'place',label:'设置位置'}:a.status==='in_service'?{key:'relocate',label:'编辑位置'}:null;
+    return null;
+  }
+  function locationEditButton(a){const intent=locationIntent(a);return intent?'<button type="button" class="itl-link" data-action="edit_location" data-id="'+a.id+'" aria-label="'+esc(a.name+'：'+intent.label)+'">'+esc(intent.label)+'</button>':'';}
+  function custodyButtons(a){
+    if(a.category!=='laptop'||!canWrite()||a.record_inactive)return '';
+    const actions=a.status==='in_depot'?[['assign','领用']]:a.status==='in_service'?[['reassign','换保管人'],['return','归还']]:[];
+    return actions.map(([key,label])=>'<button type="button" class="itl-link" data-action="'+key+'" data-id="'+a.id+'">'+label+'</button>').join('');
+  }
+  function healthCell(asset) {
+    const h=state.health[asset.id];if(!h)return '';
+    const at=h.observed_at?new Date(h.observed_at).toLocaleString('zh-CN',{hour12:false}):'时间未记录';
+    if(!h.kind)return '<div class="itl-health-meta">'+esc(h.collection_status==='failed'?'采集失败 · 未形成结论':'部分采集 · 未形成结论')+'</div>';
+    const later=h.latest_attempt&&h.latest_attempt.id!==h.source_inspection_id;
+    const hint=[at,h.confirmed?'运维已判断':'待运维判断',later?'本次采集'+(h.latest_attempt.status==='failed'?'失败':'不完整'):''].filter(Boolean).join(' · ');
+    const reason=[h.reason,h.evidence,'巡检时间：'+at].filter(Boolean).join('；');
+    return '<span class="itl-health-badge itl-health-'+esc(h.kind)+'" title="'+esc(reason)+'">● '+esc(h.label)+'</span><div class="itl-health-meta">'+esc(hint)+'</div>';
+  }
+  function visibleAllColumns(){return [...allColumns,...(state.showAssetNo?[['asset_no','资产编号']]:[]),...(state.showOwner?[['owner_name','责任人']]:[])];}
+  function businessOptions(selected){return '<option value="">全部类别</option>'+[...new Set(businessTypes.entries.map(e=>e.group))].map(group=>'<optgroup label="'+esc(group)+'">'+businessTypes.entries.filter(e=>e.group===group).map(e=>'<option value="'+e.key+'"'+(e.key===selected?' selected':'')+'>'+e.label+'</option>').join('')+'</optgroup>').join('');}
   function renderAll() {
-    $('#itlContent').innerHTML = `<div class="u-filter-bar itl-toolbar"><label>搜索 <input id="itlSearch" type="search" value="${esc(state.search)}" placeholder="型号 / 用途 / IP / 名称 / SN / 编号"></label><label>类别 <select id="itlCategory"><option value="">全部类别</option>${Object.entries(categories).map(([k,v]) => `<option value="${k}"${k === state.category ? ' selected' : ''}>${v}</option>`).join('')}</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>${Object.entries(statuses).map(([k,v]) => `<option value="${k}"${k === state.status ? ' selected' : ''}>${v}</option>`).join('')}</select></label>${ITLedger.recordScopeControl('active')}</div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table"><thead><tr>${allColumns.map(([key,label]) => `<th class="u-sortable" data-sort-by="${key}">${label}<span class="u-sort-icon">⇅</span></th>`).join('')}<th>当前位置</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div><div class="itl-density" role="group" aria-label="表格密度"><button type="button" data-density="comfortable" aria-pressed="${state.density==='comfortable'}">舒适</button><button type="button" data-density="compact" aria-pressed="${state.density==='compact'}">紧凑</button></div></div>`;
-    $('#itlTable').classList.toggle('itl-table-compact',state.density==='compact');
-    document.querySelectorAll('[data-density]').forEach(b=>b.addEventListener('click',()=>{state.density=b.dataset.density;$('#itlTable').classList.toggle('itl-table-compact',state.density==='compact');document.querySelectorAll('[data-density]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.density===state.density)));}));
-    const sorter = UnifyHelpers.attachTableSort({ tableSelector: '#itlTable', fieldTypes: { id: 'number', category: 'labelMap', asset_label: 'string', purpose_label: 'string', status: 'labelMap', sn: 'string' }, labelMaps: { category: categories, status: statuses }, defaultSort: { field: 'id', dir: 'desc' }, pagination: { containerSelector: '#itlPager', pageSize: 25 }, getList: () => {
-      // Hidden columns (asset_no / owner) stay searchable; the display de-duplication never narrows what search can find.
-      const q = state.search.toLowerCase();
-      return state.assets.filter(a => (!state.category || a.category === state.category) && (!state.status || a.status === state.status)).map(listRow)
-        .filter(r => !q || [r.name, r.brand, r.model, modelLabel(r), r.attrs?.purpose, r.purpose_label, ipOf(r), r.sn, r.asset_no, r.owner_name, r.owner_dept, r.attrs?.subtype, subtypeLabel(r)].some(v => String(v ?? '').toLowerCase().includes(q)));
-    }, render: rows => {
-      $('#itlTable tbody').innerHTML = rows.length ? rows.map(r => `<tr data-detail-row="${r.id}" tabindex="0" aria-label="查看${esc(r.name)}"><td>${categoryCell(r)}</td><td>${assetCell(r)}</td><td>${purposeCell(r)}</td><td>${badge(r.status)}</td><td>${esc(r.sn || '—')}</td><td>${esc(location(r))}<div class="itl-locate-entry">${locateButton(r)}</div></td><td>${canWrite() ? `<button type="button" class="itl-link" data-action="edit" data-id="${r.id}">编辑</button>` : '—'}</td></tr>`).join('') : `<tr><td colspan="${allColumns.length + 2}" class="itl-empty">没有符合条件的资产</td></tr>`;
-    } });
-    const pageToRestore=state.tablePage;sorter.init();
-    // A saved sort whose column is no longer shown (e.g. a context from before the 2026-10 column change) falls back
-    // to the default order instead of clicking a header that does not exist (codex 50 H-2).
-    const sortTh=state.sortBy?$('#itlTable th[data-sort-by="'+state.sortBy+'"]'):null;
-    if(sortTh){sortTh.click();if(state.sortDir==='asc')sortTh.click();}else{state.sortBy=null;sorter.render();}
-    sorter.pager.goToPage(pageToRestore);allSorter=sorter;state.tablePage=sorter.getState().page;
-    $('#itlTable').addEventListener('click',e=>{if(e.target.closest('[data-sort-by]'))captureContext();});
-    $('#itlPager').addEventListener('click',captureContext);
-    [['#itlSearch','search','input'],['#itlCategory','category','change'],['#itlStatus','status','change']].forEach(([selector,key,event]) => $(selector).addEventListener(event, e => { state[key] = e.target.value; sorter.render();captureContext(); }));
+    const columns=visibleAllColumns();
+    $('#itlContent').innerHTML='<div class="itl-list-scopes" role="group" aria-label="资产范围">'+[['all','全部资产'],['equipment','整机与设备'],['parts','硬盘与部件']].map(([k,l])=>'<button type="button" data-list-scope="'+k+'" aria-pressed="'+(state.listScope===k)+'">'+l+'</button>').join('')+'</div><div class="u-filter-bar itl-toolbar"><label class="itl-list-search">搜索 <input id="itlSearch" type="search" value="'+esc(state.search)+'" placeholder="名称、型号、IP、序列号、编号、责任人"></label><label>类别 <select id="itlCategory">'+businessOptions(state.category)+'</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>'+Object.entries(statuses).map(([k,v])=>'<option value="'+k+'"'+(k===state.status?' selected':'')+'>'+v+'</option>').join('')+'</select></label>'+ITLedger.recordScopeControl('active')+'<button type="button" class="u-btn-secondary" id="itlResetFilters">重置筛选</button></div><div class="itl-list-options"><span id="itlResultCount"></span><div><label><input type="checkbox" id="itlShowAssetNo"'+(state.showAssetNo?' checked':'')+'>资产编号</label><label><input type="checkbox" id="itlShowOwner"'+(state.showOwner?' checked':'')+'>责任人</label></div></div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table itl-table-compact"><thead><tr><th class="itl-sequence">序号</th>'+columns.map(([key,label])=>'<th class="u-sortable" data-sort-by="'+key+'">'+label+'<span class="u-sort-icon">⇅</span></th>').join('')+'<th>位置 / 保管人</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div></div>';
+    let count=0;
+    const sorter=UnifyHelpers.attachTableSort({tableSelector:'#itlTable',fieldTypes: { id: 'number', category:'string',asset_label:'string',purpose_label:'string',status:'labelMap',sn:'string',asset_no:'string',owner_name:'string'},labelMaps:{status:statuses},defaultSort: { field: 'id', dir: 'desc' },pagination:{containerSelector:'#itlPager',pageSize:25},getList:()=>{
+      const q=state.search.trim().toLowerCase();const rows=state.assets.filter(a=>(!state.category||businessTypes.key(a)===state.category)&&(!state.status||a.status===state.status)&&(state.listScope==='all'||(state.listScope==='parts'?a.category==='disk':!['disk','software','subscription'].includes(a.category)))).map(a=>{const row=listRow(a);row._category=a.category;row.category=businessTypes.label(a);return row;}).filter(r=>!q||[r.name,r.brand,r.model,r.asset_label,r.purpose_label,r.sn,r.asset_no,r.owner_name,r.owner_dept,r.attrs?.subtype,r.attrs?.device_type,r.category,subtypeLabel({...r,category:r._category})].some(v=>String(v??'').toLowerCase().includes(q)));count=rows.length;return rows;
+    },render:rows=>{
+      const paging=sorter.pager.getState();const rowStart=(paging.page-1)*paging.pageSize;
+      $('#itlResultCount').textContent='显示 '+count+' / '+state.assets.length+' 项'+(state.listScope==='equipment'?' · 不含硬盘、软件与订阅':'');
+      $('#itlTable tbody').innerHTML=rows.length?rows.map((r,index)=>{const a={...r,category:r._category};return '<tr data-detail-row="'+r.id+'" tabindex="0" aria-label="查看'+esc(r.name)+'"><td class="itl-sequence">'+(rowStart+index+1)+'</td><td>'+categoryCell(a)+'</td><td>'+assetCell(a)+'</td><td>'+purposeCell(r)+'</td><td>'+badge(r.status)+'</td><td>'+esc(r.sn||'—')+'</td>'+(state.showAssetNo?'<td>'+esc(r.asset_no||'—')+'</td>':'')+(state.showOwner?'<td>'+esc(r.owner_name||'未填写')+'</td>':'')+'<td>'+esc(location(a))+'<div class="itl-locate-entry">'+locateButton(a)+locationEditButton(a)+custodyButtons(a)+'</div></td><td>'+(canWrite()?'<button type="button" class="itl-link" data-action="edit" data-id="'+r.id+'">编辑</button>':'—')+'</td></tr>';}).join(''):'<tr><td colspan="'+(columns.length+3)+'" class="itl-empty">没有符合条件的资产</td></tr>';
+    }});
+    const restorePage=state.tablePage;sorter.init();const sortTh=state.sortBy?$('#itlTable th[data-sort-by="'+state.sortBy+'"]'):null;if(sortTh){sortTh.click();if(state.sortDir==='asc')sortTh.click();}else{state.sortBy=null;sorter.render();}sorter.pager.goToPage(restorePage);allSorter=sorter;state.tablePage=sorter.getState().page;
+    $('#itlTable').addEventListener('click',e=>{if(e.target.closest('[data-sort-by]'))captureContext();});$('#itlPager').addEventListener('click',captureContext);
+    [['#itlSearch','search','input'],['#itlCategory','category','change'],['#itlStatus','status','change']].forEach(([selector,key,event])=>$(selector).addEventListener(event,e=>{state[key]=e.target.value;state.tablePage=1;sorter.pager.goToPage(1);sorter.render();captureContext();}));
+    document.querySelectorAll('[data-list-scope]').forEach(b=>b.onclick=()=>{state.listScope=b.dataset.listScope;state.tablePage=1;renderAll();captureContext();});
+    [['#itlShowAssetNo','showAssetNo'],['#itlShowOwner','showOwner']].forEach(([selector,key])=>$(selector).onchange=e=>{captureContext();state[key]=e.target.checked;renderAll();captureContext();});
+    $('#itlResetFilters').onclick=()=>{state.search='';state.category='';state.status='';state.tablePage=1;renderAll();captureContext();};
   }
   function render() {
     if (!state.level) return;
@@ -307,13 +327,13 @@
       if (seq !== detailSequence) return;
       $('#itlDrawerTitle').textContent = asset.name;
       $('#itlDrawerMeta').innerHTML=`${badge(asset.status)}<span>${esc(categories[asset.category])}</span><span>资产 #${asset.id}</span>`;
-      const groups=[['基本信息',['category','brand','model','sn','asset_no','asset_class','attrs','note']],['位置与归属',['owner_name','owner_dept','custodian_name','u_height','slot_count']],[isAdmin()?'采购与财务':'采购信息',['purchased_at','expires_at',...(isAdmin()?['fin_amount','fin_vendor','fin_contract_no']:[])]]];
-      const attrLabels={ip:'IP',purpose:'用途',os:'操作系统',capacity:'容量',interface:'接口',form_factor:'规格',cpu:'CPU',ram:'内存',mgmt_ip:'管理IP',ssid_group:'SSID组'};
+      const groups=[['基本信息',['category','brand','model','sn','asset_no','asset_class','attrs','note']],['位置与归属',['owner_name','owner_dept','custodian_name',...(asset.category==='laptop'&&asset.location_text?['location_text']:[]),'u_height','slot_count']],[isAdmin()?'采购与财务':'采购信息',['purchased_at','expires_at',...(isAdmin()?['fin_amount','fin_vendor','fin_contract_no']:[])]]];
+      const attrLabels={device_type:'设备细分',subtype:'业务类别编码',ip:'IP',purpose:'用途',os:'操作系统',capacity:'容量',interface:'接口',form_factor:'规格',cpu:'CPU',ram:'内存',mgmt_ip:'管理IP',ssid_group:'SSID组'};
       // Platform u-kv layout only: every field is label-over-value; long values span the row, half-width ones come first.
       const kvItem=(label,value,full)=>`<div class="u-kv-item${full?' full':''}"><label>${label}</label><div class="v">${value}</div></div>`;
       const attrItems=Object.entries(asset.attrs||{}).map(([key,v])=>{const text=String(valueText(key,v));return {full:text.length>20,html:kvItem(esc(attrLabels[key]||key),esc(text),text.length>20)};}).sort((x,y)=>x.full-y.full).map(x=>x.html).join('');
-      const groupItems=(index,keys)=>(index===0?kvItem('当前位置',esc(location(asset)),true):'')+keys.map(k=>k==='attrs'?attrItems:kvItem(fields[k],esc(valueText(k,asset[k])),k==='note')).join('');
-      $('#itlDrawerBody').innerHTML = `<div id="itlDetailActions" class="u-action-bar u-action-bar-sticky">${record_control?'':locateButton(asset)}${canWrite()&&!record_control?`<button type="button" class="u-btn-secondary" data-action="edit" data-id="${asset.id}">编辑资料</button>`:''}</div><div id="itlAssetProfile">${ITLedger.recordHistoryHTML(record_control,[])}${groups.map(([title,keys],index)=>`<section class="u-detail-section itl-detail-group"><h3>${title}</h3><div class="u-kv-grid itl-kv">${groupItems(index,keys)}</div></section>`).join('')}<p class="itl-detail-version">记录版本 ${asset.version}</p><section class="u-detail-section"><h3>变更记录</h3><ol class="itl-timeline">${[...events].reverse().map(event => {
+      const groupItems=(index,keys)=>(index===0?kvItem(asset.category==='laptop'?'当前保管人':'当前位置',esc(location(asset)),true):'')+keys.map(k=>k==='attrs'?attrItems:kvItem(k==='location_text'&&asset.category==='laptop'?'历史位置（原记录）':fields[k],esc(valueText(k,asset[k])),k==='note')).join('');
+      $('#itlDrawerBody').innerHTML = `<div id="itlDetailActions" class="u-action-bar u-action-bar-sticky">${record_control?'':locateButton(asset)+locationEditButton(asset)+custodyButtons(asset)}${canWrite()&&!record_control?`<button type="button" class="u-btn-secondary" data-action="edit" data-id="${asset.id}">编辑资料</button>`:''}</div><div id="itlAssetProfile">${ITLedger.recordHistoryHTML(record_control,[])}${groups.map(([title,keys],index)=>`<section class="u-detail-section itl-detail-group"><h3>${title}</h3><div class="u-kv-grid itl-kv">${groupItems(index,keys)}</div></section>`).join('')}<p class="itl-detail-version">记录版本 ${asset.version}</p><section class="u-detail-section"><h3>变更记录</h3><ol class="itl-timeline">${[...events].reverse().map(event => {
         const from = event.from_state || {}, to = event.to_state || {};
         const diff = [...new Set([...Object.keys(from),...Object.keys(to)])].map(k => `${fields[k] || k}：${valueText(k,from[k])} → ${valueText(k,to[k])}`).join('\n');
         return `<li><strong>${esc(actionNames[event.action] || event.action)} · ${esc(asset.name)}</strong>${event.role === 'affected' ? ' <span class="itl-muted">关联资产</span>' : ''}<p>${esc(diff)}</p>${event.related_asset_id ? `<p><button type="button" class="itl-link" data-detail="${event.related_asset_id}">查看关联资产 #${event.related_asset_id}</button></p>` : ''}${event.note ? `<p>${esc(event.note)}</p>` : ''}<div class="itl-muted">${esc(event.created_at)} · 操作人 #${esc(event.operator_id)}</div><div class="itl-op">${esc(event.op_id)}</div></li>`;
@@ -371,13 +391,22 @@
     if (!canWrite()) return;
     try {
       if (key === 'edit') return await ITLedger.openAssetForm(id);
-      const { asset } = await api('/'+id);
+      const detailRecord = await api('/'+id);
+      const asset=detailRecord.asset;asset.record_inactive=!!detailRecord.record_control;
+      if(key==='edit_location'){
+        const intent=locationIntent(asset);if(!intent){notice('当前状态不支持位置操作，请核对资产状态后重试。');return;}
+        if(intent.key==='edit')return ITLedger.openAssetForm(asset.id);
+        if(intent.key==='disk_positions')return ITLedger.openDisks(asset.parent_asset_id,'detail',asset.id);
+        if(intent.key==='rack_position')return ITLedger.openRack(asset.rack_id,asset);
+        for(const view of Object.values(state.views))if(view.action&&await view.action(intent.key,asset))return;
+        return;
+      }
       if (key === 'mark_status' || key === 'retire') {
         openModal(key === 'retire' ? '确认报废' : '调整库房状态', `<p>${esc(asset.name)}</p>${key === 'retire' ? '<p>报废后不再出现在库房中，仍可在全部视图和时间线查阅。</p>' : `<label class="itl-field">目标状态<select name="status">${['in_depot','faulty','to_retire'].filter(s => s !== asset.status).map(s => `<option value="${s}">${statuses[s]}</option>`).join('')}</select></label>`}`, async form => { await action(asset,key,key === 'mark_status' ? { status: form.elements.status.value } : {}); closeModal(true); await refresh(); toast('操作已保存'); }, '确认', { assetId: asset.id });
       } else { for (const view of Object.values(state.views)) if (view.action && await view.action(key,asset)) break; }
     } catch (error) { notice(error.message); }
   }
-  window.ITLedger = { $, esc, state, syncHeaderEmphasis, assetCard, categories, statuses, fields, canWrite, isAdmin, api, refresh, render, setTab, location, children, badge, type, menu, assetButton, rememberView, viewContext, detail, closeDrawer, toast, notice, openModal, closeModal, currentModalToken: () => modalToken, formError, action, valueText, registerView: (key, view) => { state.views[key] = view; } };
+  window.ITLedger = { $, esc, state, businessTypes, syncHeaderEmphasis, assetCard, categories, statuses, fields, canWrite, isAdmin, api, refresh, render, setTab, location, children, badge, type, menu, assetButton, rememberView, viewContext, detail, closeDrawer, toast, notice, openModal, closeModal, currentModalToken: () => modalToken, formError, action, valueText, registerView: (key, view) => { state.views[key] = view; } };
   document.addEventListener('DOMContentLoaded', () => {
     const requested = locationHash(); if (Object.hasOwn(tabs,requested)) state.tab = requested;
     $('#itlTabs').addEventListener('click', e => { const tab = e.target.closest('[data-tab]'); if (tab) setTab(tab.dataset.tab); });

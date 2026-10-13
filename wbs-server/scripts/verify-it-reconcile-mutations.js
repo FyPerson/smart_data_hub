@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto'),assert=require('assert/strict'),{spawnSync}=require('child_process');
 const root=path.resolve(__dirname,'..'),source=path.join(root,'routes/it-ledger'),dir=fs.mkdtempSync(path.join(os.tmpdir(),'it-reconcile-r6-mutations-'));
-const files=['index.js','invariants.js','single-asset-actions.js','stocktakes.js','reconcile-parser.js','reconciles.js','inspections.js','inspection-collector.js','inspection-collect.js','record-management.js','inspection-sheets.js','inspection-photo-files.js'];
+const files=['asset-health.js','index.js','invariants.js','single-asset-actions.js','stocktakes.js','reconcile-parser.js','reconciles.js','inspections.js','inspection-collector.js','inspection-collect.js','record-management.js','inspection-sheets.js','inspection-photo-files.js'];
 const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),before=Object.fromEntries(files.map(f=>[f,hash(path.join(source,f))]));
 let pass=0;function check(name,ok){assert.ok(ok,name);pass++;console.log('[OK] '+name);}
 function probe(kind,factory,label){

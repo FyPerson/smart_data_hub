@@ -229,7 +229,7 @@ module.exports = async function verifyC5(t) {
     const dbPath=path.join(os.tmpdir(),unique('c5-world')+'.db');let server;let instance;
     try {
       let index=fs.readFileSync(path.join(sourceDir,'index.js'),'utf8');
-      for(const [name,target]of [['invariants',path.join(sourceDir,'invariants.js')],['single-asset-actions',modulePath],['stocktakes',path.join(sourceDir,'stocktakes.js')],['reconciles',path.join(sourceDir,'reconciles.js')],['inspections',path.join(sourceDir,'inspections.js')],['inspection-collector',path.join(sourceDir,'inspection-collector.js')],['inspection-collect',path.join(sourceDir,'inspection-collect.js')],['record-management',path.join(sourceDir,'record-management.js')],['inspection-sheets',path.join(sourceDir,'inspection-sheets.js')],['inspection-photo-files',path.join(sourceDir,'inspection-photo-files.js')]]) {
+      for(const [name,target]of [['asset-health',path.join(sourceDir,'asset-health.js')],['invariants',path.join(sourceDir,'invariants.js')],['single-asset-actions',modulePath],['stocktakes',path.join(sourceDir,'stocktakes.js')],['reconciles',path.join(sourceDir,'reconciles.js')],['inspections',path.join(sourceDir,'inspections.js')],['inspection-collector',path.join(sourceDir,'inspection-collector.js')],['inspection-collect',path.join(sourceDir,'inspection-collect.js')],['record-management',path.join(sourceDir,'record-management.js')],['inspection-sheets',path.join(sourceDir,'inspection-sheets.js')],['inspection-photo-files',path.join(sourceDir,'inspection-photo-files.js')]]) {
         const literal=`require('./${name}')`;assert.equal(index.split(literal).length,2,'C5 world dependency count');
         index=index.replace(literal,`require(${JSON.stringify(target)})`);
       }

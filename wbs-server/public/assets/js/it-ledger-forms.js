@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const L = window.ITLedger, { esc, $ } = L;
-  const attrs = { server: { ip:'IP', purpose:'用途', os:'操作系统' }, disk: { capacity:'容量', interface:'接口', form_factor:'规格' }, laptop: { cpu:'CPU', ram:'内存', os:'操作系统' }, desktop: { cpu:'CPU', ram:'内存', os:'操作系统' }, ap: { ssid_group:'SSID 组', mgmt_ip:'管理 IP' }, other: { subtype:'设备类型', ip:'IP' }, software: { version:'版本', license_count:'许可数量', installed_on:'安装位置' }, subscription: { cycle:'订阅周期', account_name:'账号名（不填密码或令牌）', renew_method:'续费方式', vendor_portal:'厂商入口' } };
+  const attrs = {"server":{"ip":"IP","purpose":"用途","os":"操作系统"},"disk":{"capacity":"容量","interface":"接口","form_factor":"规格","purpose":"用途"},"laptop":{"cpu":"CPU","ram":"内存","os":"操作系统","purpose":"用途"},"desktop":{"cpu":"CPU","ram":"内存","os":"操作系统","purpose":"用途"},"ap":{"ssid_group":"SSID 组","mgmt_ip":"管理 IP","purpose":"用途"},"other":{"subtype":"设备类型","ip":"IP","purpose":"用途","device_type":"设备细分"},"software":{"version":"版本","license_count":"许可数量","installed_on":"安装位置","purpose":"用途"},"subscription":{"cycle":"订阅周期","account_name":"账号名（不填密码或令牌）","renew_method":"续费方式","vendor_portal":"厂商入口","purpose":"用途"}};
   const placementNames = { depot:'库房', rack:'机柜在位', host:'装入宿主', custodian:'保管人领用', place:'放置在指定位置' };
   const nullable = value => value.trim() === '' ? null : value;
   const software = category => ['software','subscription'].includes(category);
@@ -38,8 +38,11 @@
       const values = asset || { category:'server', name:'', u_height:1, slot_count:0, ...prefill };
       let category = values.category;
       const originalAttrText = {};
+      let currentBusiness=L.businessTypes.key(values);
+      const textAttr=v=>v==null?'':typeof v==='object'?JSON.stringify(v):String(v);
+      originalAttrText.purpose=textAttr(values.attrs?.purpose);
       const base = ['name','brand','model','sn','asset_no','owner_name','owner_dept'];
-      const html = `<fieldset><legend>基本信息</legend><div class="itl-form-grid">${input('category','类别',category,{ choices:category===''?[['','请选择类别'],...Object.entries(L.categories)]:Object.entries(L.categories), required:true })}${asset?'<p id="itlCategoryChangeHelp" class="u-hint itl-field-wide">正在核对可变更的类别…</p>':''}${base.map(key => input(key,L.fields[key],values[key],{required:key === 'name'})).join('')}${input('asset_class','资产分类',values.asset_class,{choices:[['','未填写'],['fixed','固定资产'],['low_value','低值易耗']]})}${input('purchased_at','购置日期',values.purchased_at,{type:'date'})}<div id="itlCategoryFields" class="itl-form-grid itl-field-wide"></div>${L.isAdmin() ? input('fin_amount','购置金额',values.fin_amount,{type:'number',step:'any'})+input('fin_vendor','供应商',values.fin_vendor)+input('fin_contract_no','合同编号',values.fin_contract_no) : ''}${input('note','备注',values.note,{textarea:true,wide:true})}</div></fieldset><fieldset id="itlPlacementGroup"><legend>当前位置</legend><div id="itlPlacement" class="itl-form-grid"></div></fieldset>`;
+      const html = `<fieldset><legend>基本信息</legend><div class="itl-form-grid"><div hidden>${input('category','类别',category,{ choices:category===''?[['','请选择类别'],...Object.entries(L.categories)]:Object.entries(L.categories), required:true })}</div>${input('business_type','业务类别',category===''?'':currentBusiness,{choices:[['','请选择类别'],...L.businessTypes.entries.map(t=>[t.key,t.label])],required:true})}${asset?'<p id="itlCategoryChangeHelp" class="u-hint itl-field-wide">正在核对可变更的类别…</p>':''}${base.map(key => input(key,L.fields[key],values[key],{required:key === 'name'})).join('')}${input('attrs.purpose','用途',originalAttrText.purpose,{wide:true})}${input('asset_class','资产分类',values.asset_class,{choices:[['','未填写'],['fixed','固定资产'],['low_value','低值易耗']]})}${input('purchased_at','购置日期',values.purchased_at,{type:'date'})}<div id="itlCategoryFields" class="itl-form-grid itl-field-wide"></div>${L.isAdmin() ? input('fin_amount','购置金额',values.fin_amount,{type:'number',step:'any'})+input('fin_vendor','供应商',values.fin_vendor)+input('fin_contract_no','合同编号',values.fin_contract_no) : ''}${input('note','备注',values.note,{textarea:true,wide:true})}</div></fieldset><fieldset id="itlPlacementGroup"><legend>当前位置</legend><div id="itlPlacement" class="itl-form-grid"></div></fieldset>`;
       L.openModal(asset ? '编辑资产资料' : '登记设备',html,async form => {
         if (asset && form.elements.category.value !== asset.category) {
           await L.confirmCategoryChange(form,asset);
@@ -82,7 +85,7 @@
             if (!host) bad('placement.parent_asset_id','请选择宿主设备。');
             payload.peer_versions = { [host.id]:host.version };
           }
-          if (kind === 'custodian') { p.custodian_name = get('placement.custodian_name').trim(); p.location_text = nullable(get('placement.location_text')); if (!p.custodian_name) bad('placement.custodian_name','请填写保管人姓名。'); }
+          if (kind === 'custodian') { p.custodian_name = get('placement.custodian_name').trim(); if(category!=='laptop')p.location_text = nullable(get('placement.location_text')); if (!p.custodian_name) bad('placement.custodian_name','请填写保管人姓名。'); }
           if (kind === 'place') { p.location_text = get('placement.location_text').trim(); if (!p.location_text) bad('placement.location_text','请填写位置。'); }
           payload.placement = p;
         }
@@ -95,15 +98,29 @@
       const form = $('#itlForm');
       if (asset) form.elements.category.disabled = true;
       function categoryFields() {
+        form.elements.note.placeholder=category==='laptop'?'入库或送修时，可在备注补充库位、维修去向。':'';
         if(!Object.hasOwn(attrs,category)){$('#itlCategoryFields').innerHTML='<p class="u-hint itl-field-wide">请先选择类别，再填写专属字段与当前位置。</p>';$('#itlPlacementGroup').hidden=true;$('#itlPlacement').replaceChildren();return;}
         const height = category === values.category ? values.u_height : category === 'server' ? 1 : 0;
         const count = category === values.category ? values.slot_count : 0;
-        $('#itlCategoryFields').innerHTML = `${['server','other'].includes(category) ? input('u_height','占用 U 数',height,{type:'number',min:category === 'server' ? 1 : 0,max:category === 'server' ? 8 : undefined,required:true,disabled:!!asset?.rack_id})+input('slot_count','盘位数',count,{type:'number',min:0,required:true}) : ''}${!software(category) || !asset ? input('expires_at',software(category) ? '到期日期' : '质保到期日期',values.expires_at,{type:'date',required:category === 'subscription'}) : '<p class="u-hint itl-field-wide">软件和订阅的到期日期请通过“续费”调整。</p>'}${Object.entries(attrs[category]).map(([key,label]) => { const value = category === values.category ? values.attrs?.[key] : ''; const text = value === undefined || value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value); originalAttrText[key] = text; return input('attrs.'+key,label,text); }).join('')}`;
+        $('#itlCategoryFields').innerHTML = `${['server','other'].includes(category) ? input('u_height','占用 U 数',height,{type:'number',min:category === 'server' ? 1 : 0,max:category === 'server' ? 8 : undefined,required:true,disabled:!!asset?.rack_id})+input('slot_count','盘位数',count,{type:'number',min:0,required:true}) : ''}${!software(category) || !asset ? input('expires_at',software(category) ? '到期日期' : '质保到期日期',values.expires_at,{type:'date',required:category === 'subscription'}) : '<p class="u-hint itl-field-wide">软件和订阅的到期日期请通过“续费”调整。</p>'}${Object.entries(attrs[category]).filter(([key])=>!['purpose','subtype','device_type'].includes(key)).map(([key,label]) => { const value = category === values.category ? values.attrs?.[key] : ''; const text = value === undefined || value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value); originalAttrText[key] = text; return input('attrs.'+key,label,text); }).join('')}`;
+        if(category==='other')otherFields();
         form.elements.namedItem('u_height')?.addEventListener('input',placementFields);
         placementFields();
       }
+      function otherFields(){
+        const old=category===values.category?values:null;
+        const subtype=L.businessTypes.subtype(currentBusiness,L.businessTypes.kind(old||{category:'other',attrs:{}}),old);
+        const detail=old?.attrs?.device_type||(currentBusiness==='network'?L.businessTypes.kind(old||{category:'other',attrs:{}}):'');
+        originalAttrText.subtype=textAttr(old?.attrs?.subtype);originalAttrText.device_type=textAttr(old?.attrs?.device_type);
+        const subtypeHtml=currentBusiness==='other'?input('attrs.subtype','原有设备类型',subtype):'<div hidden>'+input('attrs.subtype','设备类型',subtype)+'</div>';
+        const kinds=L.businessTypes.kinds[currentBusiness]||[];
+        const detailHtml=input('attrs.device_type','设备细分',detail,{wide:true}).replace('type="text"','type="text" list="itlDeviceKindChoices" maxlength="100"')+'<datalist id="itlDeviceKindChoices">'+kinds.map(k=>'<option value="'+esc(k)+'"></option>').join('')+'</datalist>';
+        $('#itlCategoryFields').insertAdjacentHTML('afterbegin','<div id="itlOtherBusinessFields" class="itl-form-grid itl-field-wide">'+subtypeHtml+detailHtml+'</div>');
+        form.elements.namedItem('attrs.device_type').addEventListener('input',()=>{if(currentBusiness==='network')form.elements.namedItem('attrs.subtype').value=L.businessTypes.subtype(currentBusiness,form.elements.namedItem('attrs.device_type').value,old);});
+      }
       function placementFields() {
         if (asset) { $('#itlPlacementGroup').hidden = true; return; }
+        $('#itlPlacementGroup legend').textContent=category==='laptop'?'领用信息':'当前位置';
         const allowed = kinds(category,Number(form.elements.namedItem('u_height')?.value || 0));
         $('#itlPlacementGroup').hidden = !allowed.length;
         if (!allowed.length) { $('#itlPlacement').replaceChildren(); return; }
@@ -118,12 +135,14 @@
         if (kind === 'depot') html = input('placement.status','库房状态','in_depot',{choices:['in_depot','faulty','to_retire'].map(s => [s,L.statuses[s]])})+(category === 'ap' ? '<p class="u-hint itl-field-wide">AP 先登记进库房，随后在"AP 平面"页选中它并上架到房间内的真实位置。</p>' : '');
         if (kind === 'rack') html = input('placement.rack_id','机柜','',{required:true,choices:[['','请选择机柜'],...references.racks.map(r => [r.id,`${r.name} · ${r.u_total}U`])]})+input('placement.u_start','起始 U',1,{type:'number',min:1,required:true});
         if (kind === 'host') html = input('placement.parent_asset_id','宿主','',{required:true,choices:[['','请选择宿主'],...references.assets.filter(a => ['server','other'].includes(a.category) && a.slot_count > 0 && ['in_service','in_depot','faulty','to_retire'].includes(a.status) && a.u_height > 0).map(a => [a.id,`${a.name} · ${L.statuses[a.status]} · ${a.slot_count} 盘位`])]})+input('placement.slot_no','盘位编号',1,{type:'number',min:1,required:true});
-        if (kind === 'custodian') html = input('placement.custodian_name','保管人姓名','',{required:true})+input('placement.location_text','位置（可选）');
+        if (kind === 'custodian') html = input('placement.custodian_name','保管人姓名','',{required:true})+(category==='laptop'?'':input('placement.location_text','位置（可选）'));
         if (kind === 'place') html = input('placement.location_text','位置','',{required:true,wide:true});
         $('#itlPlacementFields').innerHTML = html;
       }
       if (!asset) form.elements.category.addEventListener('change',e => { category = e.target.value; categoryFields(); });
       categoryFields();
+      form.elements.business_type.addEventListener('change',e=>{const chosen=L.businessTypes.byKey[e.target.value];currentBusiness=e.target.value;const next=chosen?.category||'';if(asset&&next!==asset.category){form.elements.category.value=next;form.elements.category.dispatchEvent(new Event('change',{bubbles:true}));return;}const changed=category!==next;form.elements.category.value=next;if(!asset&&changed){form.elements.category.dispatchEvent(new Event('change',{bubbles:true}));}else{category=next;if(category==='other'){$('#itlOtherBusinessFields')?.remove();otherFields();const st=form.elements.namedItem('attrs.subtype');if(st)st.value=L.businessTypes.subtype(currentBusiness,'',values);form.elements.namedItem('attrs.device_type').value=currentBusiness===L.businessTypes.key(values)?textAttr(values.attrs?.device_type)||L.businessTypes.kind(values):'';}}});
+      if(category==='laptop')form.elements.note.placeholder='入库或送修时，可在备注补充库位、维修去向。';
       if(asset)L.mountAssetRecordControls(form,asset);
     } catch (error) { L.notice(error.message); }
   };

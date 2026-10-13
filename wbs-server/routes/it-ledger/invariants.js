@@ -32,16 +32,16 @@ const SOFTWARE_LIKE = new Set(['software', 'subscription']);
 const HARDWARE_CATEGORIES = ['server', 'disk', 'laptop', 'desktop', 'ap', 'other'];
 const DEPOT_STATUSES = ['in_depot', 'faulty', 'to_retire'];
 
-// §2.7 attrs 冻结键集合（方案原文逐字）。
+// 类别属性白名单：原§2.7字段 + 2026-10-12公共用途；other增加独立设备细分，不改变资产动作类别。
 const ATTRS_ALLOWED_KEYS = {
   server: ['ip', 'purpose', 'os'],
-  disk: ['capacity', 'interface', 'form_factor'],
-  laptop: ['cpu', 'ram', 'os'],
-  desktop: ['cpu', 'ram', 'os'],
-  ap: ['ssid_group', 'mgmt_ip'],
-  other: ['subtype', 'ip'],
-  software: ['version', 'license_count', 'installed_on'],
-  subscription: ['cycle', 'account_name', 'renew_method', 'vendor_portal'],
+  disk: ['capacity', 'interface', 'form_factor', 'purpose'],
+  laptop: ['cpu', 'ram', 'os', 'purpose'],
+  desktop: ['cpu', 'ram', 'os', 'purpose'],
+  ap: ['ssid_group', 'mgmt_ip', 'purpose'],
+  other: ['subtype', 'ip', 'purpose', 'device_type'],
+  software: ['version', 'license_count', 'installed_on', 'purpose'],
+  subscription: ['cycle', 'account_name', 'renew_method', 'vendor_portal', 'purpose'],
 };
 
 // placement 子对象键白名单（方案 §5 逐分支）。
@@ -149,6 +149,7 @@ function normalizeAssetFields(category, fields) {
     const allowedKeys = ATTRS_ALLOWED_KEYS[category] || [];
     const extra = Object.keys(attrs).filter((k) => !allowedKeys.includes(k));
     if (extra.length > 0) return badField('attrs', `attrs 含该类别不允许的键: ${extra.join(',')}`);
+    if (Object.hasOwn(attrs, 'device_type') && (typeof attrs.device_type !== 'string' || attrs.device_type.length > 100)) return badField('attrs.device_type', '设备细分须为100字以内的文字');
     out.attrs = attrs;
   }
   for (const dateField of ['expires_at', 'purchased_at']) {

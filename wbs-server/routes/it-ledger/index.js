@@ -3148,9 +3148,8 @@ module.exports = (deps) => {
         if (!STATUS_VALUES.includes(query.status)) return res.status(400).json({ code: 'LEDGER_BAD_REQUEST', message: 'status 非法', field: 'status' });
         clauses.push('status = ?'); params.push(query.status);
       }
-      const rows = await withRead(async q=>{const active=await recordManagement.activeClause(q);if(recordState==='active')clauses.push(active);else{if(active==='1=1')return [];clauses.push('EXISTS (SELECT 1 FROM it_asset_record_controls rc WHERE rc.asset_id=it_assets.id AND rc.state=?)');params.push(recordState);}return q.all(`SELECT * FROM it_assets${clauses.length?' WHERE '+clauses.join(' AND '):''} ORDER BY id ASC`,params);});
-      const items = (rows || []).map(parseAssetRow);
-      res.json(stripFinance({ items }, isAdmin));
+      const result = await withRead(async q=>{const active=await recordManagement.activeClause(q);if(recordState==='active')clauses.push(active);else{if(active==='1=1')return {items:[],health:{}};clauses.push('EXISTS (SELECT 1 FROM it_asset_record_controls rc WHERE rc.asset_id=it_assets.id AND rc.state=?)');params.push(recordState);}const rows=await q.all(`SELECT * FROM it_assets${clauses.length?' WHERE '+clauses.join(' AND '):''} ORDER BY id ASC`,params);const items=rows.map(parseAssetRow);return {items,health:recordState==='active'?await assetHealth.list(q,items,req.user):{}};});
+      res.json(stripFinance(result, isAdmin));
     } catch (err) {
       handleErr(res, err);
     }
@@ -3434,6 +3433,7 @@ module.exports = (deps) => {
   // C3：sheetVisibility 直接复用 inspection-sheets.js 导出的那份（服务器详情「归属」展示要用，方案
   //   §2.5 第三条明文"不另写判断"）——inspectionSheets 必须先于这里构造好，已经是既有挂载顺序
   //   （sheets 先于 inspections，方案 §5.2 M4）。
+  const assetHealth = require('./asset-health')({sheetVisibility:inspectionSheets.sheetVisibility});
   const inspections = require('./inspections')({ withRead, handleErr, collect: inspectionCollect, sheetVisibility: inspectionSheets.sheetVisibility, stripFinance });
   router.use('/it-assets/inspections', authenticateToken, requireLedgerReady, requireLedgerRead, inspections.router);
 

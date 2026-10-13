@@ -41,10 +41,10 @@ async function main(){
   const p=await c.newPage(),errors=[];p.on('pageerror',e=>errors.push(e.message));
   await p.goto(f.base+'/IT_Ledger.html#all');await p.locator('#itlTable tbody tr[data-detail-row]').first().waitFor();
   const heads=await p.locator('#itlTable thead th').evaluateAll(ths=>ths.map(t=>t.textContent.replace(/[⇅↑↓]/g,'').trim()));
-  check('表头为 类别｜资产｜用途 / 补充信息｜状态｜序列号｜当前位置｜操作',JSON.stringify(heads)===JSON.stringify(['类别','资产','用途 / 补充信息','状态','序列号','当前位置','操作']));
+  check('表头为类别｜资产｜用途｜状态｜序列号｜位置/保管人｜操作',JSON.stringify(heads)===JSON.stringify(['序号','类别','资产','用途','状态','序列号','位置 / 保管人','操作']));
   check('编号与责任人两列已收起',!heads.includes('编号')&&!heads.includes('责任人'));
   // Cell reader: main text without sub-lines and tags, sub-lines, tag texts and classes, per column, for one asset id.
-  const cells=id=>p.locator(`#itlTable tr[data-detail-row="${id}"] td`).evaluateAll(tds=>tds.map(td=>{
+  const cells=id=>p.locator(`#itlTable tr[data-detail-row="${id}"] td:not(.itl-sequence)`).evaluateAll(tds=>tds.map(td=>{
    const clone=td.cloneNode(true);clone.querySelectorAll('.itl-cell-sub,.itl-flag,.itl-locate-entry').forEach(n=>n.remove());
    return {main:clone.textContent.trim(),sub:[...td.querySelectorAll('.itl-cell-sub')].map(n=>n.textContent.trim()),
     button:td.querySelector('[data-detail]')?.textContent.trim()??null,aria:td.querySelector('[data-detail]')?.getAttribute('aria-label')??null,
@@ -58,28 +58,28 @@ async function main(){
   check('资产按钮的可访问名称是登记名称',r[1].aria==='中通文博HRD系统数据库');
   r=await cells(s2.id);check('名称为「用途 + IP」：不重复显示名称',r[1].button==='Dell PowerEdge R750'&&r[1].sub.length===0&&r[2].main==='宿主机');
   r=await cells(s3.id);check('同型号设备：名称作为次行区分',r[1].button==='Dell PowerEdge R750'&&same(r[1].sub,['数据平台虚拟化']));
-  r=await cells(o1.id);check('其他设备：类别列带细分「交换机」，用途列为 IP',r[0].main==='其他设备'&&same(r[0].sub,['交换机'])&&r[2].main==='10.9.0.1');
+  r=await cells(o1.id);check('网络设备直接分类，交换机为细分，IP作次行',r[0].main==='网络设备'&&same(r[0].sub,['交换机'])&&r[2].main===''&&same(r[2].sub,['10.9.0.1']));
   r=await cells(o2.id);check('未知细分原样显示，无 IP 显示「—」',same(r[0].sub,['kvm'])&&r[2].main==='—');
   r=await cells(o3.id);check('细分为 constructor 时原样显示（不命中对象原型）',same(r[0].sub,['constructor']));
   r=await cells(o4.id);check('细分为 __proto__ 时原样显示（不命中对象原型）',same(r[0].sub,['__proto__']));
   r=await cells(d1.id);
-  check('硬盘：主行型号 + 「采集告警」标签，次行为去掉前缀的名称',r[1].button==='Seagate ST4000NM0023'&&same(r[1].flags.map(x=>x[0]),['采集告警'])&&r[1].flags[0][1].includes('itl-flag-alert')&&same(r[1].sub,['R750 硬盘 · 盘位1']));
-  check('硬盘：用途列为容量 · 接口 · 规格',r[2].main==='4 TB · SAS · 3.5"');
+  check('未巡检硬盘不显示名称派生健康标签',r[1].button==='Seagate ST4000NM0023'&&r[1].flags.length===0&&same(r[1].sub,['R750 硬盘 · 盘位1']));
+  check('硬盘参数不混入用途列',r[2].main==='—');
   check('标记前缀的设备可访问名称保留完整名称',r[1].aria==='【采集告警】R750 硬盘 · 盘位1');
   r=await cells(d2.id);
-  check('无型号：主行退回去掉标记的名称，两个标记都成标签，不重复次行',r[1].button==='旧盘'&&same(r[1].flags.map(x=>x[0]),['采集告警','暂定'])&&r[1].flags[1][1].includes('itl-flag-tentative')&&r[1].sub.length===0);
+  check('无型号回退名称，仅保留暂定标签',r[1].button==='旧盘'&&same(r[1].flags.map(x=>x[0]),['暂定'])&&r[1].flags[0][1].includes('itl-flag-tentative')&&r[1].sub.length===0);
   r=await cells(d3.id);check('名称只有标记：按钮显示「未命名资产」，标记只出现在标签里，可访问名称保留原名',r[1].button==='未命名资产'&&same(r[1].flags.map(x=>x[0]),['暂定'])&&r[1].sub.length===0&&r[1].aria==='【暂定】');
   const flagStyle=await p.locator(`#itlTable tr[data-detail-row="${d2.id}"] .itl-flag`).evaluateAll(ns=>ns.map(n=>{const s=getComputedStyle(n);return [s.color,s.backgroundColor];}));
-  check('标签颜色实际生效（告警=危险色，暂定=警示色，均有底色）',flagStyle[0][0]==='rgb(220, 38, 38)'&&flagStyle[1][0]==='rgb(234, 88, 12)'&&flagStyle.every(([,bg])=>bg!=='rgba(0, 0, 0, 0)'));
-  r=await cells(l1.id);check('笔记本：用途列为 CPU · 内存 · 系统',r[2].main==='i5 · 16GB · Win11');
-  r=await cells(dt1.id);check('台式机：类别「台式机」，用途列为 CPU · 内存',r[0].main==='台式机'&&r[2].main==='i3 · 8GB');
-  r=await cells(ap1.id);check('无线 AP：用途列为管理 IP，次行为 SSID 组',r[0].main==='无线 AP'&&r[2].main==='10.9.1.20'&&same(r[2].sub,['SSID 组 office']));
-  r=await cells(sw.id);check('软件：用途列为版本，次行为到期日',r[2].main==='7.0'&&same(r[2].sub,['到期 2027-01-31']));
-  r=await cells(sw0.id);check('软件许可数为 0 时显示「0 个许可」',r[2].main==='0 个许可'&&same(r[2].sub,['到期 2027-03-01']));
-  r=await cells(sw2.id);check('只有到期日：主行为空，不显示「—」，次行为到期日',r[2].main===''&&same(r[2].sub,['到期 2027-04-01']));
-  r=await cells(sub1.id);check('订阅：用途列为周期 · 账号，次行为到期日',r[0].main==='订阅'&&r[2].main==='年付 · ops-account'&&same(r[2].sub,['到期 2027-05-01']));
+  check('暂定标签警示色和底色生效',flagStyle.length===1&&flagStyle[0][0]==='rgb(234, 88, 12)'&&flagStyle[0][1]!=='rgba(0, 0, 0, 0)');
+  r=await cells(l1.id);check('未填笔记本用途，不用内存参数代填',r[2].main==='—');
+  r=await cells(dt1.id);check('台式机类别保留，未填写用途显示空值',r[0].main==='台式机'&&r[2].main==='—');
+  r=await cells(ap1.id);check('AP管理IP作次行，不混入SSID参数',r[0].main==='无线 AP'&&r[2].main===''&&same(r[2].sub,['10.9.1.20']));
+  r=await cells(sw.id);check('软件版本和到期日不混入用途',r[2].main==='—'&&r[2].sub.length===0);
+  r=await cells(sw0.id);check('许可数量不混入用途',r[2].main==='—'&&r[2].sub.length===0);
+  r=await cells(sw2.id);check('仅有到期日不会自动填用途',r[2].main==='—'&&r[2].sub.length===0);
+  r=await cells(sub1.id);check('订阅周期和账号不混入用途',r[0].main==='订阅'&&r[2].main==='—'&&r[2].sub.length===0);
   r=await cells(x1.id);
-  check('含 HTML / 引号的名称、细分、IP、位置都按原文显示',r[1].button===XSS_NAME&&r[1].aria===XSS_NAME&&same(r[0].sub,['<b>"s"</b>'])&&r[2].main==='"><i>ip</i>'&&r[5].main.startsWith('<u>loc</u>'));
+  check('名称细分IP位置安全按原文显示',r[1].button===XSS_NAME&&r[1].aria===XSS_NAME&&same(r[0].sub,['<b>"s"</b>'])&&r[2].main===''&&same(r[2].sub,['"><i>ip</i>'])&&r[5].main.startsWith('<u>loc</u>'));
   check('这些值没有变成页面元素，也没有执行脚本',await p.locator(`#itlTable tr[data-detail-row="${x1.id}"]`).locator('img,b,i,u,script').count()===0&&await p.evaluate(()=>window.__xss===undefined));
 
   const visibleIds=()=>p.locator('#itlTable tbody tr[data-detail-row]').evaluateAll(trs=>trs.map(t=>Number(t.dataset.detailRow)));

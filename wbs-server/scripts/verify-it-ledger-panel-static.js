@@ -3,10 +3,10 @@
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict'),acorn=require('acorn');
 const publicRoot=path.resolve(__dirname,'../public');
 const read=p=>fs.readFileSync(path.join(publicRoot,p),'utf8');
-const modules=['it-ledger','it-ledger-forms','it-ledger-records','it-ledger-racks','it-ledger-disks','it-ledger-category-views','it-ledger-aps','it-ledger-stocktakes','it-ledger-evidence','it-ledger-inspection-sheets','it-ledger-inspections','it-ledger-export-layout','it-ledger-reconciles'];
+const modules=['it-ledger-types','it-ledger','it-ledger-forms','it-ledger-records','it-ledger-racks','it-ledger-disks','it-ledger-category-views','it-ledger-aps','it-ledger-stocktakes','it-ledger-evidence','it-ledger-inspection-sheets','it-ledger-inspections','it-ledger-export-layout','it-ledger-reconciles'];
 const expected={
  categories:{server:'服务器',disk:'硬盘',laptop:'笔记本',desktop:'台式机',ap:'无线 AP',other:'其他设备',software:'软件',subscription:'订阅'},
- statuses:{in_service:'在用',in_depot:'可用',faulty:'故障',to_retire:'待报废',retired:'已报废',active:'有效',cancelled:'已停用'},
+ statuses:{in_service:'在用',in_depot:'库房',faulty:'故障',to_retire:'待报废',retired:'已报废',active:'有效',cancelled:'已停用'},
  actionNames:{register:'登记',update:'编辑资料',rack_in:'上架',rack_out:'下架',rack_move:'迁柜',rack_relocate:'柜内移位',mark_status:'调整库房状态',retire:'报废',disk_mount:'装盘',disk_unmount:'拆盘',disk_swap:'换盘',disk_move:'移盘',assign:'领用',reassign:'更换保管人',return:'归还',place:'放置',relocate:'移动位置',ap_place:'安装 AP',ap_relocate:'移动 AP',ap_unmount:'拆下 AP',renew:'续费',cancel:'停用'}
 };
 function walk(node,fn){if(!node||typeof node!=='object')return;fn(node);for(const value of Object.values(node)){if(Array.isArray(value))value.forEach(v=>walk(v,fn));else if(value&&typeof value==='object')walk(value,fn);}}

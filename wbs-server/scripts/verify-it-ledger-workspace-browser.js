@@ -41,7 +41,7 @@ async function main(){
   await p.goto(f.base+'/IT_Ledger.html#reconciles');await p.locator('#itlInventoryContent table').waitFor();check('对账独立深链接刷新保留',await p.locator('[data-tab="reconciles"]').getAttribute('aria-current')==='page'&&await p.locator('#itlViewTitle').innerText()==='对账');await p.locator('[data-tab="all"]').click();
   check('标题对应当前视图',await p.locator('#itlViewTitle').innerText()==='全部资产');
   await p.locator('[data-tab="depot"]').click();await p.locator('.itl-module-name').click();await p.locator('[data-tab="all"][aria-current]').waitFor();check('模块标题链接同步全部资产',await p.locator('#itlViewTitle').innerText()==='全部资产');await p.locator('[data-tab="all"]').click();
-  await p.locator('[data-density="compact"]').click();check('紧凑密度可切换',await p.locator('#itlTable').evaluate(el=>el.classList.contains('itl-table-compact')));
+  check('列表固定紧凑型',await p.locator('#itlTable').evaluate(el=>el.classList.contains('itl-table-compact')));
   const contentBefore=await p.locator('#itlContent').boundingBox();
   await p.locator('[data-detail="'+a.id+'"]').click();await p.locator('#itlDrawerBody .itl-kv').first().waitFor();
   await p.waitForFunction(()=>Math.abs(document.querySelector('#itlDrawer').getBoundingClientRect().right-innerWidth)<1);
@@ -74,7 +74,7 @@ async function main(){
   check('卡片以类别为标题且不再拉满整行',depotCards.some(c=>c.name==='库房备用笔记本'&&c.kind==='笔记本')&&!!office&&office.kind==='台式机'&&office.buttons.length===0&&[...depotCards,...terminalCards].every(c=>c.kind&&c.name&&c.bare===0)&&terminalCards.every(c=>c.width<=420));
   await p.evaluate(()=>location.hash='depot');await p.locator('[data-tab="depot"][aria-current="page"]').waitFor();
   const depotCard=p.locator('.itl-card').filter({has:p.getByRole('button',{name:'库房备用笔记本',exact:true})});await depotCard.locator('.itl-menu summary').click();check('卡片菜单点击后保持打开',await depotCard.locator('.itl-menu').evaluate(el=>el.open));await p.locator('.itl-lane h2').first().click();check('点击菜单外关闭',!await depotCard.locator('.itl-menu').evaluate(el=>el.open));await depotCard.locator('.itl-menu summary').click();await depotCard.locator('[data-action="edit"]').click();await p.locator('#itlModal.open').waitFor();check('菜单操作仍可打开编辑',await p.locator('#itlModal').evaluate(el=>el.classList.contains('open')));await p.locator('#itlModalClose').click();
-  await p.locator('[data-tab="all"]').click();check('密度跨视图保留',await p.locator('#itlTable').evaluate(el=>el.classList.contains('itl-table-compact')));
+  await p.locator('[data-tab="all"]').click();check('跨视图返回仍为固定紧凑型',await p.locator('#itlTable').evaluate(el=>el.classList.contains('itl-table-compact')));
   // Narrow screens: deep links to right-hand views keep the current nav item inside the scrolling row (codex 31 M1).
   await p.setViewportSize({width:390,height:700});const navVisible=[];
   for(const view of ['stocktakes','inspections','software']){await p.evaluate(v=>location.hash=v,view);await p.locator(`[data-tab="${view}"][aria-current="page"]`).waitFor();navVisible.push(await p.evaluate(v=>{const n=document.querySelector('#itlTabs').getBoundingClientRect(),b=document.querySelector(`#itlTabs [data-tab="${v}"]`).getBoundingClientRect();return b.left>=n.left-1&&b.right<=n.right+1;},view));}

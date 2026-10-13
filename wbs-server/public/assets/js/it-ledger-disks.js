@@ -26,7 +26,7 @@
   // command below), so the workspace's asset list is already current by the time this overlay closes; close()
   // never has fresher data waiting on it, it only ever dismisses the panel.
   function close(){opening++;if(overlay)overlay.hidden=true;if(previousFocus?.isConnected)previousFocus.focus({preventScroll:true});}
-  async function openDisks(id,from='depot'){hostId=id;source=from;selectedSlot=null;pageStart=1;await show('disks');}
+  async function openDisks(id,from='depot',selectedDiskId=null,preferredSlot=null){hostId=id;source=from;selectedSlot=null;pageStart=1;const seq=opening+1;await show('disks');if(seq!==opening||mode!=='disks'||hostId!==id||overlay?.hidden)return;if(selectedDiskId){const selected=asset(selectedDiskId);if(selected?.parent_asset_id===id){selectedSlot=selected.slot_no;pageStart=Math.floor((selectedSlot-1)/48)*48+1;paintDisks();}}else if(Number.isSafeInteger(preferredSlot)&&preferredSlot>=1&&preferredSlot<=asset(id)?.slot_count){selectedSlot=preferredSlot;pageStart=Math.floor((selectedSlot-1)/48)*48+1;paintDisks();}}
   async function openReplacement(id){if(!L.canWrite())return;if(id)oldId=id;source='rack';await show('replacement');}
   function paint(){if(!overlay||overlay.hidden)return;if(mode==='replacement')paintReplacement();else paintDisks();}
   function paintDisks(){
@@ -38,16 +38,18 @@
     pageStart=Math.min(Math.max(1,pageStart),host.slot_count);const last=pageStart+Math.min(47,host.slot_count-pageStart);
     let slots='';for(let slot=pageStart;slot<=last;slot++){
       const disk=disks.find(d=>d.slot_no===slot);
-      slots+=`<button type="button" class="itl-disk-slot${disk?'':' itl-disk-empty'}${selectedSlot===slot?' itl-selected':''}" data-disk-slot="${slot}" aria-label="盘位${slot}${disk?'，'+esc(disk.name):'，空位'}"><small>#${slot}</small>${disk?`<strong>${esc(disk.model||disk.name)}</strong><span>${esc(disk.sn||'未填SN')}</span>${L.badge(disk.status)}`:`<span>${host.status==='in_service'&&L.canWrite()?'空盘位 · 点此装盘':'空盘位'}</span>`}</button>`;
+      slots+=`<button type="button" class="itl-disk-slot${disk?'':' itl-disk-empty'}${selectedSlot===slot?' itl-selected':''}" data-disk-slot="${slot}" aria-label="盘位${slot}${disk?'，'+esc(disk.name):'，未登记'}"><small>#${slot}</small>${disk?`<strong>${esc(disk.model||disk.name)}</strong><span>${esc(disk.sn||'未填SN')}</span>${L.badge(disk.status)}`:`<span>${host.status==='in_service'&&L.canWrite()?'未登记 · 点此装盘':'未登记'}</span>`}</button>`;
     }
     const disk=disks.find(d=>d.slot_no===selectedSlot);
     let operations='<p class="itl-muted">选择盘位查看或操作。</p>';
     if(disk){
       operations=`<h3>#${disk.slot_no} · ${esc(disk.name)}</h3><p>${esc(disk.model||'—')} · SN ${esc(disk.sn||'—')}</p>`;
+      const health=L.state.health?.[disk.id];
+      if(health){const at=health.observed_at?new Date(health.observed_at).toLocaleString('zh-CN',{hour12:false}):'时间未记录';const old=health.latest_attempt&&health.latest_attempt.id!==health.source_inspection_id;operations+='<section class="itl-disk-health-note"><strong>巡检结论：'+esc(health.label||(health.collection_status==='failed'?'采集失败，未形成结论':'部分采集，未形成结论'))+(old?'（上次结果）':'')+'</strong><p>采集时间：'+esc(at)+'</p>'+(health.evidence?'<p>采集信号：'+esc(health.evidence)+'</p>':'')+(health.reason?'<p>设备巡检说明：'+esc(health.reason)+'</p>':'')+'</section>';}
       if(canOperate){operations+=host.status==='in_service'?`<div class="itl-disk-operation-columns"><section><h4>换盘</h4><p>选择库房可用散盘，并指定旧盘去向。</p><button type="button" class="u-btn-primary" data-disk-op="disk_swap" data-disk-id="${disk.id}">换盘</button></section><section><h4>移盘</h4><p>移到另一台在位宿主的空盘位。</p><button type="button" class="u-btn-secondary" data-disk-op="disk_move" data-disk-id="${disk.id}">移盘</button></section></div>`:'';
         operations+=`<button type="button" class="u-btn-secondary" data-disk-op="disk_unmount" data-disk-id="${disk.id}">拆盘</button>`;
       }
-    }else if(selectedSlot&&host.status==='in_service'&&L.canWrite())operations=`<h3>#${selectedSlot} · 空盘位</h3><button type="button" class="u-btn-primary" data-disk-op="disk_mount" data-host-id="${host.id}" data-target-slot="${selectedSlot}">选择散盘安装</button>`;
+    }else if(selectedSlot&&host.status==='in_service'&&L.canWrite())operations=`<h3>#${selectedSlot} · 未登记盘位</h3><p class="itl-muted">请先核实实物，台账未登记不代表物理空槽。</p><button type="button" class="u-btn-primary" data-disk-op="disk_mount" data-host-id="${host.id}" data-target-slot="${selectedSlot}">选择散盘安装</button>`;
     $('#itlHardwareBody').innerHTML=`${host.slot_count>48?`<div class="itl-disk-pager"><button type="button" class="u-btn-secondary" data-disk-page="prev"${pageStart===1?' disabled':''}>前48槽</button><label>跳至盘位 <input id="itlDiskJump" type="number" min="1" max="${host.slot_count}" value="${pageStart}"></label><button type="button" class="u-btn-secondary" data-hardware-command="jump">查看</button><button type="button" class="u-btn-secondary" data-disk-page="next"${last===host.slot_count?' disabled':''}>后48槽</button><span>${pageStart}–${last} / ${host.slot_count}</span></div>`:''}<div class="itl-disk-grid">${slots}</div><section class="itl-disk-operations">${operations}</section>`;
   }
   async function diskForm(action,diskId,targetId,slotNo){

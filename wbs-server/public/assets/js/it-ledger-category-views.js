@@ -24,7 +24,7 @@
     const list=[];
     if(isTerminal(a)){
       if(a.status==='in_depot')list.push({key:'assign',label:'领用'});
-      if(a.status==='in_service')list.push({key:'reassign',label:'换保管人'},{key:'relocate',label:'移位置'},{key:'return',label:'归还'});
+      if(a.status==='in_service'){list.push({key:'reassign',label:'换保管人'});if(a.category!=='laptop')list.push({key:'relocate',label:'移位置'});list.push({key:'return',label:'归还'});}
     }
     if(isPlace(a)){
       if(a.status==='in_depot')list.push({key:'place',label:'投入使用'});
@@ -47,10 +47,11 @@
     $('#itlExpiryOnly').addEventListener('change',e=>{expiryOnly=e.target.checked;software();});$('#itlAddSoftware').addEventListener('click',()=>L.openAssetForm(null,{category:'subscription',u_height:0}));
   }
   async function singleAction(key,a){
+    if(a.category==='laptop'&&key==='relocate')return false;
     if(!['assign','reassign','return','place','relocate','renew','cancel'].includes(key))return false;if(!L.canWrite())return true;
     const names={assign:'领用',reassign:'更换保管人',return:a.category==='ap'?'拆下 AP':'归还',place:'投入使用',relocate:'移位置',renew:'续费',cancel:'停用'};let html=`<p>${esc(a.name)}</p>`;
     if(key==='assign'||key==='reassign')html+=L.formField('custodian_name','保管人姓名',key==='reassign'?a.custodian_name:'',{required:true});
-    if(['assign','place','relocate'].includes(key))html+=L.formField('location_text',key==='assign'?'位置（可选）':'位置',a.location_text,{required:key!=='assign'});
+    if(['assign','place','relocate'].includes(key)&&!(a.category==='laptop'&&key==='assign'))html+=L.formField('location_text',key==='assign'?'位置（可选）':'位置',a.location_text,{required:key!=='assign'});
     if(key==='return')html+=L.formField('to','去向','in_depot',{choices:['in_depot','faulty','to_retire'].map(s=>[s,L.statuses[s]])});
     if(key==='renew')html+=`<p>当前到期：${esc(a.expires_at||'未设置')}。${a.expires_at?'新日期须严格晚于当前日期。':'可填写任意合法日期。'}</p>`+L.formField('expires_at','新到期日期','',{type:'date',required:true});
     if(key==='cancel')html+='<p>停用后不再计入到期提醒，资料和历史仍可查阅。</p>';
