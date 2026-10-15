@@ -77,7 +77,7 @@ async function waitRowCountSettled(page) {
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== S1 三行齐全 =====
         console.log('S1. ODS #6 贴源三件套渲染');

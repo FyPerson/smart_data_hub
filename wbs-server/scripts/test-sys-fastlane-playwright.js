@@ -693,7 +693,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── ⑤ 其余页面硬刷新烟测（console 零错误 + 缓存串生效抽一页） ──');
         const OTHER_PAGES = ['Data_Collab.html', 'Data_Correction.html', 'Issue_Lite.html', 'Issue_Tracker.html',
-            'Model_Center.html', 'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html', 'Statistics.html', 'Task_Pool.html'];
+            'Model_Center.html', 'Model_Workbench.html', 'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html', 'Statistics.html', 'Task_Pool.html'];
         for (const pg of OTHER_PAGES) {
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/${pg}`, { waitUntil: 'networkidle' });

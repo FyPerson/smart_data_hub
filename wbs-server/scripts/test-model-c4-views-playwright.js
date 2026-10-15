@@ -52,7 +52,7 @@ async function closeDrawer(page) {
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== #52 DWD 完整视图 =====
         console.log('DWD #52');
@@ -105,7 +105,7 @@ async function closeDrawer(page) {
         expect(parentLink !== null, '主模型链接存在');
         // 先经列表按钮打开 #53（带 openerEl），再点主模型链接导航到 #52，验关闭后焦点归还列表按钮（C4 审 M-3）
         await closeDrawer(page);
-        const compRowBtn = page.locator('#modelListBody tr[data-id="53"] td:nth-child(3) .model-open-btn').first();
+        const compRowBtn = page.locator('#modelListBody [data-id="53"] .model-open-btn').first();   // C4c-2：条目内表名打开按钮（旧：第 3 列 td 内）
         await compRowBtn.click();
         await page.waitForFunction(() => document.querySelector('#modelDrawerBody .mdc-link-btn') !== null);
         await page.click('#modelDrawerBody .mdc-link-btn');
@@ -126,11 +126,24 @@ async function closeDrawer(page) {
 
         // ===== §5.7 历史 readOnly + Esc 层级 =====
         console.log('§5.7 历史 readOnly');
+        // C6a 预筛 MED-1：#52 的真实变更日志只有 basic_info / dim_config（没有 script_edit），「回退」按钮只在 script_edit 记录里渲染（MC viewModelChangeLogs），
+        //   不注入的话「readOnly 无回退」在 readOnly 真假两种情况下都成立，是空转。注入 2 条记录（字段形态照 viewModelChangeLogs 的读法），让「查看变更」/「回退」所在的分支真的走到。
+        const c4LogsMatch = (u) => u.pathname === '/api/models/52/change-logs';
+        const c4Logs = [
+            { id: 990001, model_id: 52, action: 'UPDATE', change_type: 'script_edit', change_summary: 'c4 注入：脚本编辑记录', operator_name: 'c4-probe', created_at: '2026-01-02 03:04:05' },
+            { id: 990002, model_id: 52, action: 'UPDATE', change_type: 'basic_info', change_summary: 'c4 注入：基本信息记录', operator_name: 'c4-probe', created_at: '2026-01-02 03:00:00' },
+        ];
+        const c4LogsHandler = async (route) => { if (route.request().method() !== 'GET') return route.continue(); await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(c4Logs) }); };
+        await page.route(c4LogsMatch, c4LogsHandler);
         await openDrawerById(page, 52);
         const logsBtn = page.locator('#modelDrawerBody .foot-links button:has-text("查看全部变更")');
         await logsBtn.click();
         await page.waitForFunction(() => document.getElementById('changeLogsModal') !== null);
         // readOnly：不出现「回退」按钮
+        const injectedText = await page.$eval('#changeLogsModal', e => e.textContent);
+        expect(/2 条记录/.test(injectedText), '前提：变更日志请求的注入生效（弹窗标题显示 2 条记录）', injectedText.replace(/\s+/g, ' ').slice(0, 80));
+        const viewDiffCount = await page.$$eval('#changeLogsModal button', btns => btns.filter(b => b.textContent.includes('查看变更')).length);
+        expect(viewDiffCount >= 1, '前提：script_edit 记录渲染了「查看变更」按钮（它与「回退」在同一分支里，证明回退按钮的渲染分支被走到；×关闭按钮恒存在，不能当前提）', viewDiffCount);
         const hasRevert = await page.$$eval('#changeLogsModal button', btns => btns.some(b => b.textContent.includes('回退')));
         expect(!hasRevert, '历史弹窗 readOnly 无「回退」按钮', hasRevert);
         // 子弹窗开着时抽屉 inert
@@ -150,6 +163,13 @@ async function closeDrawer(page) {
         expect(drawerStillOpen, '子弹窗期间抽屉保持 open（Esc 不越级）', drawerStillOpen);
         const drawerInertAfter = await page.$eval('#modelDetailDrawer', e => e.inert);
         expect(drawerInertAfter === false, '子弹窗关闭后抽屉恢复可交互', drawerInertAfter);
+        // 正向对照（C6a MED-1）：同一份日志下不传 opts 直接调 viewModelChangeLogs(52)（readOnly=false）必须出现「回退」按钮——证明上面「无回退」不是注入数据本身不渲染它
+        await page.evaluate(() => { viewModelChangeLogs(52); });
+        const revertShown = await page.waitForFunction(() => { const m = document.getElementById('changeLogsModal'); return !!m && Array.from(m.querySelectorAll('button')).some(b => b.textContent.includes('回退')); }, null, { timeout: 8000 }).then(() => true, () => false);
+        expect(revertShown, '正向对照：不传 opts 调 viewModelChangeLogs(52) → 同一份日志出现「回退」按钮（readOnly 才隐藏它）', revertShown);
+        await page.evaluate(() => { const m = document.getElementById('changeLogsModal'); if (m) m.remove(); });
+        await page.waitForFunction(() => document.getElementById('modelDetailDrawer').inert === false, null, { timeout: 8000 }).catch(() => {});
+        await page.unroute(c4LogsMatch, c4LogsHandler);
 
         // C4 审 M-2：验收记录弹窗 Esc 关闭（派生浮层无自身 Esc，靠抽屉 keydown 关最上层）
         const testBtn = page.locator('#modelDrawerBody .foot-links button:has-text("验收记录")');

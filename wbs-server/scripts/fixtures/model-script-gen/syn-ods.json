@@ -1,0 +1,856 @@
+{
+ "name": "syn-ods",
+ "kind": "ods",
+ "description": "合成 ODS 夹具：20 列（含主键 / identity / max_length=-1 / decimal 精度 / 含引号与换行的注释）、无主键、无来源、空模型",
+ "cases": [
+  {
+   "name": "ods-20-columns-full-model",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_item_df",
+     "table_comment": "合成 ODS",
+     "source_system": "SYS_A",
+     "source_table": "syn_item"
+    },
+    "columns": [
+     {
+      "column_name": "c0",
+      "data_type": "int",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": true,
+      "is_identity": true,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c1",
+      "data_type": "bigint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": true,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c2",
+      "data_type": "smallint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c3",
+      "data_type": "tinyint",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c4",
+      "data_type": "bit",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c5",
+      "data_type": "decimal",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c6",
+      "data_type": "numeric",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c7",
+      "data_type": "float",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c8",
+      "data_type": "real",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c9",
+      "data_type": "money",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c10",
+      "data_type": "datetime",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c11",
+      "data_type": "datetime2",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c12",
+      "data_type": "smalldatetime",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c13",
+      "data_type": "date",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c14",
+      "data_type": "time",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c15",
+      "data_type": "varchar",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c16",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c17",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c18",
+      "data_type": "char",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c19",
+      "data_type": "nchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     }
+    ],
+    "comment": ""
+   }
+  },
+  {
+   "name": "ods-20-columns-source-comment",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_item_df",
+     "table_comment": "合成 ODS",
+     "source_system": "SYS_A",
+     "source_table": "syn_item"
+    },
+    "columns": [
+     {
+      "column_name": "c0",
+      "data_type": "int",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": true,
+      "is_identity": true,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c1",
+      "data_type": "bigint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": true,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c2",
+      "data_type": "smallint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c3",
+      "data_type": "tinyint",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c4",
+      "data_type": "bit",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c5",
+      "data_type": "decimal",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c6",
+      "data_type": "numeric",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c7",
+      "data_type": "float",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c8",
+      "data_type": "real",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c9",
+      "data_type": "money",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c10",
+      "data_type": "datetime",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c11",
+      "data_type": "datetime2",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c12",
+      "data_type": "smalldatetime",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c13",
+      "data_type": "date",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c14",
+      "data_type": "time",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c15",
+      "data_type": "varchar",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c16",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c17",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c18",
+      "data_type": "char",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c19",
+      "data_type": "nchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     }
+    ],
+    "comment": "源表'说明'"
+   }
+  },
+  {
+   "name": "ods-no-primary-key",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_nopk_df"
+    },
+    "columns": [
+     {
+      "column_name": "c0",
+      "data_type": "int",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c1",
+      "data_type": "bigint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c2",
+      "data_type": "smallint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c3",
+      "data_type": "tinyint",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c4",
+      "data_type": "bit",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c5",
+      "data_type": "decimal",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c6",
+      "data_type": "numeric",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c7",
+      "data_type": "float",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c8",
+      "data_type": "real",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c9",
+      "data_type": "money",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c10",
+      "data_type": "datetime",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c11",
+      "data_type": "datetime2",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c12",
+      "data_type": "smalldatetime",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c13",
+      "data_type": "date",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c14",
+      "data_type": "time",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c15",
+      "data_type": "varchar",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c16",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c17",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c18",
+      "data_type": "char",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c19",
+      "data_type": "nchar",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     }
+    ],
+    "comment": "cmt"
+   }
+  },
+  {
+   "name": "ods-no-source-system-or-table",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_nosrc_df",
+     "table_comment": "无来源"
+    },
+    "columns": [
+     {
+      "column_name": "c0",
+      "data_type": "int",
+      "max_length": -1,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": true,
+      "is_identity": true,
+      "column_comment": "it's\nmultiline\u0001ctl"
+     },
+     {
+      "column_name": "c1",
+      "data_type": "bigint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "YES",
+      "is_primary_key": true,
+      "is_identity": false,
+      "column_comment": ""
+     },
+     {
+      "column_name": "c2",
+      "data_type": "smallint",
+      "max_length": 50,
+      "precision": 12,
+      "scale": 3,
+      "is_nullable": "NO",
+      "is_primary_key": false,
+      "is_identity": false,
+      "column_comment": ""
+     }
+    ],
+    "comment": ""
+   }
+  },
+  {
+   "name": "ods-empty-model-no-columns",
+   "config": {
+    "model": {},
+    "columns": [],
+    "comment": ""
+   }
+  },
+  {
+   "name": "ods-null-comment-and-source",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_null_df",
+     "table_comment": null,
+     "source_system": null,
+     "source_table": null
+    },
+    "columns": [
+     {
+      "column_name": "n1",
+      "data_type": "int",
+      "is_nullable": "YES",
+      "column_comment": null
+     },
+     {
+      "column_name": "n2",
+      "data_type": "varchar",
+      "max_length": 10,
+      "is_nullable": "YES"
+     }
+    ],
+    "comment": null
+   }
+  },
+  {
+   "name": "ods-long-column-name",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_item_df",
+     "table_comment": "合成 ODS",
+     "source_system": "SYS_A",
+     "source_table": "syn_item"
+    },
+    "columns": [
+     {
+      "column_name": "a_very_long_column_name_over_twenty_six_chars",
+      "data_type": "varchar",
+      "max_length": 20,
+      "is_nullable": "NO",
+      "is_primary_key": true
+     },
+     {
+      "column_name": "x",
+      "data_type": "DECIMAL",
+      "precision": null,
+      "scale": null,
+      "is_nullable": "YES",
+      "column_comment": "十进制默认精度"
+     },
+     {
+      "column_name": "y",
+      "data_type": "numeric",
+      "precision": 10,
+      "scale": 2,
+      "is_nullable": "YES"
+     },
+     {
+      "column_name": "z",
+      "data_type": "datetime2",
+      "is_nullable": "YES",
+      "column_comment": "a\r\nb"
+     }
+    ],
+    "comment": ""
+   }
+  },
+  {
+   "name": "ods-identity-and-comment-note",
+   "config": {
+    "model": {
+     "table_name": "ods_syn_item_df",
+     "table_comment": "合成 ODS",
+     "source_system": "SYS_A",
+     "source_table": "syn_item"
+    },
+    "columns": [
+     {
+      "column_name": "id",
+      "data_type": "int",
+      "is_nullable": "NO",
+      "is_primary_key": true,
+      "is_identity": true,
+      "column_comment": "主键"
+     },
+     {
+      "column_name": "v",
+      "data_type": "nvarchar",
+      "max_length": -1,
+      "is_nullable": "YES",
+      "is_identity": true
+     }
+    ],
+    "comment": ""
+   }
+  }
+ ]
+}

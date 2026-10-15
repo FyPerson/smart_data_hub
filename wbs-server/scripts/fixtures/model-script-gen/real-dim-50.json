@@ -1,0 +1,861 @@
+{
+ "name": "real-dim-50",
+ "kind": "dim",
+ "description": "真实形态（脱敏）：本地库 #50，layer=dim",
+ "cases": [
+  {
+   "name": "real-dim-50",
+   "config": {
+    "tableName": "dim_w0007_w0008",
+    "tableComment": "字段说明3",
+    "scdConfig": {
+     "scdType": "HYBRID",
+     "businessKey": "W0007W0008ID",
+     "versionKey": "ChangeID",
+     "trackFields": [
+      "ChangeID",
+      "W0007W0008ID",
+      "W0009ID",
+      "W0010W0011",
+      "W0012ID",
+      "W0013W0007W0008Name",
+      "W0007W0008Name",
+      "W0007W0008Code",
+      "W0014ID",
+      "W0008W0015ID",
+      "W0016",
+      "IsW0017",
+      "W0018",
+      "W0010W0019",
+      "CreateBy",
+      "W0020",
+      "W0008W0021",
+      "W0022W0023Over",
+      "W0022W0023In",
+      "W0024W0025",
+      "W0026W0027",
+      "W0028W0029Code",
+      "W0030Code",
+      "ModifyTime",
+      "ModifyBy",
+      "IsW0008",
+      "W0031UnionCode",
+      "W0028Field",
+      "W0032",
+      "W0033",
+      "W0008Type",
+      "W0034W0028Fields",
+      "W0035",
+      "W0036",
+      "W0037ID",
+      "W0038",
+      "W0039W0040IW0041",
+      "W0042Time",
+      "defaultW0035",
+      "defaultW0036",
+      "W0043TypeID"
+     ],
+     "fieldMappings": [
+      {
+       "srcField": "ChangeID",
+       "targetField": "change_id",
+       "dataType": "int",
+       "comment": "字段说明4ID（字段说明5）",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0007W0008ID",
+       "targetField": "w0007_w0008_id",
+       "dataType": "int",
+       "comment": "字段说明6ID",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0009ID",
+       "targetField": "w0009_id",
+       "dataType": "int",
+       "comment": "字段说明7ID",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0010W0011",
+       "targetField": "w0010_w0011",
+       "dataType": "nvarchar(64)",
+       "comment": "字段说明8",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0012ID",
+       "targetField": "w0012_id",
+       "dataType": "int",
+       "comment": "字段说明9ID",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0013W0007W0008Name",
+       "targetField": "w0013_w0008_name",
+       "dataType": "nvarchar(64)",
+       "comment": "字段说明10",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0007W0008Name",
+       "targetField": "w0007_w0008_name",
+       "dataType": "nvarchar(128)",
+       "comment": "字段说明11",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0007W0008Code",
+       "targetField": "w0007_w0008_code",
+       "dataType": "varchar(64)",
+       "comment": "字段说明12",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0014ID",
+       "targetField": "w0014_id",
+       "dataType": "int",
+       "comment": "字段说明13ID",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0008W0015ID",
+       "targetField": "w0008_w0015_id",
+       "dataType": "int",
+       "comment": "字段说明14",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0016",
+       "targetField": "w0016",
+       "dataType": "int",
+       "comment": "字段说明15:-1字段说明16、0-字段说明17、1-字段说明15",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "IsW0017",
+       "targetField": "is_w0017",
+       "dataType": "bit",
+       "comment": "字段说明18：0-字段说明19，1-字段说明20",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0018",
+       "targetField": "w0018",
+       "dataType": "nvarchar(2048)",
+       "comment": "字段说明21",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0010W0019",
+       "targetField": "w0010_w0019",
+       "dataType": "varchar(64)",
+       "comment": "字段说明22",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "CreateBy",
+       "targetField": "create_by",
+       "dataType": "int",
+       "comment": "字段说明23",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0020",
+       "targetField": "w0020",
+       "dataType": "nvarchar(1024)",
+       "comment": "字段说明24",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0008W0021",
+       "targetField": "w0008_w0021_id",
+       "dataType": "int",
+       "comment": "字段说明25",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0022W0023Over",
+       "targetField": "w0022_w0023_over",
+       "dataType": "decimal(6,4)",
+       "comment": "字段说明26",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0022W0023In",
+       "targetField": "w0022_w0023_in",
+       "dataType": "decimal(6,4)",
+       "comment": "字段说明27",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0024W0025",
+       "targetField": "w0024_w0025",
+       "dataType": "decimal(6,4)",
+       "comment": "字段说明28",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0026W0027",
+       "targetField": "w0026_w0027",
+       "dataType": "nvarchar(150)",
+       "comment": "字段说明29",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0028W0029Code",
+       "targetField": "w0028_w0029_code",
+       "dataType": "nvarchar(150)",
+       "comment": "字段说明30",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0030Code",
+       "targetField": "w0030_code",
+       "dataType": "nvarchar(100)",
+       "comment": "字段说明31",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "ModifyTime",
+       "targetField": "modify_time",
+       "dataType": "datetime",
+       "comment": "",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "ModifyBy",
+       "targetField": "modify_by",
+       "dataType": "int",
+       "comment": "字段说明32",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "IsW0008",
+       "targetField": "is_w0008",
+       "dataType": "bit",
+       "comment": "字段说明33",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0031UnionCode",
+       "targetField": "w0031_union_code",
+       "dataType": "nvarchar(1024)",
+       "comment": "字段说明34",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0028Field",
+       "targetField": "w0028_field",
+       "dataType": "int",
+       "comment": "字段说明35",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0032",
+       "targetField": "w0032",
+       "dataType": "int",
+       "comment": "字段说明36",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0033",
+       "targetField": "w0033",
+       "dataType": "int",
+       "comment": "字段说明37",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0008Type",
+       "targetField": "w0008_type",
+       "dataType": "int",
+       "comment": "字段说明38",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0034W0028Fields",
+       "targetField": "w0034_w0028_fields",
+       "dataType": "varchar(50)",
+       "comment": "字段说明39",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0035",
+       "targetField": "w0044_id",
+       "dataType": "int",
+       "comment": "字段说明40",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0036",
+       "targetField": "w0045_id",
+       "dataType": "int",
+       "comment": "字段说明41id",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0037ID",
+       "targetField": "w0037_id",
+       "dataType": "int",
+       "comment": "字段说明42ID",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0038",
+       "targetField": "w0038",
+       "dataType": "int",
+       "comment": "字段说明43",
+       "scdStrategy": "SCD2"
+      },
+      {
+       "srcField": "W0039W0040IW0041",
+       "targetField": "w0039_w0040_ids",
+       "dataType": "nvarchar(4000)",
+       "comment": "字段说明44",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0042Time",
+       "targetField": "w0042_time",
+       "dataType": "datetime",
+       "comment": "",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "defaultW0035",
+       "targetField": "default_w0044_id",
+       "dataType": "int",
+       "comment": "字段说明13id",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "defaultW0036",
+       "targetField": "default_w0045_id",
+       "dataType": "int",
+       "comment": "字段说明41id",
+       "scdStrategy": "SCD1"
+      },
+      {
+       "srcField": "W0043TypeID",
+       "targetField": "w0043_type_id",
+       "dataType": "int",
+       "comment": "字段说明45ID",
+       "scdStrategy": "SCD1"
+      }
+     ],
+     "derivedFields": [
+      {
+       "name": "w0008_w0021_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明46",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0046.W0004W0047Name"
+       },
+       "source": "w0046.W0004W0047Name"
+      },
+      {
+       "name": "w0008_w0015_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明47",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0048.W0004W0047Name"
+       },
+       "source": "w0048.W0004W0047Name"
+      },
+      {
+       "name": "w0044_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明48",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0044.W0004W0047Name"
+       },
+       "source": "w0044.W0004W0047Name"
+      },
+      {
+       "name": "w0045_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明49",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0045.W0004W0047Name"
+       },
+       "source": "w0045.W0004W0047Name"
+      },
+      {
+       "name": "w0014_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明50",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0049.W0004W0047Name"
+       },
+       "source": "w0049.W0004W0047Name"
+      },
+      {
+       "name": "w0037_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明51",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0037.W0037Name"
+       },
+       "source": "w0037.W0037Name"
+      },
+      {
+       "name": "w0028_field_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明52",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "w0050.W0004W0047Name"
+       },
+       "source": "w0050.W0004W0047Name"
+      },
+      {
+       "name": "w0008_type_name",
+       "type": "NVARCHAR(64)",
+       "comment": "字段说明53",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": "ct.W0004W0047Name"
+       },
+       "source": "ct.W0004W0047Name"
+      },
+      {
+       "name": "w0008_create_dt",
+       "type": "DATE",
+       "comment": "字段说明54（字段说明55CreateDate）",
+       "exprType": "REF",
+       "exprConfig": {
+        "expression": ""
+       },
+       "source": ""
+      }
+     ],
+     "options": {
+      "deleteDetection": true,
+      "modifyDetection": true,
+      "consistencyAlert": true,
+      "auditLog": true,
+      "stateFilter": "c.W0038 = 3",
+      "versionOrderField": "ChangeID",
+      "effDtExpr": "COALESCE(CAST(w0051.W0039Time AS DATE), CAST(w0052.CreateDate AS DATE))",
+      "consistencySourceTable": {
+       "name": "ods_w0006_w0007_w0008_df",
+       "alias": "m",
+       "joinField": "W0007W0008ID"
+      },
+      "additionalIndexes": [
+       {
+        "name": "IX_dim_w0007_w0008_change_id",
+        "columns": "change_id",
+        "where": ""
+       },
+       {
+        "name": "IX_dim_w0007_w0008_w0053",
+        "columns": "w0007_w0008_id, dw_eff_dt",
+        "where": ""
+       },
+       {
+        "name": "IX_dim_w0007_w0008_batch",
+        "columns": "dw_batch_id",
+        "where": ""
+       },
+       {
+        "name": "IX_dim_w0007_w0008_w0015",
+        "columns": "w0008_w0015_id, w0008_w0021_id",
+        "where": ""
+       },
+       {
+        "name": "IX_dim_w0007_w0008_w0009",
+        "columns": "w0009_id",
+        "where": ""
+       }
+      ],
+      "consistencyExcludeFields": [
+       "W0043TypeID"
+      ]
+     }
+    },
+    "sourceTables": [
+     {
+      "name": "ods_w0006_w0007_w0008_change_df",
+      "isPrimary": true,
+      "alias": "w0052"
+     },
+     {
+      "name": "ods_w0006_w0007_w0008_df",
+      "isPrimary": false,
+      "alias": "m",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0052.W0007W0008ID = m.W0007W0008ID"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0046",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0046.W0004W0047ID = w0052.W0008W0021 -- W0008W0021 name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0054",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0054.W0004W0047ID = w0052.W0008W0021 AND w0054.DIW0015ID = 35 -- W0015 w0055"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0048",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0048.W0004W0047ID = w0054.W0056 -- W0015 name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0044",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0044.W0004W0047ID = w0052.W0035 -- W0044 w0021 name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0045",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0045.W0004W0047ID = w0052.W0036 -- W0045 w0021 name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0049",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0049.W0004W0047ID = w0052.W0014ID -- W0014 name"
+     },
+     {
+      "name": "ods_w0006_w0037_df",
+      "isPrimary": false,
+      "alias": "w0037",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0037.W0037ID = w0052.W0037ID -- W0037 name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "w0050",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "w0050.W0004W0047ID = w0052.W0028Field -- W0028Field name"
+     },
+     {
+      "name": "ods_w0006_w0004_w0047_df",
+      "isPrimary": false,
+      "alias": "ct",
+      "joinType": "LEFT JOIN",
+      "joinCondition": "ct.W0004W0047ID = w0052.W0008Type -- W0008Type name"
+     }
+    ],
+    "advancedSql": {
+     "type": "APPLY",
+     "types": [
+      "APPLY",
+      "CTE"
+     ],
+     "applyContent": "OUTER APPLY (\n    SELECT TOP 1 w0051.W0039Time\n    FROM ods_w0057_w0043_w0058_df w0051\n    WHERE w0051.W0043ID = w0052.ChangeID\n      AND w0051.W0043TypeID = 1806\n    ORDER BY w0051.W0039Time DESC\n) w0051",
+     "cteContent": "w0059_w0054 AS (\n    SELECT W0004W0047ID, W0056\n    FROM ods_w0006_w0004_w0047_df\n    WHERE DIW0015ID = 35\n)",
+     "cteAlias": "w0059_w0054",
+     "customFromContent": ""
+    },
+    "live": {
+     "sourceTables": [
+      {
+       "name": "ods_w0006_w0007_w0008_change_df",
+       "isPrimary": true,
+       "alias": "w0052"
+      },
+      {
+       "name": "ods_w0006_w0007_w0008_df",
+       "isPrimary": false,
+       "alias": "m",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0052.W0007W0008ID = m.W0007W0008ID"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0046",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0046.W0004W0047ID = w0052.W0008W0021 -- W0008W0021 name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0054",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0054.W0004W0047ID = w0052.W0008W0021 AND w0054.DIW0015ID = 35 -- W0015 w0055"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0048",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0048.W0004W0047ID = w0054.W0056 -- W0015 name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0044",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0044.W0004W0047ID = w0052.W0035 -- W0044 w0021 name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0045",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0045.W0004W0047ID = w0052.W0036 -- W0045 w0021 name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0049",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0049.W0004W0047ID = w0052.W0014ID -- W0014 name"
+      },
+      {
+       "name": "ods_w0006_w0037_df",
+       "isPrimary": false,
+       "alias": "w0037",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0037.W0037ID = w0052.W0037ID -- W0037 name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "w0050",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "w0050.W0004W0047ID = w0052.W0028Field -- W0028Field name"
+      },
+      {
+       "name": "ods_w0006_w0004_w0047_df",
+       "isPrimary": false,
+       "alias": "ct",
+       "joinType": "LEFT JOIN",
+       "joinCondition": "ct.W0004W0047ID = w0052.W0008Type -- W0008Type name"
+      }
+     ],
+     "loadedFields": [
+      {
+       "column_name": "ChangeID",
+       "data_type": "int",
+       "column_comment": "字段说明4ID（字段说明5）"
+      },
+      {
+       "column_name": "W0007W0008ID",
+       "data_type": "int",
+       "column_comment": "字段说明6ID"
+      },
+      {
+       "column_name": "W0009ID",
+       "data_type": "int",
+       "column_comment": "字段说明7ID"
+      },
+      {
+       "column_name": "W0010W0011",
+       "data_type": "nvarchar(64)",
+       "column_comment": "字段说明8"
+      },
+      {
+       "column_name": "W0012ID",
+       "data_type": "int",
+       "column_comment": "字段说明9ID"
+      },
+      {
+       "column_name": "W0013W0007W0008Name",
+       "data_type": "nvarchar(64)",
+       "column_comment": "字段说明10"
+      },
+      {
+       "column_name": "W0007W0008Name",
+       "data_type": "nvarchar(128)",
+       "column_comment": "字段说明11"
+      },
+      {
+       "column_name": "W0007W0008Code",
+       "data_type": "varchar(64)",
+       "column_comment": "字段说明12"
+      },
+      {
+       "column_name": "W0014ID",
+       "data_type": "int",
+       "column_comment": "字段说明13ID"
+      },
+      {
+       "column_name": "W0008W0015ID",
+       "data_type": "int",
+       "column_comment": "字段说明14"
+      },
+      {
+       "column_name": "W0016",
+       "data_type": "int",
+       "column_comment": "字段说明15:-1字段说明16、0-字段说明17、1-字段说明15"
+      },
+      {
+       "column_name": "IsW0017",
+       "data_type": "bit",
+       "column_comment": "字段说明18：0-字段说明19，1-字段说明20"
+      },
+      {
+       "column_name": "W0018",
+       "data_type": "nvarchar(2048)",
+       "column_comment": "字段说明21"
+      },
+      {
+       "column_name": "W0010W0019",
+       "data_type": "varchar(64)",
+       "column_comment": "字段说明22"
+      },
+      {
+       "column_name": "CreateBy",
+       "data_type": "int",
+       "column_comment": "字段说明23"
+      },
+      {
+       "column_name": "W0020",
+       "data_type": "nvarchar(1024)",
+       "column_comment": "字段说明24"
+      },
+      {
+       "column_name": "W0008W0021",
+       "data_type": "int",
+       "column_comment": "字段说明25"
+      },
+      {
+       "column_name": "W0022W0023Over",
+       "data_type": "decimal(6,4)",
+       "column_comment": "字段说明26"
+      },
+      {
+       "column_name": "W0022W0023In",
+       "data_type": "decimal(6,4)",
+       "column_comment": "字段说明27"
+      },
+      {
+       "column_name": "W0024W0025",
+       "data_type": "decimal(6,4)",
+       "column_comment": "字段说明28"
+      },
+      {
+       "column_name": "W0026W0027",
+       "data_type": "nvarchar(150)",
+       "column_comment": "字段说明29"
+      },
+      {
+       "column_name": "W0028W0029Code",
+       "data_type": "nvarchar(150)",
+       "column_comment": "字段说明30"
+      },
+      {
+       "column_name": "W0030Code",
+       "data_type": "nvarchar(100)",
+       "column_comment": "字段说明31"
+      },
+      {
+       "column_name": "ModifyTime",
+       "data_type": "datetime",
+       "column_comment": ""
+      },
+      {
+       "column_name": "ModifyBy",
+       "data_type": "int",
+       "column_comment": "字段说明32"
+      },
+      {
+       "column_name": "IsW0008",
+       "data_type": "bit",
+       "column_comment": "字段说明33"
+      },
+      {
+       "column_name": "W0031UnionCode",
+       "data_type": "nvarchar(1024)",
+       "column_comment": "字段说明34"
+      },
+      {
+       "column_name": "W0028Field",
+       "data_type": "int",
+       "column_comment": "字段说明35"
+      },
+      {
+       "column_name": "W0032",
+       "data_type": "int",
+       "column_comment": "字段说明36"
+      },
+      {
+       "column_name": "W0033",
+       "data_type": "int",
+       "column_comment": "字段说明37"
+      },
+      {
+       "column_name": "W0008Type",
+       "data_type": "int",
+       "column_comment": "字段说明38"
+      },
+      {
+       "column_name": "W0034W0028Fields",
+       "data_type": "varchar(50)",
+       "column_comment": "字段说明39"
+      },
+      {
+       "column_name": "W0035",
+       "data_type": "int",
+       "column_comment": "字段说明40"
+      },
+      {
+       "column_name": "W0036",
+       "data_type": "int",
+       "column_comment": "字段说明41id"
+      },
+      {
+       "column_name": "W0037ID",
+       "data_type": "int",
+       "column_comment": "字段说明42ID"
+      },
+      {
+       "column_name": "W0038",
+       "data_type": "int",
+       "column_comment": "字段说明43"
+      },
+      {
+       "column_name": "W0039W0040IW0041",
+       "data_type": "nvarchar(4000)",
+       "column_comment": "字段说明44"
+      },
+      {
+       "column_name": "W0042Time",
+       "data_type": "datetime",
+       "column_comment": ""
+      },
+      {
+       "column_name": "defaultW0035",
+       "data_type": "int",
+       "column_comment": "字段说明13id"
+      },
+      {
+       "column_name": "defaultW0036",
+       "data_type": "int",
+       "column_comment": "字段说明41id"
+      },
+      {
+       "column_name": "W0043TypeID",
+       "data_type": "int",
+       "column_comment": "字段说明45ID"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

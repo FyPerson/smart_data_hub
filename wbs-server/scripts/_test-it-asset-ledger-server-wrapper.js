@@ -60,8 +60,9 @@ try {
 }
 try {
     if (fs.existsSync(RESOLVED_TEMP)) {
-        const st = fs.statSync(RESOLVED_TEMP);
-        const stReal = fs.statSync(REAL_DB_ABS);
+        // bigint：Windows 上 ino 是 64 位 NTFS 文件 ID，转 JS Number 会丢精度，两个不同文件可能比出相等（误拒启动）
+        const st = fs.statSync(RESOLVED_TEMP, { bigint: true });
+        const stReal = fs.statSync(REAL_DB_ABS, { bigint: true });
         if (!st.isFile() || (st.dev === stReal.dev && st.ino === stReal.ino)) {
             console.error(`[it-asset-ledger-wrapper] IA_TEST_DB_PATH（${RESOLVED_TEMP}）与真实 task_pool.db 设备号+inode 相同（NTFS 硬链接指向同一物理文件）或本身不是普通文件，拒绝启动（防误连真实 db）`);
             process.exit(1);

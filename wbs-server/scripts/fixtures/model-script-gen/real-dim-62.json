@@ -1,0 +1,41 @@
+{
+ "name": "real-dim-62",
+ "kind": "dim",
+ "description": "真实形态（脱敏）：本地库 #62，layer=dim",
+ "cases": [
+  {
+   "name": "real-dim-62",
+   "config": {
+    "tableName": "dim_w0157",
+    "tableComment": "字段说明341",
+    "scdConfig": {
+     "scdType": "SCD2",
+     "businessKey": "",
+     "versionKey": "",
+     "trackFields": [],
+     "fieldMappings": [],
+     "derivedFields": [],
+     "options": {
+      "deleteDetection": false,
+      "modifyDetection": false,
+      "consistencyAlert": false,
+      "auditLog": true
+     }
+    },
+    "sourceTables": [],
+    "advancedSql": {
+     "type": "NONE",
+     "types": [],
+     "applyContent": "",
+     "cteContent": "",
+     "cteAlias": "",
+     "customFromContent": ""
+    },
+    "live": {
+     "sourceTables": [],
+     "loadedFields": []
+    }
+   }
+  }
+ ]
+}

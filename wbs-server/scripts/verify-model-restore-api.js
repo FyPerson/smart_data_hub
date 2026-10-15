@@ -52,6 +52,7 @@ async function main() {
             deleted_at TEXT,
             deleted_by INTEGER,
             delete_reason TEXT,
+            config_rev INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT
         )`);
         await run(`CREATE TABLE model_change_logs (
@@ -88,6 +89,9 @@ async function main() {
         assert.strictEqual(restored.model.deleted_at, null);
         assert.strictEqual(restored.model.deleted_by, null);
         assert.strictEqual(restored.model.delete_reason, null);
+        // #77 C1a：恢复恒触发 config_rev + 1（夹具初始值 1 → 恢复后 2）
+        assert.strictEqual(restored.model.config_rev, 2, '恢复后 config_rev 必须 +1');
+        assert.strictEqual((await get('SELECT config_rev FROM data_models WHERE id = 151')).config_rev, 2, '库内 config_rev 必须 +1');
 
         const audit = await get('SELECT * FROM model_change_logs WHERE model_id = 151');
         assert.strictEqual(audit.action, 'RESTORE');
@@ -106,6 +110,7 @@ async function main() {
         assert.strictEqual(retry.alreadyRestored, true, '重复请求必须幂等');
         const auditCount = await get('SELECT COUNT(*) AS count FROM model_change_logs WHERE model_id = 151');
         assert.strictEqual(auditCount.count, 1, '幂等重试不得重复写审计');
+        assert.strictEqual((await get('SELECT config_rev FROM data_models WHERE id = 151')).config_rev, 2, '幂等重试不得再次递增 config_rev');
 
         await run("INSERT INTO data_models (id, table_name, is_deleted) VALUES (156, 'ods_due_out_detail_df', 1)");
         await run("INSERT INTO data_models (id, table_name, is_deleted) VALUES (999, 'ods_due_out_detail_df', 0)");
@@ -122,6 +127,7 @@ async function main() {
         );
         const conflicted = await get('SELECT is_deleted FROM data_models WHERE id = 156');
         assert.strictEqual(conflicted.is_deleted, 1, '冲突时必须回滚，保持软删除状态');
+        assert.strictEqual((await get('SELECT config_rev FROM data_models WHERE id = 156')).config_rev, 1, '冲突未恢复时不得递增 config_rev');
 
         await expectRestoreError(
             restoreModelRecord({

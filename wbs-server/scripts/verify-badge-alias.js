@@ -495,6 +495,8 @@ const PAGE_ALIAS_SPECS = [
     {
         file: 'Model_Center.html',
         mode: 'sem',
+        // #77 C4a：目录列表代码抽到 model-catalog.js（经典脚本，逐字搬迁）。进 sharedJs（逐行解析），不进 SCRIPT_REGISTRY（那只是豁免）
+        sharedJs: ['assets/js/model-catalog.js'],
         // 方案 §2.5 明文五值（原实现只有 ONLINE/非 ONLINE 二值 → 正向行为变更）
         expectStatuses: {
             CREATED: 'sem-wait', DEVELOPING: 'sem-active', REVIEWING: 'sem-review',
@@ -517,10 +519,12 @@ const PAGE_ALIAS_SPECS = [
         // 本页徽章走 DOM API（mdcEl 的 className 字符串拼接），模板串扫描覆盖不到，
         //   故 gate 锁在函数调用形态上。
         classGate: 'mdcStatusClass',
-        renderGate: ['mdcStatusClass', 'mdcStatusClass(detail.identity.status)'],
-        renderGateCount: { mdcStatusClass: 1, 'mdcStatusClass(detail.identity.status)': 1 },
-        // 本页唯一合法的 className 徽章写法（DOM API 扫描放行它，其余同形态一律红）
-        domApiAllow: ["className: 'u-status-badge ' + mdcStatusClass(detail.identity.status)"],
+        // #77 C4c-2（D-33）：目录列表（model-catalog.js）也输出状态徽章，写法 className: 'u-status-badge ' + mdcStatusClass(m.status)——
+        //   gate 总调用数 1 → 2（抽屉 identity 区一处在页内内联，列表一处在 model-catalog.js），新增实参形态 mdcStatusClass(m.status) 恰 1 次。
+        renderGate: ['mdcStatusClass', 'mdcStatusClass(detail.identity.status)', 'mdcStatusClass(m.status)'],
+        renderGateCount: { mdcStatusClass: 2, 'mdcStatusClass(detail.identity.status)': 1, 'mdcStatusClass(m.status)': 1 },
+        // 本页两处合法的 className 徽章写法（DOM API 扫描放行它们，其余同形态一律红）
+        domApiAllow: ["className: 'u-status-badge ' + mdcStatusClass(detail.identity.status)", "className: 'u-status-badge ' + mdcStatusClass(m.status)"],
         // b-status/b-status-off 是状态徽章的旧二值类，必须零残留；
         //   b-layer*/b-domain **不在此列**——主会话裁定它们是分类标签不是状态，原地保留。
         // M6：**只列状态徽章的旧二值类**。`mdc-badge` 本身是**保留类**（b-layer*/b-domain 仍在用，
@@ -1235,6 +1239,8 @@ const SCRIPT_REGISTRY = Object.freeze({
     'Model_Center.html': {
         'assets/js/app.js': '同上，本页无任务卡/任务抽屉；徽章由页内 mdcStatusClass 经 mdcEl 产出',
         'assets/js/model-detail-normalize.js': '模型详情数据归一化，纯数据变换，不碰 DOM',
+        'assets/js/model-catalog-core.js': '目录列表纯函数核心（#77 C4b）：分组 / 命中 / 排序 / 分页 / 事件顺序，纯数据变换，不碰 DOM、不写任何 class',
+        'assets/js/model-script-gen.js': '脚本生成器（#77 C3a 自本页内联抽出）：配置对象 → DDL / ETL / FDL / ODS 脚本文本的纯字符串函数，不碰 DOM、不写任何 class，不产出徽章',
     },
     'Task_Pool.html': {},        // app.js 必须走 sharedJs，此处有意留空
     'My_Workspace.html': {},     // 同上

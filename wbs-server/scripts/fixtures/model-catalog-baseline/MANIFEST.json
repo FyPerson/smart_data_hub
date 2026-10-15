@@ -1,0 +1,24 @@
+{
+ "schema": 1,
+ "note": "baseline.json 的完整性登记 + 录制守卫依据：Model_Center.html 的 SHA-256（LF 规范化）与此处不同则拒绝重录；baseline.json 不得手改（比较模式会校验其哈希）。",
+ "modelCenterSha256Lf": "4dd38e4989e9c5f7ac7458244069b2353eb64fc4d43a75052ee39578dfc7de3a",
+ "modelsFixtureSha256Lf": "7885cc49c1eb8690f4dc64eac5ab989ffe055a15be53c87a114fd6c4528c549f",
+ "baselineSha256Lf": "d3dc21cc07df44f4907d6f77ea33550624f8e7edd70ba983dfeae8f29eff78a8",
+ "counts": {
+  "roles": 8,
+  "models": 20,
+  "acts": 11,
+  "matrixCells": 1760,
+  "rowExtrasCells": 480,
+  "sortKeys": 10,
+  "renderedSequences": 31,
+  "deepLinks": 16,
+  "keywords": 20,
+  "matrixCallCells": 602,
+  "matrixInertCells": 301,
+  "matrixDeadCells": 7,
+  "rowExtrasCallCells": 200,
+  "rowExtrasInertCells": 0,
+  "rowExtrasDeadCells": 0
+ }
+}

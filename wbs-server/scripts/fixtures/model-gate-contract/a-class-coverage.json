@@ -1,0 +1,12 @@
+{
+  "_comment": "#77 C1c 契约文件：A 类（须递增 config_rev）写入点清单。verify-model-write-classification.js 断言其登记表中 A 类条目集合与本文件 entries 的 (file, route, hash) 集合全等；verify-model-config-rev-http.js 断言本文件每一条都被至少一个通过的真实请求用例覆盖（用例须让该条 SQL 语句实际执行，并断言 config_rev 恰好 +1）。新增 / 删除 A 类写点时三处同改。2026-10-01 由主会话按守卫 --list 输出生成。",
+  "entries": [
+    { "file": "wbs-server/server.js", "route": "DELETE /api/models/:id", "hash": "964a6ce5f613", "what": "删伴生表回写主表 dim_config（changeTracking.enabled 为真时）" },
+    { "file": "wbs-server/server.js", "route": "PUT /api/models/:id", "hash": "1a0c224d4a5f", "what": "PUT 带 dim_config 的 UPDATE 分支" },
+    { "file": "wbs-server/server.js", "route": "PUT /api/models/:id", "hash": "02567da9f1c1", "what": "PUT 不带 dim_config 的 UPDATE 分支" },
+    { "file": "wbs-server/server.js", "route": "POST /api/models/:id/save-scripts", "hash": "2fc5964e2400", "what": "save-scripts 更新 script_path（内容变化时先 bumpConfigRev）" },
+    { "file": "wbs-server/server.js", "route": "PUT /api/models/:id/edit-script", "hash": "6874f3fcf2f0", "what": "edit-script 首次建目录写 script_path" },
+    { "file": "wbs-server/server.js", "route": "PUT /api/models/:id/edit-script", "hash": "08d8e0c2caa2", "what": "edit-script 人工编辑标记 script_modified" },
+    { "file": "wbs-server/utils/model-restore.js", "route": "tag:model-restore", "hash": "6abbcd6737d0", "what": "恢复软删除模型（POST /api/models/:id/restore）" }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+ "name": "real-ods-6",
+ "kind": "ods",
+ "description": "真实形态（脱敏）：本地库 #6，layer=ods",
+ "cases": [
+  {
+   "name": "real-ods-6",
+   "config": {
+    "model": {
+     "id": 6,
+     "layer": "ods",
+     "domain": "dom_a",
+     "table_name": "ods_w0001_df",
+     "table_comment": "字段说明1",
+     "tech_owner": "管理员",
+     "biz_owner": "",
+     "update_cycle": "df",
+     "status": "ONLINE",
+     "created_at": "2026-01-01 08:00:00",
+     "updated_at": "2026-01-02 08:00:00",
+     "source_table": "w0002_w0001",
+     "source_system": "W0003",
+     "model_type": "TABLE",
+     "created_by_id": 1,
+     "category": "general",
+     "is_deleted": 0,
+     "config_mode": "standard",
+     "design_notes": null,
+     "companion_of": null
+    },
+    "columns": [
+     {
+      "column_name": "id",
+      "data_type": "int",
+      "is_nullable": "NO",
+      "is_primary_key": true
+     },
+     {
+      "column_name": "name",
+      "data_type": "nvarchar",
+      "max_length": 50,
+      "is_nullable": "YES",
+      "column_comment": "o'k"
+     }
+    ],
+    "comment": "cmt"
+   }
+  }
+ ]
+}

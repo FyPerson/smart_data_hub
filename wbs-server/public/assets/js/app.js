@@ -1340,6 +1340,12 @@ async function fillDoneCardValidationStatus() {
             const category = bar.dataset.category;
             const info = statusMap[modelId];
 
+            if (info && info.state === 'companion') {
+                // 伴生表不独立验收，随主模型验收（不显示「去验收」）
+                bar.innerHTML = '<span style="color:#a0aec0;">伴生表随主模型验收，不单独验收</span>';
+                return;
+            }
+
             if (!info || info.status === 'never') {
                 bar.innerHTML = '<span style="color:#a0aec0;">暂无验收记录</span>' +
                     ` <a href="Model_Center.html?id=${modelId}&validate=1" style="color:#d97706;text-decoration:none;margin-left:8px;font-weight:500;">去验收 →</a>`;
@@ -1350,33 +1356,46 @@ async function fillDoneCardValidationStatus() {
             let phaseHtml = '';
             let allPass = true;
 
-            if (category === 'ODS_SYNC') {
+            // #77 C1a（方案 v0.9 §4.1.2 前端 G3）：以后端 state / gatePass 为准（后端已按当前配置版本判定，
+            //   pass 与 warn 同算通过；DIM 不再要求语义验收——semantic 不参与归档门禁）
+            const isPassingResult = r => r === 'pass' || r === 'warn';
+            const gatePass = typeof info.gatePass === 'boolean' ? info.gatePass : null;
+            // #77 C1 对抗审 F4：展示分支优先按后端返回的模型分层 layer（与判定服务同口径），缺失才回落按任务类别 category；放行仍只看 gatePass
+            const modelLayer = (info && typeof info.layer === 'string') ? info.layer.toUpperCase() : '';
+            const isOdsBranch = modelLayer ? modelLayer === 'ODS' : category === 'ODS_SYNC';
+            const isDimDwdBranch = modelLayer ? (modelLayer === 'DIM' || modelLayer === 'DWD') : (category === 'DIM_DEV' || category === 'DWD_DEV');
+
+            if (info.state === 'stale') {
+                // 模型配置在最近一次验收之后已变更
+                phaseHtml = '<span style="color:#d97706;">⚠ 配置已变更，需重新验收</span>';
+                allPass = false;
+            } else if (isOdsBranch) {
                 // ODS: 单条验收状态（无分阶段）
-                const passed = info.status === 'pass';
+                const passed = gatePass !== null ? gatePass : isPassingResult(info.status);
                 phaseHtml = passed
-                    ? '<span style="color:#48bb78;">✅ 已验收</span>'
+                    ? (info.state === 'warn' || info.status === 'warn'
+                        ? '<span style="color:#48bb78;">✅ 已验收（有警告）</span>'
+                        : '<span style="color:#48bb78;">✅ 已验收</span>')
                     : '<span>⬜ 未验收</span>';
                 allPass = passed;
-            } else if (category === 'DIM_DEV') {
-                // DIM: 结构 + 数据 + 语义 三阶段
-                const sPass = phases.structure && phases.structure.result === 'pass';
-                const dPass = phases.data && phases.data.result === 'pass';
-                const smPass = phases.semantic && phases.semantic.result === 'pass';
-                phaseHtml = `${sPass ? '✅' : '⬜'} 结构  ${dPass ? '✅' : '⬜'} 数据  ${smPass ? '✅' : '⬜'} 语义`;
-                allPass = sPass && dPass && smPass;
-            } else if (category === 'DWD_DEV') {
-                // DWD: 结构 + 数据 两阶段
-                const sPass = phases.structure && phases.structure.result === 'pass';
-                const dPass = phases.data && phases.data.result === 'pass';
+            } else if (isDimDwdBranch) {
+                // DIM / DWD: 结构 + 数据 两阶段
+                const sPass = !!(phases.structure && isPassingResult(phases.structure.result));
+                const dPass = !!(phases.data && isPassingResult(phases.data.result));
                 phaseHtml = `${sPass ? '✅' : '⬜'} 结构  ${dPass ? '✅' : '⬜'} 数据`;
-                allPass = sPass && dPass;
+                allPass = gatePass !== null ? gatePass : (sPass && dPass);
             }
 
             if (allPass && phaseHtml) {
                 // 全部通过：绿色背景
                 bar.style.background = '#f0fff4';
                 bar.style.borderColor = '#c6f6d5';
-                bar.innerHTML = `<span style="color:#38a169;font-weight:500;">✅ 验收通过</span> <span style="color:#68d391;margin-left:4px;">(${phaseHtml.replace(/✅/g, '').trim().replace(/\s{2,}/g, ' + ')})</span>`;
+                // 批量接口不带任务时间条件（只看配置版本），这里不能承诺「可归档」——归档门禁另要求验收晚于任务创建
+                const isWarnState = info.state === 'warn' || info.status === 'warn';
+                const headline = isWarnState ? '✅ 当前版本已验收（有警告）' : '✅ 当前版本已验收';
+                bar.innerHTML = isOdsBranch
+                    ? `<span style="color:#38a169;font-weight:500;">${headline}</span>`
+                    : `<span style="color:#38a169;font-weight:500;">${headline}</span> <span style="color:#68d391;margin-left:4px;">(${phaseHtml.replace(/✅/g, '').trim().replace(/\s{2,}/g, ' + ')})</span>`;
             } else {
                 // 部分通过或未通过
                 bar.innerHTML = `<span style="color:#718096;">验收：</span>${phaseHtml}` +
@@ -3318,8 +3337,19 @@ async function confirmSubmit2() {
                         });
                         if (statusRes.ok) {
                             const statusData = await statusRes.json();
-                            if (statusData.status !== 'pass') {
-                                const confirmMsg = `该模型上次验收未通过，建议先在模型中心重新执行验收。\n\n是否仍要继续提交？`;
+                            // #77 C1a：以后端 gatePass 为准（pass / warn 都算通过）；warn 只提示「有警告」，不当作未通过
+                            const odsGatePass = typeof statusData.gatePass === 'boolean'
+                                ? statusData.gatePass
+                                : ['pass', 'warn'].includes(statusData.status);
+                            if (!odsGatePass) {
+                                const confirmMsg = statusData.state === 'stale'
+                                    ? `该模型配置在上次验收之后已变更，建议先在模型中心重新执行验收。\n\n是否仍要继续提交？`
+                                    : `该模型上次验收未通过，建议先在模型中心重新执行验收。\n\n是否仍要继续提交？`;
+                                if (!confirm(confirmMsg)) {
+                                    return;
+                                }
+                            } else if (statusData.state === 'warn') {
+                                const confirmMsg = `该模型上次验收有警告，建议确认警告可接受后再提交。\n\n是否继续提交？`;
                                 if (!confirm(confirmMsg)) {
                                     return;
                                 }

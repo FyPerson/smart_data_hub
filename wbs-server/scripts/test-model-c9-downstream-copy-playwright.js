@@ -82,7 +82,7 @@ const visibleRows = (page) => page.$$eval('#modelDrawerBody .field-table tbody t
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== N1 DWD 有候选 → 渲染 =====
         console.log('N1. DWD #52 下游引用');
@@ -255,7 +255,7 @@ const visibleRows = (page) => page.$$eval('#modelDrawerBody .field-table tbody t
         // 与 page1 同 context、localStorage 已有 token —— 不能再走 login.html（已登录会自动跳转，
         // evaluate 期间上下文被销毁），直接进目标页
         await page2.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page2.waitForSelector('#modelListBody tr[data-id]');
+        await page2.waitForSelector('#modelListBody [data-id]');
         const ctxCheck = await page2.evaluate(() => ({ clip: typeof navigator.clipboard, secure: window.isSecureContext }));
         expect(ctxCheck.clip === 'undefined' && ctxCheck.secure === false, '已复现非安全上下文（clipboard 不可用）', ctxCheck);
         await page2.evaluate(() => openModelDrawer(52));

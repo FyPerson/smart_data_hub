@@ -43,6 +43,11 @@ const { mapMysqlColumnToSqlServer } = require('./utils/mysql-type-mapper'); // v
 const { buildMysqlSourceCount, buildMysqlSourcePk, splitMysqlTable } = require('./utils/mysql-source-introspect'); // ODS 验收·MySQL 源行数对比 / 反查源主键
 const efficiencyStats = require('./utils/efficiency-stats'); // 统计中心·效率统计 纯计算 helper（与 verify-statistics-efficiency.js 同源）
 const { restoreModelRecord, ModelRestoreError } = require('./utils/model-restore');
+const { evaluateAcceptance, fetchRecordsByModelIds, fetchRecordsByModelId, SAME_SECOND_REASON, latestParticipatingRecord, extractPhase: extractAcceptancePhase } = require('./routes/model-center/acceptance'); // #77 C1a：验收判定统一服务（纯函数 + 取数助手）
+const { bumpConfigRev, CONFIG_REV_BUMP_SQL } = require('./routes/model-center/config-rev'); // #77 C1a：config_rev 记账助手
+const { normalizeForCompare: normalizeScriptForCompare } = require('./routes/model-center/script-compare'); // #77 C1a：save-scripts 脚本内容比较（剔头部生成信息行）
+const createModelRelations = require('./routes/model-center/model-relations'); // #77 C2b-3：关系接口 /relations + 列表 rel 计数；findDownstreamCandidates 供 /downstream 共用
+const { findDownstreamCandidates } = createModelRelations;
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -182,7 +187,7 @@ function validateDimConfigShape(dimConfig) {
     return { ok: true };
 }
 // H0（审复审 M1 + 三审 LOW）：dim_config 里的变更追踪表名校验，供注册/编辑统一复用。
-// 语义对齐前端 truthy 判断（Model_Center.html 10885 用 `enabled || false` + 非空 changeTableName 即拼进 DDL/ETL），
+// 语义对齐前端 truthy 判断（model-script-gen.js generateDwdDDL 用 `enabled || false` + 非空 changeTableName 即拼进 DDL/ETL），
 // 因此不能只在 `enabled===true` 时校验：只要提供了非空 changeTableName 就校验（防 enabled:"true" 字符串绕过）。
 // 三审 LOW：两个位置（dwdConfig.changeTracking / 顶层 changeTracking）都校验，不用 || 只选一个（防双写污染）。
 // 前置：调用前须先过 validateDimConfigShape 确保 dimConfig 是对象。返回 {ok:true} 或 {ok:false, msg}。
@@ -538,6 +543,16 @@ function insertModelChangeLog(params) {
  * @param {string} changeType - 变更类型
  * @returns {string} 变更摘要
  */
+// #77 C2a：变更摘要与 PUT「是否有基本信息变化」判定共用的规范化比较（两处必须同一套口径）
+const C2A_NORMALIZED_KEYS = new Set(['impl_note', 'design_notes', 'table_name', 'domain', 'update_cycle', 'config_mode',
+    'table_comment', 'tech_owner', 'biz_owner', 'status', 'source_system', 'source_table', 'category', 'model_type']);
+const normForSummary = (k, v) => {
+    if (k === 'config_mode') return v || 'standard';
+    if (k === 'category') return v || 'general';
+    if (k === 'model_type') return v || 'TABLE';
+    return (v === undefined || v === null || v === '') ? null : v;
+};
+
 function generateChangeSummary(action, beforeValue, afterValue, changeType, extraInfo) {
     if (action === 'CREATE') {
         return '创建模型';
@@ -560,11 +575,24 @@ function generateChangeSummary(action, beforeValue, afterValue, changeType, extr
                 source_system: '源系统',
                 source_table: '源表',
                 model_type: '模型类型',
-                category: '分类'
+                category: '分类',
+                // #77 C2a：补缺的字段（对应 PUT 构造 afterValue 的同名键，必须成对维护，否则每次编辑都误报）
+                impl_note: '实现说明',
+                design_notes: '设计说明',
+                table_name: '表名',
+                domain: '业务域',
+                update_cycle: '更新周期',
+                config_mode: '配置方式'
             };
+            // 按「空值等价；config_mode 空值视同 standard、category 视同 general、model_type 视同 TABLE」比较（normForSummary / C2A_NORMALIZED_KEYS，
+            // 与 PUT 的 hasBasicInfoChange 同一套），避免 NULL 与 '' / 默认值之间的假阳性
 
             for (const [key, label] of Object.entries(fields)) {
-                if (beforeValue && afterValue && beforeValue[key] !== afterValue[key]) {
+                if (!beforeValue || !afterValue) continue;
+                const differs = C2A_NORMALIZED_KEYS.has(key)
+                    ? normForSummary(key, beforeValue[key]) !== normForSummary(key, afterValue[key])
+                    : beforeValue[key] !== afterValue[key];
+                if (differs) {
                     changes.push(label);
                 }
             }
@@ -660,6 +688,22 @@ function hasDimConfigActualChange(oldConfig, newConfig) {
     if (!oldConfig || !newConfig) return true;
 
     return !deepEqual(oldConfig, newConfig);
+}
+
+/**
+ * #77 C1a：剔除 dim_config 里的簿记字段 changeTracking.companionModelId 后返回深拷贝
+ * （updateCompanionModelId 会把伴生表 id 写回主表 dim_config，它不改变模型产出，不应触发 config_rev 递增）。
+ * 两处位置都剔：cfg.changeTracking 与 cfg.dwdConfig.changeTracking。
+ */
+function stripDimConfigBookkeeping(cfg) {
+    if (!cfg || typeof cfg !== 'object') return cfg;
+    let copy;
+    try { copy = JSON.parse(JSON.stringify(cfg)); } catch (_) { return cfg; }
+    if (copy.changeTracking && typeof copy.changeTracking === 'object') delete copy.changeTracking.companionModelId;
+    if (copy.dwdConfig && copy.dwdConfig.changeTracking && typeof copy.dwdConfig.changeTracking === 'object') {
+        delete copy.dwdConfig.changeTracking.companionModelId;
+    }
+    return copy;
 }
 
 // ==================== 安全文件操作辅助函数 ====================
@@ -816,6 +860,34 @@ const upload = multer({ storage: storage });
 
 app.use(compression());
 app.use(cors());
+// #77 C2b-1（方案 v0.9 §4.3「请求体上限挂在全局解析器之前」）：实现对象两组路径（含子路径）的请求体上限必须先于下面的全局
+//   50MB 解析器——路由内再查 Content-Length 已经晚了，也覆盖不了分块传输。两道中间件：
+//   ① 媒体类型硬门：带请求体且 Content-Type 不是 application/json（允许带 charset 等参数）→ 415。body-parser 1.20.4 的
+//      json 解析器遇到媒体类型不匹配会放行且不置 req._body（node_modules/body-parser/lib/types/json.js:120 起的 shouldParse 分支），
+//      urlencoded 解析器只凭 req._body 判断跳过（lib/types/urlencoded.js:80），所以没有这道门，表单编码 / text/plain 请求会落进
+//      后面全局 50MB 的 urlencoded 解析器；
+//   ② 专用 JSON 解析器 limit 2.5mb（独立的传输层硬上限）：超限 413；成功解析后置 req._body，全局解析器不再二次处理。
+//   「带请求体」判据 = Transfer-Encoding 存在，或 Content-Length 为数字且不为 0（与 type-is 的 hasBody 唯一差别：Content-Length: 0
+//   且无 Transfer-Encoding 视为无请求体——某些客户端对无体的 DELETE 会带 Content-Length: 0 而不带 Content-Type，不应被 415 误拦）。
+//   〔修复 1·W1〕前置门必须与业务路由「同一挂载点、同一套路径裁剪语义」：业务路由是 app.use('/api', router) + 相对路径，
+//   所以前置门也做成挂在 /api 下的独立 Router + 相对路径。若直接在 app 上用绝对路径数组（'/api/model-impl-objects'），
+//   `/api//model-impl-objects` 这类双斜杠路径不匹配前置门、却仍能被业务路由（先裁掉 /api 再匹配）命中——415 与 2.5MB 上限被绕过。
+const IMPL_OBJECT_BODY_PATHS = ['/model-impl-objects', '/models/:id/impl-links'];
+const implBodyGate = express.Router();
+implBodyGate.use(IMPL_OBJECT_BODY_PATHS, (req, res, next) => {
+    const te = req.headers['transfer-encoding'];
+    const cl = req.headers['content-length'];
+    const hasBody = te !== undefined || (cl !== undefined && cl !== '' && !Number.isNaN(Number(cl)) && Number(cl) !== 0);
+    if (hasBody) {
+        const mediaType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+        if (mediaType !== 'application/json') {
+            return res.status(415).json({ error: '请求体必须是 application/json', code: 'UNSUPPORTED_MEDIA_TYPE' });
+        }
+    }
+    next();
+});
+implBodyGate.use(IMPL_OBJECT_BODY_PATHS, bodyParser.json({ limit: '2.5mb' }));
+app.use('/api', implBodyGate);
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -927,6 +999,9 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         //   自行 new sqlite3.Database(DB_FILE) 另开一个连接，故此处调用不依赖本回调的 db 对象，
         //   只是沿用与上方四先例同位置同时序的惯例（紧跟 legacy-archive 之后）。
         itLedgerModule.initSchema();
+        // #77 C2b-2：实现对象启动序列（等 model_impl_objects 建好 → norm_v1 幂等重算 → 排定每日 07:30 核验）。
+        //   implObjectsModule 在文件后部实例化（本回调异步晚于顶层同步执行，同上方各模块先例）；失败只记日志，不阻断服务。
+        implObjectsModule.startBackground();
     }
 });
 
@@ -1148,6 +1223,10 @@ function initTable() {
             db.run("ALTER TABLE data_models ADD COLUMN design_notes TEXT", () => { });
             // 迁移: 添加伴生表从属字段（指向主表 model id，NULL 表示非伴生表）
             db.run("ALTER TABLE data_models ADD COLUMN companion_of INTEGER", () => { });
+            // 迁移 (#77 C1a): 配置版本号——会改变模型产出的写入 +1（方案 v0.9 §4.1.1）；回填由 scripts/migrate-model-config-rev.js 负责
+            db.run("ALTER TABLE data_models ADD COLUMN config_rev INTEGER NOT NULL DEFAULT 1", () => { });
+            // 迁移 (#77 C2a): 实现说明（B 类字段：现在怎么跑；不触发 config_rev 递增，方案 v0.9 §4.1.1 / §4.2）
+            db.run("ALTER TABLE data_models ADD COLUMN impl_note TEXT", () => { });
         }
     });
 
@@ -1165,6 +1244,36 @@ function initTable() {
         operator_name TEXT,                  -- 操作人姓名
         created_at DATETIME DEFAULT (datetime('now', 'localtime'))
     )`);
+
+    // #77 C2b-1（方案 v0.9 §4.3）：实现对象两表。字段与方案 SQL 一一对应，C2b-2 才用到的核验列（hash_algo / prod_* /
+    //   verified_at / last_*）一次建全。不写外键：本项目从未开启 PRAGMA foreign_keys（见下方「FK CASCADE 说明」注释），完整性由
+    //   routes/model-center/impl-objects.js 在模块互斥锁内的事务里保证。部分唯一索引放在建表回调里创建，保证表先于索引存在。
+//   〔修复 1·L2〕身份唯一不区分大小写（schema_name / obj_name 加 COLLATE NOCASE，与 SQL Server 默认排序规则一致；表未上线，直接改建表 SQL）。
+    db.run(`CREATE TABLE IF NOT EXISTS model_impl_objects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        obj_type TEXT NOT NULL,          -- PROC / VIEW / TRIGGER / FDL_TASK / TABLE
+        db_connection_id INTEGER,        -- 过程 / 视图 / 触发器 / 表 所在库；FDL_TASK 为空
+        schema_name TEXT,
+        obj_name TEXT NOT NULL,
+        summary TEXT,                    -- 对象自身说明（与挂接职责不同）
+        reg_source TEXT,                 -- 登记源码（仅 PROC / VIEW / TRIGGER）
+        reg_hash TEXT, doc_path TEXT, doc_hash TEXT, doc_reported_at TEXT,
+        hash_algo TEXT,                  -- 规范化算法版本 norm_v1（§4.4）；C2b-1 的占位 raw_v0 在启动时重算
+        prod_hash TEXT, prod_missing INTEGER DEFAULT 0, verified_at TEXT,
+        last_attempt_at TEXT, last_error TEXT,
+        is_deleted INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT, created_by TEXT, updated_by TEXT
+    )`, (err) => {
+        if (err) return logger.error('创建 model_impl_objects 失败:', err.message);
+        db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_impl_obj_identity
+            ON model_impl_objects(obj_type, IFNULL(db_connection_id,0), IFNULL(schema_name,'') COLLATE NOCASE, obj_name COLLATE NOCASE) WHERE is_deleted = 0`,
+            (idxErr) => { if (idxErr) logger.error('创建 idx_impl_obj_identity 失败:', idxErr.message); });
+    });
+    db.run(`CREATE TABLE IF NOT EXISTS model_impl_links (
+        model_id INTEGER NOT NULL, object_id INTEGER NOT NULL,
+        role TEXT NOT NULL,               -- 对该模型的职责，如「A/B 切换发布」
+        sort_no INTEGER NOT NULL DEFAULT 0, created_at TEXT, created_by TEXT,
+        PRIMARY KEY (model_id, object_id)
+    )`, (err) => { if (err) logger.error('创建 model_impl_links 失败:', err.message); });
 
     // 创建源系统字典表
     db.run(`CREATE TABLE IF NOT EXISTS sys_source_systems (
@@ -1381,6 +1490,8 @@ function initTable() {
             logger.info("Table model_test_records created or already exists");
             // 迁移: 添加 invalidated 字段（withdraw 时标记旧验收记录失效）
             db.run("ALTER TABLE model_test_records ADD COLUMN invalidated INTEGER DEFAULT 0", () => { });
+            // 迁移 (#77 C1a): 验收记录抄录验收开始时的模型 config_rev（可空；NULL = 不属于当前版本，保守按需复验）
+            db.run("ALTER TABLE model_test_records ADD COLUMN config_rev INTEGER", () => { });
         }
     });
 
@@ -2964,6 +3075,7 @@ async function stopService() {
     if (serviceStopping) return;
     serviceStopping = true;
     await sysIterModule.stopExpirySweep();
+    await implObjectsModule.stopDailyVerify();   // #77 C2b-2：模型中心实现对象每日 07:30 核验任务
     await closeMssqlPools();
     await closeMysqlPools();
     process.exit(0);
@@ -4272,7 +4384,7 @@ async function requireExporterOrNonViewer(req, res, next) {
     }
 }
 
-// 模型业务权限：可编辑该模型（与前端 canEditThisModel 对齐）
+// 模型业务权限：可编辑该模型（前端对应 userCanEditModel；前端 ID 按 String() 比较，此处仍严格相等，口径差已登记为债）
 // 规则：admin OR 该模型的 tech_owner OR 该模型的创建者
 function canEditModel(user, model) {
     if (!user || !model) return false;
@@ -4284,7 +4396,7 @@ function canEditModel(user, model) {
     return false;
 }
 
-// 模型业务权限：可对该模型执行验收/脚本保存等开发动作（与前端 canValidateThisModel 对齐）
+// 模型业务权限：可对该模型执行验收/脚本保存等开发动作（前端对应 userCanValidateModel；前端 ID 按 String() 比较，此处仍严格相等，口径差已登记为债）
 // 规则：admin/publisher OR 该模型的 tech_owner OR 当前活跃任务的 owner
 function canOperateModel(user, model, latestActiveTaskOwnerId) {
     if (!user || !model) return false;
@@ -4295,6 +4407,14 @@ function canOperateModel(user, model, latestActiveTaskOwnerId) {
     if (latestActiveTaskOwnerId && user.id && latestActiveTaskOwnerId === user.id) return true;
     return false;
 }
+
+// K1：伴生表（data_models.companion_of 非空）不能单独关联任务；所有把 task_pool.linked_model_id 设为非空的写入点共用此文案
+const COMPANION_LINK_FORBIDDEN_MSG = '伴生表不能单独关联任务，请关联其主表模型';
+const TASK_DONE_LINK_LOCKED_MSG = '任务已完成，修改关联模型前请先退回任务';   // /api/update 的 DONE 门：前置检查与条件写重读共用同一文案
+const MODEL_STALE_WRITE_MSG = '该模型已被他人修改，请刷新后重试';   // PUT /api/models/:id 版本条件写 changes = 0（行仍在）时的 409
+const TASK_LINK_CHANGED_MSG = '任务状态已变化，请刷新后重试';   // /api/update 条件写 changes = 0 且重读无法归因于「不存在 / DONE / 伴生」时的 409
+// L1：已归档任务的关联模型在归档期间成了伴生表，退回会让任务受困
+const REOPEN_COMPANION_MSG = '关联模型已成为伴生表，请先在归档状态下改关联主表模型后再退回';
 
 // 校验模型是否已被其他活跃（未归档）任务关联
 // 返回 null 表示可用；返回任务对象表示已被占用
@@ -4769,6 +4889,15 @@ app.post('/api/create', authenticateToken, requirePublisherOrAdmin, async (req, 
         } catch (e) {
             return res.status(500).json({ error: "模型状态检查失败: " + e.message });
         }
+        // K1：伴生表不能单独关联任务（前置查询给出友好文案；写入语句本身另带同一条件，见下）
+        try {
+            const target = await dbGetAsync("SELECT companion_of FROM data_models WHERE id = ?", [linked_model_id]);
+            if (target && target.companion_of != null) {
+                return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
+            }
+        } catch (e) {
+            return res.status(500).json({ error: "模型状态检查失败: " + e.message });
+        }
     }
 
     // 显式生成北京时间
@@ -4779,9 +4908,11 @@ app.post('/api/create', authenticateToken, requirePublisherOrAdmin, async (req, 
     }).replace('T', ' ');
 
     const operator = req.user.display_name || req.user.username;
-    const stmt = db.prepare("INSERT INTO task_pool (title, desc, status, created_by, category, priority, linked_model_id, estimated_hours, deadline, created_at) VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)");
-    stmt.run(title.trim(), desc || '', req.user.id, validCategory, validPriority, linked_model_id, validEstHours, validDeadline, beijingTime, function (err) {
+    // K1：语句级条件写——目标模型已是伴生（companion_of 非空）则零写入（与 syncCompanionTable 的条件 UPDATE 互斥，SQLite 逐条串行，谁先执行谁生效）
+    const stmt = db.prepare("INSERT INTO task_pool (title, desc, status, created_by, category, priority, linked_model_id, estimated_hours, deadline, created_at) SELECT ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM data_models WHERE id = ? AND companion_of IS NOT NULL)");
+    stmt.run(title.trim(), desc || '', req.user.id, validCategory, validPriority, linked_model_id === undefined ? null : linked_model_id, validEstHours, validDeadline, beijingTime, linked_model_id === undefined ? null : linked_model_id, function (err) {
         if (err) return res.status(500).json({ error: err.message });
+        if (this.changes === 0) return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
         // 记录发布日志
         insertOperationLog(this.lastID, 'PUBLISH', operator, `发布任务: ${title.trim()}`);
         res.json({ id: this.lastID, message: "Task published" });
@@ -4799,9 +4930,13 @@ app.post('/api/create/batch', authenticateToken, requirePublisherOrAdmin, async 
     const userId = req.user.id;
     let successCount = 0;
     let failCount = 0;
+    // #77 C2b-1 修复 1（W4）：「BEGIN 成功才 ROLLBACK」——BEGIN 自身失败（如撞上他模块事务）时无条件 ROLLBACK 会滚掉他人的事务
+    //   （含实现对象模块的事务）。写法同 transactionActive 先例；只动 ROLLBACK 的条件，不改任何 SQL 文本。
+    let transactionActive = false;
 
     try {
         await dbRunAsync("BEGIN TRANSACTION");
+        transactionActive = true;
 
         for (const task of tasks) {
             if (!task.title || !task.category || !task.desc) {
@@ -4819,14 +4954,17 @@ app.post('/api/create/batch', authenticateToken, requirePublisherOrAdmin, async 
 
                 // 如果提供了模型关联信息（支持 ID 或表名）
                 if (task.linked_model_id) {
-                    const model = await dbGetAsync("SELECT id, table_name FROM data_models WHERE id = ?", [task.linked_model_id]);
+                    const model = await dbGetAsync("SELECT id, table_name, companion_of FROM data_models WHERE id = ?", [task.linked_model_id]);
                     if (model) {
+                        // K1：伴生表不能单独关联任务（批量导入按条计失败，不整批 400）
+                        if (model.companion_of != null) { failCount++; continue; }
                         linked_model_id = model.id;
                         linked_model_name = model.table_name;
                     }
                 } else if (task.linked_model_name) {
-                    const model = await dbGetAsync("SELECT id, table_name FROM data_models WHERE table_name = ?", [task.linked_model_name]);
+                    const model = await dbGetAsync("SELECT id, table_name, companion_of FROM data_models WHERE table_name = ?", [task.linked_model_name]);
                     if (model) {
+                        if (model.companion_of != null) { failCount++; continue; }
                         linked_model_id = model.id;
                         linked_model_name = model.table_name;
                     }
@@ -4841,10 +4979,12 @@ app.post('/api/create/batch', authenticateToken, requirePublisherOrAdmin, async 
                     }
                 }
 
-                await dbRunAsync(
-                    "INSERT INTO task_pool (title, desc, status, created_by, category, linked_model_id, linked_model_name, created_at) VALUES (?, ?, 'OPEN', ?, ?, ?, ?, datetime('now', 'localtime'))",
-                    [task.title, task.desc, userId, task.category, linked_model_id, linked_model_name]
+                // K1：语句级条件写——目标模型已是伴生则零写入（changes = 0 计失败）
+                const insRes = await dbRunAsync(
+                    "INSERT INTO task_pool (title, desc, status, created_by, category, linked_model_id, linked_model_name, created_at) SELECT ?, ?, 'OPEN', ?, ?, ?, ?, datetime('now', 'localtime') WHERE NOT EXISTS (SELECT 1 FROM data_models WHERE id = ? AND companion_of IS NOT NULL)",
+                    [task.title, task.desc, userId, task.category, linked_model_id, linked_model_name, linked_model_id]
                 );
+                if (insRes.changes === 0) { failCount++; continue; }
                 successCount++;
             } catch (err) {
                 console.error("Task insert error:", err.message);
@@ -4853,10 +4993,14 @@ app.post('/api/create/batch', authenticateToken, requirePublisherOrAdmin, async 
         }
 
         await dbRunAsync("COMMIT");
+        transactionActive = false;
         res.json({ success: successCount, failed: failCount, message: `成功导入 ${successCount} 条任务` });
     } catch (e) {
         console.error("Batch import transaction error:", e.message);
-        try { await dbRunAsync("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
+        if (transactionActive) {
+            try { await dbRunAsync("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
+            transactionActive = false;
+        }
         res.status(500).json({ error: "Server Transaction Error" });
     }
 });
@@ -5364,7 +5508,7 @@ app.post('/api/withdraw', authenticateToken, requireNonViewer, (req, res) => {
                             [taskRow.linked_model_id], (err) => {
                                 if (!err) logger.info(`Model ${taskRow.linked_model_id} status reverted to DEVELOPING after withdraw`);
                             });
-                        db.run("UPDATE model_test_records SET invalidated = 1 WHERE model_id = ? AND invalidated = 0",
+                        db.run("UPDATE model_test_records SET invalidated = 1 WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL)",
                             [taskRow.linked_model_id], (err) => {
                                 if (!err) logger.info(`Invalidated test records for model ${taskRow.linked_model_id} after withdraw`);
                             });
@@ -5384,25 +5528,160 @@ app.post('/api/withdraw', authenticateToken, requireNonViewer, (req, res) => {
 
 // 检查模型的结构验收+数据验收是否都通过（支持 phase=all 的全量验收记录）
 // 返回: { passed: boolean, structurePass: boolean, dataPass: boolean, allPass: boolean }
-async function checkAllValidationsPassed(modelId) {
-    const structureTest = await dbGetAsync(
-        "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) AND detail_json LIKE '%\"phase\":\"structure\"%' ORDER BY test_time DESC LIMIT 1",
-        [modelId]
-    );
-    const dataTest = await dbGetAsync(
-        "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) AND detail_json LIKE '%\"phase\":\"data\"%' ORDER BY test_time DESC LIMIT 1",
-        [modelId]
-    );
-    const allTest = await dbGetAsync(
-        "SELECT overall_result FROM model_test_records WHERE model_id = ? AND detail_json LIKE '%\"phase\":\"all\"%' AND overall_result IN ('pass', 'warn') AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1",
-        [modelId]
-    );
+// #77 C1a：判定口径统一收口到 routes/model-center/acceptance.js（方案 v0.9 §4.1.2）。
+//   本函数只负责取模型行 + 验收记录，再调纯函数 evaluateAcceptance；门禁只认 gatePass。
+//   opts.task（含 created_at）存在时加「test_time 严格晚于任务创建时间」。
+//
+// 时区一致性门禁（C1 23-R3 N3，原 G1 自 acceptance.js 纯函数迁出，保持纯函数无进程级状态）：带任务时间条件（opts.task 存在）的判定，
+//   在 tzGate.state !== 'ok' 时 fail-closed（仅对会走时间比较的情形：非伴生且 layer 为 ODS / DIM / DWD；不带任务的展示调用不受影响）。
+//   状态机：unknown（初值，自检未完成）→ ok（SQLite 自检确认一致）| mismatch（加载时 JS 判定不一致 / 自检差 > 120 秒 / 自检查询 1s·2s·4s 退避重试 3 次仍失败）；mismatch 粘滞（只升不降）。
+const TZ_MISMATCH_REASON = '服务器时区与北京时间不一致，归档门禁的时间判断不可靠，已暂停按验收归档，请联系管理员';
+const TZ_UNKNOWN_REASON = '服务启动中，归档门禁暂不可用，请稍后重试';
+const tzGate = { state: 'unknown', source: 'init' };
+(function detectJsTz() {
+    // R4：数值偏移比较（同一时间戳下 Asia/Shanghai 的年月日时分秒 vs 本机本地字段，差 > 1 秒即确认偏差）；
+    //   抛异常 / 目标时区格式化不可用（字段取不到）→ 无法判定，保持 unknown，由 SQLite 自检定性（不再直接 mismatch）；只有确认偏差才 mismatch。
+    let verdict = null;   // true = 确认偏差 / false = 一致 / null = 无法判定
+    try {
+        const n = new Date();
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(n);
+        const p = {};
+        for (const x of parts) if (x.type !== 'literal') p[x.type] = Number(x.value);
+        const shMs = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+        const localMs = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate(), n.getHours(), n.getMinutes(), n.getSeconds());
+        if (Number.isFinite(shMs) && Number.isFinite(localMs)) verdict = Math.abs(shMs - localMs) > 1000;
+    } catch (e) {
+        console.warn(`[model-center] JS 时区检测不可用（${e.message}），归档门禁时区状态保持 unknown，由 SQLite 自检定性`);
+    }
+    if (verdict === true) { tzGate.state = 'mismatch'; tzGate.source = 'js-load'; }
+})();
+function markTzMismatch(source) { tzGate.state = 'mismatch'; tzGate.source = source || 'unknown'; }
+function markTzOk(source) { if (tzGate.state === 'unknown') { tzGate.state = 'ok'; tzGate.source = source || 'unknown'; } }   // mismatch 粘滞：不得被 ok 覆盖
 
-    const structurePass = (structureTest && ['pass', 'warn'].includes(structureTest.overall_result));
-    const dataPass = (dataTest && ['pass', 'warn'].includes(dataTest.overall_result));
-    const allPass = !!allTest;
+// 判定结果附带「判定时读到的快照」（不可枚举，不进任何响应 JSON）：{ modelId, rev: 判定时的 config_rev, maxRecordId: 判定时该模型验收记录的最大 id, invalidatedCount: 失效条数, exists / layer / companionOf / isDeleted: 模型行快照 }。
+//   供归档写入（/api/confirm）做条件写——判定与写入之间配置或验收记录变化则拒绝（N1）。取自判定同一次读取，不另读。
+async function evaluateModelAcceptance(modelId, opts) {
+    const model = await dbGetAsync(
+        'SELECT id, layer, config_rev, companion_of, is_deleted FROM data_models WHERE id = ?',
+        [modelId]
+    );
+    if (!model) {
+        // 模型行不存在：无从判定，按 none（gatePass=false）处理，与旧口径「查不到记录 => 不通过」一致
+        const evMissing = evaluateAcceptance({ id: modelId, layer: null, config_rev: null, companion_of: null }, [], opts);
+        Object.defineProperty(evMissing, 'snap', { value: { modelId, rev: null, maxRecordId: 0, invalidatedCount: 0, exists: false, layer: null, companionOf: null, isDeleted: null }, enumerable: false });
+        return evMissing;
+    }
+    const records = await fetchRecordsByModelId(db, modelId);
+    let ev = evaluateAcceptance(model, records, opts);
+    if (opts && opts.task && tzGate.state !== 'ok') {
+        const layerU = String(model.layer == null ? '' : model.layer).toUpperCase();
+        const timeBased = (model.companion_of == null || model.companion_of === '') && ['ODS', 'DIM', 'DWD'].includes(layerU);
+        if (timeBased) {
+            ev = { state: 'none', gatePass: false, at: null, decisiveRecordId: null, rows: null, reason: tzGate.state === 'unknown' ? TZ_UNKNOWN_REASON : TZ_MISMATCH_REASON };
+        }
+    }
+    let maxRecordId = 0;
+    let invalidatedCount = 0;   // P2：判定时该模型 invalidated=1 的记录条数（另一已归档任务被退回会置失效，但不改 config_rev、不新增记录）
+    for (const r of records) {
+        const n = Number(r.id); if (Number.isFinite(n) && n > maxRecordId) maxRecordId = n;
+        if (Number(r.invalidated) === 1) invalidatedCount++;
+    }
+    Object.defineProperty(ev, 'snap', { value: {
+        modelId: model.id, rev: model.config_rev == null ? null : model.config_rev, maxRecordId, invalidatedCount,
+        exists: true, layer: model.layer == null ? null : model.layer, companionOf: model.companion_of == null ? null : model.companion_of, isDeleted: model.is_deleted == null ? null : model.is_deleted   // R2：模型行快照
+    }, enumerable: false });
+    return ev;
+}
 
-    return { passed: (allPass || structurePass) && (allPass || dataPass), structurePass, dataPass, allPass };
+// 返回: { passed: boolean, structurePass: boolean, dataPass: boolean, state, gatePass, reason, sameSecond }
+// passed = gatePass；structurePass / dataPass 取各阶段最新候选是否 pass|warn，仅供调用方选「结构 / 数据验收尚未通过」文案
+async function checkAllValidationsPassed(modelId, task) {
+    const ev = await evaluateModelAcceptance(modelId, { task });
+    const isPassing = v => v === 'pass' || v === 'warn';
+    const stages = ev.stages || {};
+    return {
+        passed: ev.gatePass,
+        structurePass: isPassing(stages.structure),
+        dataPass: isPassing(stages.data),
+        state: ev.state,
+        gatePass: ev.gatePass,
+        reason: ev.reason,
+        sameSecond: ev.reason === SAME_SECOND_REASON,
+        snap: ev.snap || null   // N1：判定时快照（config_rev / 最大验收记录 id），供 confirm 条件写
+    };
+}
+
+// DIM/DWD 门禁未通过时的文案（与 odsGateFailText 同构）：
+//   state 为 stale / none / companion，或同秒、早于任务创建 => 回显 evaluateAcceptance 的 reason（真实原因）；
+//   「结构 / 数据验收尚未通过」只用于对应阶段真的缺失或失败（partial / fail）。
+// 返回 { text, suffix }：suffix 为 /api/confirm 原有的「，请先执行结构验收」类后缀（回显 reason 时为空）
+function dimDwdGateFailText(check, layerName) {
+    if (check.sameSecond || ['stale', 'none', 'companion'].includes(check.state)) {
+        // 「尚无验收记录」落到下方原有的「结构验收尚未通过，请先执行结构验收」文案（与 odsGateFailText 同构）
+        if (check.reason && check.reason !== '尚无验收记录') return { text: check.reason, suffix: '' };
+    }
+    if (!check.structurePass) return { text: `${layerName} 结构验收尚未通过`, suffix: '，请先执行结构验收' };
+    return { text: `${layerName} 数据验收尚未通过`, suffix: '，请先执行数据验收' };
+}
+
+// ODS 门禁未通过时的文案：fail => 原「最近一次自测未通过」；其余沿用「尚未自测」，
+// 但同秒 / 配置已变更(stale) / 任务创建前等新增判定情形回显 evaluateAcceptance 给出的 reason
+function odsGateFailText(ev, noTestText, failText) {
+    if (ev.state === 'fail') return failText;
+    if (ev.reason && ev.reason !== '尚无验收记录') return ev.reason;
+    return noTestText;
+}
+
+// G4：关联模型（未删除）的 layer（大写）；无关联 / 模型不存在或已删除 / layer 为空 → null。门禁分支按它选，不按 task.category
+// R2：同一次读取同时带出「模型行快照」（存在性 / layer 原值 / companion_of / is_deleted），供 confirm 条件写（判定依据的模型字段在写入时须未变）。
+const MODEL_CHANGED_DURING_GATE_REASON = '模型状态在判定过程中发生变化，请刷新后重试';
+async function linkedModelLayer(linkedModelId) {
+    if (!linkedModelId) return { layer: null, modelSnap: null };
+    const m = await dbGetAsync('SELECT layer, companion_of, is_deleted FROM data_models WHERE id = ?', [linkedModelId]);
+    if (!m) return { layer: null, modelSnap: { exists: false } };
+    const notDeleted = m.is_deleted == null || Number(m.is_deleted) === 0;
+    const layer = notDeleted && m.layer != null && String(m.layer).trim() !== '' ? String(m.layer).toUpperCase() : null;
+    return { layer, modelSnap: { exists: true, layer: m.layer == null ? null : m.layer, companionOf: m.companion_of == null ? null : m.companion_of, isDeleted: m.is_deleted == null ? null : m.is_deleted } };
+}
+
+// K3：归档门禁判定（can-self-archive / archivable-task / confirm 三接口共用同一张表，避免再分叉；调用方各自映射文案 / 状态码）。
+//   前提：调用方已校验「任务为 DONE」与「非管理员须为 owner」。
+//   · 管理员 / 发布者：按关联模型（未删除）的 layer 选门禁——DIM / DWD 过两阶段验收门禁；ODS / 其他 layer / 无关联 / 关联模型已删 → 不过门禁、可归档（confirm 对 ODS 维持既有管理员旁路，展示与之一致）；
+//   · 非管理员（owner）：以 confirm 现行逻辑为准——category 必为 ODS_SYNC 且须关联模型，否则不可自助归档（「需管理员归档」）；满足后走验收判定（evaluateModelAcceptance）。
+//     evaluateModelAcceptance 按关联模型 layer 分派规则（读模型行的 layer，由 acceptance.js 分派），DIM / DWD 为两阶段真值表（structure + data，或一条 all），
+//     ODS 为无 phase 的单条；checkAllValidationsPassed 只是包装同一函数——所以非管理员 ODS_SYNC 任务关联 DIM / DWD 模型时同样按两阶段规则判定，不是按 ODS 单条判。
+//     正式口径（R5，兼容既有 confirm 语义）：ODS_SYNC owner 关联 DIM / DWD 模型时按该模型两阶段规则判定，两阶段通过即可自助归档；其他 category 的 owner 一律「需管理员归档」。
+//   · 显式例外（N5）：管理员 / 发布者对「关联模型已删除」的任务不执行验收门禁（linkedModelLayer 对已删除模型返回 null——无模型可保护，归档不应因此受困）。
+// 返回 { mode: 'none'|'dimdwd'|'ods'|'deny', allowed, denyCode?, layer?, gate?, ev?, snap?, modelSnap? }
+//   snap = 判定时读到的验收快照（config_rev / 最大验收记录 id / 失效条数），只有走了验收门禁的分支（dimdwd / ods）才有；
+//   modelSnap = 模型行快照（存在性 / layer / companion_of / is_deleted），只要任务有关联模型就有（不论是否走验收门禁，含管理员 ODS 旁路、其他 layer、已删模型例外）；
+//     走验收门禁的分支（管理员 DIM / DWD、非管理员 ODS_SYNC）取自判定那次读取（evaluateModelAcceptance 同一次 SELECT，经 snap 带出）；其余分支取自 linkedModelLayer 那次读取（该分支无其他判定读取）；
+//   /api/confirm 用它们做条件写（N1 / R2），取自判定同一次读取，不另读。
+async function archiveGateDecision(task, isAdmin) {
+    if (isAdmin) {
+        const lm = await linkedModelLayer(task.linked_model_id);
+        const layer = lm.layer;
+        if (layer === 'DIM' || layer === 'DWD') {
+            const gate = await checkAllValidationsPassed(task.linked_model_id, task);
+            const gs = gate.snap || null;   // Q1：模型行快照取自判定那次读取（evaluateModelAcceptance 的 SELECT），不用 linkedModelLayer 的第 1 次读
+            const modelSnapJudged = gs ? { exists: gs.exists, layer: gs.layer, companionOf: gs.companionOf, isDeleted: gs.isDeleted } : lm.modelSnap;
+            // 23-R5：分支由第 1 次读（linkedModelLayer）选定、判定用第 2 次读（evaluateModelAcceptance）——两次读到的模型行必须一致，
+            //   否则（如 DIM 在两次读之间变为 ODS，按 ODS 单条规则判定）一律拒绝，fail-closed
+            const fm = lm.modelSnap || {};
+            const sameRead = !!gs && gs.exists === true && fm.exists === true && gs.layer === fm.layer && gs.companionOf === fm.companionOf && gs.isDeleted === fm.isDeleted;
+            if (!sameRead) {
+                const changed = Object.assign({}, gate, { passed: false, gatePass: false, structurePass: false, dataPass: false, state: 'none', sameSecond: false, reason: MODEL_CHANGED_DURING_GATE_REASON });
+                return { mode: 'dimdwd', allowed: false, layer, gate: changed, snap: gate.snap, modelSnap: modelSnapJudged };
+            }
+            return { mode: 'dimdwd', allowed: !!gate.gatePass, layer, gate, snap: gate.snap, modelSnap: modelSnapJudged };
+        }
+        return { mode: 'none', allowed: true, layer, modelSnap: lm.modelSnap };
+    }
+    if (task.category !== 'ODS_SYNC') return { mode: 'deny', allowed: false, denyCode: 'category' };
+    if (!task.linked_model_id) return { mode: 'deny', allowed: false, denyCode: 'nolink' };
+    const ev = await evaluateModelAcceptance(task.linked_model_id, { task });
+    const s = ev.snap || null;
+    return { mode: 'ods', allowed: !!ev.gatePass, ev, snap: s, modelSnap: s ? { exists: s.exists, layer: s.layer, companionOf: s.companionOf, isDeleted: s.isDeleted } : null };
 }
 
 // 检查任务是否可以由owner自行归档
@@ -5414,7 +5693,7 @@ app.get('/api/tasks/:id/can-self-archive', authenticateToken, async (req, res) =
 
     try {
         const task = await dbGetAsync(
-            "SELECT id, category, owner_id, linked_model_id, status FROM task_pool WHERE id = ?",
+            "SELECT id, category, owner_id, linked_model_id, status, created_at FROM task_pool WHERE id = ?",
             [taskId]
         );
 
@@ -5426,10 +5705,8 @@ app.get('/api/tasks/:id/can-self-archive', authenticateToken, async (req, res) =
             return res.json({ canSelfArchive: false, reason: '任务不在DONE状态' });
         }
 
-        // 必须关联模型
-        if (!task.linked_model_id) {
-            return res.json({ canSelfArchive: false, reason: '任务未关联模型' });
-        }
+        // K3：「必须关联模型」不再在此处对所有角色一刀切——管理员 / 发布者归档未关联模型的任务不过门禁、可归档（与 /api/confirm 管理员分支一致）；
+        //   非管理员未关联模型 → archiveGateDecision 判 deny（「需管理员归档」，与 confirm 的 403 一致）
 
         // admin/publisher 也需要验收通过才能归档，但跳过 owner 检查
         const isAdmin = (userRole === 'admin' || userRole === 'publisher');
@@ -5439,35 +5716,16 @@ app.get('/api/tasks/:id/can-self-archive', authenticateToken, async (req, res) =
             return res.json({ canSelfArchive: false, reason: '您不是该任务的持有者' });
         }
 
-        // 仅 ODS_SYNC 任务允许 owner 自行归档；DIM/DWD 需管理员或发布者
-        if (!isAdmin && task.category !== 'ODS_SYNC') {
-            return res.json({ canSelfArchive: false, reason: 'DIM/DWD 任务需管理员或发布者确认归档' });
+        // K3：三接口共用 archiveGateDecision（G4 起按关联模型 layer、非管理员与 /api/confirm 现行逻辑一致）
+        const dec = await archiveGateDecision(task, isAdmin);
+        if (dec.mode === 'deny') {
+            return res.json({ canSelfArchive: false, reason: '需管理员归档' });
         }
-
-        // admin/publisher 归档 DIM/DWD 时也需检查验收
-        if (['DIM_DEV', 'DWD_DEV'].includes(task.category)) {
-            const { structurePass, dataPass, allPass } = await checkAllValidationsPassed(task.linked_model_id);
-            const layerName = task.category === 'DIM_DEV' ? 'DIM' : 'DWD';
-            if (!allPass && !structurePass) {
-                return res.json({ canSelfArchive: false, reason: `${layerName} 结构验收尚未通过` });
-            }
-            if (!allPass && !dataPass) {
-                return res.json({ canSelfArchive: false, reason: `${layerName} 数据验收尚未通过` });
-            }
-        } else if (task.category === 'ODS_SYNC') {
-            // ODS：检查最近一次自测是否通过
-            const latestTest = await dbGetAsync(
-                "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1",
-                [task.linked_model_id]
-            );
-
-            if (!latestTest) {
-                return res.json({ canSelfArchive: false, reason: '关联模型尚未进行自测' });
-            }
-
-            if (!['pass', 'warn'].includes(latestTest.overall_result)) {
-                return res.json({ canSelfArchive: false, reason: '关联模型最近一次自测未通过' });
-            }
+        if (dec.mode === 'dimdwd' && !dec.allowed) {
+            return res.json({ canSelfArchive: false, reason: dimDwdGateFailText(dec.gate, dec.layer).text, state: dec.gate.state, gatePass: false });
+        }
+        if (dec.mode === 'ods' && !dec.allowed) {
+            return res.json({ canSelfArchive: false, reason: odsGateFailText(dec.ev, '关联模型尚未进行自测', '关联模型最近一次自测未通过'), state: dec.ev.state, gatePass: false });
         }
 
         // 所有条件都满足
@@ -5488,7 +5746,7 @@ app.get('/api/models/:id/archivable-task', authenticateToken, async (req, res) =
     try {
         // 查找关联该模型的 DONE 状态任务
         const task = await dbGetAsync(
-            "SELECT id, title, owner_id, category, linked_model_id FROM task_pool WHERE linked_model_id = ? AND status = 'DONE' ORDER BY done_at DESC LIMIT 1",
+            "SELECT id, title, owner_id, category, linked_model_id, created_at FROM task_pool WHERE linked_model_id = ? AND status = 'DONE' ORDER BY done_at DESC LIMIT 1",
             [modelId]
         );
         if (!task) {
@@ -5501,39 +5759,16 @@ app.get('/api/models/:id/archivable-task', authenticateToken, async (req, res) =
             return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: '权限不足' });
         }
 
-        // DIM/DWD 归档仅限 admin/publisher（owner 不能自行归档）
-        if (!isAdminOrPublisher && ['DIM_DEV', 'DWD_DEV'].includes(task.category)) {
-            return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: 'DIM/DWD 任务需管理员或发布者确认归档' });
+        // K3：三接口共用 archiveGateDecision（去掉 category 白名单预筛——confirm 按关联模型 layer / 非管理员按 ODS_SYNC 判定，展示须与之一致）
+        const dec = await archiveGateDecision(task, isAdminOrPublisher);
+        if (dec.mode === 'deny') {
+            return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: '需管理员归档' });
         }
-
-        // 任务类型检查
-        if (!['ODS_SYNC', 'DIM_DEV', 'DWD_DEV'].includes(task.category)) {
-            return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: '仅 ODS/DIM/DWD 任务支持归档' });
+        if (dec.mode === 'dimdwd' && !dec.allowed) {
+            return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: dimDwdGateFailText(dec.gate, dec.layer).text, state: dec.gate.state, gatePass: false });
         }
-
-        // 验收结果检查
-        if (['DIM_DEV', 'DWD_DEV'].includes(task.category)) {
-            const { structurePass, dataPass, allPass } = await checkAllValidationsPassed(modelId);
-            const layerName = task.category === 'DIM_DEV' ? 'DIM' : 'DWD';
-
-            if (!allPass && !structurePass) {
-                return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: `${layerName} 结构验收尚未通过` });
-            }
-            if (!allPass && !dataPass) {
-                return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: `${layerName} 数据验收尚未通过` });
-            }
-        } else {
-            // ODS：查最新一条验收记录
-            const latestTest = await dbGetAsync(
-                "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1",
-                [modelId]
-            );
-            if (!latestTest) {
-                return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: '尚未进行自测' });
-            }
-            if (!['pass', 'warn'].includes(latestTest.overall_result)) {
-                return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: '最近一次自测未通过' });
-            }
+        if (dec.mode === 'ods' && !dec.allowed) {
+            return res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: false, reason: odsGateFailText(dec.ev, '尚未进行自测', '最近一次自测未通过'), state: dec.ev.state, gatePass: false });
         }
 
         res.json({ found: true, taskId: task.id, taskTitle: task.title, canSelfArchive: true });
@@ -5556,13 +5791,16 @@ app.post('/api/confirm', authenticateToken, requireNonViewer, async (req, res) =
     const isAdminOrPublisher = userRole === 'admin' || userRole === 'publisher';
 
     // 获取任务信息
-    db.get("SELECT file_path, linked_model_id, category, owner_id FROM task_pool WHERE id = ? AND status = 'DONE'", [id], async (err, row) => {
+    db.get("SELECT file_path, linked_model_id, category, owner_id, created_at FROM task_pool WHERE id = ? AND status = 'DONE'", [id], async (err, row) => {
         if (err) return res.status(500).json({ error: err.message });
         if (!row) return res.status(400).json({ error: "Task not found or not in DONE state" });
 
         const filePath = row.file_path;
         const isOwner = row.owner_id === userId;
 
+        // N1：走了验收门禁的分支把「判定时读到的模型快照」带到最终归档写入，写入时做条件写（管理员 ODS 旁路等不过门禁的分支无验收快照：旁路分支锁任务行与模型行，不锁验收快照）
+        let gateSnap = null;
+        let modelSnap = null;   // R2：任务判定时有关联模型 → 模型行快照（存在性 / layer / companion_of / is_deleted）
         // 权限检查
         if (!isAdminOrPublisher) {
             // 非管理员/发布者，需要检查是否为owner且满足自行归档条件
@@ -5570,79 +5808,47 @@ app.post('/api/confirm', authenticateToken, requireNonViewer, async (req, res) =
                 return res.status(403).json({ error: '权限不足，您不是该任务的持有者' });
             }
 
-            // 仅 ODS 任务允许 owner 自行归档；DIM/DWD 需管理员或发布者归档
-            if (row.category !== 'ODS_SYNC') {
-                return res.status(403).json({ error: '仅 ODS 开发任务支持开发者自行归档，DIM/DWD 任务需管理员或发布者确认归档' });
-            }
-
-            // 必须关联模型
-            if (!row.linked_model_id) {
-                return res.status(403).json({ error: '任务未关联模型，无法自行归档' });
-            }
-
-            if (row.category === 'ODS_SYNC') {
-                // ODS：检查最近一次自测通过
-                try {
-                    const latestTest = await dbGetAsync(
-                        "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1",
-                        [row.linked_model_id]
-                    );
-                    if (!latestTest) {
-                        return res.status(403).json({ error: '关联模型尚未进行自测，请先完成ODS自动验收' });
-                    }
-                    if (!['pass', 'warn'].includes(latestTest.overall_result)) {
-                        return res.status(403).json({ error: '关联模型最近一次自测未通过，请修复问题后重新自测' });
-                    }
-                    logger.info(`ODS task ${id} self-archived by owner (user_id: ${userId}), model test passed`);
-                } catch (dbErr) {
-                    return res.status(500).json({ error: '检查自测结果失败: ' + dbErr.message });
+            // K3：非管理员分支的判定（仅 ODS_SYNC 任务允许 owner 自行归档且须关联模型；ODS 验收：最新一条当前版本、晚于任务创建的验收是否 pass/warn）
+            //   由三接口共用的 archiveGateDecision 给出；此处只映射 confirm 自己的文案 / 状态码（行为与改造前一致）
+            try {
+                const dec = await archiveGateDecision(row, false);
+                if (dec.mode === 'deny' && dec.denyCode === 'category') {
+                    return res.status(403).json({ error: '仅 ODS 开发任务（ODS_SYNC）支持开发者自助归档，其他任务需管理员或发布者确认归档' });
                 }
-            } else if (row.category === 'DIM_DEV' || row.category === 'DWD_DEV') {
-                // DIM/DWD：检查结构验收和数据验收都通过
-                try {
-                    const { structurePass, dataPass, allPass } = await checkAllValidationsPassed(row.linked_model_id);
-                    const layerName = row.category === 'DIM_DEV' ? 'DIM' : 'DWD';
-
-                    if (!allPass && !structurePass) {
-                        return res.status(403).json({ error: `${layerName} 结构验收尚未通过，请先执行结构验收` });
-                    }
-                    if (!allPass && !dataPass) {
-                        return res.status(403).json({ error: `${layerName} 数据验收尚未通过，请先执行数据验收` });
-                    }
-
-                    // 检查语义验收状态（可选，仅标记）
-                    if (row.category === 'DIM_DEV') {
-                        const semanticTest = await dbGetAsync(
-                            "SELECT overall_result FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) AND detail_json LIKE '%\"phase\":\"semantic\"%' ORDER BY test_time DESC LIMIT 1",
-                            [row.linked_model_id]
-                        );
-                        if (!semanticTest) {
-                            logger.info(`DIM task ${id} archived without semantic review (allowed)`);
-                        }
-                    }
-
-                    logger.info(`${layerName} task ${id} self-archived by owner (user_id: ${userId}), structure+data passed`);
-                } catch (dbErr) {
-                    return res.status(500).json({ error: '检查验收结果失败: ' + dbErr.message });
+                if (dec.mode === 'deny') {
+                    return res.status(403).json({ error: '任务未关联模型，无法自行归档' });
                 }
+                const ev = dec.ev;
+                if (!dec.allowed) {
+                    return res.status(403).json({
+                        error: odsGateFailText(ev, '关联模型尚未进行自测，请先完成ODS自动验收', '关联模型最近一次自测未通过，请修复问题后重新自测'),
+                        state: ev.state,
+                        gatePass: false
+                    });
+                }
+                gateSnap = dec.snap || null;
+                modelSnap = dec.modelSnap || null;
+                logger.info(`ODS task ${id} self-archived by owner (user_id: ${userId}), model test passed`);
+            } catch (dbErr) {
+                return res.status(500).json({ error: '检查自测结果失败: ' + dbErr.message });
             }
         } else {
             // admin/publisher 归档 DIM/DWD 任务时，也需检查验收是否通过
-            if (['DIM_DEV', 'DWD_DEV'].includes(row.category) && row.linked_model_id) {
-                try {
-                    const { structurePass, dataPass, allPass } = await checkAllValidationsPassed(row.linked_model_id);
-                    const layerName = row.category === 'DIM_DEV' ? 'DIM' : 'DWD';
-
-                    if (!allPass && !structurePass) {
-                        return res.status(403).json({ error: `${layerName} 结构验收尚未通过，请先执行结构验收` });
+            // G4：按关联模型（未删除）的 layer 判定，不按 row.category（管理员改 category 不能绕过）：DIM / DWD 过验收门禁；ODS 维持既有管理员旁路；其余 layer / 无关联模型不执行验收门禁
+            //   K3：判定由三接口共用的 archiveGateDecision 给出
+            try {
+                const dec = await archiveGateDecision(row, true);
+                modelSnap = dec.modelSnap || null;   // R2：不论是否走验收门禁（含 ODS 旁路 / 其他 layer / 已删模型例外），判定所依据的模型行字段都要带到写入
+                if (dec.mode === 'dimdwd') {
+                    if (!dec.allowed) {
+                        const failed = dimDwdGateFailText(dec.gate, dec.layer);
+                        return res.status(403).json({ error: failed.text + failed.suffix, state: dec.gate.state, gatePass: false });
                     }
-                    if (!allPass && !dataPass) {
-                        return res.status(403).json({ error: `${layerName} 数据验收尚未通过，请先执行数据验收` });
-                    }
-                    logger.info(`${layerName} task ${id} archived by admin/publisher (user_id: ${userId}), structure+data passed`);
-                } catch (dbErr) {
-                    return res.status(500).json({ error: '检查验收结果失败: ' + dbErr.message });
+                    gateSnap = dec.snap || null;
+                    logger.info(`${dec.layer} task ${id} archived by admin/publisher (user_id: ${userId}), structure+data passed`);
                 }
+            } catch (dbErr) {
+                return res.status(500).json({ error: '检查验收结果失败: ' + dbErr.message });
             }
         }
 
@@ -5697,7 +5903,18 @@ app.post('/api/confirm', authenticateToken, requireNonViewer, async (req, res) =
             const reviewTime = now.toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai', hour12: false }).replace('T', ' ');
             const reviewerName = req.user.display_name || req.user.username;
 
-            await dbRunAsync(
+            // N1：条件写——只有「任务仍为 DONE」且（走了验收门禁时）「模型 config_rev 仍等于判定时读到的值、且没有比判定时更新的验收记录」才归档；
+            //   changes = 0 → 409，零写入（本 UPDATE 是 confirm 的第一个写，其后的模型状态 / 文件 / 日志写入都在它成功之后）。
+            //   快照取自判定读取（走验收门禁的分支取 evaluateModelAcceptance 同一次读取；管理员旁路 / 其他 layer / 已删模型例外取 linkedModelLayer 那次读取），不在判定之后另读。配置变更会递增 config_rev，新验收记录会有更大的 id。
+            //   R1：任务行判定时读到的 linked_model_id / category / owner_id / created_at 一并作条件（判定输入在写入时须未变，IS 处理 NULL）。
+            //   R2：只要判定时任务有关联模型（不论是否走验收门禁），判定所依据的模型行字段——存在性 / layer / companion_of / is_deleted——写入时须未变
+            //   （模型行不存在记为「不存在」，用 NOT EXISTS 维持不存在）。快照取自判定同一次读取，不另读。
+            //   失效计数条件（invalidated = 1 的条数不变）的正确性依赖验收记录只追加、失效单向：由 verify-model-test-records-append-only 守卫保证。
+            const gm = gateSnap ? gateSnap.modelId : null;
+            const mFlag = modelSnap ? (modelSnap.exists ? 1 : 0) : null;
+            const mId = row.linked_model_id == null ? null : row.linked_model_id;
+            const nz = (v) => (v === undefined ? null : v);
+            const archRes = await dbRunAsync(
                 `UPDATE task_pool SET
                     status = 'ARCHIVED',
                     reviewer_id = ?,
@@ -5706,9 +5923,20 @@ app.post('/api/confirm', authenticateToken, requireNonViewer, async (req, res) =
                     review_note = ?,
                     review_checklist = ?,
                     script_snapshot = ?
-                WHERE id = ?`,
-                [userId, reviewerName, reviewTime, review_note || null, review_checklist || null, scriptSnapshot, id]
+                WHERE id = ? AND status = 'DONE'
+                  AND linked_model_id IS ? AND category IS ? AND owner_id IS ? AND created_at IS ?
+                  AND (? IS NULL OR (? = 1 AND EXISTS (SELECT 1 FROM data_models WHERE id = ? AND layer IS ? AND companion_of IS ? AND is_deleted IS ?)) OR (? = 0 AND NOT EXISTS (SELECT 1 FROM data_models WHERE id = ?)))
+                  AND (? IS NULL OR ((SELECT config_rev FROM data_models WHERE id = ?) IS ?
+                       AND NOT EXISTS (SELECT 1 FROM model_test_records WHERE model_id = ? AND id > ?)
+                       AND (SELECT COUNT(*) FROM model_test_records WHERE model_id = ? AND invalidated = 1) = ?))`,
+                [userId, reviewerName, reviewTime, review_note || null, review_checklist || null, scriptSnapshot, id,
+                    mId, nz(row.category), nz(row.owner_id), nz(row.created_at),
+                    mFlag, mFlag, mId, modelSnap ? nz(modelSnap.layer) : null, modelSnap ? nz(modelSnap.companionOf) : null, modelSnap ? nz(modelSnap.isDeleted) : null, mFlag, mId,
+                    gm, gm, gateSnap ? gateSnap.rev : null, gm, gateSnap ? gateSnap.maxRecordId : 0, gm, gateSnap ? gateSnap.invalidatedCount : 0]
             );
+            if (archRes.changes === 0) {
+                return res.status(409).json({ error: '验收状态在归档过程中发生变化，请刷新后重试' });
+            }
 
             // 3. 联动模型状态（等待完成）
             if (row.linked_model_id) {
@@ -5916,7 +6144,7 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
                 if (row.linked_model_id) {
                     db.run("UPDATE data_models SET status = 'DEVELOPING', updated_at = datetime('now', 'localtime') WHERE id = ?",
                         [row.linked_model_id]);
-                    db.run("UPDATE model_test_records SET invalidated = 1 WHERE model_id = ? AND invalidated = 0",
+                    db.run("UPDATE model_test_records SET invalidated = 1 WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL)",
                         [row.linked_model_id]);
                 }
 
@@ -5936,6 +6164,14 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
             SELECT file_name as file_path FROM task_attachments WHERE task_id = ?
         `;
 
+        // #77 C1a（方案 v0.9 §4.1.2「失效补点」）：ARCHIVED→OPEN/CLAIMED 回退先把该模型未失效的验收记录置 invalidated = 1，
+        //   成功后才做任何状态写入（任务 UPDATE、模型 UPDATE 都在其后；不开事务，原因见 §4.1.1）。
+        //   置失效失败 → 直接 500，任务与模型状态都不改。无 owner 回 CLAIMED 的 400 校验前移到置失效之前，
+        //   避免该请求被拒绝却已置失效。
+        if (newStatus === 'CLAIMED' && !row.owner) {
+            return res.status(400).json({ error: "Cannot revert to CLAIMED: task has no owner" });
+        }
+        const proceedArchivedReopen = () => {
         db.all(sql, [id, id], (err, fileRows) => {
             if (err) return res.status(500).json({ error: err.message });
 
@@ -5957,7 +6193,7 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
                             reopen_reason_type = ?,
                             reopen_at = datetime('now', 'localtime'),
                             reopen_by = ?
-                        WHERE id = ?
+                        WHERE id = ? AND NOT EXISTS (SELECT 1 FROM data_models WHERE id = task_pool.linked_model_id AND companion_of IS NOT NULL)
                     `);
                     params = [reopen_reason, reopen_reason_type, reopen_by, id];
                 } else {
@@ -5975,13 +6211,15 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
                             reopen_reason_type = ?,
                             reopen_at = datetime('now', 'localtime'),
                             reopen_by = ?
-                        WHERE id = ?
+                        WHERE id = ? AND NOT EXISTS (SELECT 1 FROM data_models WHERE id = task_pool.linked_model_id AND companion_of IS NOT NULL)
                     `);
                     params = [reopen_reason, reopen_reason_type, reopen_by, id];
                 }
 
                 stmt.run(...params, function (err) {
                     if (err) return res.status(500).json({ error: err.message });
+                    // L1：语句级条件命中（关联模型已是伴生）→ 零写入，同 400（此时附件记录 / 文件都还没动）
+                    if (this.changes === 0) return res.status(400).json({ error: REOPEN_COMPANION_MSG });
 
                     // 3. 删除附件记录（清除所有交付物信息）- 必须等待完成
                     db.run("DELETE FROM task_attachments WHERE task_id = ?", [id], (deleteErr) => {
@@ -6019,6 +6257,7 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
                         // 6. 同步模型状态：根据目标状态决定模型状态
                         // ARCHIVED → OPEN: 模型变为 CREATED（待开发）
                         // ARCHIVED → CLAIMED: 模型变为 DEVELOPING（开发中）
+                        //    （验收记录置失效已在进入本分支、任何写入之前完成，见上方 #77 C1a 注释）
                         if (row.linked_model_id) {
                             const modelStatus = newStatus === 'CLAIMED' ? 'DEVELOPING' : 'CREATED';
                             db.run("UPDATE data_models SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
@@ -6040,6 +6279,26 @@ app.post('/api/reopen', authenticateToken, requirePublisherOrAdmin, (req, res) =
                 stmt.finalize();
             });
         });
+        };
+        if (!row.linked_model_id) return proceedArchivedReopen();
+        // L1：归档期间关联模型可能被转成伴生（伴生转换只拦未归档任务）；退回会让任务重新未归档并关联伴生 → 受困。
+        //   前置查询先于置失效（被拒绝的请求不产生任何写入）；任务状态 UPDATE 另带同一语句级条件（见上 proceedArchivedReopen）。
+        //   DONE → CLAIMED 分支不需要：任务处于 DONE 时它是未归档任务，伴生转换已被拦（syncCompanionTable 条件 UPDATE + PUT 前置检查）。
+        //   现状下归档任务可经 /api/update 改关联主表模型（H3 只拦 DONE），故文案指向该路径。
+        db.get("SELECT companion_of FROM data_models WHERE id = ?", [row.linked_model_id], (cErr, cm) => {
+            if (cErr) return res.status(500).json({ error: cErr.message });
+            if (cm && cm.companion_of != null) return res.status(400).json({ error: REOPEN_COMPANION_MSG });
+            db.run("UPDATE model_test_records SET invalidated = 1 WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL)",
+                [row.linked_model_id],
+                (invErr) => {
+                    if (invErr) {
+                        logger.error("Failed to invalidate model test records on reopen:", invErr);
+                        return res.status(500).json({ error: "Failed to invalidate acceptance records: " + invErr.message });
+                    }
+                    proceedArchivedReopen();
+                }
+            );
+        });
     });
 });
 
@@ -6056,11 +6315,25 @@ app.post('/api/update', authenticateToken, requirePublisherOrAdmin, async (req, 
     }
 
     try {
+        // H3：任务已 DONE 时不得改 / 清关联模型（否则管理员可解除关联绕过按关联模型 layer 的归档验收门禁）；退回路径：POST /api/reopen（DONE → CLAIMED）。零写入，其他字段与其他状态行为不变
+        const curTask = await dbGetAsync("SELECT status, linked_model_id FROM task_pool WHERE id = ?", [id]);
+        if (curTask && curTask.status === 'DONE') {
+            const want = linked_model_id ? Number(linked_model_id) : null;
+            const have = curTask.linked_model_id == null ? null : Number(curTask.linked_model_id);
+            if (want !== have) return res.status(400).json({ error: TASK_DONE_LINK_LOCKED_MSG });
+        }
         if (linked_model_id) {
             // 校验模型存在
-            const model = await dbGetAsync("SELECT table_name FROM data_models WHERE id = ?", [linked_model_id]);
+            const model = await dbGetAsync("SELECT table_name, companion_of FROM data_models WHERE id = ?", [linked_model_id]);
             if (!model) {
                 return res.status(400).json({ error: "Model not found" });
+            }
+            // K1：伴生表不能单独关联任务（前置查询；UPDATE 语句本身另带同一条件）
+            // L5：关联未改（请求值 = 任务当前值）时跳过伴生检查——已归档 / 历史上挂着伴生的任务仍可改标题等字段（UPDATE 条件同步放过）
+            //   N4：只对已归档任务生效（未归档任务即使关联未改，目标是伴生也 400——否则它会带着伴生关联继续流转）
+            const linkUnchanged = !!curTask && curTask.status === 'ARCHIVED' && curTask.linked_model_id != null && Number(linked_model_id) === Number(curTask.linked_model_id);
+            if (model.companion_of != null && !linkUnchanged) {
+                return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
             }
 
             // 校验模型活跃任务唯一性：排除自身
@@ -6073,19 +6346,35 @@ app.post('/api/update', authenticateToken, requirePublisherOrAdmin, async (req, 
             }
 
             // 更新任务，包括模型关联
+            // K1：语句级条件写——目标模型已是伴生则零写入（changes = 0 时再区分任务不存在 / 被伴生转换抢先）
+            // 末次合并审 H3：同一条语句再带 DONE 门条件（status 非 DONE，或关联值与当前相同）——前置 SELECT 与本语句之间有 await，DONE 提交可能插进来
             const result = await dbRunAsync(
-                "UPDATE task_pool SET title = ?, desc = ?, category = ?, linked_model_id = ?, linked_model_name = ? WHERE id = ?",
-                [title, desc || '', validCategory, linked_model_id, model.table_name, id]
+                "UPDATE task_pool SET title = ?, desc = ?, category = ?, linked_model_id = ?, linked_model_name = ? WHERE id = ? AND ((linked_model_id = ? AND status = 'ARCHIVED') OR NOT EXISTS (SELECT 1 FROM data_models WHERE id = ? AND companion_of IS NOT NULL)) AND (status IS NULL OR status != 'DONE' OR linked_model_id IS ?)",
+                [title, desc || '', validCategory, linked_model_id, model.table_name, id, linked_model_id, linked_model_id, linked_model_id]
             );
-            if (result.changes === 0) return res.status(404).json({ error: "Task not found" });
+            if (result.changes === 0) {
+                // changes = 0 重读分流：任务不存在 → 404；DONE 且关联会变 → 400（同前置文案）；目标仍是伴生 → 400（K1）；其他（状态在两次读之间又变回去）→ 409
+                const again = await dbGetAsync("SELECT status, linked_model_id FROM task_pool WHERE id = ?", [id]);
+                if (!again) return res.status(404).json({ error: "Task not found" });
+                if (again.status === 'DONE' && (again.linked_model_id == null ? null : Number(again.linked_model_id)) !== Number(linked_model_id)) return res.status(400).json({ error: TASK_DONE_LINK_LOCKED_MSG });
+                const compNow = await dbGetAsync("SELECT 1 AS x FROM data_models WHERE id = ? AND companion_of IS NOT NULL", [linked_model_id]);
+                if (compNow) return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
+                return res.status(409).json({ error: TASK_LINK_CHANGED_MSG });
+            }
             res.json({ message: "Task updated successfully" });
         } else {
             // 如果没有提供linked_model_id，清空模型关联
+            // 末次合并审 H3：清空关联同样带 DONE 门条件（DONE 任务只有「当前本来就没关联」才放行）
             const result = await dbRunAsync(
-                "UPDATE task_pool SET title = ?, desc = ?, category = ?, linked_model_id = NULL, linked_model_name = NULL WHERE id = ?",
+                "UPDATE task_pool SET title = ?, desc = ?, category = ?, linked_model_id = NULL, linked_model_name = NULL WHERE id = ? AND (status IS NULL OR status != 'DONE' OR linked_model_id IS NULL)",
                 [title, desc || '', validCategory, id]
             );
-            if (result.changes === 0) return res.status(404).json({ error: "Task not found" });
+            if (result.changes === 0) {
+                const again = await dbGetAsync("SELECT status FROM task_pool WHERE id = ?", [id]);
+                if (!again) return res.status(404).json({ error: "Task not found" });
+                if (again.status === 'DONE') return res.status(400).json({ error: TASK_DONE_LINK_LOCKED_MSG });
+                return res.status(409).json({ error: TASK_LINK_CHANGED_MSG });
+            }
             res.json({ message: "Task updated successfully" });
         }
     } catch (err) {
@@ -7182,6 +7471,7 @@ app.post('/api/tasks/:id/resolve', authenticateToken, requireNonViewer, (req, re
 // 1. 获取模型列表 (需要登录)
 // 性能优化：合并重复子查询，使用索引 idx_task_linked_model_status
 app.get('/api/models', authenticateToken, (req, res) => {
+    const listStartedAt = Date.now();   // #77 C2b-3：列表总耗时（含关系计数）超过 300ms 记日志
     // 允许通过 query 参数过滤, 也可以不传参数获取全部
     const { layer, owner, keyword } = req.query;
     let sql = `
@@ -7235,8 +7525,40 @@ app.get('/api/models', authenticateToken, (req, res) => {
 
     sql += " ORDER BY dm.table_name"; // 默认按表名排序, 方便下拉选择
 
-    db.all(sql, params, (err, rows) => {
+    db.all(sql, params, async (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
+        // #77 C1a：每行追加 acceptance { state, at, rows, stages, prevResult }（一次批量取该批模型的验收记录 + 内存计算，不 N+1；
+        //   不带 opts.task，只看版本，与抽屉口径一致；stages / prevResult 键恒在（无则 null）仅供展示，不得推导 state；impl_obj_names 见下）
+        try {
+            const recordMap = await fetchRecordsByModelIds(db, rows.map(r => r.id));
+            for (const r of rows) {
+                const ev = evaluateAcceptance(r, recordMap.get(Number(r.id)) || []);
+                r.acceptance = { state: ev.state, at: ev.at, rows: ev.rows };
+                r.acceptance.stages = ev.stages ? { structure: ev.stages.structure, data: ev.stages.data } : null;
+                r.acceptance.prevResult = ev.state === 'stale' ? (ev.prevResult ?? null) : null;
+            }
+        } catch (accErr) {
+            // 验收摘要只是附加信息：失败不拖垮列表，该批 acceptance 置 null，前端按「未知」处理
+            logger.error('Failed to attach acceptance summary to model list:', accErr);
+            for (const r of rows) r.acceptance = null;
+        }
+        // #77 C4-api：每行追加 impl_obj_names（已登记实现对象显示名）。独立字段、不进 rel（verify-model-relations 锁 rel 键集合）；
+        //   一次聚合 + 内存分组，不 N+1；附加信息，失败不拖垮列表，该批置 null。放在关系计数块之前，让 attachRelCounts 的 300ms 慢日志仍覆盖整个处理器
+        try {
+            const nameMap = await implObjectsModule.listObjectNamesByModel();
+            for (const r of rows) r.impl_obj_names = nameMap.get(Number(r.id)) || [];
+        } catch (nameErr) {
+            logger.error('Failed to attach implementation object names to model list:', nameErr);
+            for (const r of rows) r.impl_obj_names = null;
+        }
+        // #77 C2b-3：每行追加 rel { obj, up, down }（方案 §4.5；下游计数与 /downstream、/relations 同源，在内存里对全量 dim_config 匹配一次）。
+        //   与 acceptance 同样是附加信息：失败不拖垮列表，该批 rel 置 null
+        try {
+            await modelRelationsModule.attachRelCounts(rows, { startedAt: listStartedAt });
+        } catch (relErr) {
+            logger.error('Failed to attach relation counts to model list:', relErr);
+            for (const r of rows) r.rel = null;
+        }
         res.json(rows);
     });
 });
@@ -7399,7 +7721,7 @@ app.get('/api/tasks/:id/downstream-deps', authenticateToken, (req, res) => {
 
 // 2. 注册新模型
 app.post('/api/models', authenticateToken, requireNonViewer, (req, res) => {
-    const { layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, dim_config, config_mode, design_notes } = req.body;
+    const { layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, dim_config, config_mode, design_notes, impl_note } = req.body;
 
     if (!table_name || !layer) {
         return res.status(400).json({ error: "表名(table_name)和分层(layer)必填" });
@@ -7451,8 +7773,14 @@ app.post('/api/models', authenticateToken, requireNonViewer, (req, res) => {
                         return res.status(500).json({ error: deleteErr.message });
                     }
                     logger.info(`物理删除成功，继续注册新模型`);
+                    // #77 C2b-1 修复 1（W2 清洁性收口）：旧行已物理删除，清掉指向它的实现对象关系（清洁性收口：data_models 为 AUTOINCREMENT，id 不复用，残留关系只是指向不存在的模型）；
+                    //   失败只记日志，不阻断注册（读取路径本就过滤不存在 / 已删除的模型）。
+                    implObjectsModule.purgeLinksOfModel(existingModel.id)
+                        .catch((pErr) => logger.error(`同名重注册：清理旧模型 id=${existingModel.id} 的实现对象关系失败: ${pErr && pErr.message}`))
+                        .then(() => {
                     // 删除成功后继续注册新模型
                     doInsertModel();
+                        });
                 });
                 return;
             } else {
@@ -7469,11 +7797,11 @@ app.post('/api/models', authenticateToken, requireNonViewer, (req, res) => {
     function doInsertModel() {
         const stmt = db.prepare(`
             INSERT INTO data_models
-            (layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, model_type, category, status, created_by_id, dim_config, config_mode, design_notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?)
+            (layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, model_type, category, status, created_by_id, dim_config, config_mode, design_notes, impl_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
         `);
 
-        stmt.run(layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system || null, source_table || null, req.body.model_type || 'TABLE', category, createdById, dimConfigJson, finalConfigMode, design_notes || null, function (err) {
+        stmt.run(layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system || null, source_table || null, req.body.model_type || 'TABLE', category, createdById, dimConfigJson, finalConfigMode, design_notes || null, impl_note || null, function (err) {
             if (err) {
                 if (err.message.includes('UNIQUE')) {
                     return res.status(400).json({ error: "该表名已存在" });
@@ -7558,11 +7886,19 @@ app.post('/api/models/:id/quick-submit', authenticateToken, requireNonViewer, as
         const taskTitle = `${model.table_name} 模型开发`;
         const taskDesc = `由「注册并完成开发」快捷通道自动创建。模型：${model.table_name}（${model.table_comment || ''})`;
 
+        // K1：伴生表不能单独关联任务（前置查询；INSERT 语句本身另带同一条件，零写入）
+        if (model.companion_of != null) {
+            return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
+        }
         const insertResult = await dbRunAsync(
             `INSERT INTO task_pool (title, desc, status, created_by, owner, owner_id, category, priority, linked_model_id, created_at, claimed_at, done_at)
-             VALUES (?, ?, 'DONE', ?, ?, ?, ?, 'P1', ?, ?, ?, ?)`,
-            [taskTitle, taskDesc, userId, userName, userId, taskCategory, parseInt(id), beijingTime, beijingTime, beijingTime]
+             SELECT ?, ?, 'DONE', ?, ?, ?, ?, 'P1', ?, ?, ?, ?
+             WHERE NOT EXISTS (SELECT 1 FROM data_models WHERE id = ? AND companion_of IS NOT NULL)`,
+            [taskTitle, taskDesc, userId, userName, userId, taskCategory, parseInt(id), beijingTime, beijingTime, beijingTime, parseInt(id)]
         );
+        if (insertResult.changes === 0) {
+            return res.status(400).json({ error: COMPANION_LINK_FORBIDDEN_MSG });
+        }
 
         const taskId = insertResult.lastID;
 
@@ -7644,9 +7980,11 @@ app.delete('/api/models/:id', authenticateToken, requireNonViewer, async (req, r
                 if (err) return res.status(500).json({ error: err.message });
 
                 // 级联软删除伴生表
-                db.run(`UPDATE data_models SET is_deleted = 1, deleted_at = datetime('now','localtime'),
+                //   #77 C2b-1：下面「删关系」只删 is_deleted = 1 的伴生表的关系，必须等本条 UPDATE 完成再执行
+                //   （sqlite3 默认并行模式下同一连接上的语句不保证按发出顺序完成，曾实测偶发漏删伴生表关系）
+                const companionCascadeDone = new Promise((resolve) => db.run(`UPDATE data_models SET is_deleted = 1, deleted_at = datetime('now','localtime'),
                     deleted_by = ?, delete_reason = '主表被删除' WHERE companion_of = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
-                    [userId, id]);
+                    [userId, id], (cascadeErr) => { if (cascadeErr) logger.error(`模型 id=${id} 级联软删除伴生表失败: ${cascadeErr.message}`); resolve(); }));
 
                 // 如果删除的是伴生表，同步将主表的 changeTracking.enabled 置为 false
                 if (model.companion_of) {
@@ -7657,9 +7995,16 @@ app.delete('/api/models/:id', authenticateToken, requireNonViewer, async (req, r
                             const ct = cfg.dwdConfig?.changeTracking || cfg.changeTracking;
                             if (ct && ct.enabled) {
                                 ct.enabled = false;
-                                db.run(`UPDATE data_models SET dim_config = ?, updated_at = datetime('now','localtime') WHERE id = ?`,
-                                    [JSON.stringify(cfg), parent.id]);
-                                logger.info(`伴生表 id=${id} 被删除，主表 id=${parent.id} 的 changeTracking.enabled 已置为 false`);
+                                // #77 C1a（A 表）：主表 ETL 不再写伴生表 = 产出变化，写入发生即 config_rev +1。
+                                //   「回写 dim_config」与「config_rev 递增」合成同一条 UPDATE（并入 CONFIG_REV_BUMP_SQL，参数恒 1）：
+                                //   单语句自动提交即原子，不存在「只递增未回写 / 只回写未递增」的中间态，也不需要两步链。
+                                //   失败仍只记日志，与改动前行为一致。
+                                db.run(`UPDATE data_models SET dim_config = ?, ${CONFIG_REV_BUMP_SQL}, updated_at = datetime('now','localtime') WHERE id = ?`,
+                                    [JSON.stringify(cfg), 1, parent.id],
+                                    (updErr) => {
+                                        if (updErr) logger.error(`伴生表 id=${id} 被删除，主表 id=${parent.id} 回写 dim_config（含 config_rev 递增）失败:`, updErr);
+                                        else logger.info(`伴生表 id=${id} 被删除，主表 id=${parent.id} 的 changeTracking.enabled 已置为 false`);
+                                    });
                             }
                         } catch(e) { /* ignore parse error */ }
                     });
@@ -7678,7 +8023,13 @@ app.delete('/api/models/:id', authenticateToken, requireNonViewer, async (req, r
                     operatorName: userName
                 });
 
-                res.json({ message: "模型已删除" });
+                // #77 C2b-1（方案 §4.3）：模型软删除只删其实现对象关系（含级联软删除的伴生表的关系），不删对象——对象可能因此变为未归属。
+                //   接入方式：软删除 UPDATE 已提交之后、响应之前，等 removeLinksForDeletedModel（占实现对象模块锁的单条 DELETE）完成再响应。
+                //   原子性：与上面的软删除 UPDATE 不是同一事务（共享连接上无法原子合并）；删关系失败只记日志、不让删除响应失败——
+                //   此时只留下指向已删模型的脏关系，所有读取路径都过滤「模型已删除」的关系，不可见；模型恢复也不会自动恢复关系。
+                companionCascadeDone.then(() => implObjectsModule.removeLinksForDeletedModel(model.id))
+                    .catch((linkErr) => logger.error(`模型 id=${model.id} 软删除后清理实现对象关系失败（脏关系已被读取路径过滤）: ${linkErr && linkErr.message}`))
+                    .then(() => res.json({ message: "模型已删除" }));
             }
         );
     } catch (err) {
@@ -7701,6 +8052,15 @@ app.post('/api/models/:id/restore', authenticateToken, requireAdmin, async (req,
     const operatorName = req.user.display_name || req.user.username;
 
     try {
+        // #77 C2b-1 修复 1（W2·H2）：恢复（is_deleted 改回 0）之前先清掉该模型的实现对象关系——模型软删除后「删关系」若失败会留下脏关系，
+        //   恢复会让它们复活（方案 §4.3：模型恢复不自动恢复关系）。fail-closed：清理失败 ⇒ 500，拒绝恢复，模型仍为已删除。
+        //   onlyIfDeleted：模型已处于恢复状态时重复调用本端点不得清掉其有效关系。
+        try {
+            await implObjectsModule.purgeLinksOfModel(modelId, { onlyIfDeleted: true });
+        } catch (purgeErr) {
+            logger.error(`恢复模型前清理实现对象关系失败 id=${modelId}: ${purgeErr && purgeErr.message}`);
+            return res.status(500).json({ error: '恢复模型失败：清理实现对象关系未成功，模型保持已删除状态', code: 'MODEL_RESTORE_LINK_PURGE_FAILED' });
+        }
         const result = await restoreModelRecord({
             modelId,
             operatorId: req.user.id,
@@ -7728,7 +8088,7 @@ app.post('/api/models/:id/restore', authenticateToken, requireAdmin, async (req,
 // 4. 更新模型 (需要登录，权限校验：管理员/发布者可编辑所有，开发者仅能编辑自己注册的)
 app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res) => {
     const { id } = req.params;
-    const { table_name, table_comment, tech_owner, biz_owner, status, source_system, source_table, category, dim_config, update_cycle, domain, config_mode, design_notes } = req.body;
+    const { table_name, table_comment, tech_owner, biz_owner, status, source_system, source_table, category, dim_config, update_cycle, domain, config_mode, design_notes, impl_note } = req.body;
     const userRole = req.user.role;
     const userId = req.user.id;
     const userName = req.user.display_name || req.user.username;
@@ -7788,30 +8148,6 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
         // 判断变更类型 - 使用深度比较检测是否有实际变化
         const dimConfigProvided = dim_config !== undefined;
         const hasDimConfigChange = dimConfigProvided && hasDimConfigActualChange(oldDimConfig, dim_config);
-        const hasTableNameChange = table_name && table_name !== oldModel.table_name;
-        const hasBasicInfoChange = hasTableNameChange ||
-            (table_comment !== undefined && table_comment !== oldModel.table_comment) ||
-            (tech_owner !== undefined && tech_owner !== oldModel.tech_owner) ||
-            (biz_owner !== undefined && biz_owner !== oldModel.biz_owner) ||
-            (status !== undefined && status !== oldModel.status) ||
-            (source_system !== undefined && source_system !== oldModel.source_system) ||
-            (source_table !== undefined && source_table !== oldModel.source_table) ||
-            (category !== undefined && category !== oldModel.category) ||
-            (update_cycle !== undefined && update_cycle !== oldModel.update_cycle) ||
-            (domain !== undefined && domain !== oldModel.domain) ||
-            (config_mode !== undefined && config_mode !== oldModel.config_mode) ||
-            (design_notes !== undefined && design_notes !== oldModel.design_notes);
-
-        // 如果没有任何实际变化，仍需检查伴生表是否需要补建，然后返回
-        if (!hasDimConfigChange && !hasBasicInfoChange) {
-            if (oldModel.layer && oldModel.layer.toUpperCase() === 'DWD') {
-                ensureCompanionExists(oldModel.id, oldDimConfig, oldModel, userId);
-            }
-            return res.json({ message: "模型更新成功", noChange: true });
-        }
-
-        // 构建更新语句
-        let sql, params;
         // 计算实际要写入的值（如果前端没传则保持原值）
         const finalTableName = table_name || oldModel.table_name;
         const finalTableComment = table_comment !== undefined ? table_comment : oldModel.table_comment;
@@ -7824,6 +8160,79 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
         const finalUpdateCycle = update_cycle !== undefined ? (update_cycle || null) : oldModel.update_cycle;
         const finalDomain = domain !== undefined ? (domain || null) : oldModel.domain;
         const finalConfigMode = config_mode !== undefined ? (config_mode || 'standard') : (oldModel.config_mode || 'standard');
+        // #77 C2a：B 类字段，未带则保留旧值（与 design_notes 同语义），带了则空串置 NULL
+        const finalImplNote = impl_note !== undefined ? (impl_note || null) : (oldModel.impl_note || null);
+        const finalDesignNotes = design_notes !== undefined ? (design_notes || null) : (oldModel.design_notes || null);
+        // #77 C2a：基本信息是否有变化 = final 值与旧值按「摘要同口径」的规范化比较（normForSummary，空值等价；库里 NULL、请求带规范默认值 = 无变化）。
+        //   model_type 不参与（既有行为：单独改它走 noChange）。
+        const BASIC_INFO_FINALS = {
+            table_name: finalTableName, table_comment: finalTableComment, tech_owner: finalTechOwner, biz_owner: finalBizOwner, status: finalStatus,
+            source_system: finalSourceSystem, source_table: finalSourceTable, category: finalCategory, update_cycle: finalUpdateCycle,
+            domain: finalDomain, config_mode: finalConfigMode, design_notes: finalDesignNotes, impl_note: finalImplNote
+        };
+        const hasBasicInfoChange = Object.entries(BASIC_INFO_FINALS).some(([k, v]) => normForSummary(k, v) !== normForSummary(k, oldModel[k]));
+
+        // 如果没有任何实际变化，仍需检查伴生表是否需要补建，然后返回
+        if (!hasDimConfigChange && !hasBasicInfoChange) {
+            if (oldModel.layer && oldModel.layer.toUpperCase() === 'DWD') {
+                ensureCompanionExists(oldModel.id, oldDimConfig, oldModel, userId);
+            }
+            return res.json({ message: "模型更新成功", noChange: true });
+        }
+
+        // #77 C1 对抗审 F2：开启变更追踪会把「已存在的同名模型行」改成伴生表（此后验收判定恒为 companion、gatePass=false）。
+        //   该行若挂着未归档任务，任务将永远无法归档——设置伴生前先拦（零写入：本检查在主表 UPDATE 之前）。
+        //   检查只对应 syncCompanionTable 实际会写 companion_of 的那一行，逐分支对照（nowEnabled = 新 changeTracking.enabled === true，wasEnabled = 旧值；
+        //   伴生表名派生规则与 syncCompanionTable 相同：changeTableName || 主表名把 _df 结尾换成 _change_di）：
+        //     (a) wasEnabled 且已有 companion_of = 本主表的活跃伴生 → syncCompanionTable 只同步伴生元数据、不改 companion_of → 不检查；
+        //     (b) wasEnabled 且无活跃伴生 → 按表名取同一行（SELECT id, is_deleted FROM data_models WHERE table_name = ?，与 syncCompanionTable 的 db.get 完全相同）：
+        //         已删除 → syncCompanionTable 记日志后跳过、不写（代码里该支不 restore）→ 不检查；未删除 → link-by-name 会写它 → 检查；
+        //     (c) 此前未启用（!wasEnabled && nowEnabled）→ 取同一行：已删除 → companion-restore 会写它；未删除 → companion-link-existing 会写它 → 都检查；无行 → 走 INSERT，不检查。
+        //   task_pool 无 is_deleted 列，按表实际列只看 status != 'ARCHIVED'。
+        if (dimConfigProvided && oldModel.layer && oldModel.layer.toUpperCase() === 'DWD') {
+            const newCT = dim_config?.dwdConfig?.changeTracking || dim_config?.changeTracking;
+            const oldCT = oldDimConfig?.dwdConfig?.changeTracking || oldDimConfig?.changeTracking;
+            if (newCT?.enabled === true) {
+                const wasEnabledCT = oldCT?.enabled === true;
+                const companionTableName = newCT?.changeTableName || oldModel.table_name.replace(/_df$/, '_change_di');
+                // Q2 ①（既有缺陷）：主表名不以 _df 结尾且未设 changeTableName 时派生伴生名 = 主表名，syncCompanionTable 会把主表自己设成伴生。
+                //   硬校验：伴生表名与主表名（含本次可能改的新表名）不区分大小写相同 ⇒ 400，零写入，与有无任务无关。
+                if ([oldModel.table_name, table_name].some(n => n && String(n).toLowerCase() === String(companionTableName).toLowerCase())) {
+                    return res.status(400).json({ error: '变更追踪表名不能与主表同名' });
+                }
+                let targetRow = null;
+                if (wasEnabledCT) {
+                    const activeCompanion = await dbGetAsync('SELECT id FROM data_models WHERE companion_of = ? AND (is_deleted = 0 OR is_deleted IS NULL)', [oldModel.id]);
+                    if (!activeCompanion) {
+                        const byName = await dbGetAsync('SELECT id, is_deleted FROM data_models WHERE table_name = ?', [companionTableName]);
+                        if (byName && byName.is_deleted != 1) targetRow = byName;
+                    }
+                } else {
+                    targetRow = await dbGetAsync('SELECT id, is_deleted FROM data_models WHERE table_name = ?', [companionTableName]) || null;
+                }
+                if (targetRow) {
+                    const openTasks = await dbAllAsync("SELECT id FROM task_pool WHERE linked_model_id = ? AND (status IS NULL OR status != 'ARCHIVED') ORDER BY id", [targetRow.id]);
+                    if (openTasks.length > 0) {
+                        return res.status(400).json({ error: `伴生表 ${companionTableName} 对应的模型仍有未归档的关联任务（${openTasks.map(t => '#' + t.id).join('、')}），请先归档或解除关联后再启用变更追踪` });
+                    }
+                    // #77 C2b-1 修复 2（V1·MED-1）：未删除的独立模型将被转成伴生表（link-existing / link-by-name 共用本检查；已删除的目标走 companion-restore，
+                    //   其残留关系由 purgeLinksOfModel 清理）。伴生表不持有实现对象关系（方案 §3），而转换时清关系既不递增 config_rev 也不留痕——
+                    //   所以在转换之前阻断：有有效关系（对象未删除）⇒ 400，要求先解除挂接（解挂会走 impl-links 的递增与留痕）。
+                    //   转换后 8461 / 8533 处的 purge 保留为清洁性兜底（正常情况下此时已无关系）。
+                    if (targetRow.is_deleted != 1) {
+                        const hasLinks = await dbGetAsync(
+                            'SELECT 1 AS x FROM model_impl_links l JOIN model_impl_objects o ON o.id = l.object_id AND o.is_deleted = 0 WHERE l.model_id = ? LIMIT 1', [targetRow.id]);
+                        if (hasLinks) {
+                            return res.status(400).json({ error: `伴生表 ${companionTableName} 对应的模型仍挂接着实现对象，请先解除实现对象挂接后再启用变更追踪`, code: 'COMPANION_TARGET_HAS_LINKS' });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 构建更新语句
+        let sql, params;
+        // （实际写入值 final* 已在上面「判断变更类型」之前算好）
 
         // 字段变更时间戳：对比新旧 dim_config，自动给新增字段打 addedAt、修改字段打 modifiedAt
         if (hasDimConfigChange && dim_config && oldDimConfig) {
@@ -7858,6 +8267,21 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
                 (f, o) => f.dataType !== o.dataType || f.srcField !== o.srcField);
         }
 
+        // #77 C1a（方案 v0.9 §4.1.1 A 表）：A 类字段是否变化，在 JS 里判定后以参数 0 / 1 并入同一条 UPDATE
+        //   （单语句自动提交即原子；不开显式事务）。
+        //   dim_config：剔除 changeTracking.companionModelId 簿记字段后深比较；
+        //   table_name / source_system / source_table / update_cycle / config_mode：按「实际写入值」与旧值比较
+        //   （空串与 NULL 视同空；config_mode 空值视同 standard，与写入口径一致）。
+        const normEmpty = v => (v === undefined || v === null || v === '') ? null : v;
+        const configRevChanged =
+            (dimConfigProvided && hasDimConfigActualChange(stripDimConfigBookkeeping(oldDimConfig), stripDimConfigBookkeeping(dim_config))) ||
+            normEmpty(finalTableName) !== normEmpty(oldModel.table_name) ||
+            normEmpty(finalSourceSystem) !== normEmpty(oldModel.source_system) ||
+            normEmpty(finalSourceTable) !== normEmpty(oldModel.source_table) ||
+            normEmpty(finalUpdateCycle) !== normEmpty(oldModel.update_cycle) ||
+            normEmpty(finalConfigMode) !== normEmpty(oldModel.config_mode || 'standard');
+        const configRevBump = configRevChanged ? 1 : 0;
+
         if (dimConfigProvided) {
             const dimConfigJson = dim_config ? JSON.stringify(dim_config) : null;
             sql = `
@@ -7865,38 +8289,48 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
                 SET table_name = ?, table_comment = ?, tech_owner = ?, biz_owner = ?, status = ?,
                     source_system = ?, source_table = ?, model_type = ?, category = ?,
                     update_cycle = ?, domain = ?, config_mode = ?,
-                    dim_config = ?, design_notes = ?, updated_at = datetime('now', 'localtime')
-                WHERE id = ?
+                    dim_config = ?, design_notes = ?, impl_note = ?, ${CONFIG_REV_BUMP_SQL}, updated_at = datetime('now', 'localtime')
+                WHERE id = ? AND config_rev IS ?
             `;
-            const finalDesignNotes = design_notes !== undefined ? (design_notes || null) : (oldModel.design_notes || null);
             params = [
                 finalTableName, finalTableComment, finalTechOwner, finalBizOwner, finalStatus,
                 finalSourceSystem, finalSourceTable,
                 req.body.model_type || oldModel.model_type || 'TABLE', finalCategory,
                 finalUpdateCycle, finalDomain, finalConfigMode,
-                dimConfigJson, finalDesignNotes, id
+                dimConfigJson, finalDesignNotes, finalImplNote, configRevBump, id, oldModel.config_rev
             ];
         } else {
             sql = `
                 UPDATE data_models
                 SET table_name = ?, table_comment = ?, tech_owner = ?, biz_owner = ?, status = ?,
                     source_system = ?, source_table = ?, model_type = ?, category = ?,
-                    update_cycle = ?, domain = ?, config_mode = ?, design_notes = ?,
+                    update_cycle = ?, domain = ?, config_mode = ?, design_notes = ?, impl_note = ?,
+                    ${CONFIG_REV_BUMP_SQL},
                     updated_at = datetime('now', 'localtime')
-                WHERE id = ?
+                WHERE id = ? AND config_rev IS ?
             `;
-            const finalDesignNotes2 = design_notes !== undefined ? (design_notes || null) : (oldModel.design_notes || null);
             params = [
                 finalTableName, finalTableComment, finalTechOwner, finalBizOwner, finalStatus,
                 finalSourceSystem, finalSourceTable,
                 req.body.model_type || oldModel.model_type || 'TABLE', finalCategory,
-                finalUpdateCycle, finalDomain, finalConfigMode, finalDesignNotes2,
-                id
+                finalUpdateCycle, finalDomain, finalConfigMode, finalDesignNotes, finalImplNote,
+                configRevBump, id, oldModel.config_rev
             ];
         }
 
         db.run(sql, params, function (err) {
             if (err) return res.status(500).json({ error: err.message });
+            // 末次合并审 H2：版本条件写——WHERE 带读到旧行时的 config_rev（单条语句，不开事务）。changes = 0 说明读与写之间别的请求已递增过这一行的 config_rev，或这一行已被硬删除，
+            //   此时本请求的 A 类判定与递增都基于过期的旧行，整请求不落库、不记日志、不级联；重读分流：不存在 / 已删除 → 404，否则 409 让调用方刷新重试。
+            //   404 只覆盖「硬删」与「删除的同时递增了 config_rev」两种；软删除本身不递增 config_rev（:7974-7978），所以「读旧行之后被别人软删、且没有同时递增」时
+            //   UPDATE 照常命中、照常写日志（与 main 同为既有行为，本批不改 SQL）。
+            if (this.changes === 0) {
+                return db.get("SELECT id FROM data_models WHERE id = ? AND (is_deleted = 0 OR is_deleted IS NULL)", [id], (rErr, still) => {
+                    if (rErr) return res.status(500).json({ error: rErr.message });
+                    if (!still) return res.status(404).json({ error: "模型不存在" });
+                    return res.status(409).json({ error: MODEL_STALE_WRITE_MSG });
+                });
+            }
 
             // 记录变更日志（只有实际变化时才记录）
             const beforeValue = {
@@ -7904,9 +8338,14 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
                 dim_config: oldDimConfig
             };
             const afterValue = {
-                table_comment, tech_owner, biz_owner, status,
-                source_system, source_table, category,
-                model_type: req.body.model_type || 'TABLE',
+                // #77 C2a：全部取实际写入的 final 值（请求未带某字段 = 等于旧值，摘要不再误报为变化）
+                table_comment: finalTableComment, tech_owner: finalTechOwner, biz_owner: finalBizOwner, status: finalStatus,
+                source_system: finalSourceSystem, source_table: finalSourceTable, category: finalCategory,
+                model_type: req.body.model_type || oldModel.model_type || 'TABLE',
+                // #77 C2a：与 generateChangeSummary 字段对照表成对维护（取实际写入值，未带字段即等于旧值，不误报）
+                impl_note: finalImplNote, design_notes: finalDesignNotes,
+                table_name: finalTableName, domain: finalDomain,
+                update_cycle: finalUpdateCycle, config_mode: finalConfigMode,
                 dim_config: dim_config || oldDimConfig
             };
 
@@ -7947,6 +8386,89 @@ app.put('/api/models/:id', authenticateToken, requireNonViewer, async (req, res)
     }
 });
 
+// #77 C2a 修复（codex 24 H1）：表注释拆分迁移专用的「原子条件写」接口（仅 admin）。
+//   只改 table_comment / impl_note 两列（B 类：不递增 config_rev），条件（旧值 / 未删除 / 可选伴生归属）与写入合成同一条 UPDATE，
+//   不满足 → 409 precondition_failed 并带当前值，零写入。迁移脚本的 apply / revert 一律走这里，不再走通用 PUT。
+app.put('/api/models/:id/comment-split', authenticateToken, requireAdmin, async (req, res) => {
+    const modelId = Number(req.params.id);
+    const userId = req.user.id;
+    const userName = req.user.display_name || req.user.username;
+    const body = req.body || {};
+    const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const strOrNull = v => v === null || typeof v === 'string';
+    const { expected, set } = body;
+    if (!Number.isInteger(modelId) || modelId <= 0) return res.status(400).json({ error: '模型 id 不合法' });
+    if (!isObj(expected) || !isObj(set)
+        || !('table_comment' in expected) || !('impl_note' in expected) || !('table_comment' in set) || !('impl_note' in set)
+        || !strOrNull(expected.table_comment) || !strOrNull(expected.impl_note)
+        || typeof set.table_comment !== 'string' || set.table_comment.trim() === '' || !strOrNull(set.impl_note)) {
+        return res.status(400).json({ error: '请求体须为 { expected: { table_comment, impl_note }, set: { table_comment, impl_note } }（set.table_comment 非空字符串，其余为字符串或 null）' });
+    }
+    const hasCompanionCond = body.companion_of !== undefined;
+    if (hasCompanionCond && !(Number.isInteger(body.companion_of) && body.companion_of > 0)) {
+        return res.status(400).json({ error: 'companion_of 须为正整数' });
+    }
+    // S3：可选 parent_only: true（父行条件：companion_of 必须仍为 NULL），与 companion_of 互斥
+    if (body.parent_only !== undefined && typeof body.parent_only !== 'boolean') return res.status(400).json({ error: 'parent_only 须为布尔值' });
+    const parentOnly = body.parent_only === true;
+    if (parentOnly && hasCompanionCond) return res.status(400).json({ error: 'parent_only 与 companion_of 不能同时给出' });
+    // X1（codex 24-R2）：可选 expected_config_rev（整数）：给了则条件写追加 config_rev = ?，不匹配 409；缺省时行为不变
+    if (body.expected_config_rev !== undefined && !Number.isInteger(body.expected_config_rev)) return res.status(400).json({ error: 'expected_config_rev 须为整数' });
+    const hasRevCond = body.expected_config_rev !== undefined;
+    const setImplNote = set.impl_note === '' ? null : set.impl_note;
+    // X7（codex 24-R2）：noChange 判定与 SQL 条件写同一规范化比较（undefined 视同 NULL，其余严格相等 = SQL 的 IS）
+    const sameCol = (a, b) => (a === undefined ? null : a) === (b === undefined ? null : b);
+    try {
+        const pre = await dbGetAsync('SELECT * FROM data_models WHERE id = ?', [modelId]);
+        if (!pre) return res.status(404).json({ error: '模型不存在' });
+        // R4（codex 24-R）：空操作也必须先过存在性 / 删除 / 归属 / 旧值校验（与下面的条件写同口径），条件满足且 expected 与 set 全等才返回 noChange
+        const preCurrent = { table_comment: pre.table_comment, impl_note: pre.impl_note, companion_of: pre.companion_of, is_deleted: pre.is_deleted, config_rev: pre.config_rev };
+        const ownershipOk = (pre.is_deleted === 0 || pre.is_deleted == null) && (!hasCompanionCond || pre.companion_of === body.companion_of) && (!parentOnly || pre.companion_of == null) && (!hasRevCond || pre.config_rev === body.expected_config_rev);
+        const valuesMatch = sameCol(pre.table_comment, expected.table_comment) && sameCol(pre.impl_note, expected.impl_note);
+        // S4：expected 与 set 两列全等 = 空操作：不执行 UPDATE、不写日志
+        if (sameCol(expected.table_comment, set.table_comment) && sameCol(expected.impl_note, setImplNote)) {
+            if (!ownershipOk || !valuesMatch) return res.status(409).json({ error: 'precondition_failed', current: preCurrent });
+            return res.json({ message: '无变化', noChange: true });
+        }
+        // 单条 UPDATE（NULL 安全比较用 IS）；归属条件并入同一语句：未带 companion_of 时两个参数均为 NULL，条件恒真；带了则 companion_of 必须仍等于它；parent_only 为真时 companion_of 必须仍为 NULL
+        const sql = "UPDATE data_models SET table_comment = ?, impl_note = ?, updated_at = datetime('now','localtime') WHERE id = ? AND (is_deleted = 0 OR is_deleted IS NULL) AND table_comment IS ? AND impl_note IS ? AND (? IS NULL OR companion_of = ?) AND (? = 0 OR companion_of IS NULL) AND (? IS NULL OR config_rev = ?)";
+        const companionCond = hasCompanionCond ? body.companion_of : null;
+        const revCond = hasRevCond ? body.expected_config_rev : null;
+        const params = [set.table_comment, setImplNote, modelId, expected.table_comment, expected.impl_note, companionCond, companionCond, parentOnly ? 1 : 0, revCond, revCond];
+        db.run(sql, params, async function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            if (this.changes === 0) {
+                try {
+                    const cur = await dbGetAsync('SELECT table_comment, impl_note, companion_of, is_deleted, config_rev FROM data_models WHERE id = ?', [modelId]);
+                    return res.status(409).json({ error: 'precondition_failed', current: cur || null });
+                } catch (e2) {
+                    return res.status(409).json({ error: 'precondition_failed', current: null });
+                }
+            }
+            let preDim = null;
+            if (pre.dim_config) { try { preDim = JSON.parse(pre.dim_config); } catch (_) { preDim = null; } }
+            const beforeValue = { ...pre, dim_config: preDim, table_comment: expected.table_comment, impl_note: expected.impl_note };
+            const afterValue = { ...beforeValue, table_comment: set.table_comment, impl_note: setImplNote };
+            const changeSummary = generateChangeSummary('UPDATE', beforeValue, afterValue, 'basic_info');
+            insertModelChangeLog({
+                modelId: pre.id,
+                modelName: pre.table_name,
+                action: 'UPDATE',
+                changeType: 'basic_info',
+                beforeValue,
+                afterValue,
+                changeSummary,
+                operatorId: userId,
+                operatorName: userName
+            });
+            res.json({ message: '表注释拆分写入成功' });
+        });
+    } catch (err) {
+        logger.error('comment-split error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // === 伴生表级联管理辅助函数 ===
 function syncCompanionTable(parentId, newConfig, oldConfig, parentModel, userId, userName) {
     const newCT = newConfig?.dwdConfig?.changeTracking || newConfig?.changeTracking;
@@ -7966,24 +8488,47 @@ function syncCompanionTable(parentId, newConfig, oldConfig, parentModel, userId,
         // 先检查是否已存在（可能之前软删除了）
         db.get(`SELECT id, is_deleted FROM data_models WHERE table_name = ?`, [changeTableName], (err, existing) => {
             if (err) return logger.error(`伴生表检查失败: ${err.message}`);
+            // Q2 ②（第二道兜底）：取到的行就是主表自己（伴生名 = 主表名）→ 不写，避免把主表设成自身伴生
+            if (existing && Number(existing.id) === Number(parentId)) {
+                return logger.error(`伴生表名 ${changeTableName} 与主表(id=${parentId})同名，跳过伴生设置（不写）`);
+            }
             if (existing && existing.is_deleted == 1) {
                 // 恢复已删除的伴生表
+                // #77 C2b-1 修复 1（W2）：把 is_deleted 改回 0 之前先清掉该模型的实现对象关系（fail-closed：清理失败 ⇒ 记日志并跳过恢复，不置 0）。
+                //   伴生表不持有关系（方案 §3：伴生表的对象登记在主模型下），历史数据里残留的关系不得随恢复复活。
+                implObjectsModule.purgeLinksOfModel(existing.id, { onlyIfDeleted: true }).then(() => {
+                // mc-write: companion-restore
                 db.run(`UPDATE data_models SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, delete_reason = NULL,
                     companion_of = ?, dim_config = ?, config_mode = 'companion', table_comment = ?,
                     tech_owner = ?, domain = ?, layer = ?, updated_at = datetime('now','localtime')
-                    WHERE id = ?`,
+                    WHERE id = ? AND NOT EXISTS (SELECT 1 FROM task_pool WHERE linked_model_id = data_models.id AND (status IS NULL OR status != 'ARCHIVED'))`,
                     [parentId, companionConfig, (parentModel.table_comment || '') + ' - 变更追踪',
-                     parentModel.tech_owner, parentModel.domain, parentModel.layer, existing.id]);
-                // 更新主表的 changeTracking.companionModelId
-                updateCompanionModelId(parentId, existing.id);
+                     parentModel.tech_owner, parentModel.domain, parentModel.layer, existing.id],
+                    function (runErr) {
+                        // G3：检查「目标行无未归档关联任务」与写 companion_of 合成同一条语句（原子，覆盖 PUT 与任何其他调用路径）；changes = 0 即被跳过
+                        if (runErr) return logger.error(`伴生表恢复失败: ${runErr.message}`);
+                        if (this.changes === 0) return logger.warn(`伴生转换跳过：目标行有未归档关联任务（restore, id=${existing.id}, parent=${parentId}）`);
+                        // 更新主表的 changeTracking.companionModelId
+                        updateCompanionModelId(parentId, existing.id);
+                    });
+                }, (purgeErr) => logger.error(`伴生表恢复已跳过（清理实现对象关系失败，不置 is_deleted = 0）: id=${existing.id}, parent=${parentId}: ${purgeErr && purgeErr.message}`));
             } else if (existing) {
                 // 已存在且未删除 — 更新从属关系
+                // mc-write: companion-link-existing
                 db.run(`UPDATE data_models SET companion_of = ?, dim_config = ?, config_mode = 'companion',
-                    updated_at = datetime('now','localtime') WHERE id = ?`,
-                    [parentId, companionConfig, existing.id]);
-                updateCompanionModelId(parentId, existing.id);
+                    updated_at = datetime('now','localtime') WHERE id = ? AND NOT EXISTS (SELECT 1 FROM task_pool WHERE linked_model_id = data_models.id AND (status IS NULL OR status != 'ARCHIVED'))`,
+                    [parentId, companionConfig, existing.id],
+                    function (runErr) {
+                        if (runErr) return logger.error(`伴生表关联失败: ${runErr.message}`);
+                        if (this.changes === 0) return logger.warn(`伴生转换跳过：目标行有未归档关联任务（link-existing, id=${existing.id}, parent=${parentId}）`);
+                        // #77 C2b-1 修复 3（X1）：独立模型被转成伴生表——前面的 COMPANION_TARGET_HAS_LINKS 预检已挡住常规情形，这里是并发窗口（预检与转换之间被挂接）的兜底：
+                        //   account:true 带记账清理（有关系才清，并递增 config_rev、写 impl_object 变更日志）；失败只记日志
+                        implObjectsModule.purgeLinksOfModel(existing.id, { account: true, expectedParentId: parentId, user: { id: userId, display_name: userName } }).catch((pErr) => logger.error(`伴生转换：清理 id=${existing.id} 的实现对象关系失败: ${pErr && pErr.message}`));
+                        updateCompanionModelId(parentId, existing.id);
+                    });
             } else {
                 // 创建新的伴生表记录
+                // mc-write: companion-insert
                 db.run(`INSERT INTO data_models (layer, domain, table_name, table_comment, tech_owner, biz_owner,
                     update_cycle, status, created_by_id, dim_config, config_mode, companion_of, category)
                     VALUES (?, ?, ?, ?, ?, ?, 'di', ?, ?, ?, 'companion', ?, 'general')`,
@@ -8001,11 +8546,16 @@ function syncCompanionTable(parentId, newConfig, oldConfig, parentModel, userId,
         });
     } else if (!nowEnabled && wasEnabled) {
         // 取消勾选 → 软删除伴生表
+        // mc-write: companion-cancel-tracking-softdelete
         db.run(`UPDATE data_models SET is_deleted = 1, deleted_at = datetime('now','localtime'),
             deleted_by = ?, delete_reason = '主表取消变更追踪' WHERE companion_of = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
             [userId, parentId], function(err) {
                 if (err) return logger.error(`伴生表删除失败: ${err.message}`);
-                if (this.changes > 0) logger.info(`伴生表已软删除: parent=${parentId}, affected=${this.changes}`);
+                if (this.changes > 0) {
+                    logger.info(`伴生表已软删除: parent=${parentId}, affected=${this.changes}`);
+                    // #77 C2b-1 修复 1（W2 清洁性收口）：被软删除的伴生表若有历史残留关系一并清掉（companionsOnly：只清 companion_of = 主表 的子表，不动主表自己的关系）；失败只记日志
+                    implObjectsModule.purgeLinksOfModel(parentId, { companionsOnly: true }).catch((pErr) => logger.error(`取消变更追踪：清理伴生表的实现对象关系失败 parent=${parentId}: ${pErr && pErr.message}`));
+                }
             });
     } else if (nowEnabled && wasEnabled) {
         // 更新伴生表信息（同步主表的 tech_owner、domain 等）
@@ -8018,6 +8568,7 @@ function syncCompanionTable(parentId, newConfig, oldConfig, parentModel, userId,
         db.get(`SELECT id FROM data_models WHERE companion_of = ? AND (is_deleted = 0 OR is_deleted IS NULL)`, [parentId], (err, companion) => {
             if (companion) {
                 // 伴生表已存在且关系正确 — 同步元数据
+                // mc-write: companion-sync-meta
                 db.run(`UPDATE data_models SET table_comment = ?, tech_owner = ?, domain = ?, dim_config = ?,
                     updated_at = datetime('now','localtime') WHERE id = ?`,
                     [(parentModel.table_comment || '') + ' - 变更追踪',
@@ -8026,17 +8577,27 @@ function syncCompanionTable(parentId, newConfig, oldConfig, parentModel, userId,
                 // companion_of 关系未建立（可能是旧数据或已被用户手动删除），按表名查找
                 db.get(`SELECT id, is_deleted FROM data_models WHERE table_name = ?`, [changeTableName], (err2, existing) => {
                     if (err2) return;
+                    if (existing && Number(existing.id) === Number(parentId)) {   // Q2 ②：伴生名 = 主表名，不写
+                        return logger.error(`伴生表名 ${changeTableName} 与主表(id=${parentId})同名，跳过伴生设置（不写）`);
+                    }
                     if (existing && existing.is_deleted == 1) {
                         // 伴生表已被用户手动删除 — 不自动恢复，等用户通过平台重新勾选创建
                         logger.info(`伴生表 ${changeTableName}(id=${existing.id}) 已被删除，跳过自动恢复，需用户手动重建`);
                     } else if (existing) {
                         // 已存在但 companion_of 为空 — 补充从属关系
+                        // mc-write: companion-link-by-name
                         db.run(`UPDATE data_models SET companion_of = ?, dim_config = ?, config_mode = 'companion',
                             table_comment = ?, tech_owner = ?, domain = ?,
-                            updated_at = datetime('now','localtime') WHERE id = ?`,
+                            updated_at = datetime('now','localtime') WHERE id = ? AND NOT EXISTS (SELECT 1 FROM task_pool WHERE linked_model_id = data_models.id AND (status IS NULL OR status != 'ARCHIVED'))`,
                             [parentId, companionConfig, (parentModel.table_comment || '') + ' - 变更追踪',
-                             parentModel.tech_owner, parentModel.domain, existing.id]);
-                        updateCompanionModelId(parentId, existing.id);
+                             parentModel.tech_owner, parentModel.domain, existing.id],
+                            function (runErr) {
+                                if (runErr) return logger.error(`伴生表补充从属关系失败: ${runErr.message}`);
+                                if (this.changes === 0) return logger.warn(`伴生转换跳过：目标行有未归档关联任务（link-by-name, id=${existing.id}, parent=${parentId}）`);
+                                // #77 C2b-1 修复 1（W2 清洁性收口）：同 link-existing
+                                implObjectsModule.purgeLinksOfModel(existing.id, { account: true, expectedParentId: parentId, user: { id: userId, display_name: userName } }).catch((pErr) => logger.error(`伴生转换：清理 id=${existing.id} 的实现对象关系失败: ${pErr && pErr.message}`));
+                                updateCompanionModelId(parentId, existing.id);
+                            });
                     } else {
                         // 完全不存在 — 不自动补建，等用户通过平台重新勾选创建
                         logger.info(`伴生表 ${changeTableName} 不存在，跳过自动补建，需用户手动重建`);
@@ -8073,6 +8634,7 @@ function updateCompanionModelId(parentId, companionId) {
             const ct = cfg.dwdConfig?.changeTracking || cfg.changeTracking;
             if (ct) {
                 ct.companionModelId = companionId;
+                // mc-write: companion-id-writeback
                 db.run(`UPDATE data_models SET dim_config = ? WHERE id = ?`,
                     [JSON.stringify(cfg), parentId]);
             }
@@ -8237,9 +8799,12 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
     let successCount = 0;
     let failCount = 0;
     const errors = [];
+    // #77 C2b-1 修复 1（W4）：BEGIN 成功才 ROLLBACK（理由同 /api/create/batch；只动 ROLLBACK 条件，不改 SQL 文本）
+    let transactionActive = false;
 
     try {
         await dbRunAsync("BEGIN TRANSACTION");
+        transactionActive = true;
 
         for (let i = 0; i < models.length; i++) {
             const m = models[i];
@@ -8275,8 +8840,8 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
             try {
                 await dbRunAsync(`
                     INSERT INTO data_models
-                    (layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, model_type, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (layer, domain, table_name, table_comment, tech_owner, biz_owner, update_cycle, source_system, source_table, model_type, status, impl_note, design_notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `, [
                     m.layer.toUpperCase(),
                     m.domain || null,
@@ -8288,7 +8853,9 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
                     m.source_system || null,
                     m.source_table || null,
                     m.model_type || 'TABLE',
-                    'CREATED'  // 批量导入的模型默认为 CREATED 状态，忽略用户输入
+                    'CREATED',  // 批量导入的模型默认为 CREATED 状态，忽略用户输入
+                    m.impl_note || null,     // #77 C2a：批量导入补齐 impl_note / design_notes（B 类字段，空即 NULL）
+                    m.design_notes || null
                 ]);
                 successCount++;
             } catch (insertErr) {
@@ -8299,6 +8866,7 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
         }
 
         await dbRunAsync("COMMIT");
+        transactionActive = false;
 
         res.json({
             success: successCount,
@@ -8309,7 +8877,10 @@ app.post('/api/models/batch', authenticateToken, requirePublisherOrAdmin, async 
 
     } catch (e) {
         console.error("Model batch import error:", e.message);
-        try { await dbRunAsync("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
+        if (transactionActive) {
+            try { await dbRunAsync("ROLLBACK"); } catch (rollbackErr) { /* ignore */ }
+            transactionActive = false;
+        }
         res.status(500).json({ error: "服务器事务错误: " + e.message });
     }
 });
@@ -9313,9 +9884,10 @@ app.post('/api/models/:id/semantic-review', authenticateToken, requirePublisherO
 
         // 保存语义验收记录到 model_test_records
         await dbRunAsync(
-            `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, execution_time_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, model.table_name, userName, userId, 'pass', 0, JSON.stringify({ phase: 'semantic', confirmed, confirmed_at: new Date().toISOString() }), 0]
+            `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, execution_time_ms, config_rev)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            // config_rev 取入口读到的模型行（#77 C1a：验收开始时的版本号，不在 INSERT 时再读）
+            [id, model.table_name, userName, userId, 'pass', 0, JSON.stringify({ phase: 'semantic', confirmed, confirmed_at: new Date().toISOString() }), 0, model.config_rev]
         );
 
         logger.info(`Semantic review confirmed for model ${model.table_name} by ${userName}`);
@@ -9386,9 +9958,10 @@ app.post('/api/warehouse/dim-acceptance', authenticateToken, requireNonViewer, a
         if (dimModel) {
             const savedPhase = phase || 'all';
             await dbRunAsync(
-                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [dimModel.id, tableName, userName, req.user.id, result.overall_result, result.total_rows, JSON.stringify({ phase: savedPhase, structure: result.structure, data: result.data, semantic: result.semantic, summary: result.summary }), conn.id, result.execution_time_ms]
+                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms, config_rev)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                // config_rev 取入口处（9416 起，长耗时 executeDimValidation 之前）读到的模型行 dimModel（#77 C1a）
+                [dimModel.id, tableName, userName, req.user.id, result.overall_result, result.total_rows, JSON.stringify({ phase: savedPhase, structure: result.structure, data: result.data, semantic: result.semantic, summary: result.summary }), conn.id, result.execution_time_ms, dimModel.config_rev]
             );
         }
 
@@ -9449,6 +10022,20 @@ app.get('/api/models/:id', authenticateToken, async (req, res) => {
                 model.dim_config = null;
             }
         }
+        // #77 C5：追加 acceptance { state, at, rows, stages, prevResult, reason }，供抽屉概览「最近验收」行按 state 渲染（方案 §4.1 / P46）。
+        //   与列表 GET /api/models 同口径：不带 opts.task、stages 仅 DIM / DWD 有（其余 null）、prevResult 仅 stale 有（其余 null）；
+        //   多出一个 reason（判定理由，列表不带）。验收摘要只是附加信息：计算失败不拖垮详情，acceptance 置 null，前端按「暂不可用」处理。
+        //   本接口的返回对象没有任何调用方原样回写进 PUT / POST（C5 N0 已核：各页面编辑流都是逐字段拼 payload）。
+        try {
+            const accEv = evaluateAcceptance(model, await fetchRecordsByModelId(db, model.id));
+            model.acceptance = { state: accEv.state, at: accEv.at, rows: accEv.rows };
+            model.acceptance.stages = accEv.stages ? { structure: accEv.stages.structure, data: accEv.stages.data } : null;
+            model.acceptance.prevResult = accEv.state === 'stale' ? (accEv.prevResult ?? null) : null;
+            model.acceptance.reason = accEv.reason || '';
+        } catch (accErr) {
+            logger.error('Failed to attach acceptance to model detail:', accErr);
+            model.acceptance = null;
+        }
         res.json(model);
     } catch (err) {
         logger.error('Get model detail error:', err.message);
@@ -9507,19 +10094,13 @@ app.get('/api/models/:id/downstream', authenticateToken, async (req, res) => {
         if (!model) { return res.status(404).json({ error: '模型不存在' }); }
         const tn = String(model.table_name || '');
         if (!tn) { return res.json({ table_name: '', candidates: [] }); }
-        // LIKE 转义：\ 作转义符，% _ \ 前加 \（配合 ESCAPE '\'）
-        const likeVal = '%' + tn.replace(/[\\%_]/g, '\\$&') + '%';
+        // #77 C2b-3：匹配逻辑抽成共享函数 findDownstreamCandidates（routes/model-center/model-relations.js，语义与原内联 SQL 逐项相等：
+        //   dim_config 原文含 table_name 子串（% _ 反斜杠按字面量、ASCII 不区分大小写）、排除自身与已删除、ORDER BY layer, table_name）；
+        //   /relations 与列表 rel.down 同源。取全量模型一次后在内存里匹配。
         const t0 = Date.now();
-        const rows = await dbAllAsync(
-            `SELECT id, table_name, table_comment, layer, status, config_mode
-             FROM data_models
-             WHERE id != ?
-               AND (is_deleted IS NULL OR is_deleted = 0)
-               AND dim_config LIKE ? ESCAPE '\\'
-             ORDER BY layer, table_name`,
-            [id, likeVal]
-        );
-        // C5 审 M-4：全表 dim_config LIKE 无索引，记耗时供部署后观察（现网模型 ~百级毫秒内）
+        const allModels = await dbAllAsync(modelRelationsModule.SQL_ALL_MODELS);
+        const rows = findDownstreamCandidates(model, allModels);
+        // C5 审 M-4：全表 dim_config 扫描无索引，记耗时供部署后观察（现网模型 ~百级毫秒内）
         const elapsed = Date.now() - t0;
         if (elapsed > 300) { logger.warn(`[downstream] 模型 ${id} 下游扫描耗时 ${elapsed}ms（${rows.length} 候选）`); }
         res.json({ table_name: tn, candidates: rows });
@@ -9597,9 +10178,10 @@ app.post('/api/models/:id/validate', authenticateToken, requireNonViewer, async 
             let insertResult = { lastID: null };
             if (dimPhase !== 'semantic') {
                 insertResult = await dbRunAsync(
-                    `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify({ phase: dimPhase, structure: result.structure, data: result.data, semantic: result.semantic, summary: result.summary }), conn.id, result.execution_time_ms]
+                    `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms, config_rev)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    // config_rev 取入口（9589）读到的 model 行，不在 INSERT 时再读（#77 C1a）
+                    [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify({ phase: dimPhase, structure: result.structure, data: result.data, semantic: result.semantic, summary: result.summary }), conn.id, result.execution_time_ms, model.config_rev]
                 );
             }
 
@@ -9637,9 +10219,10 @@ app.post('/api/models/:id/validate', authenticateToken, requireNonViewer, async 
 
             // 保存验收记录
             const insertResult = await dbRunAsync(
-                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify({ phase: dwdPhase, structure: result.structure, data: result.data, summary: result.summary }), conn.id, result.execution_time_ms]
+                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms, config_rev)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                // config_rev 取入口（9589）读到的 model 行，不在 INSERT 时再读（#77 C1a）
+                [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify({ phase: dwdPhase, structure: result.structure, data: result.data, summary: result.summary }), conn.id, result.execution_time_ms, model.config_rev]
             );
 
             logger.info(`DWD validation completed for model ${model.table_name}: ${result.overall_result}`);
@@ -9741,9 +10324,10 @@ app.post('/api/models/:id/validate', authenticateToken, requireNonViewer, async 
             result = await executeOdsValidation(validationParams);
 
             const insertResult = await dbRunAsync(
-                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify(result.details), conn.id, result.execution_time_ms]
+                `INSERT INTO model_test_records (model_id, table_name, test_user, test_user_id, overall_result, total_rows, detail_json, db_connection_id, execution_time_ms, config_rev)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                // config_rev 取入口（9589）读到的 model 行，不在 INSERT 时再读（#77 C1a）
+                [id, model.table_name, userName, userId, result.overall_result, result.total_rows, JSON.stringify(result.details), conn.id, result.execution_time_ms, model.config_rev]
             );
 
             logger.info(`ODS validation completed for model ${model.table_name}: ${result.overall_result}`);
@@ -9811,24 +10395,58 @@ app.get('/api/models/:id/test-records/:recordId', authenticateToken, (req, res) 
 });
 
 // 14. 获取模型最新验收状态 (需要登录)
-app.get('/api/models/:id/validation-status', authenticateToken, (req, res) => {
+// #77 C1a：验收状态展示视图，统一由 evaluateAcceptance 给出（方案 v0.9 §4.1.2「调用方替换」）。
+//   响应契约：原有 status / test_time / test_user 取该模型「最近一条参与阶段记录」
+//   （ODS 无 phase；DIM/DWD 为 structure / data / all；不分版本、排除 invalidated=1）的
+//   overall_result / test_time / test_user，无记录为 'never'；不得被改成新 state 值。
+//   末次合并审 M6 订正：与旧实现不同——排除 semantic 与非三层（ODS / DIM / DWD 之外的层，一律无参与记录 ⇒ 'never'）：旧实现（main）两者都参与取值。
+//   消费方 app.js 只在兜底分支读 status 判断 'never'，不受影响；此差异登记为响应契约差异，不再称「保持旧语义」。
+//   新判定只追加 state / gatePass，以及 state_at / state_test_user（决定 state 的那条记录的时间与执行人，
+//   执行人按 decisiveRecordId 直接取，不按时间反查）。
+function buildValidationStatusView(model, records) {
+    const ev = evaluateAcceptance(model, records);
+    const legacy = latestParticipatingRecord(model, records);
+    const status = legacy ? legacy.overall_result : 'never';
+    const decisive = ev.decisiveRecordId != null
+        ? (records || []).find(r => Number(r.id) === Number(ev.decisiveRecordId))
+        : null;
+    return {
+        ev,
+        status,
+        legacy,
+        // 追加字段（无论 status 是否 never 都带 state / gatePass）
+        extra: {
+            state: ev.state,
+            gatePass: ev.gatePass,
+            state_at: ev.at,
+            state_test_user: decisive ? decisive.test_user : null,
+            // #77 C1 对抗审 F4：模型分层（大写规范化，与判定服务 evaluateAcceptance 的分支取值同口径），供前端按分层而非任务类别选展示分支
+            layer: String(model && model.layer != null ? model.layer : '').toUpperCase()
+        }
+    };
+}
+
+app.get('/api/models/:id/validation-status', authenticateToken, async (req, res) => {
     const { id } = req.params;
 
-    db.get(
-        `SELECT overall_result, test_time, test_user FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1`,
-        [id],
-        (err, row) => {
-            if (err) return res.status(500).json({ error: err.message });
-            if (!row) {
-                return res.json({ status: 'never', message: '未验收' });
-            }
-            res.json({
-                status: row.overall_result,
-                test_time: row.test_time,
-                test_user: row.test_user
-            });
+    try {
+        const model = await dbGetAsync('SELECT id, layer, config_rev, companion_of FROM data_models WHERE id = ?', [id]);
+        if (!model) {
+            return res.json({ status: 'never', message: '未验收', state: 'none', gatePass: false });
         }
-    );
+        const records = await fetchRecordsByModelId(db, id);
+        const view = buildValidationStatusView(model, records);
+        if (view.status === 'never') {
+            return res.json(Object.assign({ status: 'never', message: '未验收' }, view.extra));
+        }
+        res.json(Object.assign({
+            status: view.status,
+            test_time: view.legacy.test_time,
+            test_user: view.legacy.test_user
+        }, view.extra));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 15. 批量获取模型验收状态 (需要登录) - 用于列表展示
@@ -9845,49 +10463,50 @@ app.get('/api/models/validation-status/batch', authenticateToken, async (req, re
     }
 
     try {
-        // 获取每个模型的最新验收记录
+        // #77 C1a：改调统一判定服务——一次批量取模型行与验收记录，内存里逐模型 evaluateAcceptance
+        //   （旧实现 MAX(test_time) JOIN 同秒会出多行、且不认 config_rev / 分阶段 / 伴生）
         const placeholders = idList.map(() => '?').join(',');
-        const records = await dbAllAsync(`
-            SELECT m.model_id, m.overall_result, m.test_time, m.test_user
-            FROM model_test_records m
-            INNER JOIN (
-                SELECT model_id, MAX(test_time) as max_time
-                FROM model_test_records
-                WHERE model_id IN (${placeholders}) AND (invalidated = 0 OR invalidated IS NULL)
-                GROUP BY model_id
-            ) latest ON m.model_id = latest.model_id AND m.test_time = latest.max_time
-            WHERE m.invalidated = 0 OR m.invalidated IS NULL
-        `, idList);
+        const modelRows = await dbAllAsync(
+            `SELECT id, layer, config_rev, companion_of FROM data_models WHERE id IN (${placeholders})`,
+            idList
+        );
+        const modelById = new Map(modelRows.map(m => [Number(m.id), m]));
+        const recordMap = await fetchRecordsByModelIds(db, idList);
 
-        // 获取分阶段验收状态（DIM/DWD 有 structure/data/semantic 阶段）
-        const phaseRecords = await dbAllAsync(`
-            SELECT model_id, detail_json, overall_result, test_time
-            FROM model_test_records
-            WHERE model_id IN (${placeholders}) AND (invalidated = 0 OR invalidated IS NULL)
-            ORDER BY test_time DESC
-        `, idList);
-
-        // 转换为 { id: { status, phases } } 格式
+        // 转换为 { id: { status, phases, state, gatePass } } 格式
         const statusMap = {};
-        idList.forEach(id => { statusMap[id] = { status: 'never', phases: {} }; });
-        records.forEach(r => {
-            statusMap[r.model_id].status = r.overall_result;
-            statusMap[r.model_id].test_time = r.test_time;
-            statusMap[r.model_id].test_user = r.test_user;
-        });
-
-        // 提取分阶段信息（每个 phase 取最新一条）
-        phaseRecords.forEach(r => {
-            try {
-                const detail = JSON.parse(r.detail_json || '{}');
-                const phase = detail.phase;
-                if (phase && statusMap[r.model_id] && !statusMap[r.model_id].phases[phase]) {
-                    statusMap[r.model_id].phases[phase] = {
-                        result: r.overall_result,
-                        test_time: r.test_time
-                    };
-                }
-            } catch (e) { /* ignore parse errors */ }
+        idList.forEach(mid => {
+            const model = modelById.get(mid);
+            const records = recordMap.get(mid) || [];
+            if (!model) {
+                statusMap[mid] = { status: 'never', phases: {}, state: 'none', gatePass: false };
+                return;
+            }
+            const view = buildValidationStatusView(model, records);
+            const entry = Object.assign({ status: view.status, phases: {} }, view.extra);
+            if (view.status !== 'never') {
+                entry.test_time = view.legacy.test_time;
+                entry.test_user = view.legacy.test_user;
+            }
+            // 分阶段结果（DIM/DWD 的 structure / data 来自判定服务的阶段取值，已按当前版本过滤）；
+            // 各阶段 test_time / test_user 取该阶段自己那条记录（不共用 ev.at）
+            const stageDetail = view.ev.stageDetail || {};
+            ['structure', 'data'].forEach(p => {
+                if (stageDetail[p]) entry.phases[p] = { result: stageDetail[p].result, test_time: stageDetail[p].test_time, test_user: stageDetail[p].test_user };
+            });
+            // 保留原有 all 键：当前版本最新一条未失效的全量验收记录
+            const allRec = records
+                .filter(r => (r.invalidated === 0 || r.invalidated == null)
+                    && extractAcceptancePhase(r.detail_json) === 'all'
+                    && r.config_rev != null && Number(r.config_rev) === Number(model.config_rev))
+                .sort((a, b) => String(b.test_time).localeCompare(String(a.test_time)) || Number(b.id) - Number(a.id))[0];
+            if (allRec) entry.phases.all = { result: allRec.overall_result, test_time: allRec.test_time, test_user: allRec.test_user };
+            // semantic 不参与门禁，仅展示：取最新一条未失效的语义确认记录
+            const semanticRec = records
+                .filter(r => (r.invalidated === 0 || r.invalidated == null) && extractAcceptancePhase(r.detail_json) === 'semantic')
+                .sort((a, b) => String(b.test_time).localeCompare(String(a.test_time)) || Number(b.id) - Number(a.id))[0];
+            if (semanticRec) entry.phases.semantic = { result: semanticRec.overall_result, test_time: semanticRec.test_time, test_user: semanticRec.test_user };
+            statusMap[mid] = entry;
         });
 
         res.json(statusMap);
@@ -9909,6 +10528,20 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
     if (!scripts || !tableName) {
         return res.status(400).json({ error: '缺少必要参数' });
     }
+    // #77 P53 = B：两个可选字段——purpose（字符串，豁免只认 'ods-auto-save'）与 expected_config_rev（整数）。类型不对 400（零写入，先于任何查库 / 写入）；缺省 = 普通保存。
+    const savePurpose = req.body.purpose;
+    const expectedConfigRev = req.body.expected_config_rev;
+    if (savePurpose !== undefined && typeof savePurpose !== 'string') {
+        return res.status(400).json({ error: 'purpose 必须是字符串' });
+    }
+    if (expectedConfigRev !== undefined && !Number.isInteger(expectedConfigRev)) {
+        return res.status(400).json({ error: 'expected_config_rev 必须是整数' });
+    }
+    // P57② = codex 49A-astra MED：ODS 自动保存（purpose === 'ods-auto-save'）必须带 expected_config_rev——服务端靠它判断「生成脚本的依据是不是最新配置」，
+    //   缺省无法判断，宁可拒绝（400，零写入、先于任何查库）。其余 purpose 值与不带 purpose 的普通保存行为不变。
+    if (savePurpose === 'ods-auto-save' && expectedConfigRev === undefined) {
+        return res.status(400).json({ error: 'ODS 自动保存必须带 expected_config_rev', code: 'EXPECTED_CONFIG_REV_REQUIRED' });
+    }
 
     try {
         // 获取模型信息
@@ -9916,11 +10549,42 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
         if (!model) {
             return res.status(404).json({ error: '模型不存在' });
         }
+        // #77 P53 = B（用户裁定）：「首次落盘不递增」的豁免只留给一种请求——ODS 验收通过后的自动保存（autoSaveOdsScripts）：purpose === 'ods-auto-save'，
+        //   模型分层为 ODS（服务端按 model.layer 判，大小写不敏感），且请求带的 expected_config_rev 等于此刻的 config_rev（= 前端用最新行生成脚本；版本过期说明生成依据已落后）。
+        //   其余首次落盘一律递增：配置台「预览后保存到服务器」用的是没保存的编辑器状态生成脚本，首次落盘后验收仍显示有效是不对的，所以不能豁免。
+        //   model 是本请求最早读出的行，在任何 bump 之前。
+        //   纵深防御（P57② 之后）：下面豁免条件里的「分层是 ODS」「版本相等」两项，已被后面的 409（早检 / 终检：CONFIG_REV_STALE / LAYER_NOT_ODS）拦在前面——
+        //   走到豁免判定的 ods-auto-save 请求必然满足这两项，所以它们对外不可观测；仍保留作冗余防线（M-P53a / M-P53b 变异因此重定义为连同 409 一起去掉）。
+        const firstSaveExempt = savePurpose === 'ods-auto-save'
+            && String(model.layer || '').toUpperCase() === 'ODS'
+            && expectedConfigRev === model.config_rev;
+
+        // #77 C1 对抗审 S1：文件名 / 目录 / 生效集合前缀都由请求体 tableName 推导，手工构造与模型表名不同的 tableName 可绕过前缀过滤造成漏记。
+        //   严格相等才放行（缺省 tableName 已在入口 400）；零写入、不递增。前端五个调用点均传 model.table_name。
+        if (tableName !== model.table_name) {
+            return res.status(400).json({ error: '请求的表名与模型表名不一致' });
+        }
 
         // 业务权限检查：admin/publisher OR tech_owner OR 当前活跃任务 owner
         const latestOwnerId = await getLatestActiveTaskOwnerId(id);
         if (!canOperateModel(req.user, model, latestOwnerId)) {
             return res.status(403).json({ error: '权限不足：只有技术负责人、当前任务负责人或管理员可以保存脚本' });
+        }
+
+        // P57② = codex 49A-astra MED：ODS 自动保存的版本检查（purpose === 'ods-auto-save'，不论分层、不论是否首次落盘）。
+        //   前端是「GET 最新行 → 按它生成脚本 → POST」，GET 与 POST 之间配置可能又变了（config_rev 已递增、验收已因此失效）；
+        //   此时 expected_config_rev 落后于当前版本，这份脚本是按旧配置生成的，任何落盘都会写入旧脚本。所以版本不等 ⇒ 409 CONFIG_REV_STALE：
+        //   不写文件、不递增 config_rev、不写 script_path，响应带 current_config_rev。前端不自动重试（409 ⇒ 这次验收已失效，见 Model_Center.html autoSaveOdsScripts），只提示并重查能否自行归档。
+        //   放在权限检查之后：无权限者拿 403，不会从 409 响应里读到当前版本号。检查共两次：这是第一次（早失败，读的是本请求最早读出的 model 行）；
+        //   第二次（终检）在下方进入写阶段之前（effectiveSetDiffers 之后、第一个写操作之前）重读 config_rev 和 layer 再判。
+        //   409 的范围（purpose === 'ods-auto-save'）：① 版本不等（两个方向都算）⇒ CONFIG_REV_STALE；② 服务端分层已不是 ODS ⇒ LAYER_NOT_ODS
+        //   （自动保存生成的是 ODS 的 DDL / 同步脚本，写进 DIM / DWD 模型的目录并按普通保存递增是错的）。版本检查在前。
+        //   早检在 mkdirSync 之前、零副作用：409 时不留空目录。
+        if (savePurpose === 'ods-auto-save' && expectedConfigRev !== model.config_rev) {
+            return res.status(409).json({ error: '模型配置已更新，生成脚本所依据的版本已过期，请重新获取后再保存', code: 'CONFIG_REV_STALE', current_config_rev: model.config_rev });
+        }
+        if (savePurpose === 'ods-auto-save' && String(model.layer || '').toUpperCase() !== 'ODS') {
+            return res.status(409).json({ error: '模型分层已不是 ODS，ODS 自动保存的脚本未保存', code: 'LAYER_NOT_ODS', current_config_rev: model.config_rev });
         }
 
         // 查找关联该模型的任务（优先找当前用户的进行中任务）
@@ -9962,9 +10626,8 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
             logger.info(`No linked task found, saving scripts to: ${scriptDir}`);
         }
 
-        if (!fs.existsSync(scriptDir)) {
-            fs.mkdirSync(scriptDir, { recursive: true });
-        }
+        // 注意：scriptDir 的创建（mkdirSync）已挪到下方写阶段入口、第二次版本检查之后——版本过期 ⇒ 409 时不留下空目录（P57②「零写入」）。
+        //   规划阶段（planScript / effectiveSetDiffers）只用 existsSync / 目录读取，目录不存在时按「没有同名文件 / 空目录」处理，与先建目录等价。
 
         const savedFiles = [];
         const archivedFiles = [];
@@ -9973,14 +10636,19 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
 
         // --- 脚本内容比对辅助函数 ---
         // 去掉注释头中的日期和版本行，只比较业务逻辑部分
-        const normalizeForCompare = (content) => {
-            return content
-                .replace(/创建日期:\s*\d{4}-\d{2}-\d{2}/g, '')
-                .replace(/配置版本:\s*v\d+/g, '')
-                .replace(/最后同步:\s*[^\n]*/g, '')
-                .replace(/\r\n/g, '\n')
-                .trim();
-        };
+        // #77 C1a：规则抽到 routes/model-center/script-compare.js（含 ODS「生成时间」、DIM/DWD「生成日期」等头部行，
+        //   有独立测试 verify-model-script-compare.js）
+        const normalizeForCompare = normalizeScriptForCompare;
+
+        // 上次保存目录（模型的 script_path）——只接受脚本根目录 UPLOAD_DIR 之下的路径，越界 / 非法一律当作不存在
+        let prevScriptDir = null;
+        if (model.script_path && typeof model.script_path === 'string') {
+            const rootResolved = path.resolve(UPLOAD_DIR);
+            const candidate = path.resolve(UPLOAD_DIR, model.script_path);
+            if (candidate !== rootResolved && candidate.startsWith(rootResolved + path.sep)) {
+                prevScriptDir = candidate;
+            }
+        }
 
         // 归档旧文件到 _history/ 目录，保留最近 MAX_HISTORY 个版本
         const MAX_HISTORY = 20;
@@ -10015,37 +10683,174 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
             return true;
         };
 
-        // 保存单个脚本（比对 → 归档 → 写入）
-        const saveScript = (scriptKey, fileName, type) => {
+        // #77 C1a（方案 v0.9「脚本端点 fail-closed 顺序」）：
+        //   ① 先比较出待写文件清单（只读，不写盘；旧文件不存在 = 首次落盘：只有 ODS 验收后自动保存且版本等于当前才不算内容变化，其余一律算变化，见 firstSaveExempt 与下方 bump 条件）
+        //   ② 清单非空 → 先 bumpConfigRev（单条 UPDATE，自动提交）
+        //   ③ 再逐个归档旧版本 + 写文件
+        //   ④ 最后更新 script_path 等字段
+        //   ② 之后任一步失败：版本号已递增，最坏多要求一次复验，不会拿旧验收给新脚本背书。
+        const pendingWrites = [];
+        const planScript = (scriptKey, fileName, type) => {
             const content = scripts[scriptKey];
             if (!content) return;
 
             const filePath = path.join(scriptDir, fileName);
 
-            // 比对：如果旧文件存在且内容无实质变化，跳过
-            if (fs.existsSync(filePath)) {
-                const oldContent = fs.readFileSync(filePath, 'utf8');
-                if (normalizeForCompare(oldContent) === normalizeForCompare(content)) {
+            // 比对：如果当前目录同名旧文件存在且内容无实质变化，跳过写入（跳过判定只看当前目录，不受 script_path 目录影响）
+            const oldExists = fs.existsSync(filePath);
+            // contentChanged = 「相对于该模型已保存的同名脚本内容实质变化」，是 bump 的逐文件判据（#77 C1 对抗审 F1：两处都比，不再「当前目录优先」）：
+            //   ① 当前目录有同名文件且归一化后内容不同 → 变化；
+            //   ② 本次要写入的文件：script_path 目录（与当前目录不同时）有同名文件且归一化后内容不同 → 变化；
+            //   两处都没有才是首次落盘：只有 firstSaveExempt（ODS 验收后自动保存、版本等于当前）才不算变化，其余一律算变化（P53 = B）；文件存在却读不出一律按「变化」（fail-closed）。
+            //   跳过写入的文件（当前目录同名且归一化后相同，上面直接 return）不与旧 script_path 目录逐文件比较，由下方目录级「生效脚本集合」规则覆盖；
+            //   目录级规则（script_path 换目录且生效脚本集合不同）见下方 dirChanged，与本判据并列、任一成立即 bump。
+            let contentChanged = false;
+            let anyOldFile = oldExists;   // 当前目录或 script_path 目录里有没有同名旧文件（都没有 = 首次落盘）
+            if (oldExists) {
+                let curSame = false;
+                try {
+                    curSame = normalizeForCompare(fs.readFileSync(filePath, 'utf8')) === normalizeForCompare(content);
+                } catch (_) {
+                    curSame = false; // 读不出：不能证明没变，也不跳过写入
+                }
+                if (curSame) {
                     skippedFiles.push({ type, fileName, reason: '内容无变化' });
                     return;
                 }
-                // 有变化，归档旧版本
-                const configVersion = req.body.configVersion || 'unknown';
-                archiveOldScript(scriptDir, fileName, configVersion);
-                archivedFiles.push({ type, fileName });
+                contentChanged = true;
             }
-
-            fs.writeFileSync(filePath, content, 'utf8');
-            savedFiles.push({ type, fileName });
+            if (prevScriptDir && prevScriptDir !== path.resolve(scriptDir)) {
+                const prevFile = path.join(prevScriptDir, fileName);
+                try {
+                    if (fs.existsSync(prevFile) && fs.statSync(prevFile).isFile()) {
+                        anyOldFile = true;
+                        if (normalizeForCompare(fs.readFileSync(prevFile, 'utf8')) !== normalizeForCompare(content)) contentChanged = true;
+                    }
+                } catch (_) {
+                    // 文件存在却读不出（锁 / 权限）：无法证明内容未变，按「变了」处理（fail-closed）；只有确认不存在才算首次落盘
+                    contentChanged = true;
+                }
+            }
+            if (!anyOldFile && !firstSaveExempt) contentChanged = true;   // P53 = B：首次落盘默认递增，豁免只给 ODS 验收后自动保存
+            pendingWrites.push({ content, fileName, type, filePath, oldExists, contentChanged });
         };
 
-        // 保存各类脚本（带版本归档）
-        saveScript('ddl', `${safeTableName}_DDL.sql`, 'DDL');
-        saveScript('fullLoad', `${safeTableName}_全量初始化.sql`, '全量初始化');
-        saveScript('incremental', `${safeTableName}_增量加载.sql`, '增量加载');
-        saveScript('fdl', `${safeTableName}_FDL节点.sql`, 'FDL节点');
-        saveScript('sync', `${safeTableName}_同步脚本.sql`, '同步脚本');
-        saveScript('quality', `${safeTableName}_质量规则.sql`, '质量规则');
+        // 规划各类脚本（带版本归档）
+        planScript('ddl', `${safeTableName}_DDL.sql`, 'DDL');
+        planScript('fullLoad', `${safeTableName}_全量初始化.sql`, '全量初始化');
+        planScript('incremental', `${safeTableName}_增量加载.sql`, '增量加载');
+        planScript('fdl', `${safeTableName}_FDL节点.sql`, 'FDL节点');
+        planScript('sync', `${safeTableName}_同步脚本.sql`, '同步脚本');
+        planScript('quality', `${safeTableName}_质量规则.sql`, '质量规则');
+
+        // 目录级规则（#77 C1 对抗审 F1，主会话返工口径）：模型已有非空 script_path、本次会写文件时，比较「生效脚本集合」而不是目录本身：
+        //   · 原 script_path 无法安全解析（绝对路径 / 含 .. / 解析结果不在 UPLOAD_DIR 内）→ 变化；
+        //   · 解析后与本次落盘目录相同 → 不变（逐文件规则已覆盖）；
+        //   · 目录不同 → 文件名集合 = (旧目录顶层全部 .sql ∪ 新目录顶层全部 .sql 减去 task_attachments 登记的任务附件) ∪ 本次写入文件名（与归档快照 / GET /scripts 的真实消费面一致：
+        //     它们读 script_path 目录顶层全部 .sql；只看顶层文件，不进 _history 等子目录；读目录失败按变化）：
+        //     「写入后新目录的生效内容」= 本次将写入的内容覆盖到新目录现有同名文件之上，与旧目录同名文件比较；
+        //     任一文件名只在一边存在、或两边都在但 normalizeForCompare 后内容不同、或读失败 → 变化；全部一致 → 不变
+        //     （ODS 新任务首次验收后自动保存：旧任务目录内容与新生成的一致，不应让刚做的验收失效）。
+        //   只影响是否递增，不改变写哪些文件。
+        // G2：文件名集合不靠表名前缀，而是「顶层全部 .sql」减去登记在 task_attachments 里的任务附件（提交任务时落在任务目录、命名 {任务号}_{类型}_{日期}.sql）。
+        //   edit-script 对 fileName 只拦路径穿越（不要求 .sql 后缀 / 表名前缀），非前缀 .sql 也可能是手工建的脚本，不能靠前缀排除。
+        //   task_attachments.file_name 存相对 UPLOAD_DIR 的路径（'/' 分隔，如 owner/12_title/12_sql_script_20260301.sql），按 path.resolve(UPLOAD_DIR, file_name) 解析成绝对路径后与目录内文件的绝对路径比对
+        //   （Windows 下不区分大小写）；查附件表失败 → 按变化（fail-closed）。
+        const absKey = (p0) => (process.platform === 'win32' ? path.resolve(p0).toLowerCase() : path.resolve(p0));
+        const loadAttachmentKeys = async () => {
+            const rows = await dbAllAsync("SELECT file_name FROM task_attachments WHERE file_name IS NOT NULL AND LOWER(file_name) LIKE '%.sql'");
+            return new Set(rows.map(r => absKey(path.resolve(UPLOAD_DIR, String(r.file_name)))));
+        };
+        // H2：领取 / 重新提交只删 task_attachments 登记、不删文件，旧附件会以「未登记」身份留在任务目录。任务目录命名为 `{任务号}_{标题}`（提交处 relativeTaskDir），
+        //   附件强制命名 `{任务号}_{类型}_{日期}.sql`：位于任务目录、且文件名匹配 `^<该目录任务号>_[A-Za-z_]+_\d{8}\.sql$` 的文件也排除；
+        //   任务号从目录名解析，解析不出就不做此排除；任务号与目录不符的同形文件不排除（仍算脚本）。
+        //   命名空间不相交由 edit-script 文件名校验保证（K2：edit-script 拒绝 `^\d+_[A-Za-z_]+_\d{8}\.[A-Za-z0-9]+$` 形文件名；save-scripts 写入名由服务端生成），
+        //   所以与附件同形的文件只可能是上传处理器落盘的附件，按名排除不会漏掉手工脚本。
+        const isOrphanAttachmentName = (dir, name) => {
+            const m = /^(\d+)_/.exec(path.basename(dir));
+            return !!m && new RegExp('^' + m[1] + '_[A-Za-z_]+_\\d{8}\\.sql$').test(name);
+        };
+        const topLevelSqlNames = (dir, attKeys) => {
+            if (!fs.existsSync(dir)) return [];
+            return fs.readdirSync(dir, { withFileTypes: true })
+                .filter(ent => ent.isFile() && ent.name.endsWith('.sql') && !attKeys.has(absKey(path.join(dir, ent.name))) && !isOrphanAttachmentName(dir, ent.name))
+                .map(ent => ent.name);
+        };
+        const effectiveSetDiffers = async (prevDir) => {
+            let names, attKeys;
+            try {
+                attKeys = await loadAttachmentKeys();
+                names = new Set([...topLevelSqlNames(prevDir, attKeys), ...topLevelSqlNames(scriptDir, attKeys), ...pendingWrites.map(w => w.fileName)]);
+            } catch (_) {
+                return true; // 查附件表 / 读目录失败：不能证明一致，按变化（fail-closed）
+            }
+            const readSide = (dir, fileName) => {
+                const f = path.join(dir, fileName);
+                if (!fs.existsSync(f) || !fs.statSync(f).isFile() || attKeys.has(absKey(f)) || isOrphanAttachmentName(dir, fileName)) return null;
+                return fs.readFileSync(f, 'utf8');
+            };
+            for (const fileName of names) {
+                try {
+                    const pw = pendingWrites.find(w => w.fileName === fileName);
+                    const newContent = pw ? pw.content : readSide(scriptDir, fileName);
+                    const oldContent = readSide(prevDir, fileName);
+                    if ((newContent === null) !== (oldContent === null)) return true;
+                    if (newContent !== null && normalizeForCompare(newContent) !== normalizeForCompare(oldContent)) return true;
+                } catch (_) {
+                    return true; // 读不出：不能证明一致，按变化（fail-closed）
+                }
+            }
+            return false;
+        };
+        let dirChanged = false;
+        if (pendingWrites.length > 0 && model.script_path && typeof model.script_path === 'string') {
+            const rootResolved = path.resolve(UPLOAD_DIR);
+            const prevResolved = path.resolve(UPLOAD_DIR, model.script_path);
+            const unsafePrev = path.isAbsolute(model.script_path)
+                || model.script_path.split(/[\\/]+/).includes('..')
+                || !(prevResolved !== rootResolved && prevResolved.startsWith(rootResolved + path.sep));
+            dirChanged = unsafePrev || (prevResolved !== path.resolve(scriptDir) && await effectiveSetDiffers(prevResolved));
+        }
+        // P57② 终检（进入写阶段之前）：上面规划阶段有多处 await（查任务、查附件表、effectiveSetDiffers 等），早检之后配置可能又变了，所以在 effectiveSetDiffers 之后、
+        //   递增与写文件之前重读 config_rev 和 layer 再判一次；版本不等 ⇒ 409 CONFIG_REV_STALE，分层已不是 ODS ⇒ 409 LAYER_NOT_ODS（均零写入）。
+        //   豁免路径（firstSaveExempt）上，这次重读返回之后到下面同步的写文件循环之间没有 await（configRevBumped 为假时不调用 bumpConfigRev）；非豁免路径只多 bumpConfigRev 一个 await。
+        //   「没有 await」不是原子保证：sqlite3 在线程池里异步执行排队的语句，别的请求已排队的配置 UPDATE 可能在这次重读之后、回调交付或写文件之前完成（codex 50A MED）。
+        //   登记残余（两条路径都有）：该毫秒级窗口内的配置变更本身已递增版本、验收会因此失效；写入的旧脚本只展示不执行，下次保存（前端按最新行重新生成）覆盖它。
+        //   不做条件递增（那会是 server.js 的新 UPDATE data_models 写点），也不为这个窗口引入跨模块锁。
+        if (savePurpose === 'ods-auto-save') {
+            const fresh = await dbGetAsync('SELECT config_rev, layer FROM data_models WHERE id = ?', [id]);
+            if (!fresh || fresh.config_rev !== expectedConfigRev) {
+                return res.status(409).json({ error: '模型配置已更新，生成脚本所依据的版本已过期，请重新获取后再保存', code: 'CONFIG_REV_STALE', current_config_rev: fresh ? fresh.config_rev : null });
+            }
+            if (String(fresh.layer || '').toUpperCase() !== 'ODS') {
+                return res.status(409).json({ error: '模型分层已不是 ODS，ODS 自动保存的脚本未保存', code: 'LAYER_NOT_ODS', current_config_rev: fresh.config_rev });
+            }
+        }
+        if (!fs.existsSync(scriptDir)) {
+            fs.mkdirSync(scriptDir, { recursive: true });
+        }
+
+        // 逐文件 contentChanged（见 planScript：当前目录与 script_path 目录两处都比，normalizeForCompare 后内容不同）或目录级 dirChanged，任一成立才 bump；
+        // 两处都没有同名文件的首次落盘（P53 = B）：只有 firstSaveExempt（purpose = 'ods-auto-save'、模型为 ODS、expected_config_rev 等于当前版本）才不算内容变化——
+        // ODS 的脚本由配置确定性推出，配置的实质变化已由 PUT 记账，验收通过后的自动保存相当于补存档；否则 autoSaveOdsScripts（Model_Center.html）首次保存会立刻让刚做的验收失效。
+        // 其余首次落盘一律算变化（递增）：配置台「预览后保存到服务器」用的是未保存的编辑器状态生成脚本，所以不能豁免；
+        // 用户可见变化（已接受）：DIM / DWD 验收后第一次保存脚本会让验收失效一次。
+        // （edit-script 不在此列：手工编辑的脚本就是实际 ETL，新文件照样触发。）
+        const configRevBumped = pendingWrites.some(w => w.contentChanged) || dirChanged;
+        if (configRevBumped) {
+            await bumpConfigRev(db, [id]);
+        }
+
+        for (const w of pendingWrites) {
+            if (w.oldExists) {
+                // 有变化，归档旧版本
+                const configVersion = req.body.configVersion || 'unknown';
+                archiveOldScript(scriptDir, w.fileName, configVersion);
+                archivedFiles.push({ type: w.type, fileName: w.fileName });
+            }
+            fs.writeFileSync(w.filePath, w.content, 'utf8');
+            savedFiles.push({ type: w.type, fileName: w.fileName });
+        }
 
         // 只在有实际保存或归档时更新数据库记录
         if (savedFiles.length > 0) {
@@ -10070,7 +10875,8 @@ app.post('/api/models/:id/save-scripts', authenticateToken, requireNonViewer, as
             savedFiles,
             archivedFiles,
             skippedFiles,
-            taskId: task?.id || null
+            taskId: task?.id || null,
+            configRevBumped
         });
     } catch (err) {
         logger.error('Save scripts error:', err.message);
@@ -10162,6 +10968,17 @@ app.put('/api/models/:id/edit-script', authenticateToken, requireNonViewer, asyn
         return res.status(400).json({ error: '缺少 fileName 或 content 参数' });
     }
 
+    // K2：命名空间不相交的写入侧保证——任务附件由上传处理器强制命名 `${任务号}_${类型}_${8位日期}${扩展名}`，
+    //   edit-script 拒绝同形文件名，使 save-scripts 按文件名排除「未登记孤儿附件」时不会误排除手工脚本（见 save-scripts 的 isOrphanAttachmentName）。
+    //   放在任何 DB / 文件系统写入之前（含下方 script_path 回填），命中即零写入。
+    if (/^\d+_[A-Za-z_]+_\d{8}\.[A-Za-z0-9]+$/.test(String(fileName))) {
+        return res.status(400).json({ error: '文件名与任务附件命名格式冲突，请换一个名字' });
+    }
+    // L2：NTFS 备用数据流（`x.sql::$DATA`、`a.sql:x`）与 Windows 会吞掉的结尾 `.` / 空格，都能绕过上面按字面文件名的命名校验——含 `:`、以 `.` 或空格结尾一律拒绝
+    if (String(fileName).includes(':') || /[. ]$/.test(String(fileName))) {
+        return res.status(400).json({ error: '文件名不合法' });
+    }
+
     try {
         const model = await dbGetAsync(
             'SELECT id, table_name, script_path, script_modified, tech_owner, created_by_id FROM data_models WHERE id = ? AND is_deleted = 0',
@@ -10210,6 +11027,11 @@ app.put('/api/models/:id/edit-script', authenticateToken, requireNonViewer, asyn
             // 内容未变化，无需写文件和标记
             return res.json({ success: true, message: `脚本 ${fileName} 内容未变化，跳过保存`, fileName, changed: false });
         }
+
+        // #77 C1a（A 表）：内容确实会变 → 先递增 config_rev（单条 UPDATE，自动提交），再写文件（fail-closed 顺序）。
+        //   不挂在上面 script_path 的条件 UPDATE 或下面 script_modified 的条件语句上：
+        //   前者早于文件名检查与写文件，后者在 autoSave / isNewFile 时不执行。
+        await bumpConfigRev(db, [id]);
 
         // 写入新内容
         if (!fs.existsSync(scriptDir)) {
@@ -10309,7 +11131,7 @@ app.get('/api/models/:id/dev-status', authenticateToken, async (req, res) => {
 
     try {
         const model = await dbGetAsync(
-            'SELECT id, table_name, layer, config_mode, dim_config, script_path, status, script_modified, script_modified_by, script_modified_at FROM data_models WHERE id = ? AND (is_deleted = 0 OR is_deleted IS NULL)',
+            'SELECT id, table_name, layer, config_mode, dim_config, script_path, status, script_modified, script_modified_by, script_modified_at, config_rev, companion_of FROM data_models WHERE id = ? AND (is_deleted = 0 OR is_deleted IS NULL)',
             [id]
         );
         if (!model) {
@@ -10407,14 +11229,23 @@ app.get('/api/models/:id/dev-status', authenticateToken, async (req, res) => {
         }
 
         // 4. 检查验收记录（可选项）
-        const latestTest = await dbGetAsync(
-            "SELECT overall_result, test_time FROM model_test_records WHERE model_id = ? AND (invalidated = 0 OR invalidated IS NULL) ORDER BY test_time DESC LIMIT 1",
-            [id]
-        );
+        //    #77 C1a：改调统一判定服务（只看版本，不带 opts.task；optional 不影响 canSubmit）
+        const accEv = evaluateAcceptance(model, await fetchRecordsByModelId(db, id));
+        const accDetailByState = {
+            pass: '通过',
+            warn: '通过(有警告)',
+            fail: '未通过',
+            partial: '仅完成部分阶段验收',
+            stale: '配置已变更，需重新验收',
+            companion: '伴生表不独立验收',
+            none: '未执行验收'
+        };
         deliverables.validation = {
-            ready: latestTest && ['pass', 'warn'].includes(latestTest.overall_result),
-            detail: latestTest ? `${latestTest.overall_result === 'pass' ? '通过' : latestTest.overall_result === 'warn' ? '通过(有警告)' : '未通过'} (${latestTest.test_time})` : '未执行验收',
-            optional: true
+            ready: accEv.gatePass,
+            detail: (accDetailByState[accEv.state] || '未执行验收') + (accEv.at && ['pass', 'warn', 'fail', 'partial'].includes(accEv.state) ? ` (${accEv.at})` : ''),
+            optional: true,
+            state: accEv.state,
+            gatePass: accEv.gatePass
         };
 
         // 计算是否可提交（必要项全部就绪）
@@ -21349,6 +22180,25 @@ const legacyArchiveModule = require('./routes/legacy-archive')({
 app.use('/api', legacyArchiveModule.router);
 
 // ============================================================
+// 模型实现对象（#77 C2b-1，方案 v0.9 §4.3）：对象 / 挂接 API、输入校验、权限、整组替换互斥与事务、config_rev 递增与留痕。
+//   工厂 / DI 范式对齐上方各模块；两表建在 initTable（model_change_logs 之后），本模块无 initSchema。
+//   请求体上限中间件在文件前部、全局 bodyParser 之前（IMPL_OBJECT_BODY_PATHS）。
+//   removeLinksForDeletedModel 供 DELETE /api/models/:id 在软删除之后删关系。
+//   ⚠️ 路由按 /api/model-impl-objects* 与 /api/models/:id/impl-links 注册，未匹配自动 next()，不拦截其他 /api/*。
+// ============================================================
+const implObjectsModule = require('./routes/model-center/impl-objects')({
+  db, logger, authenticateToken, requireAdmin, requireNonViewer, canEditModel,
+  verifyEnabled: true,   // C2b-2：三端核验显式开关（仿 expirySweepEnabled，只有严格等于 true 才启用）；本地副本想关闭就改成 false 或删掉本行
+  getMssqlPool, decryptPassword,   // C2b-2 三端核验：读生产定义（参数化）与连接解密，沿用平台既有函数，不新增依赖
+});
+app.use('/api', implObjectsModule.router);
+
+// #77 C2b-3：GET /api/models/:id/relations（上游 / 下游 / 对象 / objectState）+ 列表 rel 计数（server.js 的 GET /api/models 在请求时调用 attachRelCounts）。
+//   复用 impl-objects 的「有效关系」过滤（listModelObjects / countObjectsByModel）。
+const modelRelationsModule = createModelRelations({ db, logger, authenticateToken, implObjects: implObjectsModule });
+app.use('/api', modelRelationsModule.router);
+
+// ============================================================
 // 信息化资产轻量台账（长任务 D · C1 事务底座）：D10 独立连接 itDb（同一 DB_FILE 另开连接）+
 //   itTxnMutex 读写串行；deps 不注入共享连接助手（方案 §12）。
 // ============================================================
@@ -21855,5 +22705,67 @@ app.listen(PORT, '0.0.0.0', () => {
             logger.error(`[collab-resume] 启动恢复扫描异常（不阻断服务）: ${e.message}`);
         }
     });
+
+    // #77 C1a（方案 v0.9 §5.2 第 3 条）：启动检查 config_rev 迁移状态。
+    //   缺迁移标记（表 model_center_migrations 不存在或无 name='config_rev_backfill' 行）
+    //   或 model_test_records 仍有 config_rev IS NULL 的行 => console.error 一行说明。
+    //   不拒绝启动、不改任何数据；未迁移时验收记录不满足 config_rev 相等，列表 / 抽屉 / 门禁同时得到 stale。
+    //   延迟 3 秒：让启动期的 ALTER TABLE 补列先跑完；unref 不阻止进程退出。
+    const configRevCheckTimer = setTimeout(async () => {
+        try {
+            const problems = [];
+            const tbl = await dbGetAsync("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_center_migrations'");
+            let hasMarker = false;
+            if (tbl) {
+                const marker = await dbGetAsync("SELECT name FROM model_center_migrations WHERE name = 'config_rev_backfill' LIMIT 1");
+                hasMarker = !!marker;
+            }
+            if (!hasMarker) problems.push('缺迁移标记 config_rev_backfill');
+            const nullRow = await dbGetAsync("SELECT COUNT(*) AS c FROM model_test_records WHERE config_rev IS NULL");
+            const nullCount = nullRow ? Number(nullRow.c) : 0;
+            if (nullCount > 0) problems.push(`model_test_records 有 ${nullCount} 行 config_rev 为 NULL`);
+            if (problems.length > 0) {
+                logger.error(`[model-center] config_rev 未迁移：${problems.join('；')}。NULL 版本的验收记录不能作为当前版本依据；缺迁移标记请核对迁移（scripts/migrate-model-config-rev.js）`);
+            }
+        } catch (e) {
+            logger.error(`[model-center] config_rev 启动检查失败（不阻断服务）: ${e.message}`);
+        }
+    }, 3000);
+    if (configRevCheckTimer.unref) configRevCheckTimer.unref();
+
+    // #77 C1 对抗审 F5：时区一致性自检。归档门禁「验收晚于任务创建」比较的是两边的字符串时间：
+    //   验收 test_time 由 SQLite datetime('now','localtime') 写入，任务创建时间走 JS 北京时间（toLocaleString sv-SE / Asia/Shanghai）。
+    //   服务器本地时区不是北京时间时两边口径错开，判断会失真。启动后取两边「现在」比一次，差超过 120 秒只告警，
+    //   不阻断启动。
+    //   K4：数据库已打开，监听回调里立即执行（不再延迟 3 秒，消除启动头 3 秒的未判定窗口）；查询 / 解析异常同样 markTzMismatch（fail-closed，不再只打日志）。
+    //   N3：状态初值 unknown（见 tzGate）；自检查询异常按 1s / 2s / 4s 退避重试 3 次，仍失败才置 mismatch；确认一致置 ok。unknown 期间带任务时间的门禁同样拒绝（「服务启动中」文案）。
+    (async () => {
+        const retryDelaysMs = [1000, 2000, 4000];
+        for (let attempt = 0; ; attempt++) {
+            try {
+                const row = await dbGetAsync("SELECT datetime('now','localtime') AS t");
+                const sqliteLocal = row && row.t ? String(row.t) : '';
+                const jsBeijing = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' });
+                const toMs = s => Date.parse(String(s).replace(' ', 'T') + 'Z');
+                const diffSec = Math.abs(toMs(sqliteLocal) - toMs(jsBeijing)) / 1000;
+                if (!Number.isFinite(diffSec) || diffSec > 120) {
+                    markTzMismatch('startup-sqlite-check');   // G1：写入时区状态，带任务时间条件的门禁判定随之 fail-closed
+                    console.error(`[model-center][TZ-MISMATCH] ★★★ 时区不一致告警：SQLite datetime('now','localtime')=${sqliteLocal}，JS 北京时间=${jsBeijing}，相差 ${Number.isFinite(diffSec) ? Math.round(diffSec) + ' 秒' : '无法解析'}（阈值 120 秒）。验收时间与任务创建时间时区不一致，归档门禁的「验收晚于任务创建」判断会失真，请核对服务器时区。`);
+                } else {
+                    markTzOk('startup-sqlite-check');
+                    console.log(`[model-center] 时区一致性自检通过（第 ${attempt + 1} 次）：归档门禁时区状态 = ${tzGate.state}`);
+                }
+                return;
+            } catch (e) {
+                if (attempt >= retryDelaysMs.length) {
+                    markTzMismatch('startup-sqlite-check-error');   // K4：自检重试 3 次仍失败 = 无法证明一致，按不一致处理（fail-closed）
+                    console.error(`[model-center] 时区一致性自检失败，按时区不一致处理（带任务时间条件的门禁 fail-closed）: ${e.message}`);
+                    return;
+                }
+                console.error(`[model-center] 时区一致性自检第 ${attempt + 1} 次失败，${retryDelaysMs[attempt]}ms 后重试: ${e.message}`);
+                await new Promise(r => setTimeout(r, retryDelaysMs[attempt]));
+            }
+        }
+    })();
 });
 

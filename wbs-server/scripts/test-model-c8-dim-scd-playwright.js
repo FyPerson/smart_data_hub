@@ -71,7 +71,7 @@ const sqlBlocks = (page) => inLogicSec(page, '.sql-block');
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== D1 dim_org 的 CTE 段（bug 回归）=====
         console.log('D1. #55 dim_org type=CTE 段显示（旧实现整段丢失）');

@@ -16,7 +16,7 @@
  * codex 首审（2026-06-22）采纳项：DECIMAL 精度 >38 clamp（H-2）、enum/set 按 COLUMN_TYPE 解析长度
  * 防截断（M-2）、char >4000 → NVARCHAR(MAX)（M-3）、bit(n>1) → VARBINARY（L-1）。
  *
- * 返回契约（对齐 Model_Center.html generateODSDDLWithColumns 的装配逻辑）：
+ * 返回契约（对齐 model-script-gen.js generateODSDDLWithColumns 的装配逻辑）：
  *   { data_type, max_length, precision, scale, _warn? }
  *   - data_type 为 'NVARCHAR' / 'NCHAR'   → 前端按 max_length 装配长度（-1 = MAX）
  *   - data_type 为 'DECIMAL'              → 前端按 precision/scale 装配

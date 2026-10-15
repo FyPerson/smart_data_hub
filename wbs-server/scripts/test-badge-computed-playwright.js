@@ -203,12 +203,15 @@ const PAGES = [
     {
         key: 'Model_Center',
         file: 'Model_Center.html',
-        // ⚠️ 本页状态徽章**只在详情抽屉里**（列表页状态列是纯文字，方案 §2.5「列表页纯文字维持现状」），
-        //    故需先点开第一行抽屉。openFn 照抄 test-model-c3-drawer-playwright.js 的打开范式。
-        listSelector: '#modelListBody tr',
+        // ⚠️ 本页有两组状态徽章：详情抽屉里的（主取样，需先点开第一个条目的抽屉，openFn 照抄 test-model-c3-drawer-playwright.js 的打开范式）
+        //    与列表条目里的（C4c-2 起列表状态改成彩色徽章 mdcStatusClass，D-33，原方案 §2.5「列表页纯文字」已被取代；
+        //    见下面的 extraSamples：另取样 #modelListBody .u-status-badge，不需要 openFn）。
+        listSelector: '#modelListBody [data-id]',   // C4c-2：条目 [data-id]（旧：tr）
         badgeSelector: '#modelDrawerBody .u-status-badge',
+        // C4c-2：列表改成彩色状态徽章（mdcStatusClass，D-33）——除抽屉外再加一组列表取样（见 SAMPLE_JOBS：#modelListBody .u-status-badge，不需要 openFn）
+        extraSamples: [{ name: 'list', badgeSelector: '#modelListBody .u-status-badge' }],
         openFn: async (page) => {
-            const btn = await page.$('#modelListBody tr[data-id] button, #modelListBody tr[data-id]');
+            const btn = await page.$('#modelListBody [data-id] .model-open-btn');   // C4c-2：点条目的表名打开按钮（旧：tr 里第一个 button 或 tr 本身）
             if (!btn) return 'no-target';   // 库里没有模型 → 交下游 rows 判定（对齐三态契约）
             await btn.click();
             await page.waitForSelector('#modelDrawerBody .kv', { timeout: 10000 });
@@ -435,7 +438,13 @@ async function signAsAdmin() {
     await page.goto(`${BASE_URL}/login.html`);
     await page.evaluate((t) => localStorage.setItem('token', t), token);
 
+    // 采样任务 = PAGES 每页一份 + 该页声明的 extraSamples（同一页的另一组徽章；不进 PAGES，避免被「页清单无重复 file / 与守卫页集合双向相等」互校当成重复页；不带 openFn）
+    const SAMPLE_JOBS = [];
     for (const pc of PAGES) {
+        SAMPLE_JOBS.push(pc);
+        for (const ex of pc.extraSamples || []) SAMPLE_JOBS.push(Object.assign({}, pc, { key: pc.key + '.' + ex.name, badgeSelector: ex.badgeSelector, openFn: undefined, extraSamples: undefined }));
+    }
+    for (const pc of SAMPLE_JOBS) {
         console.log(`\n--- ${pc.key} ---`);
         // 〔23B·B-M1〕网络健康快照的**监听窗口覆盖「goto → 抽样完成」全程**，try/finally 保证摘除。
         //   原实现只在 openFn 前后挂/摘：首屏 goto 阶段的 4xx/请求失败完全不在快照里，

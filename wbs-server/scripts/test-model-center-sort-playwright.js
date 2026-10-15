@@ -13,6 +13,13 @@
  * ⚠️ 校验用「行 data-id 顺序 + allModelsData 原始字段值」而非渲染文本——
  *    渲染的「表名」列会在伴生表/custom 模式前插入「●」视觉标记字符，直接比较渲染文本
  *    会被这个前缀字符污染 locale 排序断言（首次实测踩坑，已改用原始字段值校验）。
+ * C4b 改写（目录列表按「组」分页、前端搜索）：
+ *   - 排序断言作用于「主模型序列」：伴生表（allModelsData 里 companion_of 指向列表内主模型的行）紧跟其主模型，不按自己的字段值散落；
+ *     主模型不在列表里的落单伴生当主模型。因此「按行单调」改为「主模型序列单调 + 每个伴生紧跟其主模型」。
+ *   - 搜索「dwd」改为输入即过滤（不再要求回车 / 重载）：①每个可见组至少有一个成员按本用例自己手写的字段谓词命中 ②所有表名含 dwd 的行都可见 ③主模型按 updated_at 降序仍保持；
+ *     保留一次回车，证明它不发请求。
+ * C4c-2 改写（目录列表由 tr 表格改为双行卡片）：条目 = #modelListBody 里的 [data-id]（组包装只带 data-group）；排序控件 = button[data-sort-by]（列头条 5 个 + 排序条 3 个，本用例用其中 table_name / status / updated_at / tech_owner）；
+ *   激活态仍是该按钮的 .active 类与 .sort-icon 文本（⇅ / ↓ / ↑）；组语义断言（主模型序列单调 + 伴生紧跟主模型）不动。
  * ⚠️ 只读点击，不产生任何写操作（不点击注册/编辑/删除/ETL/DDL/验收等按钮）。
  */
 'use strict';
@@ -24,7 +31,8 @@ const { chromium } = require('playwright');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const PORT = process.env.PORT || '3300';
+const PORT_ARG = (process.argv.slice(2).find(a => a.startsWith('--port=')) || '').slice('--port='.length);   // C4b：可指定端口，优先于环境变量 PORT
+const PORT = PORT_ARG || process.env.PORT || '3300';
 const BASE_URL = `http://localhost:${PORT}`;
 const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
 const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
@@ -72,6 +80,21 @@ function isMonotonicDate(arr, mult) {
     return true;
 }
 
+/** 当前页渲染行 → { ids, primaries, adjacent }：伴生（companion_of 指向列表里存在且自身不是伴生的主模型）必须紧跟其主模型（或同组前一个伴生）；主模型不在列表里的伴生当主模型 */
+const GROUP_ROWS_FN = (override) => {
+    const byId = new Map(allModelsData.map((m) => [String(m.id), m]));
+    const ids = override || Array.from(document.querySelectorAll('#modelListBody [data-id]')).map((r) => Number(r.dataset.id));
+    const primaries = [];
+    let adjacent = true, lastPrimary = null;
+    for (const id of ids) {
+        const m = byId.get(String(id));
+        const parent = m && m.companion_of != null ? byId.get(String(m.companion_of)) : null;
+        const isComp = !!parent && parent.companion_of == null;
+        if (!isComp) { primaries.push(id); lastPrimary = id; } else if (String(m.companion_of) !== String(lastPrimary)) adjacent = false;
+    }
+    return { ids, primaries, adjacent };
+};
+
 (async () => {
     console.log('=== 模型中心列表页 点击表头排序 Playwright 视觉冒烟测试 ===\n');
 
@@ -93,22 +116,37 @@ function isMonotonicDate(arr, mult) {
         await page.evaluate((token) => localStorage.setItem('token', token), adminToken);
         await page.goto(`${BASE_URL}/Model_Center.html`);
         await page.waitForLoadState('networkidle');
-        await page.waitForSelector('#modelListBody tr', { timeout: 10000 });
+        await page.waitForSelector('#modelListBody [data-id]', { timeout: 10000 });
         await page.waitForTimeout(300);
 
-        expect(await page.isVisible('#modelListTable'), '模型列表表格渲染');
+        expect(await page.isVisible('#modelListBody'), '模型列表渲染（C4c-2：卡片列表容器 #modelListBody 可见；旧：表格 #modelListTable）');
         await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'model-center-sort-01-initial.png') });
 
         // 当前渲染行的 data-id 顺序（反映 renderModelsPage 实际渲染顺序）
         const getRowIdOrder = async () => page.$$eval(
-            '#modelListBody tr[data-id]',
-            (trs) => trs.map((tr) => tr.getAttribute('data-id'))
+            '#modelListBody [data-id]',
+            (els) => els.map((el) => el.getAttribute('data-id'))
         );
         // allModelsData 原始字段快照（id -> model），用于按真实字段值校验排序（避开渲染文本里的「●」等视觉前缀污染）
         const getModelMap = async () => page.evaluate(
             () => Object.fromEntries(allModelsData.map((m) => [String(m.id), m]))
         );
 
+        const groupRows = () => page.evaluate(GROUP_ROWS_FN, null);
+        // 邻接判据（L9）：被检页必须至少有 1 个伴生，否则恒为真——不满足时改用 getCatalogView().orderedIds（全部页）做全量检查
+        const adjacent = async (what, g) => {
+            let gg = g, where = '当前页';
+            if (g.ids.length === g.primaries.length) {
+                const all = await page.evaluate(() => getCatalogView().orderedIds);
+                gg = await page.evaluate(GROUP_ROWS_FN, all); where = '全量（当前页没有伴生）';
+            }
+            expect(gg.ids.length > gg.primaries.length, what + '：被检范围（' + where + '）至少有 1 个伴生，邻接判据不是恒真');
+            expect(gg.adjacent, what);
+        };
+        // C6a：单调性判据对空 / 单元素序列恒真——被检主模型序列须至少 2 个（与 adjacent 的「至少 1 个伴生」同类前置）
+        const needTwo = (what, g) => expect(g.primaries.length >= 2, what + '：被检主模型序列至少 2 个（单调性判据不是对空 / 单元素序列恒真），实际 ' + g.primaries.length);
+        let apiModelsRequests = 0;   // 输入即过滤：搜索期间不得有 GET /api/models
+        page.on('request', (r) => { try { const u = new URL(r.url()); if (u.pathname === '/api/models' && r.method() === 'GET') apiModelsRequests++; } catch (_) { /* ignore */ } });
         const originalIdOrder = await getRowIdOrder();
         expect(originalIdOrder.length > 0, `默认渲染出至少 1 行数据（实际 ${originalIdOrder.length} 行）`);
         let modelMap = await getModelMap();
@@ -118,23 +156,26 @@ function isMonotonicDate(arr, mult) {
         // 步骤 2：点「表名」表头 → 第1次 desc
         // ============================================================
         console.log('\n2. 点击「表名」表头（第1次，应为 desc）...');
-        await page.click('#modelListTable th.sortable[data-sort-by="table_name"]');
+        await page.click('button[data-sort-by="table_name"]');
         await page.waitForTimeout(200);
 
         const activeAfterFirstClick = await page.$eval(
-            '#modelListTable th.sortable[data-sort-by="table_name"]',
+            'button[data-sort-by="table_name"]',
             (th) => th.classList.contains('active')
         );
         const iconAfterFirstClick = await page.$eval(
-            '#modelListTable th.sortable[data-sort-by="table_name"] .sort-icon',
+            'button[data-sort-by="table_name"] .sort-icon',
             (el) => el.textContent
         );
         expect(activeAfterFirstClick, '第1次点击后「表名」表头获得 active 高亮');
         expect(iconAfterFirstClick === '↓', `第1次点击后图标为 ↓（实际:${iconAfterFirstClick}）`);
 
         const idOrderDesc = await getRowIdOrder();
-        const rawNamesDesc = idOrderDesc.map((id) => modelMap[id].table_name);
-        expect(isMonotonicString(rawNamesDesc, -1), '第1次点击后「表名」原始字段值按降序排列');
+        const gDesc = await groupRows();
+        needTwo('第1次点击后「表名」', gDesc);
+        const rawNamesDesc = gDesc.primaries.map((id) => modelMap[String(id)].table_name);
+        expect(isMonotonicString(rawNamesDesc, -1), '第1次点击后「表名」主模型序列按降序排列');
+        await adjacent('第1次点击后每个伴生紧跟其主模型', gDesc);
         expect(JSON.stringify(idOrderDesc) !== JSON.stringify(originalIdOrder), '排序后行顺序与初始顺序不同（确认排序确实生效）');
         await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'model-center-sort-02-desc.png') });
 
@@ -142,33 +183,35 @@ function isMonotonicDate(arr, mult) {
         // 步骤 3：再点一次「表名」 → asc
         // ============================================================
         console.log('\n3. 再次点击「表名」表头（第2次，应为 asc）...');
-        await page.click('#modelListTable th.sortable[data-sort-by="table_name"]');
+        await page.click('button[data-sort-by="table_name"]');
         await page.waitForTimeout(200);
 
         const iconAfterSecondClick = await page.$eval(
-            '#modelListTable th.sortable[data-sort-by="table_name"] .sort-icon',
+            'button[data-sort-by="table_name"] .sort-icon',
             (el) => el.textContent
         );
         expect(iconAfterSecondClick === '↑', `第2次点击后图标为 ↑（实际:${iconAfterSecondClick}）`);
 
-        const idOrderAsc = await getRowIdOrder();
-        const rawNamesAsc = idOrderAsc.map((id) => modelMap[id].table_name);
-        expect(isMonotonicString(rawNamesAsc, 1), '第2次点击后「表名」原始字段值按升序排列');
+        const gAsc = await groupRows();
+        needTwo('第2次点击后「表名」', gAsc);
+        const rawNamesAsc = gAsc.primaries.map((id) => modelMap[String(id)].table_name);
+        expect(isMonotonicString(rawNamesAsc, 1), '第2次点击后「表名」主模型序列按升序排列');
+        await adjacent('第2次点击后每个伴生紧跟其主模型', gAsc);
         await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'model-center-sort-03-asc.png') });
 
         // ============================================================
         // 步骤 4：第三次点击「表名」 → 清排序，恢复默认原始顺序
         // ============================================================
         console.log('\n4. 第三次点击「表名」表头（应清排序，恢复默认顺序）...');
-        await page.click('#modelListTable th.sortable[data-sort-by="table_name"]');
+        await page.click('button[data-sort-by="table_name"]');
         await page.waitForTimeout(200);
 
         const activeAfterThirdClick = await page.$eval(
-            '#modelListTable th.sortable[data-sort-by="table_name"]',
+            'button[data-sort-by="table_name"]',
             (th) => th.classList.contains('active')
         );
         const iconAfterThirdClick = await page.$eval(
-            '#modelListTable th.sortable[data-sort-by="table_name"] .sort-icon',
+            'button[data-sort-by="table_name"] .sort-icon',
             (el) => el.textContent
         );
         expect(!activeAfterThirdClick, '第3次点击后「表名」表头失去 active 高亮');
@@ -182,53 +225,92 @@ function isMonotonicDate(arr, mult) {
         // 步骤 5：状态列（statusOrder 自定义优先级）+ 最后更新（date 类型）排序
         // ============================================================
         console.log('\n5. 点击「状态」表头（statusOrder 自定义优先级类型）...');
-        await page.click('#modelListTable th.sortable[data-sort-by="status"]');
+        await page.click('button[data-sort-by="status"]');
         await page.waitForTimeout(200);
         const STATUS_SORT_ORDER = { CREATED: 0, DEVELOPING: 1, REVIEWING: 2, ONLINE: 3, OFFLINE: 4 };
-        const idOrderStatusDesc = await getRowIdOrder();
-        const statusRankDesc = idOrderStatusDesc.map((id) => {
-            const s = modelMap[id].status;
+        const gStatus = await groupRows();
+        needTwo('「状态」排序后', gStatus);
+        await adjacent('「状态」排序后每个伴生紧跟其主模型', gStatus);
+        const statusRankDesc = gStatus.primaries.map((id) => {
+            const s = modelMap[String(id)].status;
             return STATUS_SORT_ORDER[s] !== undefined ? STATUS_SORT_ORDER[s] : 99;
         });
         let statusMonotonic = true;
         for (let i = 1; i < statusRankDesc.length; i++) {
             if (statusRankDesc[i - 1] - statusRankDesc[i] < 0) { statusMonotonic = false; break; }
         }
-        expect(statusMonotonic, '「状态」列第1次点击后按业务优先级降序排列（statusOrder 类型分派生效）');
+        expect(statusMonotonic, '「状态」列第1次点击后主模型序列按业务优先级降序排列（statusOrder 类型分派生效）');
         // 清排序，回默认，避免影响后续步骤
-        await page.click('#modelListTable th.sortable[data-sort-by="status"]');
-        await page.click('#modelListTable th.sortable[data-sort-by="status"]');
+        await page.click('button[data-sort-by="status"]');
+        await page.click('button[data-sort-by="status"]');
 
         console.log('\n6. 点击「最后更新」表头（date 类型），验证日期列排序...');
-        await page.click('#modelListTable th.sortable[data-sort-by="updated_at"]');
+        await page.click('button[data-sort-by="updated_at"]');
         await page.waitForTimeout(200);
-        const idOrderUpdatedDesc = await getRowIdOrder();
-        const rawUpdatedDesc = idOrderUpdatedDesc.map((id) => modelMap[id].updated_at);
-        expect(isMonotonicDate(rawUpdatedDesc, -1), '「最后更新」列第1次点击后按日期降序排列（date 类型分派生效）');
+        const gUpdated = await groupRows();
+        needTwo('「最后更新」排序后', gUpdated);
+        const rawUpdatedDesc = gUpdated.primaries.map((id) => modelMap[String(id)].updated_at);
+        expect(isMonotonicDate(rawUpdatedDesc, -1), '「最后更新」列第1次点击后主模型序列按日期降序排列（date 类型分派生效）');
+        await adjacent('「最后更新」排序后每个伴生紧跟其主模型', gUpdated);
 
         // ============================================================
         // 步骤 7：与搜索筛选叠加 —— 保持当前排序（updated_at desc）下搜索
         // ============================================================
-        console.log('\n7. 输入搜索关键字「dwd」并回车，验证排序与筛选叠加...');
+        console.log('\n7. 输入搜索关键字「dwd」（输入即过滤，不发请求），验证排序与筛选叠加...');
+        const reqsBeforeSearch = apiModelsRequests;
         await page.fill('#searchKeyword', 'dwd');
-        await page.press('#searchKeyword', 'Enter');
-        await page.waitForLoadState('networkidle');
         await page.waitForTimeout(400);
-
-        modelMap = await getModelMap(); // allModelsData 已被 loadModels() 重新拉取替换，需要刷新快照
-        const idOrderFiltered = await getRowIdOrder();
-        expect(idOrderFiltered.length > 0, '搜索「dwd」后仍有匹配数据');
-        const filteredNamesRaw = idOrderFiltered.map((id) => modelMap[id].table_name.toLowerCase());
-        const allMatchKeyword = filteredNamesRaw.every((n) => n.includes('dwd'));
-        expect(allMatchKeyword, '筛选结果表名均包含关键字「dwd」（筛选生效）');
-        const filteredUpdatedRaw = idOrderFiltered.map((id) => modelMap[id].updated_at);
-        expect(isMonotonicDate(filteredUpdatedRaw, -1), '筛选后仍保持「最后更新」降序（排序未被搜索重置，叠加生效）');
+        const gFiltered = await groupRows();
+        // C6a：needTwo 在这里揭出——「dwd」在测试库副本上只命中 1 个主模型（#52 + 伴生 #53），下面的 ③ 对单元素序列恒真；本步骤的断言原样保留，③ 的判别力由后面的 7b（关键词「dim_」，命中 ≥2 个主模型）补上
+        expect(gFiltered.primaries.length >= 1, '搜索「dwd」后至少有 1 个主模型组（实际 ' + gFiltered.primaries.length + '）');
+        expect(gFiltered.ids.length > 0, '搜索「dwd」后仍有匹配数据');
+        // ①每个可见组（当前页）至少有一个成员按本用例自己手写的字段谓词命中 dwd：表名 / 中文短名 / 实现说明 / 源表 / 源系统 / 上游名（ModelDetailKit 自算）/ 对象名 / ID
+        const checkGroups = await page.evaluate(() => {
+            const q = 'dwd';
+            const lo = (v) => String(v == null ? '' : v).replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+            const parse = (raw) => { if (raw == null || raw === '') return null; if (typeof raw === 'object') return raw; try { let v = JSON.parse(raw); if (typeof v === 'string') v = JSON.parse(v); return v; } catch (e) { return null; } };
+            const ups = (m) => {
+                if (String(m.layer || '').toUpperCase() === 'ODS') return [m.source_system, m.source_table].map((x) => (x == null ? '' : String(x).trim())).filter(Boolean);
+                const d = ModelDetailKit.normalizeModelDetail({ layer: m.layer, config_mode: m.config_mode, companion_of: m.companion_of, dim_config: parse(m.dim_config) });
+                return d.sources.map((x) => x.name).filter(Boolean);
+            };
+            const hit = (m) => [m.table_name, m.table_comment, m.impl_note, m.source_table, m.source_system].concat(ups(m), Array.isArray(m.impl_obj_names) ? m.impl_obj_names : []).some((v) => v != null && lo(v).indexOf(q) !== -1) || String(m.id) === q;
+            const byId = new Map(allModelsData.map((m) => [String(m.id), m]));
+            const view = getCatalogView();   // 仅用于 ②（全部页的可见 id）；① 读 DOM 行（L9：不读实现自己的视图）
+            const domIds = Array.from(document.querySelectorAll('#modelListBody [data-id]')).map((r) => Number(r.dataset.id));
+            const domGroups = [];
+            for (const id of domIds) {
+                const m = byId.get(String(id));
+                const parent = m && m.companion_of != null ? byId.get(String(m.companion_of)) : null;
+                const isComp = !!parent && parent.companion_of == null;
+                if (isComp && domGroups.length) domGroups[domGroups.length - 1].push(id); else domGroups.push([id]);
+            }
+            const groupsOk = domGroups.length > 0 && domGroups.every((g) => g.some((id) => hit(byId.get(String(id)))));
+            const allDwd = allModelsData.filter((m) => lo(m.table_name).indexOf(q) !== -1).map((m) => m.id);
+            const visibleAll = new Set(view.orderedIds.map(String));
+            return { groupsOk, groups: domGroups.length, missing: allDwd.filter((id) => !visibleAll.has(String(id))) };
+        });
+        expect(checkGroups.groups > 0 && checkGroups.groupsOk, '①每个可见组（读 DOM 行分组）至少有一个成员按手写字段谓词命中「dwd」（筛选生效）');
+        expect(checkGroups.missing.length === 0, '②所有表名含「dwd」的行都可见（不漏）' + (checkGroups.missing.length ? '：缺 ' + checkGroups.missing.join(',') : ''));
+        const filteredUpdatedRaw = gFiltered.primaries.map((id) => modelMap[String(id)].updated_at);
+        expect(isMonotonicDate(filteredUpdatedRaw, -1), '③筛选后主模型仍保持「最后更新」降序（排序未被搜索重置，叠加生效）');
+        await adjacent('筛选后每个伴生仍紧跟其主模型', gFiltered);
+        await page.press('#searchKeyword', 'Enter');   // 回车不再必需（输入即过滤），保留一次证明它不发请求
+        await page.waitForTimeout(400);
+        expect(apiModelsRequests === reqsBeforeSearch, '输入即过滤 + 回车：期间不发 GET /api/models 请求（实际 +' + (apiModelsRequests - reqsBeforeSearch) + '）');
         await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'model-center-sort-05-filter-plus-sort.png') });
+
+        // 7b（C6a）：关键词「dim_」命中多个主模型（测试库副本上是 4 个 DIM、无伴生），排序仍是步骤 6 的 updated_at 降序——重做 ③，判据不再对单元素序列恒真
+        await page.fill('#searchKeyword', 'dim_');
+        await page.waitForTimeout(400);
+        const gDim = await groupRows();
+        needTwo('搜索「dim_」后', gDim);
+        expect(gDim.ids.length > 0 && gDim.ids.length < originalIdOrder.length, '7b 搜索「dim_」后列表确实被筛小（实际 ' + gDim.ids.length + ' 行，初始第 1 页 ' + originalIdOrder.length + ' 行）');
+        const dimUpdatedRaw = gDim.primaries.map((id) => modelMap[String(id)].updated_at);
+        expect(isMonotonicDate(dimUpdatedRaw, -1), '③b 搜索「dim_」后主模型仍保持「最后更新」降序（排序未被搜索重置；命中 ≥2 个主模型，判据不是单元素恒真）');
 
         // 清空搜索，恢复全量，避免影响后续步骤
         await page.fill('#searchKeyword', '');
-        await page.press('#searchKeyword', 'Enter');
-        await page.waitForLoadState('networkidle');
         await page.waitForTimeout(400);
 
         // ============================================================
@@ -246,16 +328,16 @@ function isMonotonicDate(arr, mult) {
         const pageAfterGoTo2 = await page.evaluate(() => currentPage);
         console.log(`  goToPage(2) 后 currentPage = ${pageAfterGoTo2}`);
 
-        await page.click('#modelListTable th.sortable[data-sort-by="tech_owner"]');
+        await page.click('button[data-sort-by="tech_owner"]');
         await page.waitForTimeout(200);
         const pageAfterSortClick = await page.evaluate(() => currentPage);
         expect(pageAfterSortClick === 1, `点击排序表头后 currentPage 重置为 1（实际:${pageAfterSortClick}）`);
 
         // 清排序，回到原始态收尾
-        await page.click('#modelListTable th.sortable[data-sort-by="tech_owner"]'); // asc
-        await page.click('#modelListTable th.sortable[data-sort-by="tech_owner"]'); // reset
-        await page.click('#modelListTable th.sortable[data-sort-by="updated_at"]'); // updated_at 由 desc -> asc
-        await page.click('#modelListTable th.sortable[data-sort-by="updated_at"]'); // -> reset
+        await page.click('button[data-sort-by="tech_owner"]'); // asc
+        await page.click('button[data-sort-by="tech_owner"]'); // reset
+        await page.click('button[data-sort-by="updated_at"]'); // updated_at 由 desc -> asc
+        await page.click('button[data-sort-by="updated_at"]'); // -> reset
 
         // ============================================================
         // 收尾：console error 断言

@@ -54,7 +54,7 @@ async function closeDrawer(page) {
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== O1 ODS #6 字段区真连数仓 =====
         console.log('O1. ODS #6 metadata 字段区');

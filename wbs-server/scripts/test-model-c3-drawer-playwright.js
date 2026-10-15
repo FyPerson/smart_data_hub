@@ -7,7 +7,7 @@
  * 规格：模型详情抽屉方案 v1.4 §5.3（双层 controller/门禁/abortReason）+ §5.5（焦点/inert/Esc）+ D2（button 点击区）
  * 覆盖：
  *   D1 表名按钮打开抽屉：identity 渲染（#id/表名/状态）+ 标题=表名
- *   D2 描述列按钮同样打开；design_notes 图标 stopPropagation 不误开（若样本有）
+ *   D2 条目第二行非交互区同样打开抽屉（经 MC 的 C7 整条目点击委托；C4c-2 前是「描述列按钮」）
  *   D3 焦点：打开后焦点=关闭按钮；抽屉 open 时 main inert、抽屉非 inert；关闭后反转 + 焦点回触发按钮
  *   D4 Esc 关闭；overlay 点击关闭
  *   D5 快速 A→B 切换：A 慢返回（route 延迟）仍显示 B（门禁丢弃迟到响应）
@@ -50,15 +50,15 @@ const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE}/Model_Center.html`, { waitUntil: 'load' });
-        await page.waitForSelector('#modelListBody tr[data-id]');
+        await page.waitForSelector('#modelListBody [data-id]');
 
         // ===== D1 表名按钮打开 =====
         console.log('D1. 表名按钮打开抽屉');
         // C4：identity #id 移到 header sub（tableComment · #id）；正文 .kv 承载技术负责人/更新周期等
         // 精确断言用 sub 的 #id\b（C3 审 M-5：避免 #1 被 #12 前缀误包含）
         const subHasId = (page, id) => page.$eval('#modelDrawerSub', (e, id) => new RegExp('#' + id + '(?!\\d)').test(e.textContent), id);
-        const firstBtn = page.locator('#modelListBody tr[data-id] td:nth-child(3) .model-open-btn').first();
-        const firstRowId = await page.$eval('#modelListBody tr[data-id]', r => Number(r.dataset.id));
+        const firstBtn = page.locator('#modelListBody [data-id] .model-open-btn').first();   // C4c-2：条目内表名打开按钮（旧：第 3 列 td 内）
+        const firstRowId = await page.$eval('#modelListBody [data-id]', r => Number(r.dataset.id));
         await firstBtn.click();
         await page.waitForSelector('#modelDetailDrawer.open');
         await page.waitForFunction(id => { const s = document.getElementById('modelDrawerSub'); return s && new RegExp('#' + id + '(?!\\d)').test(s.textContent); }, firstRowId);
@@ -67,6 +67,7 @@ const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
         expect(title.length > 0 && title !== '模型详情', '标题=表名', title);
         const kvText = await page.$eval('#modelDrawerBody .kv', e => e.textContent);
         expect(kvText.includes('技术负责人'), 'identity kv 含技术负责人行', kvText.slice(0, 80));
+        expect(kvText.includes('业务负责人'), 'identity kv 含业务负责人行（C4c-2 §4.2 第 5 条）', kvText.slice(0, 120));
 
         // ===== D3 焦点/inert（open 态）=====
         console.log('D3. 焦点与 inert');
@@ -102,12 +103,16 @@ const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
         expect(true, 'overlay 点击关闭生效');
 
         // ===== D2 描述列按钮 =====
-        console.log('D2. 描述列按钮');
-        const commentBtn = page.locator('#modelListBody tr[data-id] td:nth-child(4) .model-open-btn').first();
-        await commentBtn.click();
+        // C4c-2：旧「描述列按钮」（第 4 列 td 里的第二个 .model-open-btn）已并入表名按钮；意图不变（点非表名处同样打开抽屉）→
+        //   点同一条目第二行（.catalog-row2：#id / 实现说明首句 / 业务域 / 更新时间 / 关系计数）的非交互区，经 C7 整条目点击打开
+        console.log('D2. 条目第二行非交互区');
+        const row2 = page.locator('#modelListBody [data-id] .catalog-row2').first();
+        expect(await row2.count() === 1, '第一个条目有第二行 .catalog-row2');
+        expect(await row2.locator('button, a, input, select, textarea, label').count() === 0, '第二行内没有交互元素（点它只能走整条目委托）');
+        await row2.click();
         await page.waitForSelector('#modelDetailDrawer.open');
         await page.waitForFunction(() => document.querySelector('#modelDrawerBody .kv') !== null);
-        expect(true, '描述列按钮打开抽屉');
+        expect(true, '第二行非交互区点击打开抽屉');
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.getElementById('modelDetailDrawer').classList.contains('open'));
 
@@ -115,13 +120,14 @@ const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
         // 抽屉 open 后 overlay 挡住列表（用户不可能点列表按钮）——真实切换路径=抽屉内导航（C5 下游引用/
         // 主模型链接跳转，§5.3 push）或关闭重开；此处用 evaluate 直调 openModelDrawer 模拟 push 路径
         console.log('D5. 快速切换竞态');
-        const ids = await page.$$eval('#modelListBody tr[data-id]', rows => rows.slice(0, 2).map(r => Number(r.dataset.id)));
+        const ids = await page.$$eval('#modelListBody [data-id]', rows => rows.slice(0, 2).map(r => Number(r.dataset.id)));
         const [idA, idB] = ids;
+        expect(ids.length === 2 && ids.every((v) => Number.isInteger(v) && v > 0), 'D5 前提：列表里至少有 2 个条目 [data-id] 可作 A→B 切换对象（为空则下面的 route 指向 undefined，用例会无效空转）', ids);
         await page.route(`**/api/models/${idA}`, async route => {
             await new Promise(r => setTimeout(r, 1500)); // A 慢 1.5s
             await route.continue();
         });
-        const btnA = page.locator(`#modelListBody tr[data-id="${idA}"] .model-open-btn`).first();
+        const btnA = page.locator(`#modelListBody [data-id="${idA}"] .model-open-btn`).first();
         await btnA.click();          // 打开 A（慢）
         await page.waitForTimeout(150);
         await page.evaluate(id => openModelDrawer(id), idB); // 立即切 B（导航层重建 ctx，旧 ctx abort）

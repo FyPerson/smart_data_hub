@@ -1,5 +1,7 @@
 'use strict';
 
+const { CONFIG_REV_BUMP_SQL } = require('../routes/model-center/config-rev');
+
 class ModelRestoreError extends Error {
     constructor(code, message, status) {
         super(message);
@@ -47,15 +49,17 @@ async function restoreModelRecord({ modelId, operatorId, operatorName, dbRunAsyn
         }
 
         const beforeValue = { ...model };
+        // mc-write: model-restore
         const updateResult = await dbRunAsync(
             `UPDATE data_models
                 SET is_deleted = 0,
                     deleted_at = NULL,
                     deleted_by = NULL,
                     delete_reason = NULL,
+                    ${CONFIG_REV_BUMP_SQL},
                     updated_at = datetime('now', 'localtime')
               WHERE id = ? AND is_deleted = 1`,
-            [modelId]
+            [1, modelId]   // #77 C1a：恢复恒触发 config_rev + 1（删除期间的状态不可知，方案 v0.9 §4.1.1 A 表）
         );
         if (!updateResult || updateResult.changes !== 1) {
             throw new ModelRestoreError('MODEL_RESTORE_CONFLICT', '模型状态已变化，请刷新后重试', 409);

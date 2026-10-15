@@ -164,7 +164,7 @@ async function main() {
     const id1 = await mkIssue('待受理', { type: 'feature' });
     const r1 = await call('POST', `/api/sys-issues/${id1}/edit-in-revision`, creatorTok, {
       title: '新标题-待受理', description: '新描述', system_name: 'HRD', module_name: '新模块',
-      priority: 'P1', deadline: '2026-12-31', needs_feasibility: 1,
+      priority: 'P1', deadline: futureDateOnly(90), needs_feasibility: 1,
       requester_dept: '新部门', requester_name: '新姓名', requester_phone: '13800000001',
     });
     assert.strictEqual(r1.status, 200, `[①待受理] 期望 200, got ${r1.status} ${JSON.stringify(r1.body)}`);
@@ -177,7 +177,7 @@ async function main() {
     const id2 = await mkIssue('待修改', { type: 'bug' });
     const r2 = await call('POST', `/api/sys-issues/${id2}/edit-in-revision`, adminTok, {
       title: '新标题-待修改', description: '新描述2', system_name: '电子签', module_name: '模块2',
-      priority: 'P0', deadline: '2026-11-30', needs_feasibility: 0,
+      priority: 'P0', deadline: futureDateOnly(60), needs_feasibility: 0,
       requester_dept: '部门2', requester_name: '姓名2', requester_phone: '13800000002',
     });
     assert.strictEqual(r2.status, 200, `[①待修改] 期望 200, got ${r2.status} ${JSON.stringify(r2.body)}`);
@@ -189,7 +189,7 @@ async function main() {
     const id3 = await mkIssue('待指派', { type: 'feature' });
     const r3 = await call('POST', `/api/sys-issues/${id3}/edit-in-revision`, creatorTok, {
       title: '新标题-待指派', description: '新描述3', system_name: '其他', module_name: '模块3',
-      priority: 'P2', deadline: '2026-10-31', needs_feasibility: 1,
+      priority: 'P2', deadline: futureDateOnly(30), needs_feasibility: 1,
       requester_dept: '部门3', requester_name: '姓名3', requester_phone: '13800000003',
     });
     assert.strictEqual(r3.status, 200, `[①待指派] 期望 200, got ${r3.status} ${JSON.stringify(r3.body)}`);
@@ -199,7 +199,7 @@ async function main() {
     const id4 = await mkIssue('待处理', { type: 'bug' });
     const r4 = await call('POST', `/api/sys-issues/${id4}/edit-in-revision`, creatorTok, {
       title: '新标题-待处理', description: '新描述4', system_name: 'BMS', module_name: '模块4',
-      priority: 'P3', deadline: '2026-09-30', needs_feasibility: 0,
+      priority: 'P3', deadline: futureDateOnly(10), needs_feasibility: 0,
       requester_dept: '部门4', requester_name: '姓名4', requester_phone: '13800000004',
     });
     assert.strictEqual(r4.status, 200, `[①待处理] 期望 200, got ${r4.status} ${JSON.stringify(r4.body)}`);

@@ -164,7 +164,7 @@
                 return field;
             });
         } else if (Array.isArray(scd.trackFields) && scd.trackFields.length > 0) {
-            // 旧数据仅字段名（generateDimETLFromConfig 回落先例）；type 允许空
+            // 旧数据仅字段名（原 generateDimETLFromConfig 的回落先例；该函数是无调用方的死代码，已于 #77 C3a 从页面删除）；type 允许空
             base = scd.trackFields.map(function (f) {
                 var name = normStr(f) || '';
                 var field = { name: name, type: '', comment: '', source: name, isPk: false, isDerived: false, addedAt: null };

@@ -1,0 +1,48 @@
+{
+ "name": "real-dwd-59",
+ "kind": "dwd",
+ "description": "真实形态（脱敏）：本地库 #59，layer=dwd",
+ "cases": [
+  {
+   "name": "real-dwd-59",
+   "config": {
+    "tableName": "dwd_w0155_test_df",
+    "tableComment": "字段说明340",
+    "dwdConfig": {
+     "dataGranularity": "",
+     "updateStrategy": "FULL_OVERWRITE",
+     "primaryKeys": [],
+     "hashConfig": {
+      "enabled": true,
+      "excludeFields": [
+       "dw_create_ts",
+       "dw_update_ts",
+       "dw_hash_val",
+       "dw_etl_job",
+       "dw_load_ts",
+       "dw_src_sys",
+       "dw_batch_id"
+      ],
+      "userExcludeFields": []
+     },
+     "changeTracking": {
+      "enabled": false,
+      "changeTableName": ""
+     },
+     "filterCondition": ""
+    },
+    "selectedFields": [],
+    "derivedFields": [],
+    "sourceTables": [],
+    "advancedSql": {
+     "type": "NONE",
+     "types": [],
+     "applyContent": "",
+     "cteContent": "",
+     "cteAlias": "",
+     "customFromContent": ""
+    }
+   }
+  }
+ ]
+}
