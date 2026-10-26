@@ -2,38 +2,27 @@
 /**
  * 系统迭代 建单弹窗 config-hide Playwright 验证（§211 收尾）
  *   needs_feasibility 勾选框仅 feature/improvement 显示；bug/config 隐藏 + 隐藏时清勾（防 stale 勾选提交致 400 FEASIBILITY_NOT_APPLICABLE）。
- *   用法：先起本地 server（localhost:3000），再 node scripts/test-sys-config-hide-playwright.js
+ *   用法：node scripts/test-sys-config-hide-playwright.js
+ *   [#106 S3b] 被测服务 / 实例库 / 密钥来自 test-env：默认自起临时隔离实例（来源 = 本检出本地库快照），也可由 TEST_* 变量组指向已起好的隔离实例；不再回落 3000，不再读真实库 / 真实 .env。
  *   纯前端显隐验证，不建单、不触发任何后端写/钉钉副作用。
  */
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-const WBS = path.join(__dirname, '..');
-require('dotenv').config({ path: path.join(WBS, '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(WBS, 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 const ADMIN_ID = 1;
+let BASE_URL = null;   // test-env ready() 之后才有值
 
 function signAs(userId) {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(DB_PATH);
-    db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId], (err, row) => {
-      db.close();
-      if (err) return reject(err);
-      if (!row) return reject(new Error(`user id=${userId} not found`));
-      resolve(jwt.sign({ id: row.id, username: row.username, display_name: row.display_name, role: row.role }, JWT_SECRET, { expiresIn: '1h' }));
-    });
-  });
+  return testEnv.signToken(userId);
 }
 
 let assertCount = 0, failCount = 0;
 function expect(cond, msg) { assertCount++; if (!cond) { failCount++; console.log(`  ❌ #${assertCount}: ${msg}`); } else console.log(`  ✓ ${msg}`); }
 
 (async () => {
+  await testEnv.ready();   // 先于任何网络请求 / 浏览器操作
   console.log('=== 系统迭代 建单弹窗 config-hide 验证 ===\n');
+  BASE_URL = testEnv.env().baseUrl;
   const browser = await chromium.launch({ headless: true });
   const consoleErrors = [];
   try {
@@ -96,5 +85,10 @@ function expect(cond, msg) { assertCount++; if (!cond) { failCount++; console.lo
     await browser.close();
   }
   console.log(`\n===== ${assertCount - failCount}/${assertCount} 通过, ${failCount} 失败 =====`);
-  process.exit(failCount ? 1 : 0);
-})();
+  try { await testEnv.teardown(); } catch (e) { console.error('teardown 失败：' + e.message); failCount++; }
+  testEnv.finish(failCount ? 1 : 0);   // 成功路径：teardown 之后只设退出码、让事件循环自然结束（fetch 之后立即 process.exit 在 Windows 上会触发 libuv 断言崩溃，见 lib/test-env.js finish）
+})().catch(async (e) => {
+  console.error('执行异常：', e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

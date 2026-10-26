@@ -2,10 +2,10 @@
  * 前端统一 #12 · 吸顶操作栏 Playwright 行为实测
  *
  * 用法：node scripts/test-unify12-sticky-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）
  *
  * 覆盖：
- *   P1 computed style 生效（缓存串 bump 后新 CSS 真加载）：
+ *   P1 computed style 生效（服务端注入的内容指纹缓存串，新 CSS 真加载）：
  *      - Data_Collab / Data_Correction / Issue_Lite：u-drawer-body 内挂类元素 position=sticky + top=-20px
  *      - Sys_Iteration：si-drawer-body 内挂类元素 top=-18px（页内条件覆盖压过共享 -20px）
  *   P2 真滚动吸顶（Data_Collab）：detailBody 注入长内容+action-bar，滚动后 bar 的
@@ -17,7 +17,7 @@
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const BASE_URL = fx.BASE;
+let BASE_URL = null;   // [#106 S4d-1] fx.BASE 在 ready() 之前读取会抛错，改为 ready 之后赋值
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
@@ -52,6 +52,8 @@ async function probeComputed(page, containerSelector) {
 }
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
     console.log('=== 前端统一 #12 吸顶操作栏 Playwright 实测 ===\n');
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
@@ -59,7 +61,7 @@ async function probeComputed(page, containerSelector) {
 
     try {
         // ===== P1 computed style 四页 =====
-        console.log('P1. computed style（新 CSS 经 bump 后的缓存串真实加载）');
+        console.log('P1. computed style（新 CSS 经服务端注入的内容指纹缓存串真实加载）');
         const shared = [
             ['Data_Collab.html', '#detailBody', '-20px'],
             ['Data_Correction.html', '#drawerBody', '-20px'],
@@ -169,6 +171,11 @@ async function probeComputed(page, containerSelector) {
         await browser.close();
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('吸顶实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

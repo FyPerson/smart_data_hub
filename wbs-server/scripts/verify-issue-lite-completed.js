@@ -12,17 +12,16 @@
  *   [6] 已完成单作废保留完成事实（completed_at/complete_note/board_url 三项全等）
  * ⚠️ 不触发真钉钉：N2 只测 400 门挡路径；通知留痕用 SQL 哨兵造，不真发。
  *
- * 用法：node scripts/verify-issue-lite-completed.js（自启 PORT=3399，跑完按端口精确杀 + 清理测试单）
+ * 用法：node scripts/verify-issue-lite-completed.js
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完收掉实例并清理测试单。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
-const path = require('path');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const DB_FILE = path.join(__dirname, '..', 'task_pool.db');
+let BASE = null;       // ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值（实例库）
 const ADMIN_ID = fx.ADMIN_ID;
 const FENG_ID = fx.CONTACT_ID;
 const TITLE_PREFIX = '[CPLVERIFY]';
@@ -41,36 +40,23 @@ async function api(method, urlPath, token, body) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
-// codex 15 C-1：解析 netstat 本地地址列做**精确端口**比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupTestRows() {
     return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); resolve(); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve(`打开实例库失败：${oe.message}`);   // 返回错误描述（null = 成功）；调用方计失败，不吞
+            db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], (de) => { db.close(() => resolve(de ? `DELETE 失败：${de.message}` : null)); });
+        });
     });
 }
-async function waitReady(getLog, ms = 12000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(getLog())) {
-            try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) return true; } catch (_) {}
-        }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
+// 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+async function issueLiteServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
 }
 function bodyWith(title) {
     return { title: TITLE_PREFIX + title, requester_name: '张三', requester_dept: '市场营销部', requester_phone: '13800001111' };
@@ -78,8 +64,10 @@ function bodyWith(title) {
 // SQL 哨兵种子（codex 15 C-2/C-3/C-4）：通知留痕/completed_at 无法经 API 造出（会触真钉钉），直接落库种非空哨兵
 function dbRun(sql, params) {
     return new Promise((resolve) => {
-        const d = new sqlite3.Database(DB_FILE);
-        d.run(sql, params, function (e) { const c = e ? -1 : this.changes; d.close(() => resolve(c)); });
+        const d = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve(-1);
+            d.run(sql, params, function (e) { const c = e ? -1 : this.changes; d.close(() => resolve(c)); });
+        });
     });
 }
 // 'YYYY-MM-DD HH:MM:SS'（datetime localtime）→ 毫秒时间戳（codex 15 C-6：真解析，不靠字典序）
@@ -88,16 +76,14 @@ const NOTE1 = '第一次完成：看板已交付并核对口径';
 const NOTE2 = '第二次完成：修订后重新交付看板';
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupTestRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
     try {
-        const ready = await waitReady(() => log);
-        check('服务 + issue_lite schema 就绪', ready);
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        const ce0 = await cleanupTestRows();
+        if (ce0) check('清理历史测试单', false, ce0);
+        const ready = await issueLiteServiceReady();
+        check('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
         if (!ready) throw new Error('服务未就绪');
 
         const adminTok = await fx.signAs(ADMIN_ID);
@@ -182,14 +168,16 @@ const NOTE2 = '第二次完成：修订后重新交付看板';
         fail++;
         results.push(`  ❌ 异常中断：${e.message}`);
     } finally {
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
-        await new Promise(r => setTimeout(r, 500));
-        await cleanupTestRows();
+        if (DB_FILE) { const ce = await cleanupTestRows(); if (ce) check('清理测试单', false, ce); }
+        try { await fx.teardown(); } catch (e) { fail++; results.push(`  ❌ teardown（收掉自起实例）失败：${e.message}`); }
     }
 
     console.log('─────── Commit C 完成时间防回归 verify ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? `✅ PASS（${pass}/${pass + fail}）` : `❌ FAIL（${fail} 项失败 / 共 ${pass + fail}）`}`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('Commit C verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

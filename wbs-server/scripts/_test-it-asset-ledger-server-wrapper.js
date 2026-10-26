@@ -34,6 +34,47 @@ if (!TEMP_DB) {
     process.exit(1);
 }
 
+// [#106 S4b2b] 源码副本里的空占位：下面的 realpath / inode 校验要求「真实库路径」存在。临时目录里复制出来的源码副本（server.js 等，上层没有任何 .git）里没有业务库文件，
+// 缺则建一个 0 字节占位（flag 'wx'：已存在不覆盖），由调用方（测试套件）不必再预放。
+// 在检出目录里（从 ROOT 起逐级向上任一层存在 .git——文件或目录）lstat 为 ENOENT 时什么都不做，绝不在检出目录里建文件，后面的校验原样执行（行为与改前完全一样）。
+// 这时「拒绝」是否成立取决于临时库：临时库已存在 → 下面 ②（realpath）会因真实库路径缺失而抛错，fail-closed 拒绝启动；临时库也不存在 → ②③ 两项校验都被 existsSync 跳过，照常往下 require 服务入口（与改前行为一致，
+// 这条路径上真实库文件缺失本来就意味着没有可误连的库）。H 的 runWrapperPlaceholderCases (a) 与 (d) 分别钉这两种情况。
+// lstat 的其他错误：打印并退出 1。
+function hasGitAtOrAbove(startDir) {
+    let dir = path.resolve(startDir);
+    for (;;) {
+        try { fs.lstatSync(path.join(dir, '.git')); return true; } catch (e) { if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; }
+        const up = path.dirname(dir);
+        if (up === dir) return false;
+        dir = up;
+    }
+}
+try {
+    fs.lstatSync(REAL_DB_ABS);
+} catch (e) {
+    if (e.code === 'ENOENT') {
+        let underGit;
+        try { underGit = hasGitAtOrAbove(ROOT); } catch (e2) {
+            console.error(`[it-asset-ledger-wrapper] 查找上层 .git 失败，fail-closed 拒绝启动：${e2.message}`);
+            process.exit(1);
+        }
+        if (!underGit) {
+            try {
+                fs.writeFileSync(REAL_DB_ABS, '', { flag: 'wx' });
+                console.error(`[it-asset-ledger-wrapper] 源码副本（${ROOT} 及其上层都没有 .git）里没有真实库路径的文件：已建 0 字节占位（只为通过下面的 realpath / inode 校验，服务的建库调用被重定向到 IA_TEST_DB_PATH，占位文件不会被打开写入）`);
+            } catch (e3) {
+                if (e3.code !== 'EEXIST') {
+                    console.error(`[it-asset-ledger-wrapper] 建占位文件失败，拒绝启动：${e3.message}`);
+                    process.exit(1);
+                }
+            }
+        }
+    } else {
+        console.error(`[it-asset-ledger-wrapper] lstat 真实库路径失败（${e.code || e.message}），拒绝启动`);
+        process.exit(1);
+    }
+}
+
 // H1 fail-closed 校验：下方 PatchedDatabase 的重定向逻辑只在 filename===REAL_DB_ABS 时才改写为
 // TEMP_DB；若 IA_TEST_DB_PATH 本身被误设为真库路径，重定向条件恒不成立，会直接放行连接真库。
 // 三层拦截，任一命中即视为校验失败，fail-closed 拒绝启动：

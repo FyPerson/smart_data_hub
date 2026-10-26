@@ -15,54 +15,61 @@
  * 共享目录/共享库清理必须精确清单，本文件严格只删自己 registerCreatedId 记录过的 id，不做任何前缀
  * 通配删除）。
  *
- * ⚠️ [S3-C 环境依赖·2026-09-17 实测记录] 本文件假定 BASE_URL（默认 localhost:3000）指向的服务
- * 进程已加载长任务B S1/S1b/S2/S2b 全部改动（commit 0303098/08e6249/81d8d2c/716ff6a）。若该进程
- * 是旧代码（提交前已启动的常驻开发服务器），POST /submit 不会产生 action_code=dev_submit_done/
- * dev_no_code 的时间线行，本文件全部断言会红——那不是回归，是「服务进程代码落后于仓库」，重启该
- * 服务进程到最新代码后重跑即可。**本仓 server.js 的 db 路径硬编码为 wbs-server/task_pool.db
- * （无 env 覆盖），且直连该文件做写操作会被本机权限分类器判定为"修改共享资源"拒绝**——本文件因此
- * 严格只通过 HTTP API（含官方 DELETE 端点清理）操作数据，不直连 sqlite3 写库，也不尝试另起
- * 一份 db 副本+独立端口（server.js 结构不支持指定 db 路径，强行复制文件与常驻服务进程共享同一
- * 物理文件会有并发写入风险）。
+ * ⚠️ [S3-C 环境依赖·2026-09-17 实测记录] 本文件假定被测服务进程已加载长任务B S1/S1b/S2/S2b 全部改动
+ * （commit 0303098/08e6249/81d8d2c/716ff6a）。[#106 S4d-3] 迁移后被测服务是 test-env 自起的隔离实例（本检出的代码），
+ * 不再有「常驻开发服务器是旧代码」的环境依赖。本文件仍严格只通过 HTTP API（含官方 DELETE 端点清理）操作数据，不直连 sqlite3 写库；
+ * 实例库只用 OPEN_READONLY 做两类只读核对（拿 users 行 / 末尾零残留 SELECT）。
  *
- * 用法：node scripts/test-sys-perdev-done-playwright.js（需先启动/重启 node server.js，端口 3000，
- *   且工作区已包含长任务B S1-S2b 全部 commit）
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；
+ *   · 删除 assertLocalTargetOrExit（MED-5：原来防的是 TEST_BASE_URL 指向远端而本文件直读本机业务库——现在被测服务与库路径同出一源 test-env，
+ *     隔离实例本身就是本地目标，该失真假设不再存在）与 ensureServerListening（端口探测，ready() 已核对服务身份 / 就绪）；
+ *   · 令牌用 testEnv.signToken；RUN_TAG（含 crypto.randomBytes）、标题前缀等每次运行唯一，清理仍只针对本文件登记过的 id；
+ *   · 清理：issue / release 的 DELETE 各自 try，失败再试一轮（共 2 轮，间隔 200ms），遗留计失败（原本就计失败，这里补重试）。
+ *
+ * 用法：node scripts/test-sys-perdev-done-playwright.js
  */
 'use strict';
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;
+let BASE_URL = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库，只读核对）
 
 const ADMIN_ID = 1;
 const DEV_ID = 8;         // 示例开发A——同 test-sys-submit-withdraw-playwright.js 既有夹具账号
 const SECOND_DEV_ID = 9;  // 示例开发B
 
-const RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-const RUN_TAG_MARKER = `RT-PERDEV-${RUN_TAG}`;
+let RUN_TAG = null;         // [#106 S4d-3] ready() 之后赋值（顶层 Date.now() / crypto.randomBytes 会被守卫 R6 判红）
+let RUN_TAG_MARKER = null;
 const TITLE_PREFIX = '[pw-perdev-done]';
 
-// ⚠️ [S3-C 清理纪律] db 只读——本文件唯一的读操作是 signAs() 查 users 表拿 JWT payload 字段
-// （角色/姓名，登录态本身走 JWT 自签不查库），以及 T2 里为了断言"库里 dev_status/rounds 真的
-// 落对了值"而做的只读核对；写操作一律走 HTTP API（含清理，见 registerCreatedId + apiDeleteIssue）。
-const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows || [])));
+// ⚠️ [S3-C 清理纪律] db 只读——本文件的读操作是 末尾零残留核对（signAs 现在走 testEnv.signToken，不再自己查 users 表）；
+// 写操作一律走 HTTP API（含清理，见 registerCreatedId + apiDeleteIssue）。
+// [#106 S4d-3] 只读打开实例库（OPEN_READONLY，带打开回调转 Promise），每次查询开关一次，关库等回调、错误不丢；模块顶层不再 new Database(业务库)。
+function openInstanceDbReadonly(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+const dbAll = async (sql, params = []) => {
+    const d = await openInstanceDbReadonly(DB_PATH);
+    return new Promise((res, rej) => { d.all(sql, params, (e, rows) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(rows || []); }); }); });
+};
+/** 最多尝试 2 次（间隔 200ms），成功即返回，失败抛最后一次的错 */
+async function twice(fn) {
+    try { return await fn(); } catch (e1) {
+        await new Promise((r) => setTimeout(r, 200));
+        return fn();
+    }
+}
 
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);   // [#106 S4d-3] 实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 }
 function jsonHeaders(tok) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` }; }
 // [LOW-10] 实测发现：Sys_Iteration.html 详情页无条件拉取 admin-only 的
@@ -96,17 +103,6 @@ async function shotOnFail(page, cond, name, msg) {
     }
 }
 
-function ensureServerListening(timeoutMs = 3000) {
-    const u = new URL(BASE_URL);
-    const host = u.hostname;
-    const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
-    return new Promise((resolve, reject) => {
-        const sock = net.createConnection({ port, host });
-        const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时`)); }, timeoutMs);
-        sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js`)); });
-    });
-}
 async function loginPage(browser, token) {
     const page = await browser.newPage();
     const consoleErrors = [];
@@ -197,8 +193,11 @@ async function apiArrangeRelease(adminTok, id) {
     const addR = await fetch(`${BASE_URL}/api/sys-releases/${createJ.id}/add-issues`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ issue_ids: [id] }) });
     return { status: addR.status, body: await addR.json().catch(() => null) };
 }
-async function apiDeleteIssue(adminTok, id, reason) {
+// [#106 S4d-3 修复批] treat404AsCleaned：重试（第 2 次）时 404 视为已清掉（第 1 次请求服务端已删、响应丢失 / 抛错的情形）；
+//   第 1 次 404 仍抛错进入重试，不直接放过；最终是否真的清净由收尾的磁盘零残留回查裁定
+async function apiDeleteIssue(adminTok, id, reason, treat404AsCleaned) {
     const r = await fetch(`${BASE_URL}/api/sys-issues/${id}`, { method: 'DELETE', headers: jsonHeaders(adminTok), body: JSON.stringify({ reason: reason || 'Playwright 夹具清理：S3-C 逐人完成事件测试遗留单，非真实业务数据' }) });
+    if (treat404AsCleaned && r.status === 404) return;
     if (r.status !== 200) throw new Error(`[清理] DELETE id=${id} 应 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
 }
 
@@ -230,22 +229,15 @@ async function mkFixtureTwoDevLastSubmit(adminTok, devTok, secondDevTok) {
     return id;
 }
 
-// [codex 589 MED-5] signAs 与末尾零残留核对直读本地 task_pool.db（DB_PATH 恒指向本仓库文件），若
-// TEST_BASE_URL 指向非本机目标，本文件读到的"库状态"与实际被测服务器的库完全是两回事——校验会全程
-// 静默失真（signAs 拿到的 JWT payload 对不上远端用户、零残留核对读的是本机空/无关表）。在创建任何
-// 夹具之前直接退出并说明，不允许带着这种失真假设继续跑。
-function assertLocalTargetOrExit() {
-    if (!process.env.TEST_BASE_URL) return;
-    let host;
-    try { host = new URL(process.env.TEST_BASE_URL).hostname; } catch (e) { host = null; }
-    if (host === 'localhost' || host === '127.0.0.1') return;
-    console.error(`[MED-5] TEST_BASE_URL=${process.env.TEST_BASE_URL} 指向非本机目标（hostname=${host}）——本文件的 signAs 与零残留核对直读本地 task_pool.db，不支持远端目标，退出不建任何夹具。`);
-    process.exit(1);
-}
+// [#106 S4d-3] 原 assertLocalTargetOrExit（codex 589 MED-5）已删：它防的是 TEST_BASE_URL 指向远端而本文件直读本机业务库造成校验静默失真；
+//   迁移后被测服务与实例库路径同出一源（test-env），不存在两者不一致的情形，隔离实例本身就是本地目标。
 
 async function main() {
-    assertLocalTargetOrExit();
-    await ensureServerListening();
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+    RUN_TAG_MARKER = `RT-PERDEV-${RUN_TAG}`;
     const adminTok = await signAs(ADMIN_ID);
     const devTok = await signAs(DEV_ID);
     const secondDevTok = await signAs(SECOND_DEV_ID);
@@ -331,7 +323,8 @@ async function main() {
         console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
         if (fail > 0) { console.log('失败项：'); failDetails.forEach(m => console.log('  - ' + m)); }
     } finally {
-        try { await browser.close(); } catch (e) { console.error(`browser.close() 失败（不阻断后续清理）：${e.message}`); }
+        // [#106 S4d-3 修复批] browser.close() 失败不阻断后续清理，但计失败（原来只打日志，退出码仍为 0）
+        try { await browser.close(); } catch (e) { console.error(`browser.close() 失败（不阻断后续清理）：${e.message}`); fail++; failDetails.push(`browser.close() 失败：${e.message}`); }
         // 清理链两半缺一半都是假清理（memory feedback_shared_dir_test_cleanup_precise_list·首跑实锤：加入批次的单 DELETE 409
         // SYS_ISSUE_IN_RELEASE 留下 19155）：① 先把自己造的单从自己造的批次移出（remove-issues）② DELETE 单 ③ DELETE 自己造的空批次
         // （官方 DELETE /sys-releases/:id 存在）。三步都只针对本文件登记过的 id，不做前缀通配。
@@ -392,28 +385,38 @@ async function main() {
                 }
             } catch (e) { console.error(`清理 release=${relId} 移单失败：${e.message}`); fail++; failDetails.push(`清理 release=${relId} 移单异常：${e.message}`); }
         }
+        // [#106 S4d-3] DELETE 各自 try，失败再试一轮（twice：共 2 次，间隔 200ms），仍失败才计失败
         for (const id of createdIds) {
-            try { await apiDeleteIssue(adminTok, id); }
+            let delAttempt = 0;   // 第 2 次起 404 视为已清（见 apiDeleteIssue）
+            try { await twice(() => apiDeleteIssue(adminTok, id, undefined, delAttempt++ > 0)); }
             catch (e) { console.error(`清理 issue=${id} 失败：${e.message}`); fail++; failDetails.push(`清理 issue=${id} 失败：${e.message}`); }
         }
         for (const relId of createdReleaseIds) {
+            let relDelAttempt = 0;   // 第 2 次起 404 视为已清
             try {
-                const r = await fetch(`${BASE_URL}/api/sys-releases/${relId}`, { method: 'DELETE', headers: jsonHeaders(adminTok), body: JSON.stringify({ reason: 'Playwright 夹具清理' }) });
-                if (r.status !== 200) { console.error(`清理 release=${relId} 删除非 200：${r.status} ${JSON.stringify(await r.json().catch(() => null))}`); fail++; failDetails.push(`清理 release=${relId} 删除失败：${r.status}`); }
-            } catch (e) { console.error(`清理 release=${relId} 删除失败：${e.message}`); fail++; failDetails.push(`清理 release=${relId} 删除异常：${e.message}`); }
+                await twice(async () => {
+                    const isRetry = relDelAttempt++ > 0;   // 先于 fetch 计次：第 1 次 fetch 抛错时重试仍按第 2 次算
+                    const r = await fetch(`${BASE_URL}/api/sys-releases/${relId}`, { method: 'DELETE', headers: jsonHeaders(adminTok), body: JSON.stringify({ reason: 'Playwright 夹具清理' }) });
+                    if (isRetry && r.status === 404) return;
+                    if (r.status !== 200) throw new Error(`清理 release=${relId} 删除非 200：${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
+                });
+            } catch (e) { console.error(`清理 release=${relId} 删除失败：${e.message}`); fail++; failDetails.push(`清理 release=${relId} 删除失败：${e.message}`); }
         }
-        // 断言到磁盘：本文件登记过的 id 必须零残留（读端只读 SELECT）
-        const leftIssues = createdIds.length ? await dbAll(`SELECT id FROM sys_issues WHERE id IN (${createdIds.map(() => '?').join(',')})`, createdIds) : [];
-        const leftRels = createdReleaseIds.length ? await dbAll(`SELECT id FROM sys_releases WHERE id IN (${createdReleaseIds.map(() => '?').join(',')})`, createdReleaseIds) : [];
-        if (leftIssues.length || leftRels.length) { console.error(`清理残留：issues=${JSON.stringify(leftIssues)} releases=${JSON.stringify(leftRels)}`); process.exitCode = 1; fail++; failDetails.push(`清理残留：issues=${JSON.stringify(leftIssues)} releases=${JSON.stringify(leftRels)}`); }
-        else console.log(`清理完成：issues=${createdIds.length} releases=${createdReleaseIds.length} 零残留`);
-        db.close();
+        // 断言到磁盘：本文件登记过的 id 必须零残留（读端只读 SELECT；[#106 S4d-3] 回查本身失败也计失败，原来会让 finally 抛出而丢掉后续收尾）
+        try {
+            const leftIssues = createdIds.length ? await dbAll(`SELECT id FROM sys_issues WHERE id IN (${createdIds.map(() => '?').join(',')})`, createdIds) : [];
+            const leftRels = createdReleaseIds.length ? await dbAll(`SELECT id FROM sys_releases WHERE id IN (${createdReleaseIds.map(() => '?').join(',')})`, createdReleaseIds) : [];
+            if (leftIssues.length || leftRels.length) { console.error(`清理残留：issues=${JSON.stringify(leftIssues)} releases=${JSON.stringify(leftRels)}`); fail++; failDetails.push(`清理残留：issues=${JSON.stringify(leftIssues)} releases=${JSON.stringify(leftRels)}`); }
+            else console.log(`清理完成：issues=${createdIds.length} releases=${createdReleaseIds.length} 零残留`);
+        } catch (e) { console.error(`零残留回查失败：${e.message}`); fail++; failDetails.push(`零残留回查失败：${e.message}`); }
     }
-    // [MED-7] 退出码不得被清理残留静默吞掉——process.exit(0) 会无条件覆盖已设的 process.exitCode，
-    // 此前"process.exit(fail > 0 ? 1 : 0)"在 fail===0 但清理残留（上方 process.exitCode=1）时仍会
-    // 以 0 退出，CI/自动化据退出码判定会误判为全绿。fail 已在残留分支同步自增，这里保留双重判据
-    // 兜底（即便未来有别的分支只设 exitCode 不动 fail，也不会被这一行悄悄冲掉）。
-    process.exit((fail > 0 || process.exitCode === 1) ? 1 : 0);
+    try { await testEnv.teardown(); } catch (e) { console.error(`teardown（收掉自起实例）失败：${e.message}`); fail++; failDetails.push(`teardown 失败：${e.message}`); }
+    // [MED-7] 退出码不得被清理残留静默吞掉——清理残留 / 回查失败 / teardown 失败都已同步自增 fail，退出码只由 fail 决定（[#106 S4d-3] 不再用 process.exitCode 旁路）。
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('测试运行异常：', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('测试运行异常：', e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -1,14 +1,16 @@
 /**
  * test-sys-detail-ux-playwright.js — 系统迭代详情抽屉 UX 补全 前端冒烟（F 线，本文件起）
  *
- * 循 test-sys-commit-cols-playwright.js 套件范式（外部 server:3000 已运行的真实 task_pool.db +
- * JWT 注入 + login.html 中继跳转 + 直接 SQL 造夹具 + must() 断言计数 + finally 段清理 + 非零退出码）。
- * 与该文件同款契约：本脚本**不**自带端口探测/自启动逻辑——依赖调用方在跑本脚本前已把 server 跑在
- * localhost:3000（含本次改动的最新代码），server 未起时 page.goto/fetch 会失败并落入顶层 catch，
- * 计入 failed 且非零退出，不会被误判为"全部跳过=通过"。
+ * 循 test-sys-commit-cols-playwright.js 套件范式（JWT 注入 + login.html 中继跳转 + 直接 SQL 造夹具 +
+ * must() 断言计数 + finally 段清理 + 非零退出码）。
  *
- * 用法：本地 server（3000）已重启到含本文件覆盖改动的代码后：
- *   node scripts/test-sys-detail-ux-playwright.js
+ * 用法：node scripts/test-sys-detail-ux-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   原「外部 server:3000 已运行的真实 task_pool.db」契约作废：服务由 testEnv.ready() 起并核对身份，起不来时 ready() 抛错、入口 .catch 非零退出。
+ *   造数：直连实例库插单据（标题 DUX-<场景>-<RUN_TAG>，RUN_TAG = Date.now()，每次运行唯一）及子表行，收尾按登记的 issue id 级联删除
+ *   （每个 id 的每一步各自 try，共 2 轮，间隔 200ms，清完回查，遗留计失败）。
+ *   固定用户 id：成员夹具里的 9001–9004 / 9101 等是写进 sys_issue_dev_assignees / timeline 的展示用 id（不要求 users 表里存在）；token 用库里第一个 active admin。
+ *   批跑建议：needsService:true；非 exclusive（只建 DUX- 标记的单，按 id 清理）；不需要服务端开关。
  *
  * F1 覆盖：
  *   [T1] 开发成员 chip 逐人完成时刻——code_submitted 且 resolved_at 有值的成员，chip 内出现
@@ -149,23 +151,42 @@
 'use strict';
 
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const sqlite3 = require('sqlite3');
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-// ⚠️ 必须加载 .env：server 端 JWT_SECRET 来自 .env，脚本不加载会退回 fallback 值 →
-//    签名不匹配 → 所有请求 403 → 被 checkAuth 踢回 login.html（同款套件均有此行）
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（原来必须加载 .env 取 JWT_SECRET，隔离实例的密钥不在 .env 里）
+let BASE_URL = null;        // ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SCREENSHOT_DIR = null;  // ready() 之后赋值：os.tmpdir() 下的目录（原在检出目录 test-screenshots 下；本脚本实际不截图，只在异常时 mkdir，纯失败诊断）
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(__dirname, '..', 'test-screenshots');
-
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
 let passed = 0, failed = 0;
 let fatalError = null;
@@ -213,7 +234,7 @@ function siConsoleErrorsExcludingKnown409(page) {
     });
 }
 
-const RUN_TAG = Date.now();
+let RUN_TAG = null;   // [#106 S4d-5] ready() 之后赋值：Date.now()（顶层调用会被守卫 R6 判红）
 const createdIssueIds = [];
 
 const FIXTURE_SYSTEM = 'BMS';
@@ -239,13 +260,19 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
     return r.lastID;
 }
 
-(async () => {
+async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-detail-ux-playwright-shots');
+    RUN_TAG = Date.now();
+    db = await openInstanceDb(DB_PATH);
     let browser;
     try {
         // users 表用 `status`（非 is_active）标活跃态——列名以 PRAGMA table_info 实测为准，不凭印象写
         const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!admin) throw new Error('库中无 active admin 用户，无法造 token');
-        const adminTok = jwt.sign({ id: admin.id, username: admin.username, display_name: admin.display_name, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+        const adminTok = await testEnv.signToken(admin.id);   // [#106 S4d-5] 实例密钥签（读实例库 users 行），不再自读 JWT_SECRET
 
         // ── 夹具：一单四名开发，逐人不同 dev_status/resolved_at 组合 ──────────────────
         //   〔F3b MED-3〕补第 4 名 no_code——production 代码的显示条件是
@@ -1562,16 +1589,33 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         // dev_assignee_id 查询的其它脚本（该表无 issue_id 外键级联，需要显式清）。顺序放在最前——
         // sys_issue_dev_assignees 删掉后 dev_assignee_id 就成了悬空引用，虽然 SQLite 默认不强制外键，
         // 但按"先删末端明细表、再删被引用的主表"这个既定顺序惯例走，不依赖"反正不强制约束"这层侥幸。
-        const safeDelete = async (sql, params, step) => {
-            try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
-        };
-        for (const id of createdIssueIds) {
-            await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], `dev_events#${id}`);
-            await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
-            await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
-            await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
-            await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+        // [#106 S4d-5] 每个 id 的每一步各自 try；有失败整体再试一轮（共 2 轮，间隔 200ms）；每轮清完回查 sys_issues / sys_issue_dev_events 按 id 的残留，非 0 计入本轮失败；
+        //   仍失败的计入 cleanupErrs（下方两条断言据此判红）。原来只有一轮，失败一次就记。
+        let roundErrs = [];
+        for (let round = 0; round < 2; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            roundErrs = [];
+            const safeDelete = async (sql, params, step) => {
+                try { await run(sql, params); } catch (e) { roundErrs.push({ step, message: e && e.message }); }
+            };
+            for (const id of createdIssueIds) {
+                await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], `dev_events#${id}`);
+                await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
+                await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
+                await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
+                await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+            }
+            if (createdIssueIds.length) {
+                try {
+                    const ph = createdIssueIds.map(() => '?').join(',');
+                    const leftIssues = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE id IN (${ph})`, createdIssueIds);
+                    const leftEvents = await get(`SELECT COUNT(*) AS c FROM sys_issue_dev_events WHERE issue_id IN (${ph})`, createdIssueIds);
+                    if (leftIssues.c !== 0 || leftEvents.c !== 0) roundErrs.push({ step: '回查', message: `按 id 回查仍有残留：sys_issues ${leftIssues.c} / sys_issue_dev_events ${leftEvents.c}` });
+                } catch (e) { roundErrs.push({ step: '回查', message: e && e.message }); }
+            }
+            if (roundErrs.length === 0) break;
         }
+        cleanupErrs.push(...roundErrs);
         const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`DUX-%-${RUN_TAG}`]);
         console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条，应为 0）`);
         must(cleanupErrs.length === 0, `夹具清理 SQL 全部无错误，实得 errs=${JSON.stringify(cleanupErrs)}`);
@@ -1588,13 +1632,21 @@ async function mkMember(issueId, userId, userName, devStatus, resolvedAt, noCode
         }
         must(createdIssueIds.length === 0 || devEventsLeft === 0,
             `夹具清理后 sys_issue_dev_events 残留应为 0，实得 ${devEventsLeft === null ? '(查询失败)' : devEventsLeft}`);
-        db.close();
+        // [#106 S4d-5] 原为 db.close()（不等回调）：改等 close 回调，失败计失败；随后收掉自起实例，失败计失败
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
+        try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
         console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈（此次结果不可信赖为"仅这些用例失败"）' : ''}`);
-        process.exit(failed === 0 && !fatalError ? 0 : 1);
     }
-})().catch(e => {
+    // [#106 S4d-5] 原为 finally 里 process.exit(...)：改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+    testEnv.finish(failed === 0 && !fatalError ? 0 : 1);
+}
+
+main().catch(async (e) => {
     // 外层 rejection 兜底——封住"finally 段自身抛错（例如 browser.close()/cleanup() 内部 await 失败）
-    // 导致 IIFE 整体 rejected、绕过上面的汇总打印与 process.exit 调用"这条路径（同既有套件纪律）。
+    // 导致 main 整体 rejected、绕过上面的汇总打印与退出码设置"这条路径（同既有套件纪律）；
+    // [#106 S4d-5] 同时覆盖 ready() 失败（实例起不来）：teardown 后以 1 退出。
     console.error('[顶层兜底] finally 段或未捕获 rejection：\n', e && (e.stack || e));
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

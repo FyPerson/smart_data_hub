@@ -18,7 +18,7 @@
  *   2026-09-06 决策记录 D2 放开 admin-submit-on-behalf 到任意 EXPORTING 单后，C-UI-3 第四条
  *   断言（「admin 仍无按钮」）翻转为「admin 有按钮」，新增 C-UI-7 真实链路。
  *
- * 前置：dev 服务器运行即可——**夹具由本脚本每次自动播种**（require ./make-dc-ui-fixtures）。
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例）——**夹具由本脚本每次自动播种**（require ./make-dc-ui-fixtures）。
  *   原先硬读 <tmp>/dc-testsingle.json，夹具丢失即 ENOENT 崩溃、整套回归跑不了（2026-09-01 实遇）；
  *   且 C-UI-4 会把 normal 单真实闭环成 DONE，复用旧夹具必判红 → 恒新播种最稳。跑完自动清理测试单。
  *   C-UI-7 消费 seed() 新增的第二张 `normal2` 单，与 C-UI-4/5/6 消费的 `normal` 单互不干扰。
@@ -30,13 +30,13 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const sqlite3 = require('sqlite3').verbose();
 const fixtures = require('./make-dc-ui-fixtures');
 const fx = require('./_test-fixture');
 
 // codex 审 MED 采纳：复用 _test-fixture 的 BASE，不再重复硬编码
 //   （两处各写一份地址时，一旦其一改动就会「在 A 播种、在 B 断言」静默误报）
-const BASE_URL = fx.BASE;
+// [#106 S4d-1] fx.BASE 在 ready() 之前读取会抛错，改为 main() 里 ready 之后赋值
+let BASE_URL = null;
 
 let pass = 0, fail = 0;
 const fails = [];
@@ -46,17 +46,38 @@ function ok(name, cond, detail) {
 }
 
 // 直查库断言终态——UI 文案断言不足以证明状态真的变了（见 C-UI-4 注释）
-function dbGet(sql, params) {
+// fx.DB_PATH 在调用时（ready 之后）才读取；开库用夹具导出的 fx.openInstanceDb（OPEN_READWRITE、不带 OPEN_CREATE、带打开回调）；
+//   close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
-        db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.get(sql, params, (e, r) => { db.close((cerr) => { const err = e || cerr; err ? reject(err) : resolve(r); }); });
     });
 }
-function dbAll(sql, params) {
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
-        db.all(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.all(sql, params, (e, r) => { db.close((cerr) => { const err = e || cerr; err ? reject(err) : resolve(r); }); });
     });
+}
+
+/**
+ * [#106 S4d-1] 清理播种出来的协作单（FK 级联清子表）：每个编号单独 try / catch，一个失败不中断后续；只把清理成功的编号移出追踪；
+ * 失败的编号再试一轮（共 2 轮，间隔 200ms）；仍遗留的返回说明数组（调用方计失败）。取代原先 fixtures.cleanupSeeded 的单轮清理
+ */
+async function cleanupSeededIds(ids) {
+    let remaining = (ids || []).slice();
+    let lastErr = new Map();
+    for (let round = 0; round < 2 && remaining.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        const still = [];
+        lastErr = new Map();
+        for (const id of remaining) {
+            try { await fx.cleanup(id); } catch (e) { still.push(id); lastErr.set(id, (e && e.message) || String(e)); }
+        }
+        remaining = still;
+    }
+    return remaining.map((id) => `测试单 #${id} 清理失败（已重试 1 轮）: ${lastErr.get(id)}`);
 }
 
 async function loginAs(context, token, id) {
@@ -72,10 +93,21 @@ async function main() {
     //   且 browser.close() 与夹具清理各自独立 try——任一步抛错都不能吃掉另一步。
     //   原实现里 seed() 在 try 外，chromium.launch() 失败会残留测试单；
     //   browser.close() 抛错也会阻止 cleanupSeeded。
+    await fx.ready();   // 先于任何网络请求 / 写库 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
     let seeded = null;
     let browser = null;
     try {
-        seeded = await fixtures.seed({ quiet: true });   // 内嵌调用不落 JSON（token 不外泄到临时目录）
+        try {
+            seeded = await fixtures.seed({ quiet: true });   // 内嵌调用不落 JSON（token 不外泄到临时目录）
+        } catch (e) {
+            // [#106 S4d-1] seed 中途失败：seeded 仍为 null，下面 finally 的清理不会执行；播种内部的失败回滚若没清干净，
+            //   残留编号随 e.cleanupErrors 带出——逐条计失败（让残留测试单可见），然后照旧抛出原错误
+            if (e && Array.isArray(e.cleanupErrors)) {
+                e.cleanupErrors.forEach((m) => ok(`播种失败回滚残留：${m}`, false));
+            }
+            throw e;
+        }
         const single = seeded.single;
         const normal = seeded.normal;
         const normal2 = seeded.normal2;
@@ -388,27 +420,36 @@ async function main() {
             await ctx.close();
         }
 
-        console.log(`\n========== 结果：${pass} 通过 / ${fail} 失败 ==========`);
-        if (fail > 0) { console.log('失败项：', fails.join(' | ')); process.exitCode = 1; }
-        else console.log('✓ Commit C 前端 UI 全部通过');
     } finally {
         // 两段各自独立 try：关浏览器失败不能吃掉夹具清理
         if (browser) {
             try { await browser.close(); }
-            catch (e) { console.warn(`⚠️ 关闭浏览器失败: ${e.message}`); }
+            catch (e) { fail++; fails.push(`关闭浏览器失败: ${e.message}`); console.warn(`⚠️ 关闭浏览器失败: ${e.message}`); }   // [#106 S4d-1] 失败计失败
         }
         if (seeded) {
             // codex 审 MED 采纳：清理失败不再静默吞，改为判红——
             //   残留测试单会污染后续回归（也会让人误以为库里的脏单是业务数据）
-            const cleanupErrs = await fixtures.cleanupSeeded(seeded.ids);
+            // [#106 S4d-1] 每个编号单独 try / catch + 再试一轮（cleanupSeededIds），遗留计失败
+            const cleanupErrs = await cleanupSeededIds(seeded.ids);
             if (cleanupErrs.length) {
                 fail += cleanupErrs.length;
                 cleanupErrs.forEach((m) => fails.push(m));
                 console.log(`\n✗ 夹具清理未完成：\n  ${cleanupErrs.join('\n  ')}`);
-                process.exitCode = 1;
             }
         }
     }
+
+    // [#106 S4d-1] 实例收尾放在清理之后（清理要用实例）；成功路径补 finish（原来靠自然结束 + process.exitCode）
+    try { await fx.teardown(); } catch (e) { fail++; fails.push(`teardown 失败: ${e.message}`); console.log(`✗ teardown（收掉自起实例）失败: ${e.message}`); }
+    // [#106 S4d-1] 汇总行放在清理与 teardown 计数之后（原来在 finally 之前打印，清理 / teardown 失败时日志仍显示全过而退出码是 1），用最终的 fail 计数
+    console.log(`\n========== 结果：${pass} 通过 / ${fail} 失败 ==========`);
+    if (fail > 0) { console.log('失败项：', fails.join(' | ')); }
+    else console.log('✓ Commit C 前端 UI 全部通过');
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('脚本异常:', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('脚本异常:', e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

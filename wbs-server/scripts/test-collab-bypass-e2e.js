@@ -4,7 +4,7 @@
  * 用法：node scripts/test-collab-bypass-e2e.js
  *
  * 前置：
- *   - 本地 server 已启动（localhost:3000）
+ *   - 入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *   - 用户表里有 admin / 19900000003 / demo_user_a / demo_user_b（角色 admin / publisher / user / user）
  *   - target_db_connection_id=2（business_db source 连接）
  *   - fixture 由 _test-fixture.js 动态创建（v3 协议：PENDING_ASSIGN → assign → PENDING → 直接 UPDATE 到 SUBMITTED+failed）
@@ -26,48 +26,42 @@
 'use strict';
 
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
-
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
 
 // v3 二级转派后 fixture 动态创建（2026-05-19）
 const fx = require('./_test-fixture');
+
+// [#106 S4c-A1] 被测服务 / 实例库 / 签名来自 test-env：BASE / DB_PATH 在 ready() 之后才赋值；
+//   不再写死 3000、业务库路径，不再加载 .env 与自己 jwt.sign。
+let BASE = null;
+let DB_PATH = null;
 let TEST_ID = null;
 
 const tokens = {};
 
+// [#106 S4c-1 修复批 1] 与原脚本语义一致：按 users.username 在实例库里取行，再经 fx.signAs(id) 签发（不再用固定 id 映射）；
+//   查不到即抛错。dbGet / DB_PATH 在入口 ready() 之后才被调用。
 async function loginAs(username) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get(`SELECT id, username, display_name, role FROM users WHERE username=? LIMIT 1`, [username],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user ${username} not found in local DB`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    const user = await dbGet(`SELECT id, username, display_name, role FROM users WHERE username=? LIMIT 1`, [username]);
+    if (!user) throw new Error(`user ${username} not found in instance DB`);
+    return fx.signAs(user.id);
 }
 
-function dbGet(sql, params) {
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get(sql, params, (err, row) => { db.close(); err ? reject(err) : resolve(row); });
+        db.get(sql, params, (err, row) => {
+            // 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); });
+        });
     });
 }
 
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(sql, params, function(err) {
-            db.close();
-            err ? reject(err) : resolve({ changes: this.changes, lastID: this.lastID });
+            const out = err ? null : { changes: this.changes, lastID: this.lastID };
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(out); });
         });
     });
 }
@@ -286,22 +280,42 @@ async function runTests() {
         try {
             await fx.cleanup(TEST_ID);
             console.log(`✅ fixture cleaned up: id=${TEST_ID}`);
+            TEST_ID = null;   // 已清理：入口的异常兜底不再重复清
         } catch (e) {
-            console.log(`⚠️ fixture cleanup failed: ${e.message}`);
+            console.log(`⚠️ fixture cleanup failed（TEST_ID 保留，入口 finally 再试一次，仍失败才计失败）: ${e.message}`);
         }
     }
 
     if (failures.length > 0) {
         console.log('\nFailures:');
         for (const f of failures) console.log(`  - ${f.name}: ${f.error}`);
-        process.exit(1);
     }
+    // helper 不再 process.exit：返回失败数，由入口在 teardown 之后 finish
+    return failures.length;
 }
 
-runTests().catch(async (e) => {
-    console.error('FATAL:', e);
-    if (TEST_ID) {
-        try { await fx.cleanup(TEST_ID); } catch (_) { }
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        BASE = fx.BASE;
+        DB_PATH = fx.DB_PATH;
+        const nFailed = await runTests();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('FATAL:', e);
+    } finally {
+        // [#106 S4c 收口] 夹具还在（runTests 里清理失败，或中途抛异常）就再试一次；仍失败必须计失败（code = 1），且不跳过 teardown
+        if (TEST_ID) {
+            await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 与 runTests 内第一次清理之间等 200ms（防事务外异步回写偶发 SQLITE_BUSY）
+            try { await fx.cleanup(TEST_ID); TEST_ID = null; } catch (e) { console.error(`夹具清理失败 id=${TEST_ID}：${e.message}`); code = 1; }
+        }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
     }
-    process.exit(2);
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('bypass e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
 });

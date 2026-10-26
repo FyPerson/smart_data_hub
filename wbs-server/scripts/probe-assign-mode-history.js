@@ -1,7 +1,8 @@
 /**
- * v1.72.3 admin 直派模式 — 历史数据兼容性 verify 脚本
+ * v1.72.3 admin 直派模式 — 历史数据兼容性 probe 探针脚本（原名 verify-assign-mode-history.js，S4e-4 改名为 probe-*）
  *
  * 用途：部署后 scp 到生产 → 跑探查 → 即用即删（F1 探针模式）
+ * 用法：node scripts/probe-assign-mode-history.js （只读排查探针，对生产 / 本地库跑，不进测试体系；登记为 EXEMPT）
  *
  * 检查项：
  *   1. 所有 collab_requests 行 assign_mode 应为 'normal' 或 'admin_direct'，不存在 NULL
@@ -113,7 +114,7 @@ function printDistribution() {
 }
 
 (async () => {
-    console.log('=== v1.72.3 admin 直派模式 — 历史数据 verify ===\n');
+    console.log('=== v1.72.3 admin 直派模式 — 历史数据 probe ===\n');
     await checkAssignModeLegal();
     await checkHistoryRowsNormal();
     await checkIndexExists();

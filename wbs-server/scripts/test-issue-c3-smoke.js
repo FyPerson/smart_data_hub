@@ -1,7 +1,7 @@
 /**
  * v1.74.0 C3 — POST/assign/DELETE/notify endpoint 冒烟 e2e
  *
- * 用法：本地 server 已启动（localhost:3000）后 node scripts/test-issue-c3-smoke.js
+ * 用法：node scripts/test-issue-c3-smoke.js（入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组，四个必须同时给）
  * 复用 _test-fixture 的 signAs（admin=1 / viewer=2 / user dev1=19）。
  * 完整 e2e（T2-T8 全集）在 C7；本脚本只冒烟 C3 改造的关键行为，确认 endpoint 不报错 + 行为符合预期。
  *
@@ -39,21 +39,21 @@
  */
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-function dbGet(sql, params) {
+// [#106 S4c-B] 实例库来自 test-env：fx.DB_PATH 在 ready() 之前读会抛 FX_NOT_READY，故改为 ready() 之后在入口里赋值，不再指向业务库 task_pool.db
+let DB_PATH = null;
+// 以下两个 helper：等 close 回调再落定，关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.get(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); });
     });
 }
-function dbAll(sql, params) {
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.all(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.all(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); });
     });
 }
 
@@ -297,13 +297,40 @@ async function main() {
     });
 
     // 清理残留测试单
-    for (const id of createdIds) {
-        await fx.apiCall('DELETE', `/api/issues/${id}`, adminToken);
+    // [#106 S4c 收口] 逐个 try/catch 并核对状态码（200 / 404 才算清掉），清掉的才移出追踪数组；剩余编号再试一轮；仍遗留的计入失败（fail），不中断后续清理
+    for (let round = 0; round < 2 && createdIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of createdIds.slice()) {
+            try {
+                const r = await fx.apiCall('DELETE', `/api/issues/${id}`, adminToken);
+                if (r.status === 200 || r.status === 404) createdIds.splice(createdIds.indexOf(id), 1);
+                else console.log(`  清理 #${id} 失败（第 ${round + 1} 轮）：HTTP ${r.status} ${JSON.stringify(r.body)}`);
+            } catch (e) { console.log(`  清理 #${id} 异常（第 ${round + 1} 轮）：${e.message}`); }
+        }
     }
+    if (createdIds.length > 0) { console.log(`  ❌ 测试单清理失败，遗留 id=${createdIds.join(',')}`); fail += createdIds.length; }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 C3 冒烟全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    return fail;   // 不在 helper 里 process.exit：由入口在 teardown 之后 finish
 }
 
-main().catch(e => { console.error('冒烟脚本异常:', e); process.exit(1); });
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        DB_PATH = fx.DB_PATH;
+        const nFailed = await main();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('冒烟脚本异常:', e);
+    } finally {
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('issue-c3 smoke 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

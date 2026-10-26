@@ -10,6 +10,8 @@
  *   3. 三个写入口（create/forward/reassign）共用同一判定 → 模拟各入口对领导/客服的处理一致
  *
  * 即用即删（F1 探针模式）。纯 SELECT 零写操作。
+ * 用法：node scripts/verify-readonly-leader-exporter-block.js [--real-db <业务库路径>]
+ *   （[S4e-4] 第 2 项真实用户分类默认跳过，带 --real-db 时以只读方式打开指定库）
  */
 'use strict';
 
@@ -19,8 +21,28 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 
 const ROOT = path.join(__dirname, '..');
-const db = new sqlite3.Database(path.join(ROOT, 'task_pool.db'));
+
+// [S4e-4] Part 2（真实用户分类）连真实库——改为 `--real-db <路径>`（或 `--real-db=<路径>`）显式开关：
+//   · 不带开关 = 跳过 Part 2，打印 SKIP 说明，不计通过、不计失败；
+//   · 带开关 = 路径必须是存在的文件（不存在即判失败），一律 OPEN_READONLY 打开（原为默认读写+创建）。
+//   顶层不再打开任何库；库连接只在 Part 2 内按需建立。
+let db = null;
 const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
+// 开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown，判失败。
+function parseRealDbSwitch() {
+  const argv = process.argv.slice(2);
+  let sw = { given: false, value: '', unknown: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--real-db' || a.startsWith('--real-db=')) {
+      const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+      sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+    } else if (a.startsWith('--real')) {
+      sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+    }
+  }
+  return sw;
+}
 
 // 拦截判定纯函数（复刻 server.js 三个入口共用的 READONLY_LEADER_IDS.includes(Number(id)) 逻辑）
 const READONLY_LEADER_IDS = [6, 11];
@@ -57,14 +79,27 @@ function check(name, fn) {
   check('后端 3 入口均调 helper（含定义 ≥4 次出现）', () => assert(callCount >= 4, `仅 ${callCount} 处 isReadonlyLeaderId`));
 
   // --- 2. 真实用户分类 ---
-  console.log('\n[2] 真实用户分类（连本地 task_pool.db）');
-  const leaders = await all(`SELECT id, display_name FROM users WHERE id IN (6, 11)`);
-  const cs = await all(`SELECT id, display_name FROM users WHERE role='viewer' AND id NOT IN (6,11)`);
-  const normals = await all(`SELECT id, display_name FROM users WHERE role='user' LIMIT 3`);
+  console.log('\n[2] 真实用户分类（连本地业务库，需 --real-db <路径> 显式开启）');
+  const sw = parseRealDbSwitch();
+  let part2Skipped = false;
+  if (!sw.given) {
+    part2Skipped = true;
+    console.log('  [SKIP] Part 2 真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启（不计通过、不计失败；请勿据此断言真实库已验收）');
+  } else {
+    const realDbPath = path.resolve(process.cwd(), sw.value);
+    if (sw.unknown !== null || sw.value === '' || !fs.existsSync(realDbPath) || !fs.statSync(realDbPath).isFile()) {
+      check('Part 2 --real-db 指定的路径存在且是文件', () => assert.fail(sw.unknown !== null ? `无法识别的开关 ${sw.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）` : sw.value === '' ? '缺少路径参数（用法：--real-db <业务库路径>）' : `路径不存在或不是文件：${realDbPath}（显式开启时不静默跳过）`));
+    } else {
+      db = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
+      const leaders = await all(`SELECT id, display_name FROM users WHERE id IN (6, 11)`);
+      const cs = await all(`SELECT id, display_name FROM users WHERE role='viewer' AND id NOT IN (6,11)`);
+      const normals = await all(`SELECT id, display_name FROM users WHERE role='user' LIMIT 3`);
 
-  leaders.forEach(u => check(`领导 ${u.display_name}(id=${u.id}) → 拦截`, () => assert.strictEqual(isReadonlyLeader(u.id), true)));
-  cs.forEach(u => check(`客服viewer ${u.display_name}(id=${u.id}) → 放行`, () => assert.strictEqual(isReadonlyLeader(u.id), false)));
-  normals.forEach(u => check(`普通user ${u.display_name}(id=${u.id}) → 放行`, () => assert.strictEqual(isReadonlyLeader(u.id), false)));
+      leaders.forEach(u => check(`领导 ${u.display_name}(id=${u.id}) → 拦截`, () => assert.strictEqual(isReadonlyLeader(u.id), true)));
+      cs.forEach(u => check(`客服viewer ${u.display_name}(id=${u.id}) → 放行`, () => assert.strictEqual(isReadonlyLeader(u.id), false)));
+      normals.forEach(u => check(`普通user ${u.display_name}(id=${u.id}) → 放行`, () => assert.strictEqual(isReadonlyLeader(u.id), false)));
+    }
+  }
 
   // --- 3. 三入口判定一致性 + 边界 ---
   console.log('\n[3] 边界与一致性');
@@ -74,6 +109,7 @@ function check(name, fn) {
   check('admin(id=3 示例用户A) 不在领导名单（admin 本就有权，名单只管纯只读领导）', () => assert.strictEqual(isReadonlyLeader(3), false));
 
   console.log(`\n===== 结果：${pass} PASS / ${fail} FAIL =====`);
-  db.close();
+  if (part2Skipped) console.log('  ⚠️ 注意：[2] 真实用户分类本次未执行（默认跳过，需 `--real-db <路径>` 显式开启），以上 PASS 不含这半条覆盖。');
+  if (db) db.close();
   process.exit(fail > 0 ? 1 : 0);
-})().catch(e => { console.error('脚本异常:', e); db.close(); process.exit(1); });
+})().catch(e => { console.error('脚本异常:', e); if (db) db.close(); process.exit(1); });

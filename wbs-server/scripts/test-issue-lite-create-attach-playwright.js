@@ -40,22 +40,24 @@
  *      贴图不再被共享层收入、P5b 断言在此变红，再卸载还原
  *   P10 全程 0 console error（豁免窗口内的预期 404）
  *
- * 用法：本地 server（3000）已启动到最新分支代码后：node scripts/test-issue-lite-create-attach-playwright.js
+ * 用法：node scripts/test-issue-lite-create-attach-playwright.js
+ * [#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 的本地 server，
+ *   不再直连业务库 task_pool.db / 业务 uploads 目录：库路径来自 fx.DB_PATH，上传目录 = <实例数据根>/uploads（数据根未知即抛）。
+ *   造数前缀 [ILCREATEATTACH]；前置清理 / 收尾清理的任何失败都计失败（原来 dbRun / dbAll 吞错、清理 try/catch 空吞、rmSync 不确认）。
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const HTML_PATH = path.join(__dirname, '..', 'public', 'Issue_Lite.html');
-const ROOT = path.join(__dirname, '..');
-const DB_FILE = path.join(ROOT, 'task_pool.db');
-const UPLOAD_DIR = path.join(ROOT, 'uploads');
-const ISSUE_LITE_UPLOAD_SUBDIR = path.resolve(UPLOAD_DIR, 'issue-lite');
+let BASE_URL = null;   // ready() 之后赋值：fx.BASE
+let HTML_PATH = null;   // P9 / P9b 反证读取的页面源文件：顶层只放纯声明（守卫 R5 / R6），在入口 ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值：fx.DB_PATH
+let UPLOAD_DIR = null;   // ready() 之后赋值：<实例数据根>/uploads
+let ISSUE_LITE_UPLOAD_SUBDIR = null;
 const PREFIX = '[ILCREATEATTACH]';
 
 let pass = 0, fail = 0;
@@ -74,52 +76,133 @@ function makeTmpFiles() {
     return { dir, png1, png2, xlsx };
 }
 
-function dbRun(sql, params) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.run(sql, params || [], function (err) { db.close(); resolve({ err, lastID: this && this.lastID }); });
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
+
+// [#106 S4d-1] 开库用夹具导出的 fx.openInstanceDb（OPEN_READWRITE、不带 OPEN_CREATE：路径不存在就报错而不是悄悄建空库；带打开回调转 Promise）
+// [#106 S4d-1] 失败一律 reject（原来 dbRun 把错误装进返回值、dbAll 出错返回 []，调用方看不到失败）；close 等回调落定，关库错误不丢（语句错误优先）
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_FILE);
+    return new Promise((resolve, reject) => {
+        db.run(sql, params || [], function (err) {
+            const lastID = this && this.lastID;
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve({ lastID }); });
+        });
     });
 }
-function dbAll(sql, params) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.all(sql, params || [], function (err, rows) { db.close(); resolve(err ? [] : (rows || [])); });
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(DB_FILE);
+    return new Promise((resolve, reject) => {
+        db.all(sql, params || [], function (err, rows) {
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(rows || []); });
+        });
     });
+}
+// [#106 S4d-1] 上传目录 = <实例数据根>/uploads（隔离实例的 uploads 在数据根里）；数据根未知（变量组形态下清单对不上）即抛，不静默回落到业务 uploads
+function resolveUploadDirs() {
+    const dataDir = testEnv.env().dataDir;
+    if (!dataDir) throw new Error('实例数据根（env().dataDir）未知：无法定位 uploads 目录——变量组形态下 TEST_DB_PATH 所在目录没有与 TEST_INSTANCE 匹配的 sdh-instance.json');
+    UPLOAD_DIR = path.join(dataDir, 'uploads');
+    ISSUE_LITE_UPLOAD_SUBDIR = path.resolve(UPLOAD_DIR, 'issue-lite');
 }
 // 同 test-issue-lite-paste-playwright.js 范式：先按落盘 file_name 物理删附件，越界路径不删只 warn
-async function cleanupTestAttachmentFiles() {
-    const rows = await dbAll(
-        `SELECT file_name FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`,
-        [PREFIX + '%']);
-    const attempted = [];
+// [#106 S4d-1 修复批 2] 跨轮状态：pending（Map，键 = 绝对路径）由 cleanup() 持有、跨轮保留——附件行是定位物理文件的唯一依据，
+//   所以：① 查附件行失败 → 记错误并返回 false，本轮不删任何行（调用方据返回值跳过删行）；② 越界路径不删文件、计一条错误，
+//   且同样返回 false（行留着，下一轮 / 下一次运行仍能重新发现，不会被「洗」成成功）；③ pending 里每个路径 unlink 后用 pathExists
+//   确认已不存在才移出，否则计错误；④ 返回 true 仅当本轮查询成功、无越界、pending 已空（此时才允许删附件行）。
+// [#106 S4d-1 codex 21-R M1] 存在性判断用 lstat：只有 ENOENT 算不存在，其余错误（如权限）原样抛出，不当成「已删」
+function pathExists(p) {
+    try { fs.lstatSync(p); return true; } catch (e) { if (e && e.code === 'ENOENT') return false; throw e; }
+}
+async function cleanupTestAttachmentFiles(errors, pending) {
+    let rows;
+    try {
+        rows = await dbAll(
+            `SELECT file_name FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`,
+            [PREFIX + '%']);
+    } catch (e) {
+        errors.push(`查测试单附件行失败: ${e && e.message}`);   // [#106 S4d-1] 原来 dbAll 出错返回 []，整段清理静默跳过
+        return false;
+    }
+    let outOfBounds = false;
     for (const row of rows) {
         const fileName = row && row.file_name;
         if (!fileName) continue;
         const fullPath = path.resolve(UPLOAD_DIR, fileName);
         if (!fullPath.startsWith(ISSUE_LITE_UPLOAD_SUBDIR + path.sep)) {
             console.log(`  ⚠️  跳过越界路径（不在 uploads/issue-lite 子目录内，不删）: file_name="${fileName}"`);
+            errors.push(`越界路径未删（file_name 不在 uploads/issue-lite 内；出现在前置清理时，说明来源库快照里有历史越界行，需人工核对来源库）: file_name="${fileName}" → ${fullPath}`);   // 修复批 2：计错误，不再只打日志
+            outOfBounds = true;
             continue;
         }
-        attempted.push(fullPath);
-        try { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); } catch (e) {
+        pending.set(fullPath, true);
+    }
+    for (const fullPath of Array.from(pending.keys())) {
+        try {
+            if (pathExists(fullPath)) fs.unlinkSync(fullPath);
+            if (pathExists(fullPath)) throw new Error('unlink 后文件仍存在');
+            pending.delete(fullPath);   // 只移除确认已不存在的路径
+        } catch (e) {
             console.log(`  ⚠️  物理文件删除失败: ${fullPath}（${e.message}）`);
+            errors.push(`物理文件删除失败 ${fullPath}: ${e.message}`);   // [#106 S4d-1] 计失败
         }
     }
-    return attempted;
+    return !outOfBounds && pending.size === 0;
 }
+/**
+ * [#106 S4d-1] 清理测试单据：物理文件 → 附件行 → 单据行，每一步单独 try / catch，一步失败不中断后续；
+ * 有失败则间隔 200ms 再整体重试一轮（共 2 轮）；返回最后一轮仍未清掉的失败说明 + pending 剩余路径（数组，调用方逐条计失败）。
+ * [#106 S4d-1 修复批 2] pending 跨轮保留；物理文件没删净 / 附件行没查到时不删附件行，附件行没删成功时不删单据行
+ *   （原来每轮 errors=[] 重来且照删行：第一轮查询或 unlink 失败后第二轮查不到行，errors 为空 → 失败被洗成成功，文件仍留在实例 uploads 里）。
+ */
 async function cleanup() {
-    await cleanupTestAttachmentFiles();
-    try { await dbRun(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [PREFIX + '%']); } catch (_) { /* ignore */ }
-    try { await dbRun(`DELETE FROM issue_lite WHERE title LIKE ?`, [PREFIX + '%']); } catch (_) { /* ignore */ }
+    const pending = new Map();   // 待删物理文件：键 = 绝对路径，跨轮保留
+    let errors = [];
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        const filesDone = await cleanupTestAttachmentFiles(errors, pending);
+        if (filesDone) {
+            let attRowsDeleted = false;
+            try { await dbRun(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [PREFIX + '%']); attRowsDeleted = true; } catch (e) { errors.push(`删附件行失败: ${e && e.message}`); }
+            if (attRowsDeleted) {
+                try { await dbRun(`DELETE FROM issue_lite WHERE title LIKE ?`, [PREFIX + '%']); } catch (e) { errors.push(`删测试单失败: ${e && e.message}`); }
+            }
+        }
+        if (errors.length === 0 && pending.size === 0) break;
+    }
+    for (const p of pending.keys()) {
+        if (!errors.some((m) => m.includes(p))) errors.push(`物理文件未清除（跨轮遗留）: ${p}`);
+    }
+    return errors;
 }
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 写库 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
     console.log('=== 数据开发 建单弹窗附件 picker 化 + 两步提交 Playwright 实测 ===\n');
-    await cleanup();
+    DB_FILE = fx.DB_PATH;
+    HTML_PATH = path.join(__dirname, '..', 'public', 'Issue_Lite.html');
+    resolveUploadDirs();
+    const preErrors = await cleanup();
+    if (preErrors.length > 0) throw new Error(`前置清理（上次遗留的 ${PREFIX} 测试单）失败：${preErrors.join(' | ')}`);
     const tmp = makeTmpFiles();
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ viewport: { width: 1400, height: 950 } });
-    const page = await context.newPage();
+    let browser = null;   // [#106 S4d-1 修复批 2] 浏览器启动 / newContext / newPage 都在下面同一个 try 里：任何一步抛错，finally 都会（已创建才）关浏览器并删临时目录
     const consoleErrors = [];
     // P6/P6b/P9 用 mock 假 issueId（88888/88889），submitCreate 成功后会 openDrawer(假id) 触发对不存在
     // id 的真实 GET → 404；P7 故意 mock 附件端点返回 500 来验证"失败不回滚"。Chrome 对非 2xx fetch 都会
@@ -127,16 +210,19 @@ async function cleanup() {
     // test-tracker-attach-picker-playwright.js 的 allow404 范式，500 是本文件因 P7 新增的同款豁免）。
     let allow404 = false;
     let allow500 = false;
-    page.on('console', m => {
-        if (m.type() !== 'error') return;
-        if (allow404 && /Failed to load resource.*404/.test(m.text())) return;
-        if (allow500 && /Failed to load resource.*500/.test(m.text())) return;
-        consoleErrors.push(m.text());
-    });
-    page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
     let fixtureId = null;
     try {
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+        const page = await context.newPage();
+        page.on('console', m => {
+            if (m.type() !== 'error') return;
+            if (allow404 && /Failed to load resource.*404/.test(m.text())) return;
+            if (allow500 && /Failed to load resource.*500/.test(m.text())) return;
+            consoleErrors.push(m.text());
+        });
+        page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
         const token = await fx.signAs(fx.ADMIN_ID);
         await page.goto(`${BASE_URL}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
@@ -618,6 +704,7 @@ async function cleanup() {
                     await page.waitForTimeout(300);
                 } catch (cleanupErr) {
                     console.log(`  ⚠️ P9 清理阶段异常（不掩盖原始失败）：${cleanupErr.message}`);
+                    expect(false, `P9 清理阶段（卸载拦截 + 重新加载真实页面）失败：${cleanupErr.message}`);   // [#106 S4d-1] 清理失败计失败；不抛，原始异常继续向外传
                 }
             }
         }
@@ -673,6 +760,7 @@ async function cleanup() {
                     await page.waitForTimeout(300);
                 } catch (cleanupErr) {
                     console.log(`  ⚠️ P9b 清理阶段异常（不掩盖原始失败）：${cleanupErr.message}`);
+                    expect(false, `P9b 清理阶段（卸载拦截 + 重新加载真实页面）失败：${cleanupErr.message}`);   // [#106 S4d-1] 清理失败计失败；不抛，原始异常继续向外传
                 }
             }
         }
@@ -681,11 +769,18 @@ async function cleanup() {
         console.log('\nP10. console 健康');
         expect(consoleErrors.length === 0, `全程 0 console error（实际 ${consoleErrors.length}${consoleErrors.length ? '：' + consoleErrors.slice(0, 3).join(' | ') : ''}）`);
     } finally {
-        await browser.close();
-        fs.rmSync(tmp.dir, { recursive: true, force: true });
-        await cleanup();
+        // [#106 S4d-1] 三个收尾动作各自 try / catch，互不跳过；任一失败都计失败
+        if (browser) { try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); } }
+        try { removeTreeChecked(tmp.dir); } catch (e) { expect(false, `清理临时文件目录失败 ${tmp.dir}：${e && e.message}`); }
+        const postErrors = await cleanup();
+        expect(postErrors.length === 0, `收尾清理无失败（${postErrors.length} 项${postErrors.length ? '：' + postErrors.join(' | ') : ''}）`);
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('建单附件实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

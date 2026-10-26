@@ -2,7 +2,8 @@
  * 三模块「查询已读」未读态展示统一 前端 Playwright 实测（2026-07-13）
  *
  * 用法：node scripts/test-notify-read-unify-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）
+ * [#106 S4d-1] 原顶层 `--isolated-three-state` 分支（spawn test-notify-three-state-playwright.js）已删除（主会话裁定 Q6）：该三态脚本独立运行、无需服务，直接 node 运行它即可。
  *
  * 用真实页面函数 + route mock 验证：
  *   [数据修正] ★核心 bug：buildNotifyRow 结果框独立后，查询未读不再覆盖通知时间+按钮
@@ -10,14 +11,9 @@
  *   [数据协作] 未读文案去收件人名
  */
 'use strict';
-// --isolated-three-state exercises actual query functions and CSS without a real DB.
-if(process.argv.includes('--isolated-three-state')){
- const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'test-notify-three-state-playwright.js')],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
- process.exit(result.status===0?0:1);
-}
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
-const BASE = fx.BASE;
+let BASE = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
 
@@ -31,6 +27,8 @@ async function newPage(browser, token, url) {
 }
 
 (async () => {
+  await fx.ready();   // 先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+  BASE = fx.BASE;
   const token = await fx.signAs(fx.ADMIN_ID);
   const browser = await chromium.launch();
 
@@ -100,6 +98,11 @@ async function newPage(browser, token, url) {
   }
 
   await browser.close();
+  try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
   console.log(`\n=== PASS ${pass} / FAIL ${fail} ===`);
-  process.exit(fail === 0 ? 0 : 1);
-})().catch(e => { console.error(e); process.exit(1); });
+  fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+  console.error(e);
+  try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

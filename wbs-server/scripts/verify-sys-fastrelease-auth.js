@@ -1,6 +1,6 @@
 // scripts/verify-sys-fastrelease-auth.js — 系统迭代·组 B「bug 先行上线授权」阶段一（授权面）验收
 //   SSOT = docs/local/系统迭代/预计完成时间与先行上线_方案_20260812_v1.3.md §1(B1/B2/B2b) + §3.1
-//   用法：node scripts/verify-sys-fastrelease-auth.js
+//   用法：node scripts/verify-sys-fastrelease-auth.js [--real-db <路径>]   （[8c] 真实库只读探针默认跳过，带开关才执行）
 //
 // 范围声明：本阶段只做 §3.1 授权面（POST fast-release-authorize/fast-release-revoke 两端点 + schema
 //   六列 + 成组约束）。§3.2 开发直上（submit 勾选直翻）与 §3.3 补验收闭环是后续阶段，未实现，本文件
@@ -18,7 +18,7 @@
 //       （[预筛 MED-3] 四因逐条断言：未授权/已撤销幂等提示/已消费不可撤/已上线不可撤，错误码单码不变）
 //   [8] 成组约束探针（[Y5] 范式，[预筛 MED-2] 判据只此一份）：JS 纯函数用例表（4 正例+4 反例+空串反例）+
 //       候选行 SQL 粗筛→I.fastReleaseGroupInvariantViolations 逐行精判（内存库注入对照①②③各一条 + 空串
-//       专项，均含"注入判红→清理恢复0"闭环）+ 真实本地库（task_pool.db）同一判据违例计数=0
+//       专项，均含"注入判红→清理恢复0"闭环）+ 真实本地库（业务库，S4e-4 起需 `--real-db <路径>` 显式开启）同一判据违例计数=0
 //   [9]（组 B·B1·授权终结事件制·2026-08-13 用户 P7 终裁后改写）accept 直翻已上线终结活跃授权——真实链路
 //       （创建→受理→指派→授权→estimate→submit(no_code)→accept 直翻已上线→close→reopen）：accept 命中
 //       事件①「上线翻牌」，六列清空+1条 fast_release_auth_terminated 留痕；close/reopen 均不复活六列。
@@ -607,10 +607,37 @@ async function main() {
     await run(`UPDATE sys_issues SET fast_release_auth_by=NULL, fast_release_auth_by_name=NULL, fast_release_auth_at=NULL WHERE id = ?`, [injectEmpty]);
     assert.strictEqual(await fastReleaseViolationCount(all), 0, '[8b-空串] 清理注入行后应恢复 0');
 
-    // [8c] 真实本地库（task_pool.db）——独立只读连接，用完即关；同一套候选行 SQL 粗筛 + I.fastReleaseGroupInvariantViolations 精判
+    // [8c] 真实本地库（业务库）——独立只读连接，用完即关；同一套候选行 SQL 粗筛 + I.fastReleaseGroupInvariantViolations 精判
+    // [S4e-4] 改为 `--real-db <路径>`（或 `--real-db=<路径>`）显式开关，默认跳过（SKIP 不计通过、不计失败）；
+    //   带开关时路径必须是存在的文件（不存在即判失败），一律 OPEN_READONLY；六列全不在也判失败（不静默跳过）。
     let y8EnvSkipped = false;
-    const realDbPath = path.join(__dirname, '..', 'task_pool.db');
-    if (fs.existsSync(realDbPath)) {
+    //   开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown，判失败。
+    const realDbSwitch = (() => {
+      const argv = process.argv.slice(2);
+      let sw = { given: false, value: '', unknown: null };
+      for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--real-db' || a.startsWith('--real-db=')) {
+          const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+          sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+        } else if (a.startsWith('--real')) {
+          sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+        }
+      }
+      return sw;
+    })();
+    let realDbPath = null;
+    if (!realDbSwitch.given) {
+      y8EnvSkipped = true;
+      console.log('  ⚠️ [8c] SKIP（真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启；本条不计通过、不计失败）');
+    } else {
+      assert.ok(realDbSwitch.unknown === null, `[8c] 无法识别的开关 ${realDbSwitch.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）`);
+      assert.ok(realDbSwitch.value !== '', '[8c] --real-db 缺少路径参数（用法：--real-db <业务库路径>）');
+      realDbPath = path.resolve(process.cwd(), realDbSwitch.value);
+      assert.ok(fs.existsSync(realDbPath) && fs.statSync(realDbPath).isFile(),
+        `[8c] --real-db 指定的路径不存在或不是文件：${realDbPath}（显式开启时不静默跳过）`);
+    }
+    if (realDbPath) {
       const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
       const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
       // [codex 360 L2] 列存在检查改六列全集合——原实现只抽查 fast_release_auth_by 一列当"迁移是否已跑"
@@ -629,17 +656,14 @@ async function main() {
         const realViolations = realCandidates.reduce((sum, row) => sum + I.fastReleaseGroupInvariantViolations(row).length, 0);
         assert.strictEqual(realViolations, 0,
           `[8c] ⭐⭐ 真实本地库 sys_issues 先行上线授权字段组违例计数应为 0（候选行 ${realCandidates.length} 条，逐行喂 fastReleaseGroupInvariantViolations），实得 ${realViolations}`);
-        ok(`[8c] ⭐⭐ 真实本地库（task_pool.db）先行上线授权字段组探针：六列全在 + 候选行 ${realCandidates.length} 条，违例计数=0（判据=I.fastReleaseGroupInvariantViolations，与写点同一份实现）`);
+        ok(`[8c] ⭐⭐ 真实本地库（业务库）先行上线授权字段组探针：六列全在 + 候选行 ${realCandidates.length} 条，违例计数=0（判据=I.fastReleaseGroupInvariantViolations，与写点同一份实现）`);
       } else if (presentCols.length === 0) {
-        y8EnvSkipped = true;
-        console.log('  ⚠️ [8c]（跳过真实库断言：fast_release_* 六列均不存在，服务从未启动过完成本次 ALTER）');
+        // [S4e-4] 显式指定了库却六列均不存在：不是业务库结构（或服务从未启动过完成 ALTER），判失败而非静默跳过
+        fail(`[8c] --real-db 指定的库 ${realDbPath} 里 sys_issues 的 fast_release_* 六列均不存在——不是业务库结构，或服务从未启动过完成本次 ALTER`);
       } else {
         fail(`[8c] 真实本地库 sys_issues 处于 fast_release_* 部分迁移态——${presentCols.length}/6 列存在（${JSON.stringify(presentCols)}），缺失 ${JSON.stringify(missingCols)}。KEY_COLS 整组入锚意图下不应出现半成品态，须人工核查该库的迁移历史（是否有进程在 alterAddMissingCols [1a-14] 六条 ALTER 执行到一半时被中断）。`);
       }
       await new Promise((resolve) => realDb.close(resolve));
-    } else {
-      y8EnvSkipped = true;
-      console.log('  ⚠️ [8c]（跳过真实库断言：本地未找到 task_pool.db）');
     }
     if (y8EnvSkipped) global.__Y8_ENV_SKIPPED__ = true;
   }
@@ -782,7 +806,7 @@ async function main() {
     '重新授权(consumed置空+timeline两条历史) + 撤销正例+撤销后再授权 + 撤销负例四因(未授权/已撤销幂等/已消费/已上线，精确原因文案+单码) + ' +
     '成组约束探针([Y5]范式·判据只此一份：纯函数用例表含空串反例+候选行SQL粗筛→JS判据精判 内存注入对照①②③+空串专项+真实库) + reopen不动授权字段(真实链路) + note边界四态');
   if (global.__Y8_ENV_SKIPPED__) {
-    console.log('  ⚠️ 注意：[8c] 真实本地库（task_pool.db）先行上线授权字段组探针本次未执行（环境相关——本地无 task_pool.db 或列尚未就绪），以上"全部通过"不含这半条覆盖，请勿据此断言真实库已验收。');
+    console.log('  ⚠️ 注意：[8c] 真实本地库（业务库）先行上线授权字段组探针本次未执行（真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启），以上"全部通过"不含这半条覆盖，请勿据此断言真实库已验收。');
   }
 }
 

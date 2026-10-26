@@ -1,5 +1,5 @@
 // 验证脚本：上线逾期留痕 C2·A 块（方案 20260910 v1.2 §5.1/§6/§7）
-//   用法：node scripts/verify-sys-release-overdue.js
+//   用法：node scripts/verify-sys-release-overdue.js [--real-db <路径>]   （[7c] 真实库只读探针默认跳过，带开关才执行）
 //
 // 背景：execute 端点 rGateSatisfied 分支（内核 _publishReleaseCoreInTxn 返回之后、sysCommit() 之前）
 //   新增逾期判定——读回本事务刚写入的 released_at（唯一时间锚来源），与批次 planned_date 比较：
@@ -12,7 +12,7 @@
 //   [4] 发布时刻不变量三夹具（546-H1 fail-closed）：released_at NULL / 非法 / status 未翻转
 //   [5] 非最后一人带理由不校验不落库；应急带理由不持久化
 //   [6] 重复确认不多写 release_overdue_reason 行
-//   [7] 层一探针双向（releaseOverdueGroupInvariantViolations）+ [7c] 真实本地库只读扫描（fail-safe）
+//   [7] 层一探针双向（releaseOverdueGroupInvariantViolations）+ [7c] 真实本地库只读扫描（默认跳过；带 `--real-db <路径>` 才执行，路径不存在 / 缺表 / 缺列均判失败）
 //   [8] 静态断言：_publishReleaseCoreInTxn 函数体 sha256 与记录基线逐字相等（行数断言保留作副断言——
 //       C2b·M1：单纯行数不变会漏放"等行数改写"，如把某行逻辑替换成另一段同样行数的代码）
 //
@@ -106,6 +106,27 @@ function call(method, p, tok, body) {
 
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
+
+// [S4e-4] 真实库只读探针（[7c]）改为 `--real-db <路径>`（或 `--real-db=<路径>`）显式开关：
+//   · 不带开关 = 跳过该半截，打印 SKIP 说明，不计通过、不计失败（末尾横幅再喊一句）；
+//   · 带开关 = 路径必须是存在的文件（不存在即判失败），一律 OPEN_READONLY；列/表缺失也判失败（不静默跳过）。
+//   跨零点自动重跑直接转发原命令行（见 finishWithCrossMidnightGuard），子进程与父进程用同一套开关解析。
+//   开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown，判失败。
+const REAL_DB_SWITCH = (() => {
+  const argv = process.argv.slice(2);
+  let sw = { given: false, value: '', unknown: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--real-db' || a.startsWith('--real-db=')) {
+      const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+      sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+    } else if (a.startsWith('--real')) {
+      sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+    }
+  }
+  return sw;
+})();
+let realDbProbeSkipped = false;
 
 async function mkRelease(extra = {}) {
   const r = await call('POST', '/api/sys-releases', adminTok, { title: extra.title || 'A 块逾期测试批次' });
@@ -215,7 +236,7 @@ function finishWithCrossMidnightGuard(exitCode) {
     process.exit(2);
   }
   console.log(`\n⏭️  跨零点（开工日=${RUN_START_DATE}，收尾日=${endDateStr}），结果不可信，自动重跑一次子进程…`);
-  const child = spawnSync(process.execPath, [__filename], {
+  const child = spawnSync(process.execPath, [__filename, ...process.argv.slice(2)], {
     stdio: 'inherit',
     env: { ...process.env, RELEASE_OVERDUE_XMID_RETRY: '1' },
   });
@@ -581,25 +602,31 @@ async function main() {
     assert.strictEqual(violationsWhitespaceClean.length, 0, `[7b-M1]清理为 (null,null) 后应零违例，实际 ${violationsWhitespaceClean.length}`);
     ok('[7b-M1] 全库探针·纯空白说明反例：植入 (\'其他\',\'   \')→报违例；清理为 (null,null)→零违例');
 
-    // [7c]（C2b·M2）真实本地库（task_pool.db）只读扫描——照 verify-sys-fastrelease-auth.js:609-630
-    //   范式：独立只读连接、用完即关、零写。⚠️ 必须 fail-safe：真实库不存在 / 两列尚不存在（本机
-    //   service 尚未用 C2 新代码重启过一次，ALTER 未跑）→ SKIP，不算 FAIL（服务重启后 ALTER 自动补齐，
-    //   非本脚本职责）。
+    // [7c]（C2b·M2）真实本地库（业务库）只读扫描——照 verify-sys-fastrelease-auth.js [8c]
+    //   范式：独立只读连接、用完即关、零写。
+    //   [S4e-4] 改为 `--real-db <路径>` 显式开关：不带开关 = SKIP（不计通过、不计失败）；带开关 = 路径必须
+    //   存在（不存在即判失败）、两列/表缺失也判失败，不再静默跳过。
     {
-      const realDbPath = path.join(__dirname, '..', 'task_pool.db');
-      if (!fs.existsSync(realDbPath)) {
-        console.log('  ⚠️ SKIP: 真实库不存在（task_pool.db 未找到）');
+      if (!REAL_DB_SWITCH.given) {
+        realDbProbeSkipped = true;
+        console.log('  ⚠️ [7c] SKIP（真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启；本条不计通过、不计失败）');
       } else {
+        assert.ok(REAL_DB_SWITCH.unknown === null, `[7c] 无法识别的开关 ${REAL_DB_SWITCH.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）`);
+        assert.ok(REAL_DB_SWITCH.value !== '', '[7c] --real-db 缺少路径参数（用法：--real-db <业务库路径>）');
+        const realDbPath = path.resolve(process.cwd(), REAL_DB_SWITCH.value);
+        assert.ok(fs.existsSync(realDbPath) && fs.statSync(realDbPath).isFile(),
+          `[7c] --real-db 指定的路径不存在或不是文件：${realDbPath}（显式开启时不静默跳过）`);
         const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
         const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
         try {
           const realRows = await realAll(`SELECT id, overdue_reason_code, overdue_reason_note FROM sys_releases`);
           const realViolations = realRows.flatMap(r => I.releaseOverdueGroupInvariantViolations(r));
           assert.strictEqual(realViolations.length, 0, `[7c]真实本地库 sys_releases 逾期理由字段组违例计数应为 0（扫描 ${realRows.length} 行），实得 ${realViolations.length}：${JSON.stringify(realViolations)}`);
-          ok(`[7c] 真实本地库（task_pool.db）只读扫描：${realRows.length} 行，违例计数=0（判据=I.releaseOverdueGroupInvariantViolations，与写点同一份实现）`);
+          ok(`[7c] 真实本地库（业务库）只读扫描：${realRows.length} 行，违例计数=0（判据=I.releaseOverdueGroupInvariantViolations，与写点同一份实现）`);
         } catch (e) {
           if (e && /no such column/i.test(e.message)) {
-            console.log('  ⚠️ SKIP: 真实库无两列（服务启动 ALTER 后才有）');
+            // [S4e-4] 显式指定了库却缺逾期理由两列：判失败而非静默跳过
+            throw new Error(`[7c] --real-db 指定的库 ${realDbPath} 的 sys_releases 缺逾期理由两列（服务启动 ALTER 后才有，或不是业务库结构）：${e.message}`);
           } else {
             throw e;
           }
@@ -650,6 +677,9 @@ async function main() {
     ok(`[8] 静态断言：_publishReleaseCoreInTxn 函数体行数不变（${EXPECTED_BODY_LINE_COUNT} 行，${startIdx + 1}-${endIdx + 1}）+ sha256 与基线逐字相等 + 不含 'overdue' 字样——内核零改动红线未被破坏`);
   }
 
+  if (realDbProbeSkipped) {
+    console.log('\n  ⚠️ 注意：[7c] 真实本地库只读探针本次未执行（默认跳过，需 `--real-db <路径>` 显式开启），以下 PASS 不含这半条覆盖，请勿据此断言真实库已验收。');
+  }
   console.log(`\nPASS ${passed} / FAIL 0`);
   finishWithCrossMidnightGuard(0);
 }

@@ -1,16 +1,19 @@
 /**
  * 「上线单管理体验优化」方案 v1.3·Phase R Commit 7（O4 前端 + 三组挂账浏览器断言）·Playwright 活体验证
- * 用法：外部 server:3000 已起（本文件不自拉服务，见下方"server 编排"约定）后：
- *   node scripts/test-sys-release-mgmt-playwright.js
+ * 用法：node scripts/test-sys-release-mgmt-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   下面的 TCP + readiness 双探测保留（在 ready() 之后对被测实例做），本文件自身不 spawn/kill server 进程。
+ *   失败截图写 os.tmpdir() 下的 sys-release-mgmt-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
- * ⚠️ 一次只跑一个写 db 的 Playwright——本文件直连 task_pool.db 造夹具 + 写 sys_issues/sys_releases/
- *   sys_release_audit/sys_issue_timeline，与其余 test-sys-*-playwright.js 一样不支持并发跑多份实例
- *   （同 test-sys-my-pending-playwright.js 头部纪律，未重复整段搬运，此处仅点名）。
+ * ⚠️ 本文件直连实例库造夹具 + 写 sys_issues/sys_releases/sys_release_audit/sys_issue_timeline；
+ *   一个隔离实例上同一时刻只跑一个写 db 的 Playwright，且本脚本**必须 exclusive**（独占一个实例，不与其它写 sys_releases 的脚本共用实例）。
+ *   原因：批次号 release_no 按「当日最大数字后缀 + 1」生成（routes/sys-iteration/index.js:16183 nextReleaseNo），被删掉的最大号会被重发；
+ *   经 API 删上线单会写一条 action='delete' 的 sys_release_audit 行（以 release_no 为键，行不随批次删除）；
+ *   本文件的断言「该 release_no 的 delete 审计行恰 1 条」（COUNT(*)，见下方 sys_release_audit 核对处）——共享实例上若 test-sys-perdev-done-playwright.js 等先删过同号批次，
+ *   本脚本新建批次会重发同一个号、审计行变成 2 条，断言判红（被删的是当日最大号时必现，不是偶发）。批跑清单由主会话配 exclusive。
  *
- * server 编排（无人值守，同 test-sys-my-pending-playwright.js 契约）：本文件契约=外部 server:3000
- *   已起（TCP+readiness 双探测）——本文件自身不 spawn/kill server 进程，起停 server 是调用方（主会话/
- *   agent）的职责：3000 无监听则从 wbs-server 目录起 server（单命令、记 PID）；3000 已被占用则先跑
- *   readiness 探测确认是本项目 server（401）再直接用，不是则停手报告，不抢占端口。
+ * server 编排（同 test-sys-my-pending-playwright.js 契约）：双探测（TCP 监听 + 应用层 readiness 401）在 ready() 之后做，
+ *   用来确认监听者确实是目标 server.js（隔离实例）。
  *
  * 数据隔离：全部造数标题/批次号恒 RELMG- 前缀（共享面隔离约定，与 MPPW-/FLPW-/其它前缀区分）。
  *
@@ -40,31 +43,44 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const net = require('net');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-mgmt-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / SCREENSHOT_DIR：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let SCREENSHOT_DIR = null;
 const TITLE_PREFIX = 'RELMG-';
 
 const ADMIN_ID = 1;
 const BIZ_SYSTEMS = ['BMS', 'HRD', '电子签', '客户报销平台', 'RPA程序', '小程序-智荟人力', '其他'];
 const N_PLAIN_MEMBERS = 15;   // + 7 张系统标签夹具 = 22 张成员（>20 验收阈值）
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
+const dbAll = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.all(sql, params, (e, rows) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(rows); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -108,7 +124,7 @@ function ensureServerListening(timeoutMs = 3000) {
         const sock = net.createConnection({ port, host });
         const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
         sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件`)); });
+        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——ready() 之后被测实例应已在监听，请查隔离实例的启动日志`)); });
     });
 }
 async function ensureAppReadinessEndpoint() {
@@ -139,6 +155,10 @@ async function mkPendingIssue(titleTag, systemName) {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-mgmt-playwright-shots');
     await ensureServerListening();
     console.log('  ✅ 端口 Listen 探测通过（server 已就绪）');
     await ensureAppReadinessEndpoint();
@@ -596,71 +616,92 @@ async function main() {
             try { await browser.close(); }
             catch (e) { fail++; failDetails.push('浏览器关闭失败: ' + (e && e.message || e)); console.warn('浏览器关闭失败:', e && e.message || e); }
         }
+        // [#106 S4d-4] 清理失败计失败：每一项（每张成员单 / 批次 / 审计 / Esc 批次）单独 try，失败再试一轮（共 2 轮，间隔 200ms，删除语句幂等）；
+        //   任一项两轮后仍失败即计清理异常；清理异常与回查残留都判失败
         let cleanupErrorCount = 0;
+        const withRetry = async (label, fn) => {
+            let lastErr = null;
+            for (let round = 0; round < 2; round++) {
+                if (round > 0) await new Promise((r) => setTimeout(r, 200));
+                try { await fn(); return true; } catch (e) { lastErr = e; }
+            }
+            cleanupErrorCount++;
+            console.warn(`${label}（已重试 1 轮）: ${lastErr && lastErr.message}`);
+            return false;
+        };
         const CHILD_TABLES = ['sys_issue_dev_commits', 'sys_fast_release_executors', 'sys_issue_timeline', 'sys_issue_dev_events', 'sys_issue_dev_assignees'];
         const RESIDUAL_CHECK_TABLES = [...CHILD_TABLES, 'sys_issue_attachments', 'sys_issue_release_commit_snapshots', 'sys_issue_delete_audit'];
         for (const id of createdIssueIds) {
-            try {
+            await withRetry(`夹具清理失败 issue #${id}`, async () => {
                 for (const t of CHILD_TABLES) await dbRun(`DELETE FROM ${t} WHERE issue_id=?`, [id]);
                 await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
-            } catch (e) { cleanupErrorCount++; console.warn(`夹具清理失败 issue #${id}: ${e.message}`); }
+            });
         }
         // 批次若因流程中途异常未走到④的删除步骤，兜底清理（正常路径下批次早已在④内被真实 DELETE 端点删除，
         // 这里只处理"跑到一半异常退出"的残留场景，非重复删除）。
         if (releaseId) {
-            try {
+            await withRetry(`夹具批次兜底清理失败 #${releaseId}`, async () => {
                 await dbRun('DELETE FROM sys_release_executors WHERE release_id=?', [releaseId]);
                 await dbRun('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?', [releaseId]);
                 await dbRun('DELETE FROM sys_releases WHERE id=?', [releaseId]);
-            } catch (e) { cleanupErrorCount++; console.warn(`夹具批次兜底清理失败 #${releaseId}: ${e.message}`); }
+            });
         }
         // 审计表留痕按 release_no 精确清（release_id 在批次删除后不再有 sys_releases 行可关联，只能靠冗余存的 release_no 定位）。
         if (releaseNo) {
-            try { await dbRun('DELETE FROM sys_release_audit WHERE release_no=?', [releaseNo]); }
-            catch (e) { cleanupErrorCount++; console.warn(`审计表清理失败 release_no=${releaseNo}: ${e.message}`); }
+            await withRetry(`审计表清理失败 release_no=${releaseNo}`, async () => { await dbRun('DELETE FROM sys_release_audit WHERE release_no=?', [releaseNo]); });
         }
         // [codex 477 复审 HIGH·⑤] Esc 回归夹具批次——与 releaseId 不同，⑤全程只打开/取消了删除确认弹窗，
         // 从未真正调用 DELETE 端点，该批次在正常路径下**本就还活着**（非"跑到一半异常退出"才需要的兜底），
         // 这里是唯一、必经的清理点。零成员，无需清 sys_release_executors/commit_snapshots/audit（未产生）。
         if (escReleaseId) {
-            try { await dbRun('DELETE FROM sys_releases WHERE id=?', [escReleaseId]); }
-            catch (e) { cleanupErrorCount++; console.warn(`Esc 回归夹具批次清理失败 #${escReleaseId}: ${e.message}`); }
+            await withRetry(`Esc 回归夹具批次清理失败 #${escReleaseId}`, async () => { await dbRun('DELETE FROM sys_releases WHERE id=?', [escReleaseId]); });
         }
         const idList = createdIssueIds.length ? createdIssueIds : [-1];
         const placeholders = idList.map(() => '?').join(',');
         let totalResidual = 0;
         const residualDetail = {};
-        for (const t of [...RESIDUAL_CHECK_TABLES, 'sys_issues']) {
-            const col = t === 'sys_issues' ? 'id' : 'issue_id';
-            const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
-            const c = r ? r.c : 0;
-            residualDetail[t] = c;
-            totalResidual += c;
-        }
-        if (releaseId) {
-            const relResidual = await dbGet('SELECT COUNT(*) c FROM sys_releases WHERE id=?', [releaseId]);
-            residualDetail.sys_releases = (relResidual && relResidual.c) || 0;
-            totalResidual += residualDetail.sys_releases;
-        }
-        if (releaseNo) {
-            const auditResidual = await dbGet('SELECT COUNT(*) c FROM sys_release_audit WHERE release_no=?', [releaseNo]);
-            residualDetail.sys_release_audit = (auditResidual && auditResidual.c) || 0;
-            totalResidual += residualDetail.sys_release_audit;
-        }
-        if (escReleaseId) {
-            const escRelResidual = await dbGet('SELECT COUNT(*) c FROM sys_releases WHERE id=?', [escReleaseId]);
-            residualDetail.sys_releases_esc = (escRelResidual && escRelResidual.c) || 0;
-            totalResidual += residualDetail.sys_releases_esc;
+        // [#106 S4d-4] 回查本身失败也计失败（原来无 try：库不可读时会抛出并吞掉后面的汇总与退出码）
+        try {
+            for (const t of [...RESIDUAL_CHECK_TABLES, 'sys_issues']) {
+                const col = t === 'sys_issues' ? 'id' : 'issue_id';
+                const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
+                const c = r ? r.c : 0;
+                residualDetail[t] = c;
+                totalResidual += c;
+            }
+            if (releaseId) {
+                const relResidual = await dbGet('SELECT COUNT(*) c FROM sys_releases WHERE id=?', [releaseId]);
+                residualDetail.sys_releases = (relResidual && relResidual.c) || 0;
+                totalResidual += residualDetail.sys_releases;
+            }
+            if (releaseNo) {
+                const auditResidual = await dbGet('SELECT COUNT(*) c FROM sys_release_audit WHERE release_no=?', [releaseNo]);
+                residualDetail.sys_release_audit = (auditResidual && auditResidual.c) || 0;
+                totalResidual += residualDetail.sys_release_audit;
+            }
+            if (escReleaseId) {
+                const escRelResidual = await dbGet('SELECT COUNT(*) c FROM sys_releases WHERE id=?', [escReleaseId]);
+                residualDetail.sys_releases_esc = (escRelResidual && escRelResidual.c) || 0;
+                totalResidual += residualDetail.sys_releases_esc;
+            }
+        } catch (e) {
+            cleanupErrorCount++;
+            console.warn(`夹具清理回查失败: ${e && e.message}`);
         }
         console.log(`  🧹 夹具清理完成（成员单 ${createdIssueIds.length} 条 + 批次 #${releaseId}，清理异常 ${cleanupErrorCount} 次，逐表残留=${JSON.stringify(residualDetail)}，合计残留 ${totalResidual} 行，均应为 0）`);
         if (cleanupErrorCount > 0 || totalResidual > 0) {
             fail++;
-            failDetails.push(`夹具清理不干净：清理异常 ${cleanupErrorCount} 次 / 逐表残留 ${JSON.stringify(residualDetail)}（合计 ${totalResidual} 行）——本地库已被本次测试运行污染，需人工核实`);
+            failDetails.push(`夹具清理不干净：清理异常 ${cleanupErrorCount} 次 / 逐表残留 ${JSON.stringify(residualDetail)}（合计 ${totalResidual} 行）——实例库已被本次测试运行污染，需人工核实`);
         }
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) { console.log('失败清单：'); failDetails.forEach(m => console.log('  - ' + m)); process.exit(1); }
     }
+    try { await testEnv.teardown(); } catch (e) { fail++; failDetails.push('teardown 失败: ' + (e && e.message || e)); console.warn('teardown（收掉自起实例）失败:', e && e.message || e); }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    if (fail > 0) { console.log('失败清单：'); failDetails.forEach(m => console.log('  - ' + m)); }
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

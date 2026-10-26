@@ -27,7 +27,13 @@ const XLSX = require('xlsx');
 //   ⚠️ 硬红线：绝不落 UPLOAD_DIR（server.js:666 `app.use('/uploads', express.static(UPLOAD_DIR))`
 //   把它挂成了静态公开目录，结果 xlsx 含身份证/银行账号，落进去=拼 URL 就能下别人敏感数据）。
 //   本目录不挂 express.static，只能通过 index.js 的鉴权下载端点读取。
-const PERIODIC_RESULTS_DIR = path.join(__dirname, '..', '..', 'periodic-results');
+//   [#106 S1a · 偏差 A3] 取自实例配置（utils/instance-mode.js）：正常模式 = <wbs-server>/periodic-results（与原写法逐字相同），
+//   隔离模式 = <数据根>/periodic-results。实例配置被拒绝（只可能出现在 server.js 之外的脚本进程里）时回退原写法。
+const _instanceConfig = require('../../utils/instance-mode').getInstanceConfig();
+if (_instanceConfig.refuse) console.warn(`[periodic-fetch/runner] 运行模式判定被拒绝（${_instanceConfig.code}），结果目录回退到 wbs-server/periodic-results`);
+const PERIODIC_RESULTS_DIR = _instanceConfig.refuse
+  ? path.join(__dirname, '..', '..', 'periodic-results')
+  : _instanceConfig.periodicResultsDir;
 
 function ensurePeriodicResultsDir() {
   fs.mkdirSync(PERIODIC_RESULTS_DIR, { recursive: true });

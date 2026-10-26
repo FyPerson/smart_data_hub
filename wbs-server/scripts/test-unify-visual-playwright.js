@@ -2,11 +2,18 @@
  * 前端统一 C-pre 视觉回归基线 harness
  *
  * 用法：
- *   拍基线：PORT=3100 node scripts/test-unify-visual-playwright.js --shot baseline
- *     （server 可先手动起好；若探测不到已在跑的 server，本脚本会自己 spawn 一个，跑完自动 kill）
+ *   拍基线：node scripts/test-unify-visual-playwright.js --shot baseline
  *   比对两组截图（改造前后 / 复现性自证）：
  *     node scripts/test-unify-visual-playwright.js --compare baseline after-c1
  *     （labelA labelB 对应 unify-baseline/ 下两个子目录；按文件名逐名配对做像素比对）
+ *
+ * [#106 S4d-5 · 主会话 Q4 裁定：只迁移环境层、不进批跑清单] 拍图模式经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；
+ *   不再依赖 localhost:3100 / PORT / 业务库 task_pool.db / .env，也不再自己 spawn `node server.js`（原 ensureServerRunning / probeVersion 整段删除）。
+ *   `--compare` 模式只读两个已有截图目录做像素比对、不访问被测服务、不开任何库；入口仍先 ready()（守卫 R5 / R6 硬门），所以会白起一个隔离实例（原来这条分支也会无谓地打开业务库连接，现在只在拍图模式下才开实例库）。
+ *   ⚠️ 同库契约的含义变了：隔离实例是「启动那一刻来源库的副本」，两次拍图各起各的实例，列表态截图含来源库既有行 / 统计卡计数 / 分页，来源库在两次之间变了就不可逐像素比对；
+ *   本脚本因此不进批跑清单，需要逐像素对比基线时由人在同一份来源库快照下成对运行。
+ *   固定业务编号常量（FIXED_IDS 99001–99006、COLLAB_OA_CORE、各 [UNIFY-BASELINE] 标记文本）是逐像素可复现性的设计前提，**不改**；preflight 仍会拒绝被非 fixture 数据占用的固定 id。
+ *   批跑建议：不进批跑（needsService:true 仅拍图模式；exclusive：写固定 id 与全局唯一索引列）；不需要服务端开关。
  *
  * ⚠️ 比对标准（两轮自证实测定标，字节级全同在本机 Chromium 上不可达）：
  *   Chromium 光栅化存在随机性 AA 抖动——同库同代码连续两轮，28 张中约 2-4 张出现 ≤30 个像素、
@@ -49,12 +56,9 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const { spawn } = require('child_process');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
 // ============================================================
 // 配置
@@ -67,13 +71,13 @@ function parseArgs(argv) {
     }
     return out;
 }
-const ARGS = parseArgs(process.argv.slice(2));
-
-const PORT = process.env.PORT || '3100';
-const BASE_URL = `http://localhost:${PORT}`;
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const OUTPUT_DIR = path.join(__dirname, 'unify-baseline', ARGS.shot);
+// [#106 S4d-5] 顶层的 parseArgs(...) / path.join(...) 调用会被守卫 R6 判红：ARGS / OUTPUT_DIR 改 let，在 main 里赋值（--compare 模式不需要 BASE_URL / DB_PATH，拍图模式 ready() 之后才赋）。
+let ARGS = null;
+let BASE_URL = null;      // 拍图模式 ready() 之后赋值：testEnv.env().baseUrl
+let API_HOST = null;      // 拍图模式 ready() 之后赋值：从 baseUrl 解出的主机 / 端口（原来写死 localhost + PORT）
+let API_PORT = null;
+let DB_PATH = null;       // 拍图模式 ready() 之后赋值：testEnv.env().dbPath（实例库）
+let OUTPUT_DIR = null;    // main 里赋值：scripts/unify-baseline/<shot 标签>（基线截图是本脚本的交付物，放检出目录内，不是临时文件）
 const FIXTURE_PREFIX = '[UNIFY-BASELINE]';
 
 // ── H-1 固定值（严禁改回 Date.now() 等动态成分）──────────
@@ -112,13 +116,35 @@ const VIEWPORTS = [
 // ============================================================
 // sqlite helpers（直连 db 副本：re-id / 时间回填 / 残留校验 / 清理）
 // ============================================================
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为拍图模式 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
 });
 const dbRun = (sql, params = []) => new Promise((resolve, reject) => {
     db.run(sql, params, function (err) { (err ? reject(err) : resolve(this)); });
 });
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ============================================================
@@ -130,8 +156,8 @@ function rawReq(token, method, p, body) {
         const data = body !== undefined ? JSON.stringify(body) : null;
         const r = http.request(
             {
-                host: 'localhost',
-                port: PORT,
+                host: API_HOST,   // [#106 S4d-5] 原为写死的 localhost + PORT：改用 ready() 之后从实例 baseUrl 解出的主机 / 端口
+                port: API_PORT,
                 method,
                 path: p,
                 headers: {
@@ -170,53 +196,15 @@ async function apiRequest(token, method, p, body) {
 async function signAsAdmin() {
     const user = await dbGet("SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1");
     if (!user) throw new Error('db 副本中找不到 admin 用户，无法签发 JWT');
-    const token = jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '2h' }
-    );
+    // [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行），不再自读 .env 的 JWT_SECRET
+    const token = await testEnv.signToken(user.id);
     return { token, user };
 }
 
 // ============================================================
-// server 探测 / 自起（若已有 server 在跑就复用，不重复 spawn）
+// [#106 S4d-5] 原「server 探测 / 自起」整段（probeVersion + ensureServerRunning：探测 PORT 上的 server，探不到就 spawn `node server.js` 并在跑完后 kill）已删：
+//   隔离实例由 testEnv.ready() 起并核对身份（/api/version 的 instance 与 mode）、由 testEnv.teardown() 收掉；本脚本不再 spawn 任何 server 进程。
 // ============================================================
-function probeVersion() {
-    return new Promise((resolve) => {
-        const r = http.get(`${BASE_URL}/api/version`, { timeout: 2000 }, (res) => {
-            let d = ''; res.on('data', (c) => { d += c; });
-            res.on('end', () => resolve(res.statusCode === 200));
-        });
-        r.on('error', () => resolve(false));
-        r.on('timeout', () => { r.destroy(); resolve(false); });
-    });
-}
-
-async function ensureServerRunning() {
-    if (await probeVersion()) {
-        console.log(`  探测到 ${BASE_URL} 已有 server 在跑，复用（不自行 spawn，跑完不 kill）`);
-        return { proc: null, spawnedByScript: false };
-    }
-    console.log(`  ${BASE_URL} 无响应，自行 spawn server（PORT=${PORT}）...`);
-    const proc = spawn('node', ['server.js'], {
-        cwd: path.join(__dirname, '..'),
-        env: { ...process.env, PORT },
-    });
-    let log = '';
-    proc.stdout.on('data', (d) => { log += d; });
-    proc.stderr.on('data', (d) => { log += d; });
-    let ready = false;
-    for (let i = 0; i < 60; i++) {
-        if (await probeVersion()) { ready = true; break; }
-        await sleep(300);
-    }
-    if (!ready) {
-        proc.kill('SIGKILL');
-        throw new Error(`server 在 ${BASE_URL} 60 次探测(18s)内未就绪，最近日志：\n${log.slice(-800)}`);
-    }
-    await sleep(800); // 额外缓冲：各模块 schema readiness（sys-iteration/periodic-fetch 等）DDL 收尾
-    return { proc, spawnedByScript: true };
-}
 
 // ============================================================
 // fixture 依赖数据探测（动态查库，不硬编码 id——db 副本可能随主库快照变化）
@@ -818,25 +806,37 @@ async function runCompare(labelA, labelB) {
 // ============================================================
 // 主流程
 // ============================================================
-(async () => {
+async function main() {
+    // [#106 S4d-5] 两种模式都先 ready()：守卫 R5 / R6 要求入口第一条有副作用的语句是 await ready()（硬门，不为单个脚本开例外）；
+    //   --compare 模式因此会白起一个隔离实例，代价可接受（比对本身仍只读两个截图目录、不访问被测服务、不开库）
+    await testEnv.ready();
+    ARGS = parseArgs(process.argv.slice(2));
+    OUTPUT_DIR = path.join(__dirname, 'unify-baseline', ARGS.shot);
+
+    // [#106 S4d-5 · Q4] --compare 模式：只读两个已有截图目录做像素比对（用 Playwright 的页面 canvas 解码 PNG，不访问任何被测服务）。
+    //   原来这条分支也无谓地在模块顶层打开了业务库连接（db 现在只在拍图模式下才开实例库）
     if (ARGS.compare) {
         let code = 1;
         try { code = await runCompare(ARGS.compare[0], ARGS.compare[1]); }
         catch (e) { console.error('比对异常：', e.message); code = 1; }
-        finally { db.close(); }
-        process.exit(code);
+        try { await testEnv.teardown(); } catch (e) { console.error(`  teardown（收掉自起实例）失败：${e && e.message}`); code = 1; }
+        testEnv.finish(code);
+        return;
     }
+
+    // 拍图模式：实例已由上面的 ready() 起好（或已核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    { const u = new URL(BASE_URL); API_HOST = u.hostname.replace(/^\[|\]$/g, ''); API_PORT = Number(u.port); }
+    DB_PATH = testEnv.env().dbPath;
+    db = await openInstanceDb(DB_PATH);
 
     console.log('=== 前端统一 C-pre 视觉基线 harness ===');
     console.log(`  BASE_URL=${BASE_URL}  shot 标签=${ARGS.shot}  输出目录=${OUTPUT_DIR}`);
 
-    let serverHandle = { proc: null, spawnedByScript: false };
     let exitCode = 0;
     let cleanupAllowed = false;   // preflight 通过后才允许清理（防固定 id 被真实数据占用时误删）
 
     try {
-        serverHandle = await ensureServerRunning();
-
         const { token: adminToken } = await signAsAdmin();
 
         console.log('\n0. preflight：固定 id 占用者身份校验 + pre-clean 上轮残留...');
@@ -880,10 +880,6 @@ async function runCompare(labelA, labelB) {
         console.error('\nharness 异常终止：', err.message);
         exitCode = 1;
     } finally {
-        if (serverHandle.proc && serverHandle.spawnedByScript) {
-            serverHandle.proc.kill('SIGKILL');
-            await sleep(500);
-        }
         // 兜底：即便中途异常也尝试清一次残留 fixture（仅 preflight 通过后——固定 id 归属已确认）
         if (cleanupAllowed) {
             try {
@@ -894,9 +890,19 @@ async function runCompare(labelA, labelB) {
                 }
             } catch (_) { exitCode = 1; }
         }
-        db.close();
+        // [#106 S4d-5] 原为 db.close()（不等回调）：改等 close 回调，失败计失败；随后收掉自起实例（原来的「spawn 的 server 跑完 kill」由 teardown 取代），失败计失败
+        try { await closeDb(); } catch (e) { console.error(`  关闭实例库失败：${e && e.message}`); exitCode = 1; }
+        try { await testEnv.teardown(); } catch (e) { console.error(`  teardown（收掉自起实例）失败：${e && e.message}`); exitCode = 1; }
     }
 
     console.log(`\n${exitCode === 0 ? 'PASS' : 'FAIL'}：前端统一 C-pre 视觉基线 harness 结束（退出码 ${exitCode}）`);
-    process.exit(exitCode);
-})();
+    // [#106 S4d-5] 原为 process.exit(exitCode)：改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+    testEnv.finish(exitCode);
+}
+
+main().catch(async (e) => {
+    console.error('harness 顶层异常：', e && e.stack || e);
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

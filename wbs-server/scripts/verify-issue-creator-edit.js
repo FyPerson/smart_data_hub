@@ -2,7 +2,7 @@
  * 需求跟踪 · 建单人编辑权限（E1）后端权限矩阵 e2e（2026-07-23）
  *
  * 用法：node scripts/verify-issue-creator-edit.js
- * 前置：本地 server 已启动（默认 localhost:3000，可用 TEST_BASE_URL 覆盖，如 http://localhost:3100）
+ * 前置：入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *
  * 覆盖（PUT /api/issues/:id 双通道权限）：
  *   1. 建单人(user)编辑自己的单（待处理）→ 200 + 系统评论留痕（is_system=1，含字段清单）
@@ -19,11 +19,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// [#106 S4c-B] 被测服务来自 test-env：fx.BASE 在 ready() 之前读会抛 FX_NOT_READY，故改为 ready() 之后在入口里赋值；
+//   原 `process.env.TEST_BASE_URL || 3000` 与指向业务库 task_pool.db 的 DB_PATH 都已删除（库句柄在入口里用 fx.DB_PATH 打开）。
+let BASE = null;
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
@@ -42,8 +42,11 @@ async function api(method, urlPath, token, body) {
 }
 
 (async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）。库句柄也挪到 ready 之后才打开（原先在最前面就打开业务库）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 需求跟踪 建单人编辑权限（E1）权限矩阵 e2e ===\n');
-    const db = new sqlite3.Database(DB_PATH);
+    const db = await fx.openInstanceDb(fx.DB_PATH);   // [#106 S4c 收口] 带打开回调、不建空库；打开失败落到末尾 .catch（teardown 后非零退出）
     const created = [];
     try {
         const userToken = await fx.signAs(fx.CONTACT_ID);      // id=3 user（建单人）
@@ -136,16 +139,34 @@ async function api(method, urlPath, token, body) {
         console.log('\n6. WHERE 非终态+created_by 守卫（三件套）');
         const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
         expect(src.includes(`AND created_by = ? AND status NOT IN ('已关闭', '已拒绝')`), '建单人通道 UPDATE 带非终态+created_by 复校守卫（静态断言）');
+    } catch (e) {
+        console.log('  ✗ e2e 异常：' + (e && e.stack || e));   // 原先异常会变成未处理拒绝；现计失败，仍走下面的清理与收尾
+        fail++;
     } finally {
         // 清理测试单据（评论/历史/附件级联行一并删）
-        for (const id of created.filter(Boolean)) {
-            await dbRun(db, 'DELETE FROM issue_comments WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun(db, 'DELETE FROM issue_status_history WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun(db, 'DELETE FROM issue_attachments WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun(db, 'DELETE FROM issues WHERE id = ?', [id]).catch(() => {});
+        // [#106 S4c 收口] 每个单的四条 DELETE 放在同一个 try/catch：任一条失败该编号留在待清理列表里（不再 .catch(() => {}) 吞掉），剩余编号再试一轮；
+        //   仍遗留的每个计 1 次失败（fail），不中断后续清理、关库与 teardown
+        const pendingIds = created.filter(Boolean);
+        for (let round = 0; round < 2 && pendingIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of pendingIds.slice()) {
+                try {
+                    await dbRun(db, 'DELETE FROM issue_comments WHERE issue_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM issue_status_history WHERE issue_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM issue_attachments WHERE issue_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM issues WHERE id = ?', [id]);
+                    pendingIds.splice(pendingIds.indexOf(id), 1);
+                } catch (e) { console.error(`清理需求 #${id} 失败（第 ${round + 1} 轮）：${e.message}`); }
+            }
         }
-        db.close();
+        if (pendingIds.length > 0) { console.error(`测试单清理失败，遗留 id=${pendingIds.join(',')}`); fail += pendingIds.length; }
+        await new Promise((resolve) => { db.close((cerr) => { if (cerr) { console.error(`关库失败：${cerr.message}`); fail++; } resolve(); }); });
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); fail++; }
     }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('issue-creator-edit verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

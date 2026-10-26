@@ -1,6 +1,11 @@
 /**
  * P2（附件组件通用化 + 提交弹窗附件顺带传）— Playwright 冒烟
- * 用法：本地 server(3000) 已启动后 node scripts/test-issue-p2-attachment-playwright.js
+ * 用法：node scripts/test-issue-p2-attachment-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   ⚠️ 已知既有红：建单缺 intake_contract_version（本脚本建 sys-issues 单时没带，服务端返回 400 CLIENT_CONTRACT_OUTDATED，见 routes/sys-iteration/index.js:7354-7361），
+ *   且估时写死过去日期 2026-08-01（:93），登记 PROJECT_STATUS，契约修复另起小提交；本次迁移只改环境层，不修业务契约。
+ *   收口批：建单助手同时校验状态码与正整数编号，红的表现变为「建单失败」抛错退 1（原来 issueId 为空、B 段后续断言失败）；夹具标题带运行标记 RUN_TAG（[p2-<pid>-<时间戳>]），清理先按标记补查。
+ *   造数（建单修好之后）：经 API 建 1 张 sys-issues 单（标题 P2冒烟单）+ 3 个临时 PNG（os.tmpdir() 下 mkdtempSync 建的私有目录 p2-attach-*，收尾整目录删、删失败计失败）；收尾 DELETE 看状态码（200 / 404 算清掉，2 轮间隔 200ms）。
  *
  * 测点：
  *   A 建单不回归：建单弹窗 create-spec 组件选文件→预览→删除→追加（通用化后仍工作）
@@ -10,18 +15,31 @@
  */
 'use strict';
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE = 'http://localhost:3000';
-const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB = null;     // [#106 S4d-2 收口批] ready() 之后赋值：testEnv.env().dbPath（实例库，只用于清理时按运行标记补查）
+let RUN_TAG = null;   // [#106 S4d-2 收口批] ready() 之后赋值：[p2-<pid>-<时间戳>]，夹具标题带它；建单后客户端没拿到编号时，清理按标记补查
 const ADMIN = 1;
 
-const dbGet = (s, p) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.get(s, p, (e, x) => { d.close(); e ? j(e) : r(x); }); });
-async function sign(uid) { const u = await dbGet('SELECT id,username,display_name,role FROM users WHERE id=?', [uid]); return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, SECRET, { expiresIn: '4h' }); }
+// [#106 S4d-2 收口批] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+  });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbAll(s, p) {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.all(s, p, (e, x) => { d.close((ce) => { const err = e || ce; err ? j(err) : r(x); }); }); });
+}
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库（收口批起仅为清理补查按标记开实例库）
+async function sign(uid) { return testEnv.signToken(uid); }
 async function api(tok, method, url, body) {
   const r = await fetch(BASE + url, { method, headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = { _raw: t.slice(0, 160) }; }
@@ -31,8 +49,40 @@ let pass = 0, fail = 0;
 function must(c, m) { if (c) { console.log('  ✅ ' + m); pass++; } else { console.log('  ❌ ' + m); fail++; } }
 
 // 造一个内存图片文件（1x1 PNG）供 setInputFiles 用
-const PNG_1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-function tmpPng(name) { const p = path.join(require('os').tmpdir(), name); require('fs').writeFileSync(p, PNG_1x1); return p; }
+// [#106 S4d-2] 顶层只放纯声明（守卫 R5 / R6）：Buffer.from 挪进 tmpPng
+// [#106 S4d-2 送审前小修] 临时 PNG 放进 mkdtempSync 建的私有目录（不再用 os.tmpdir() 下的固定文件名：两个工作树同时跑时先结束的一方会删掉另一方正在用的文件），收尾整目录删（见 removeTmpFiles）
+const PNG_1x1_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+let tmpDir = null;   // 私有临时目录：第一次 tmpPng 时建，removeTmpFiles 删净才置空
+function tmpPng(name) {
+  if (!tmpDir) tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2-attach-'));   // 先赋值再写文件：写一半失败，目录也由收尾删
+  const p = path.join(tmpDir, name);
+  fs.writeFileSync(p, Buffer.from(PNG_1x1_B64, 'base64'));
+  return p;
+}
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+  let st;
+  try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+  if (st.isSymbolicLink()) {
+    try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+    return;
+  }
+  if (st.isDirectory()) {
+    for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+    fs.rmdirSync(dir);
+  } else {
+    fs.unlinkSync(dir);
+  }
+  try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+  throw new Error(`删除后仍存在：${dir}`);
+}
+/** 删私有临时目录（含 3 个 PNG）：删净才把 tmpDir 置空；返回仍失败的说明数组（调用方计失败）。原来写出去就不删 */
+function removeTmpFiles() {
+  const errs = [];
+  if (!tmpDir) return errs;
+  try { removeTreeChecked(tmpDir); tmpDir = null; } catch (e) { errs.push(`${tmpDir}: ${(e && e.message) || e}`); }
+  return errs;
+}
 
 async function gotoAs(browser, token) {
   const page = await browser.newPage();
@@ -50,15 +100,60 @@ async function gotoAs(browser, token) {
 }
 async function openDrawer(page, id) { await page.evaluate(i => siOpenDrawer(i), id); await page.waitForTimeout(700); }
 
+// [#106 S4d-2 收口批] 建单助手：状态码须为 200 / 201 且编号为正整数，不满足即抛错（原来编号 undefined 会被后面静默忽略）
+async function createSysIssue(t, body) {
+  const c = await api(t, 'POST', '/api/sys-issues', body);
+  const id = c.j && c.j.id;
+  if ((c.status !== 200 && c.status !== 201) || !Number.isInteger(id) || id <= 0) throw new Error(`建单失败 ${c.status} ${JSON.stringify(c.j)}`);
+  return id;
+}
+
 let issueId = null;
+let tok = null;   // [#106 S4d-2] 提到模块级，供入口 .catch 里尽力清理用
+
+/**
+ * [#106 S4d-2] 清理造的 sys-issues 单：DELETE 看状态码（200 / 404 算清掉），失败再试一轮（共 2 轮，间隔 200ms）；
+ * 清掉才把 issueId 置空（入口 .catch 里再调一次是幂等的）；返回 null = 已清，否则返回失败说明。原来不看状态码、抛错会中断收尾
+ */
+async function cleanupIssue() {
+  // [#106 S4d-2 收口批] 待清集合 = 已登记的 issueId ∪ 按运行标记补查到的单（建单请求服务端已落库而客户端没拿到编号的）；补查失败计失败
+  const ids = new Set();
+  const errs = [];
+  if (issueId) ids.add(issueId);
+  if (RUN_TAG && DB) {
+    try { for (const r of await dbAll(`SELECT id FROM sys_issues WHERE title LIKE '%' || ? || '%'`, [RUN_TAG])) ids.add(r.id); }
+    catch (e) { errs.push(`按运行标记补查失败：${(e && e.message) || e}`); }
+  }
+  for (const id of ids) {
+    let ok = false, lastErr = null;
+    for (let round = 0; round < 2 && !ok; round++) {
+      if (round > 0) await new Promise((r) => setTimeout(r, 200));
+      try {
+        const d = await api(tok, 'DELETE', `/api/sys-issues/${id}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' });
+        console.log(`  · 清理测试单 #${id}（${d.status}）`);
+        // 成功 200（routes/sys-iteration/index.js:14080 `res.json({ ok: true, id })`）/ 不存在 404（:13953）；其余（400 / 409 / 503 / 500）一律算失败
+        if (d.status === 200 || d.status === 404) ok = true;
+        else lastErr = `HTTP ${d.status} ${JSON.stringify(d.j).slice(0, 120)}`;
+      } catch (e) { lastErr = (e && e.message) || String(e); }
+    }
+    if (ok) { if (id === issueId) issueId = null; }   // 清掉才置空（入口 .catch 里再调一次是幂等的）
+    else errs.push(`#${id}: ${lastErr}`);
+  }
+  return errs.length ? errs.join(' | ') : null;
+}
+
 async function main() {
-  const tok = await sign(ADMIN);
+  await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+  BASE = testEnv.env().baseUrl;
+  DB = testEnv.env().dbPath;
+  RUN_TAG = `[p2-${process.pid}-${Date.now()}]`;
+  tok = await sign(ADMIN);
   console.log('\n══════ P2 附件组件通用化 + 提交顺带传 冒烟 ══════');
-  const f1 = tmpPng('p2-a.png'), f2 = tmpPng('p2-b.png'), f3 = tmpPng('p2-c.png');
 
   const browser = await chromium.launch();
   let allErrs = [];
   try {
+    const f1 = tmpPng('p2-a.png'), f2 = tmpPng('p2-b.png'), f3 = tmpPng('p2-c.png');   // [#106 S4d-2] 挪进 try：写文件之后的任何失败都由 finally 删它们
     // ===== A 建单不回归：create-spec 组件 =====
     const pA = await gotoAs(browser, tok);
     await pA.evaluate(() => siOpenCreate());
@@ -86,8 +181,8 @@ async function main() {
     await pA.close();
 
     // 造数：开发中单（admin 指派给自己 + estimate·供 B 三块上传 + C 提交）
-    const c = await api(tok, 'POST', '/api/sys-issues', { type: 'feature', title: 'P2冒烟单', system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13 });
-    issueId = c.j.id;
+    // [#106 S4d-2 收口批] 建单助手同时校验状态码与正整数编号（不满足即抛错）；标题带 RUN_TAG，建单后客户端没拿到编号时由 cleanupIssue 按标记补查
+    issueId = await createSysIssue(tok, { type: 'feature', title: 'P2冒烟单' + RUN_TAG, system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13 });
     await api(tok, 'POST', `/api/sys-issues/${issueId}/schedule`, { priority: 'P2' });
     await api(tok, 'POST', `/api/sys-issues/${issueId}/assign`, { assigned_to: ADMIN });
     await api(tok, 'POST', `/api/sys-issues/${issueId}/estimate`, { dev_estimated_at: '2026-08-01 10:00' });
@@ -193,11 +288,22 @@ async function main() {
 
     must(allErrs.length === 0, `D 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
   } finally {
-    await browser.close();
-    if (issueId) { const d = await api(tok, 'DELETE', `/api/sys-issues/${issueId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理测试单 #${issueId}（${d.status}）`); }
+    try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+    const fileErrs = removeTmpFiles();
+    if (fileErrs.length) must(false, `删除临时 PNG 私有目录失败：${fileErrs.join(' | ')}`);
+    const keepId = issueId;
+    const cleanupErr = await cleanupIssue();
+    if (cleanupErr) must(false, `清理测试单 #${keepId} 失败（已重试 1 轮）：${cleanupErr}`);
   }
+  try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
   console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
   console.log(fail === 0 ? '  🎉 P2 冒烟全部通过\n' : '  🚫 存在失败项\n');
-  process.exit(fail === 0 ? 0 : 1);
+  testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('P2 冒烟异常:', e); process.exit(1); });
+main().catch(async (e) => {
+  console.error('P2 冒烟异常:', e);
+  try { await cleanupIssue(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+  try { removeTmpFiles(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

@@ -2,7 +2,7 @@
 //   + S3「执行确认 + 共享翻牌内核」POST /sys-issues/:id/fast-release-exec-confirm 端点验收
 //   SSOT = docs/local/系统迭代/先行上线两步化_方案_20260813_v1.8.md §4-1（挂牌）/ §4-2（拆直上·整体替代）
 //   / §4-3（执行确认端点）/ §4-4b（共享翻牌内核）
-//   用法：node scripts/verify-sys-fastlane-submit.js
+//   用法：node scripts/verify-sys-fastlane-submit.js [--real-db <路径>]   （[7c] / [49a] / [50a] 真实库只读探针默认跳过，带开关才执行）
 //
 // [S2 语义翻转声明] 本文件此前（组 B·SB2 阶段）覆盖的是 submit `direct_release=true` 分支——开发勾选后
 //   单事务条件更新直接翻牌到「已上线」。方案 §4-2「整体替代」拍板：该单步直上分支已随两步化拆除，
@@ -39,7 +39,7 @@
 //       进入待验证后，列表/详情两端点 last_completed_at 均正确取到 runWGate 镜像行的 created_at，
 //       两处子查询同源一致（同 codex 263 M-1 契约）
 //   [7] 不变量①②③⑦探针（[Y5] 范式，未受 S2 影响，原样保留）：JS 纯函数用例表 + 候选行 SQL 粗筛 →
-//       I.fastlaneAcceptanceInvariantViolations 逐行精判 + 真实本地库（task_pool.db）同一判据违例计数=0
+//       I.fastlaneAcceptanceInvariantViolations 逐行精判 + 真实本地库（业务库，S4e-4 起需 `--real-db <路径>` 显式开启）同一判据违例计数=0
 //   [8] online_source 消费面：列表/详情端点 online_source_kind==='authorized_fastlane' + deriveOnlineSourceKind
 //       直调四分支穷举 + 前端字典覆盖（静态源码扫描）——夹具改用 SQL 造态直接构造"已上线+authorized_fastlane"
 //       状态（原经 submit direct_release=true 真实链路已不可达，deriveOnlineSourceKind 本身与写入路径
@@ -127,7 +127,7 @@
 //   [46] return 验收打回闸成对：46a 无 done 正常终结（处理中）+ 清集合；46b 有 done 409
 //   [47] void 含 done 终极出口正例：done 行也被软删（方案 §5-⑨ 唯一例外，历史 exec_status 原样保留）
 //   [48] issue_reject 路径：结构性零行照常（挂牌前，roster 从未产生，changes=0 不写虚假 timeline）
-//   [49] 不变量 ⑪ 探针：授权非活跃单不得存在未软删集合行——真实本地库（task_pool.db，同 [7c] 范式）
+//   [49] 不变量 ⑪ 探针：授权非活跃单不得存在未软删集合行——真实本地库（业务库，同 [7c] 范式）
 //       终态零违例 + IN-MEMORY 库 SQL 造态孤儿行反证判红（仅判该 issue）+ 清理恢复零违例（双向证明闭环）。
 //       ⚠️ 编码期实测修复：首版扫 IN-MEMORY 累计库断言零违例，被 [19a] 等组的 SQL 造态对照组遗留状态
 //       误判违例——改按真实本地库范式，详见组内注释
@@ -271,6 +271,39 @@ function call(method, p, tok, body) {
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 function fail(msg) { console.error('\n❌ verify-sys-fastlane-submit 失败: ' + msg); process.exit(1); }
+
+// [S4e-4] 真实库只读探针（[7c] / [49a] / [50a]）改为 `--real-db <路径>`（或 `--real-db=<路径>`）显式开关：
+//   · 不带开关 = 跳过该半截，打印 SKIP 说明，不计通过、不计失败（末尾横幅再喊一句，防止被绿色 summary 盖过）；
+//   · 带开关 = 路径必须是存在的文件（不存在即判失败，不静默跳过），一律 OPEN_READONLY 打开。
+//   各探针的 ★对照组（内存库注入判红）与探针共用同一份 SQL，原样保留、始终执行。
+//   开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown，判失败。
+const REAL_DB_SWITCH = (() => {
+  const argv = process.argv.slice(2);
+  let sw = { given: false, value: '', unknown: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--real-db' || a.startsWith('--real-db=')) {
+      const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+      sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+    } else if (a.startsWith('--real')) {
+      sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+    }
+  }
+  return sw;
+})();
+const realDbSkippedTags = [];
+function resolveRealDbPath(tag) {
+  if (!REAL_DB_SWITCH.given) {
+    realDbSkippedTags.push(tag);
+    console.log(`  ⚠️ ${tag} SKIP（真实库只读探针默认跳过，需 \`--real-db <路径>\` 显式开启；本条不计通过、不计失败）`);
+    return null;
+  }
+  assert.ok(REAL_DB_SWITCH.unknown === null, `${tag} 无法识别的开关 ${REAL_DB_SWITCH.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）`);
+  assert.ok(REAL_DB_SWITCH.value !== '', `${tag} --real-db 缺少路径参数（用法：--real-db <业务库路径>）`);
+  const p = path.resolve(process.cwd(), REAL_DB_SWITCH.value);
+  assert.ok(fs.existsSync(p) && fs.statSync(p).isFile(), `${tag} --real-db 指定的路径不存在或不是文件：${p}（显式开启时不静默跳过）`);
+  return p;
+}
 
 let seq = 0;
 async function mkIssue(type, overrides = {}) {
@@ -779,8 +812,8 @@ async function main() {
     await run(`UPDATE sys_issues SET online_source=NULL, post_release_acceptance=NULL WHERE id = ?`, [inj5]);
     assert.strictEqual(await fastlaneViolationCount(all), 0, '[7b-空串] 清理注入行后应恢复 0');
 
-    const realDbPath = path.join(__dirname, '..', 'task_pool.db');
-    if (fs.existsSync(realDbPath)) {
+    const realDbPath = resolveRealDbPath('[7c]');
+    if (realDbPath) {
       const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
       const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
       const realCols = await new Promise((resolve, reject) => realDb.all(`PRAGMA table_info(sys_issues)`, (e, r) => e ? reject(e) : resolve(r)));
@@ -791,13 +824,13 @@ async function main() {
         let total = 0;
         for (const row of rows) total += I.fastlaneAcceptanceInvariantViolations(row).length;
         assert.strictEqual(total, 0, `[7c] 真实本地库补验收字段组违例计数应为 0，实得 ${total}（候选行 ${rows.length} 条）`);
-        ok(`[7c] ⭐⭐ 真实本地库（task_pool.db）先行上线补验收字段组探针：${needCols.length} 列全在 + 候选行 ${rows.length} 条，违例计数=0`);
+        ok(`[7c] ⭐⭐ 真实本地库（业务库）先行上线补验收字段组探针：${needCols.length} 列全在 + 候选行 ${rows.length} 条，违例计数=0`);
       } else {
-        ok('[7c] 真实本地库缺补验收三列——环境相关跳过，非探针本身问题');
+        // [S4e-4] 显式指定了库却缺补验收字段组：判失败而非静默跳过
+        realDb.close();
+        assert.fail(`[7c] --real-db 指定的库 ${realDbPath} 缺补验收字段组（${needCols.filter(c => !realColNames.includes(c)).join(',')}）——不是业务库结构，或 S1 迁移未跑到该库`);
       }
       realDb.close();
-    } else {
-      ok('[7c] 真实本地库 task_pool.db 不存在——环境相关跳过（CI/新环境无本地库属正常）');
     }
   }
 
@@ -2574,7 +2607,7 @@ async function main() {
   //   排查后发现是 [19a] 等组"SQL 造态直接污染 online_source 模拟脏数据"这类**测试自身构造的对照组
   //   遗留状态**（非真实代码路径产物），这些issue 的 roster 行"未软删但授权非活跃"是那些组刻意造出来验证
   //   其它断言的副产物，从未被本探针的调用范围覆盖过。真正代表"终态零违例"的判据应比照既有 [7c] 组
-  //   范式——扫描**真实本地库 task_pool.db**（未被本文件测试造态污染），而非本文件自身高强度对照组
+  //   范式——扫描**真实本地库（业务库）**（未被本文件测试造态污染），而非本文件自身高强度对照组
   //   测试后积累的脏 IN-MEMORY 库。改为该范式后，[49b]/[49c] 的反证/清理断言相应收窄为"仅判该 issue"
   //   （不再依赖全库计数为 0 这个假设，本身就更精确、不受其余组影响）。
   {
@@ -2591,10 +2624,10 @@ async function main() {
                         JOIN sys_issues i ON i.id = fe.issue_id
                        WHERE fe.removed_at IS NULL`;
 
-    // [49a] 真实本地库（task_pool.db）终态零违例——同 [7c] 组既有范式：只读连接 + 表/列存在性判断 +
-    //   环境相关跳过（无本地库/无该表均视为环境问题，非探针本身问题）。
-    const realDbPath = path.join(__dirname, '..', 'task_pool.db');
-    if (fs.existsSync(realDbPath)) {
+    // [49a] 真实本地库（业务库）终态零违例——同 [7c] 组既有范式：只读连接 + 表/列存在性判断；
+    //   [S4e-4] 默认跳过，需 `--real-db <路径>` 显式开启（缺表在显式开启时判失败）。
+    const realDbPath = resolveRealDbPath('[49a]');
+    if (realDbPath) {
       const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
       const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
       const realTables = await realAll(`SELECT name FROM sqlite_master WHERE type='table' AND name='sys_fast_release_executors'`);
@@ -2602,13 +2635,12 @@ async function main() {
         const rows = await realAll(scanSql);
         const violations = I.fastReleaseRosterResidualAtInactiveAuthViolations(rows);
         assert.deepStrictEqual(violations, [], `[49a] 真实本地库扫描应零违例（候选 ${rows.length} 行），实得 ${JSON.stringify(violations)}`);
-        ok(`[49a] ⭐⭐ 真实本地库（task_pool.db）不变量 ⑪ 探针：候选 ${rows.length} 行，违例计数=0`);
+        ok(`[49a] ⭐⭐ 真实本地库（业务库）不变量 ⑪ 探针：候选 ${rows.length} 行，违例计数=0`);
       } else {
-        ok('[49a] 真实本地库缺 sys_fast_release_executors 表（S1 迁移未跑到本地库）——环境相关跳过，非探针本身问题');
+        realDb.close();
+        assert.fail(`[49a] --real-db 指定的库 ${realDbPath} 缺 sys_fast_release_executors 表——不是业务库结构，或 S1 迁移未跑到该库`);
       }
       realDb.close();
-    } else {
-      ok('[49a] 真实本地库 task_pool.db 不存在——环境相关跳过（CI/新环境无本地库属正常）');
     }
 
     // [49b]（★对照组·反证）SQL 造态直接绕过应用层清集合逻辑，构造"授权已撤销但集合行仍未软删"的
@@ -2651,9 +2683,9 @@ async function main() {
     //   统一取时"纪律，同 index.js 该函数定义处注释）。
     const inv12NowStr = (await get(`SELECT datetime('now','localtime') AS n`)).n;
 
-    // [50a] 真实本地库（task_pool.db）终态零违例——同 [7c]/[49a] 既有范式。
-    const realDbPath50 = path.join(__dirname, '..', 'task_pool.db');
-    if (fs.existsSync(realDbPath50)) {
+    // [50a] 真实本地库（业务库）终态零违例——同 [7c]/[49a] 既有范式（[S4e-4] 默认跳过，需 `--real-db <路径>`）。
+    const realDbPath50 = resolveRealDbPath('[50a]');
+    if (realDbPath50) {
       const realDb50 = new sqlite3.Database(realDbPath50, sqlite3.OPEN_READONLY);
       const realAll50 = (sql) => new Promise((resolve, reject) => realDb50.all(sql, (e, r) => e ? reject(e) : resolve(r)));
       const realTables50 = await realAll50(`SELECT name FROM sqlite_master WHERE type='table' AND name='sys_fast_release_executors'`);
@@ -2661,13 +2693,12 @@ async function main() {
         const rows = await realAll50(aggSql);
         const violations = I.fastReleaseNonFlippedFullDoneViolations(rows, inv12NowStr);
         assert.deepStrictEqual(violations, [], `[50a] 真实本地库扫描应零违例（候选 ${rows.length} 单），实得 ${JSON.stringify(violations)}`);
-        ok(`[50a] ⭐⭐ 真实本地库（task_pool.db）不变量 ⑫ 探针：候选 ${rows.length} 单，违例计数=0`);
+        ok(`[50a] ⭐⭐ 真实本地库（业务库）不变量 ⑫ 探针：候选 ${rows.length} 单，违例计数=0`);
       } else {
-        ok('[50a] 真实本地库缺 sys_fast_release_executors 表——环境相关跳过，非探针本身问题');
+        realDb50.close();
+        assert.fail(`[50a] --real-db 指定的库 ${realDbPath50} 缺 sys_fast_release_executors 表——不是业务库结构，或 S1 迁移未跑到该库`);
       }
       realDb50.close();
-    } else {
-      ok('[50a] 真实本地库 task_pool.db 不存在——环境相关跳过（CI/新环境无本地库属正常）');
     }
 
     // [50b]（★对照组·反证）SQL 造态绕过共享内核直接把唯一执行人标 done（不经 confirm 端点，模拟"内核
@@ -3459,6 +3490,9 @@ async function main() {
   }
 
   console.log(`\n[全部通过] ${passed}/${passed} ✓ verify-sys-fastlane-submit 全绿`);
+  if (realDbSkippedTags.length > 0) {
+    console.log(`  ⚠️ 注意：${realDbSkippedTags.join(' / ')} 真实本地库只读探针本次未执行（默认跳过，需 \`--real-db <路径>\` 显式开启），以上"全绿"不含这几条覆盖，请勿据此断言真实库已验收。`);
+  }
   console.log('  覆盖：schema 就绪 + 兼容负例(direct_release=true 零效果) + 挂牌正例(无值班0/0·有值班1行) + 无授权零挂牌对照组 + 挂牌只发生在状态真翻转路径(多开发) + 挂牌资格复核(停用/降权) + 挂牌闸type钳制 + last_completed_at正常路径 + 不变量①②③⑦探针 + online_source消费面(造态) + FAST_RELEASE_CONFIRM routeKind单元覆盖(S3改名·真实调用方) + reopen清补验收字段组(造态起点) + 授权早于reopen纵深防御(挂牌闸重定义) + isActiveFastReleaseAuth唯一判据fail-closed + [S3] 确认端点单人末位/多人非末位/负例族/空集合/代次干扰/弹回×done闸门/原子性/§3.3副作用/翻牌UPDATE全仓唯一 + [S4] 加人正例+user_name来源断言/重复加人409/首done后FROZEN成对/非挂牌态加人409成对/无资格三态/移人pending正例/移done行409/移人后同事务翻牌正例(真实端点,含因果顺序断言)/移空后不翻+解冻/非挂牌态移人409/移不存在的人409/confirm×remove竞争串行化成对 + [Opus385预筛收口] 软删后重加同user_id反向一对/user_name归一化级联三态(目标一级/目标两级/操作者)/两新端点403权限负例 + [codex387回卷] 加人x确认并发终态枚举法(add_first/confirm_first两方向均真实观测)/双加人同user_id并发(partial UNIQUE竞态互斥) + [S5] revoke成对(无done核心价值·重挂牌不撞UNIQUE/有done409)/accept成对(无done清集合/有done409+续走翻牌)/return成对(无done清集合/有done409)/void含done终极出口/reject零行照常/不变量⑪⑫双向探针(终态零违例+SQL造态反证判红+清理恢复) + [Opus S5=BLOCK 预筛 H1/L1] 重新授权清集合三变体(同人值班跨轮不再500/换值班人跨轮accept·return·revoke均不再409/无值班跨轮0-0照挂+加人解冻)/C9直翻非空集合cause=上线翻牌正例 + [codex389二批] revoke闸序修正(已消费单不再误报DEPLOY_IN_PROGRESS)/重新授权原子性故障注入(触发器阻断清集合UPDATE四面全回滚+恢复对照) + [S6] 详情DTO(挂牌混合态数组+进度/代次干扰过滤/非挂牌单空数组/consumed单留痕保留)+列表投影(x/N计数·代次干扰不计分母·空集合0/0·消费后active_auth归零·非fastlane单三列确定性归零) + [Opus预筛S6-HIGH-1/MED-2] 值班执行人可见性成对(在册列表可见+详情200+三列/DTO附块值正确/移出集合后列表不可见+详情恢复403) + [值班筛选与类型卡S1] fast_release_my_pending列表投影(正例本人在集合未确认=1/反例①exec_status=done→0/反例②不在集合的用户admin→0/反例③被移出当前代次的非活跃成员→0/字段存在性无fastlane数据普通单仍下发0非undefined) + [S-fix] 绑定顺序双身份带query对照钉进本套件自身/不掺闸对照(SQL造态consumed_at非空使active_auth归零但my_pending仍1)/59d移除前活跃集合中间断言堵addExecutor静默no-op假绿');
   server.close();
 }

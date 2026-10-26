@@ -273,8 +273,10 @@ const REGISTERED_WRITE_POINTS = [
     // scripts/test-collab-mysql-smoke-e2e.js —— 2 条：建/删一条 e2e 专用测试连接
     { file: 'scripts/test-collab-mysql-smoke-e2e.js', scope: 'function setupMysqlConnection', ordinal: 1, op: 'INSERT', fingerprint: '746cca3a8116' }, // line 92
     { file: 'scripts/test-collab-mysql-smoke-e2e.js', scope: 'function teardownMysqlConnection', ordinal: 1, op: 'DELETE', fingerprint: '97666d4df244' }, // line 102
-    // scripts/verify-collab-external-source.js（G2）—— 10 条：种子行 insertConn（顶层，08-H1 前置重构）+
+    // scripts/verify-collab-external-source.js（G2）—— 11 条：种子行 insertConn（顶层，08-H1 前置重构）+
     // S 组夹具直写（sInsertRawConn/sCorruptColumn）+ H1b/H4/H9/H8 共 7 条内联在 runHttpTests 里的直写
+    // + #106 S4b2：seedData 清场（隔离实例库，test-env 快照的既有行先删再造数）
+    { file: 'scripts/verify-collab-external-source.js', scope: 'function seedData', ordinal: 1, op: 'DELETE', fingerprint: 'a7c540d8616d' }, // line 264
     { file: 'scripts/verify-collab-external-source.js', scope: 'function insertConn', ordinal: 1, op: 'INSERT', fingerprint: 'ebbabcbbbfb0' }, // line 450
     { file: 'scripts/verify-collab-external-source.js', scope: 'function sInsertRawConn', ordinal: 1, op: 'INSERT', fingerprint: '5c96e5e6b60b' }, // line 630
     { file: 'scripts/verify-collab-external-source.js', scope: 'function sCorruptColumn', ordinal: 1, op: 'UPDATE', fingerprint: '053fddf9aa5a' }, // line 647
@@ -285,8 +287,9 @@ const REGISTERED_WRITE_POINTS = [
     { file: 'scripts/verify-collab-external-source.js', scope: 'function runHttpTests', ordinal: 5, op: 'UPDATE', fingerprint: '8031e494ff85' }, // line 1578 H9：撤销 source_system_code
     { file: 'scripts/verify-collab-external-source.js', scope: 'function runHttpTests', ordinal: 6, op: 'UPDATE', fingerprint: '8031e494ff85' }, // line 1596 H9：恢复 source_system_code
     { file: 'scripts/verify-collab-external-source.js', scope: 'function runHttpTests', ordinal: 7, op: 'DELETE', fingerprint: 'f77e89da7d82' }, // line 1843 08-H1：删 PX_DUP2 关系型行，闭环回 422 对照
-    // scripts/test-collab-external-source-playwright.js（G3 Playwright 贯穿，C5）—— 1 条：
-    // insertConn（顶层种子函数，与 G2 insertConn 同款 SQL/同一列清单，指纹相同不是巧合）
+    // scripts/test-collab-external-source-playwright.js（G3 Playwright 贯穿，C5）—— 2 条：
+    // insertConn（顶层种子函数，与 G2 insertConn 同款 SQL/同一列清单，指纹相同不是巧合）+ #106 S4b2：seedData 清场（同 G2）
+    { file: 'scripts/test-collab-external-source-playwright.js', scope: 'function seedData', ordinal: 1, op: 'DELETE', fingerprint: 'a7c540d8616d' }, // line 202
     { file: 'scripts/test-collab-external-source-playwright.js', scope: 'function insertConn', ordinal: 1, op: 'INSERT', fingerprint: 'ebbabcbbbfb0' }, // line 386
     // scripts/verify-periodic-run.js —— 2 条（既有周期取数套件，与本批业务无关，登记表仍需覆盖全仓）
     { file: 'scripts/verify-periodic-run.js', scope: 'function seedSourceConnections', ordinal: 1, op: 'INSERT', fingerprint: 'c22b72d60940' }, // line 292
@@ -295,6 +298,20 @@ const REGISTERED_WRITE_POINTS = [
     { file: 'scripts/verify-periodic-task-crud.js', scope: 'function main', ordinal: 1, op: 'INSERT', fingerprint: 'a903128629a6' }, // line 98
     { file: 'scripts/verify-periodic-task-crud.js', scope: 'function main', ordinal: 2, op: 'INSERT', fingerprint: '35c40292869a' }, // line 99
     { file: 'scripts/verify-periodic-task-crud.js', scope: 'function main', ordinal: 3, op: 'INSERT', fingerprint: 'cf95d0260736' }, // line 100
+    // #106 S1b（隔离库准备 + 其测试夹具）—— 3 条：
+    //   utils/instance-db.js 内部函数 prepareIsolatedDb 的「清空外部库口令」UPDATE（隔离实例的第二道防线，只经 createIsolatedDb 在刚 VACUUM INTO 出来的新文件上执行，由建线库 / 派生测试库调用，不在任何 HTTP 路径上）；
+    //   两个验证脚本各一个种夹具连接的顶层辅助函数（单条 INSERT；预期被 createIsolatedDb 清空，用来证明清口令真的生效）
+    { file: 'scripts/verify-instance-external.js', scope: 'function seedDbConnections', ordinal: 1, op: 'INSERT', fingerprint: '13d423c1bfe2' }, // line 129
+    { file: 'scripts/verify-instance-startup.js', scope: 'function seedExternalConnections', ordinal: 1, op: 'INSERT', fingerprint: 'be62bff82273' }, // line 193
+    { file: 'utils/instance-db.js', scope: 'function prepareIsolatedDb', ordinal: 1, op: 'UPDATE', fingerprint: 'fecdeb82758b' }, // 清空外部库口令的 UPDATE（位于 prepareIsolatedDb 内，行号随改动漂移，不在此记录）
+    // #106 S2b（建线 / 删线自检）—— 1 条：套件在 os.tmpdir() 下给临时「主工作区」造业务库的夹具函数，种一条带口令的外部连接，
+    //   用来证明 line new 经 createIsolatedDb 建出的线库口令已清空（同 S1b 两个夹具；不碰真实库）
+    { file: 'scripts/verify-lines-new-remove-suite.js', scope: 'function makeMainDb', ordinal: 1, op: 'INSERT', fingerprint: '7ac4c563db76' }, // line 194
+    // #106 S2c（启停自检）—— 1 条：同款临时主库夹具（建线后核线库口令已清；不碰真实库）
+    { file: 'scripts/verify-lines-run-suite.js', scope: 'function makeMainDb', ordinal: 1, op: 'INSERT', fingerprint: '7ac4c563db76' }, // line 394
+    // #106 S3a（临时实例启动器自检）—— 1 条：套件给自建的合成来源库种一条带「真实形态密文」的外部库连接（单条 INSERT；用来证明 startTestInstance 经 createIsolatedDb 派生的实例库口令已清空；
+    //   指纹取自本守卫 --dump；地址用不可路由的 TEST-NET，不碰真实库）
+    { file: 'scripts/verify-test-instance-suite.js', scope: 'function seedDbConnections', ordinal: 1, op: 'INSERT', fingerprint: 'f2246faddfd6' }, // line 438
     // server.js —— 7 条：连接管理五端点里的全部直写（POST 两支 INSERT + 清默认位 UPDATE；PUT 两种
     // 分支 + 清默认位；DELETE）
     { file: 'server.js', scope: 'POST /api/db-connections', ordinal: 1, op: 'INSERT', fingerprint: '1834517bb972' }, // line 8440 D14 原子去重分支

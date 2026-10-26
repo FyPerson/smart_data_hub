@@ -13,8 +13,13 @@
  *     不重新跑 Python 提取，直接跑 Node 装载脚本 import-legacy-archive.js。
  *
  * 用法：node scripts/smoke-legacy-archive-ui.js
- *   端口 3000 若已有服务在跑（本分支代码）则直接复用，不重复起服务、结束时也不关闭；
- *   若未起，本脚本会自行 spawn server.js 并在结束时关闭 + 释放端口。
+ *   [#106 S4b1] 不再复用 3000 上的服务、不再自 spawn 服务、不再写死端口、不再读写真实库与真实 uploads、不再加载 .env：
+ *   经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；浏览器在 ready 之后才启动。
+ *   导入 / 激活子进程（import-legacy-archive.js）一律带 --db <实例库> --uploads-root <实例数据根>/uploads。
+ *   派生子进程之前，对**最终参数数组**做硬校验（checkImportArgv，不通过就抛错、不派生）：--db 与 --uploads-root 各恰好出现一次；值等于 ready 之后的实例库路径 /
+ *   实例数据根下的 uploads；--db 的值不是本检出的任一业务库（test-env 判定业务库路径的同一函数 businessDbPaths，realpath + 同一物理文件）；
+ *   --uploads-root 的值不等于也不在本检出 wbs-server 目录之下（防止把批次导进真实库 / 真实 uploads）。
+ *   manifest / payload 取该脚本的默认位置（仓库根 tmp/），所以真实运行要在含该目录的主工作区。
  *
  * 覆盖（45 项理论满值断言，动态扣减环境依赖分支后对拍，含 codex 10/11 两号审查采纳的加固）：
  *   T0  无 active 批次时（导入前）：横幅显示 notice + 不渲染任何 tab
@@ -57,23 +62,22 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execFileSync, spawn, execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const sqlite3 = require('sqlite3').verbose();
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const TEST_PORT = 3000;
-const ROOT = path.join(__dirname, '..');
-const DB_PATH = path.join(ROOT, 'task_pool.db');
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'legacy-archive-playwright-shots');
+let BASE_URL = null;         // ready() 之后赋值
+let ROOT = null;             // wbs-server 目录（子进程 cwd）
+let DB_PATH = null;          // 实例库，ready() 之后赋值
+let UPLOADS_ROOT = null;     // 实例数据根下的 uploads，ready() 之后赋值
+let SCREENSHOT_DIR = null;   // 截图目录，ready() 之后赋值
 
 const ADMIN_ID = fx.ADMIN_ID;      // 1，admin
 const NONADMIN_ID = fx.CONTACT_ID; // 3，role=user（非 admin）
 
-const db = new sqlite3.Database(DB_PATH);
+let db = null;               // 实例库连接，ready() 之后以 OPEN_READWRITE 打开
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 const dbRun = (sql, params = []) => new Promise((res) => db.run(sql, params, function (e) { res({ err: e, changes: this && this.changes }); }));
@@ -120,20 +124,56 @@ async function loginPage(browser, token) {
     return page;
 }
 
-// netstat 精确端口比较（findstr 子串匹配会误命中，对齐 verify-legacy-archive-api.js/verify-quick-log 范式）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore */ } });
-    } catch (_) { /* ignore */ }
+// 路径比较：规范化后（Windows 下再折叠大小写）相等
+function samePathStrict(a, b) {
+    const norm = (p) => (process.platform === 'win32' ? path.resolve(String(p)).toLowerCase() : path.resolve(String(p)));
+    return norm(a) === norm(b);
+}
+// 导入 / 激活子进程的参数：先拼出最终要交给子进程的参数数组，再对这个数组本身做硬校验（不是校验拼之前的变量），不通过直接抛错、不派生子进程。
+//（import-legacy-archive.js 不带 --db 时默认写 wbs-server 下的真实库与真实 uploads。）
+function importArgs(extraArgs) {
+    const argv = ['scripts/import-legacy-archive.js', ...extraArgs, '--db', DB_PATH, '--uploads-root', UPLOADS_ROOT];
+    checkImportArgv(argv);
+    return argv;
+}
+// 对最终参数数组的硬校验：
+//   ① --db 与 --uploads-root 各恰好出现一次，且后面跟着值（不是另一个 --flag）；
+//   ② --db 的值等于 ready 之后的实例库路径，--uploads-root 的值等于实例数据根下的 uploads；
+//   ③ --db 的值（realpath + 同一物理文件）不是本检出的任一业务库（test-env 判定业务库路径的同一函数 _internals.businessDbPaths，同口径的 realOf / sameInode）；
+//   ④ --uploads-root 的值（realpath）不等于也不在本检出 wbs-server 目录之下。
+function checkImportArgv(argv) {
+    const fail = (m) => { throw new Error(`硬校验失败（import-legacy-archive.js 参数）：${m}；拒绝派生子进程`); };
+    const valueOnce = (flag) => {
+        const at = [];
+        argv.forEach((a, i) => { if (a === flag) at.push(i); });
+        if (at.length !== 1) fail(`${flag} 应恰好出现 1 次，实得 ${at.length} 次`);
+        const v = argv[at[0] + 1];
+        if (typeof v !== 'string' || v === '' || v.startsWith('--')) fail(`${flag} 后面没有有效的值`);
+        return v;
+    };
+    const dbArg = valueOnce('--db');
+    const upArg = valueOnce('--uploads-root');
+    const e = testEnv.env();
+    if (!samePathStrict(dbArg, e.dbPath)) fail(`--db（${dbArg}）不等于 ready 之后的实例库路径（${e.dbPath}）`);
+    if (!e.dataDir) fail('取不到实例数据根（env().dataDir 为 null），无法确定 --uploads-root');
+    const expectUploads = path.join(e.dataDir, 'uploads');
+    if (!samePathStrict(upArg, expectUploads)) fail(`--uploads-root（${upArg}）不等于实例数据根下的 uploads（${expectUploads}）`);
+    const I = testEnv._internals;
+    const fold = (p) => (process.platform === 'win32' ? String(p).toLowerCase() : String(p));
+    const { paths: businessPaths } = I.businessDbPaths(ROOT, process.env, (p) => fs.readFileSync(p, 'utf8'));   // 模式判定被拒绝时抛错（fail-closed）
+    for (const bp of businessPaths) {
+        if (fold(I.realOf(dbArg)) === fold(I.realOf(bp)) || I.sameInode(dbArg, bp)) fail(`--db（${dbArg}）指向本检出的业务库（${bp}）`);
+    }
+    const rel = path.relative(fold(I.realOf(ROOT)), fold(I.realOf(upArg)));
+    // [#106 S4c-2 收口] 按路径分量判断「在外部」：只有 rel === '..'、以 '..' + 分隔符开头、或绝对路径（跨盘符）才算外部；其余相对路径（含空串、含名字以 '..' 开头的合法子目录如 '..probe/uploads'）一律视为在检出目录之内、拒绝
+    const outsideRoot = rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel);
+    if (!outsideRoot) fail(`--uploads-root（${upArg}）等于或位于本检出 wbs-server 目录（${ROOT}）之下`);
+}
+// 以 OPEN_READWRITE（不带 OPEN_CREATE）打开实例库
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
 }
 
 function execFileSyncSafe(cmd, args) {
@@ -188,7 +228,7 @@ async function importBatchOnly() {
     const preMaxRow = await dbGet(`SELECT MAX(id) AS m FROM legacy_archive_batches`);
     const preMax = (preMaxRow && preMaxRow.m) || 0;
 
-    const importResult = execFileSyncSafe('node', ['scripts/import-legacy-archive.js']);
+    const importResult = execFileSyncSafe('node', importArgs([]));
     if (!importResult.ok) throw new Error(`前置导入失败（import-legacy-archive.js）：${importResult.message}\n${importResult.out}`);
 
     let batchId = null;
@@ -208,7 +248,7 @@ async function importBatchOnly() {
 
 // ---- 前置：激活已导入的批次（独立于 importBatchOnly，见上方 M1① 注释） ----
 async function activateBatch(batchId) {
-    const activateResult = execFileSyncSafe('node', ['scripts/import-legacy-archive.js', '--activate', String(batchId)]);
+    const activateResult = execFileSyncSafe('node', importArgs(['--activate', String(batchId)]));
     if (!activateResult.ok) throw new Error(`前置激活失败（--activate ${batchId}）：${activateResult.message}\n${activateResult.out}`);
     const statusRow = await dbGet(`SELECT status FROM legacy_archive_batches WHERE id = ?`, [batchId]);
     if (!statusRow || statusRow.status !== 'active') {
@@ -232,20 +272,9 @@ async function cleanupBatch(batchId) {
     if (dsDel.err) deleteErrors.push(`DELETE datasets(batch_id=${batchId}): ${dsDel.err.message}`);
     const batchDel = await dbRun(`DELETE FROM legacy_archive_batches WHERE id = ?`, [batchId]);
     if (batchDel.err) deleteErrors.push(`DELETE batches(id=${batchId}): ${batchDel.err.message}`);
-    const dir = path.join(ROOT, 'uploads', 'legacy-archive', String(batchId));
+    const dir = path.join(UPLOADS_ROOT, 'legacy-archive', String(batchId));
     const dirRemoved = await removeDirWithRetry(dir);
     return { dir, dirRemoved, deleteErrors, datasetIds };
-}
-
-async function waitReady(getLog, ms = 20000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/\[历史台账归档\] ✅ .*legacy-archive 接口放行/.test(getLog())) {
-            try { const r = await fetch(`${BASE_URL}/api/legacy-archive/datasets`); if (r.status === 401) return true; } catch (_) { /* ignore */ }
-        }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
 }
 
 // 服务端 escapeLikeKeyword 逐字复刻（routes/legacy-archive/index.js），供 T4 独立复算命中数用——
@@ -275,39 +304,46 @@ async function pickDistinctiveTerm(datasetId, searchText) {
 }
 
 async function main() {
+    await fx.ready();   // 先于任何网络 / 库 / 子进程 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+
+    // ready 成功之后立刻进入最外层 try/finally：此后任何一步失败（含数据根取不到、开库失败、就绪核对失败、浏览器启动失败）都由 finally 里的五步各自独立收尾；
+    //   入口 .catch 只覆盖 ready() 之前（含 ready 本身）的失败——try 里的异常在 catch 里记下（runError），finally 之后与其他收尾失败一并计失败，不再往外抛。
+    let browser = null;          // 可空：chromium.launch 之前就失败时，finally 里跳过关闭
     let batchId = null;
-    let ownServer = null;
-    let ownServerLog = '';
     let originalActiveId = null;
+    let runError = null;         // try 里的未预期异常
+    const finallyFailures = [];  // finally 五步各自的失败（关浏览器 / 批次清理 / 恢复原活动批次 / 关实例库 / teardown），逐条累计
     // M1（codex 11 采纳）：EXPECTED_ASSERTIONS 从写死的常量改为动态——三处分支（T0/L1/M2 none 字段）
     // 依赖运行时环境条件（当时 dev 库有没有 active 批次/默认第一页有没有无图行/bug_list 有没有非空
     // name 的 none 字段），条件不满足时对应断言会被跳过而非计入 fail。跳过几条就从理论满值里减几条，
     // 而不是死钉一个只在"全部条件都命中"这一种环境下才成立的数字——避免"已有 active 批次场景下锚点
     // 必然判红"这种自相矛盾。见文末锚点计算处 MAX_ASSERTIONS + skippedAssertions。
     let skippedAssertions = 0;
-    console.log('\n══════ 历史台账归档 Playwright 冒烟（独立页 Legacy_Archive.html） ══════');
-
-    // ===== 前置：确认/启动 server =====
-    let serverAlreadyUp = false;
     try {
-        const r = await fetch(`${BASE_URL}/api/legacy-archive/datasets`);
-        serverAlreadyUp = (r.status === 401 || r.status === 200);
-    } catch (_) { serverAlreadyUp = false; }
-    if (!serverAlreadyUp) {
-        console.log('[前置] 端口 3000 未起服务，自行 spawn server.js（本分支代码）…');
-        killPort(TEST_PORT);
-        ownServer = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-        ownServer.stdout.on('data', d => { ownServerLog += d.toString(); });
-        ownServer.stderr.on('data', d => { ownServerLog += d.toString(); });
-        const ready = await waitReady(() => ownServerLog);
-        if (!ready) { console.error('❌ server 未就绪：' + ownServerLog.slice(-2000)); process.exit(1); }
-        console.log('[前置] server 已就绪（本脚本自起，结束时会关闭）');
-    } else {
-        console.log('[前置] 端口 3000 已有服务在跑，复用（本脚本不负责关闭它）');
-    }
+        BASE_URL = fx.BASE;
+        ROOT = path.join(__dirname, '..');
+        DB_PATH = fx.DB_PATH;
+        const dataDir = testEnv.env().dataDir;
+        if (!dataDir) throw new Error('取不到实例数据根（env().dataDir 为 null：变量组形态下 TEST_DB_PATH 旁没有与 TEST_INSTANCE 一致的实例清单）：无法定位 uploads/legacy-archive，拒绝运行');
+        UPLOADS_ROOT = path.join(dataDir, 'uploads');
+        SCREENSHOT_DIR = path.join(os.tmpdir(), 'legacy-archive-playwright-shots');
+        db = await openInstanceDb(DB_PATH);
+        console.log('\n══════ 历史台账归档 Playwright 冒烟（独立页 Legacy_Archive.html） ══════');
 
-    const browser = await chromium.launch();
-    try {
+        // ===== 前置：确认被测服务就绪（身份核对用 throw，不加 must()，保持断言总数锚不变）=====
+        //   两次真实请求：health/ready 里 legacy_archive 模块 ready + 未带 token 访问数据集接口必须 401（服务确实在应答本脚本要测的路由）
+        {
+            const hr = await fetch(`${BASE_URL}/api/health/ready`);
+            const hb = await hr.json().catch(() => null);
+            if (!(hb && hb.modules && hb.modules.legacy_archive && hb.modules.legacy_archive.ready === true)) {
+                throw new Error(`前置失败：health/ready 里 legacy_archive 未就绪（HTTP ${hr.status}，legacy_archive=${JSON.stringify(hb && hb.modules && hb.modules.legacy_archive)}）`);
+            }
+            const dr = await fetch(`${BASE_URL}/api/legacy-archive/datasets`);
+            if (dr.status !== 401) throw new Error(`前置失败：未带 token 访问 /api/legacy-archive/datasets 应为 401，实得 ${dr.status}`);
+            console.log('[前置] 被测服务就绪（health/ready legacy_archive + 未带 token 401），隔离实例');
+        }
+
+        browser = await chromium.launch();
         const adminTok = await fx.signAs(ADMIN_ID);
         const nonAdminTok = await fx.signAs(NONADMIN_ID);
 
@@ -640,59 +676,73 @@ async function main() {
 
         await page.close();
         await naPage.close();
+    } catch (e) {
+        runError = e;   // 不往外抛：入口 .catch 只覆盖 ready() 之前的失败；这里记下，finally 收尾完、断言总数锚之后与其他失败一并计入
     } finally {
-        await browser.close();
+        // finally 五步各自独立 try/catch，前一步失败不阻断后一步，失败逐条累计到 finallyFailures
+        // （放在断言总数锚之后统计，不影响 must() 计数与锚）：① 关浏览器 ② 批次清理 ③ 恢复原活动批次 ④ 关实例库 ⑤ teardown。
+        // ① 关浏览器
+        try { if (browser) await browser.close(); } catch (e) { finallyFailures.push(`关闭浏览器失败：${e && e.message}`); }
         console.log('\n[清理] 清理导入的批次…');
+        // ② 批次清理
         // M1②（codex 10 采纳）：清理失败不能只打日志静默过去——之前 cleanupBatch 抛异常被 .catch 吞掉、
         // 行数/目录复核只 console.log 不 must()，脚本会在真库清理失败的情况下仍然 exit 0，谎报"冒烟全绿"。
         // 现在全部改成真断言：cleanupBatch 抛异常/DELETE 有错误/行未归零/目录未删/原 active 未恢复，
         // 任一条都计入 fail，最终 `if (fail > 0) process.exit(1)` 会如实反映清理失败。
-        let cleanupResult = null;
-        let cleanupThrew = null;
-        if (batchId) {
-            try { cleanupResult = await cleanupBatch(batchId); } catch (e) { cleanupThrew = e; }
-        }
-        if (batchId) {
-            must(!cleanupThrew, `M1②清理：cleanupBatch(#${batchId}) 未抛异常${cleanupThrew ? `（实得=${cleanupThrew.message}）` : ''}`);
-            const remainBatchRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_batches WHERE id=?`, [batchId]).catch(() => null);
-            must(!!remainBatchRow && remainBatchRow.c === 0, `M1②清理：batch #${batchId} legacy_archive_batches 行数归零（实得剩余=${remainBatchRow ? remainBatchRow.c : '查询失败'}）`);
-            // M4（codex 11 采纳）：生产不开 PRAGMA foreign_keys，删 legacy_archive_batches 不会级联，
-            // cleanupBatch 是手写逐表 DELETE（rows→datasets→batches）——只查 batches 一张表干净不能
-            // 代表 datasets/rows 也真的删空了，须逐表独立复核，任一漏删都要判红而不是被 batches 的绿掩盖。
-            const remainDatasetsRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_datasets WHERE batch_id=?`, [batchId]).catch(() => null);
-            must(!!remainDatasetsRow && remainDatasetsRow.c === 0, `M4清理：legacy_archive_datasets 行数归零（batch_id=${batchId}，实得剩余=${remainDatasetsRow ? remainDatasetsRow.c : '查询失败'}）`);
-            const datasetIds = (cleanupResult && cleanupResult.datasetIds) || [];
-            let remainRowsCount = null;
-            if (datasetIds.length > 0) {
-                const placeholders = datasetIds.map(() => '?').join(',');
-                const remainRowsRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_rows WHERE dataset_id IN (${placeholders})`, datasetIds).catch(() => null);
-                remainRowsCount = remainRowsRow ? remainRowsRow.c : null;
+        try {
+            let cleanupResult = null;
+            let cleanupThrew = null;
+            if (batchId) {
+                try { cleanupResult = await cleanupBatch(batchId); } catch (e) { cleanupThrew = e; }
             }
-            // datasetIds 为空只有两种可能：①cleanupThrew（异常路径，上面已判红，这里不能借"没查"就悄悄
-            // 给绿）②正常完成但本批次真的没有任何 dataset（本模块每批次恒 8 个数据集，理论不会发生）——
-            // 两种情况都不给"未知即通过"的默认值，remainRowsCount 非精确 0 一律判红，不留可乘之机。
-            must(remainRowsCount === 0, `M4清理：legacy_archive_rows 行数归零（涉及 ${datasetIds.length} 个 dataset_id，实得剩余=${remainRowsCount === null ? '未知（datasetIds 为空或查询失败）' : remainRowsCount}）`);
-            const dirPath = path.join(ROOT, 'uploads', 'legacy-archive', String(batchId));
-            const dirStillThere = fs.existsSync(dirPath);
-            must(!dirStillThere, `M1②清理：uploads/legacy-archive/${batchId}/ 目录已删除（实得仍存在=${dirStillThere}）`);
-            const hasDeleteErrors = !!(cleanupResult && cleanupResult.deleteErrors && cleanupResult.deleteErrors.length);
-            must(!hasDeleteErrors, `M1②清理：DELETE 无错误${hasDeleteErrors ? `（实得=${JSON.stringify(cleanupResult.deleteErrors)}）` : ''}`);
-        }
+            if (batchId) {
+                must(!cleanupThrew, `M1②清理：cleanupBatch(#${batchId}) 未抛异常${cleanupThrew ? `（实得=${cleanupThrew.message}）` : ''}`);
+                const remainBatchRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_batches WHERE id=?`, [batchId]).catch(() => null);
+                must(!!remainBatchRow && remainBatchRow.c === 0, `M1②清理：batch #${batchId} legacy_archive_batches 行数归零（实得剩余=${remainBatchRow ? remainBatchRow.c : '查询失败'}）`);
+                // M4（codex 11 采纳）：生产不开 PRAGMA foreign_keys，删 legacy_archive_batches 不会级联，
+                // cleanupBatch 是手写逐表 DELETE（rows→datasets→batches）——只查 batches 一张表干净不能
+                // 代表 datasets/rows 也真的删空了，须逐表独立复核，任一漏删都要判红而不是被 batches 的绿掩盖。
+                const remainDatasetsRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_datasets WHERE batch_id=?`, [batchId]).catch(() => null);
+                must(!!remainDatasetsRow && remainDatasetsRow.c === 0, `M4清理：legacy_archive_datasets 行数归零（batch_id=${batchId}，实得剩余=${remainDatasetsRow ? remainDatasetsRow.c : '查询失败'}）`);
+                const datasetIds = (cleanupResult && cleanupResult.datasetIds) || [];
+                let remainRowsCount = null;
+                if (datasetIds.length > 0) {
+                    const placeholders = datasetIds.map(() => '?').join(',');
+                    const remainRowsRow = await dbGet(`SELECT COUNT(*) c FROM legacy_archive_rows WHERE dataset_id IN (${placeholders})`, datasetIds).catch(() => null);
+                    remainRowsCount = remainRowsRow ? remainRowsRow.c : null;
+                }
+                // datasetIds 为空只有两种可能：①cleanupThrew（异常路径，上面已判红，这里不能借"没查"就悄悄
+                // 给绿）②正常完成但本批次真的没有任何 dataset（本模块每批次恒 8 个数据集，理论不会发生）——
+                // 两种情况都不给"未知即通过"的默认值，remainRowsCount 非精确 0 一律判红，不留可乘之机。
+                must(remainRowsCount === 0, `M4清理：legacy_archive_rows 行数归零（涉及 ${datasetIds.length} 个 dataset_id，实得剩余=${remainRowsCount === null ? '未知（datasetIds 为空或查询失败）' : remainRowsCount}）`);
+                const dirPath = path.join(UPLOADS_ROOT, 'legacy-archive', String(batchId));
+                const dirStillThere = fs.existsSync(dirPath);
+                must(!dirStillThere, `M1②清理：uploads/legacy-archive/${batchId}/ 目录已删除（实得仍存在=${dirStillThere}）`);
+                const hasDeleteErrors = !!(cleanupResult && cleanupResult.deleteErrors && cleanupResult.deleteErrors.length);
+                must(!hasDeleteErrors, `M1②清理：DELETE 无错误${hasDeleteErrors ? `（实得=${JSON.stringify(cleanupResult.deleteErrors)}）` : ''}`);
+            }
+        } catch (e) { finallyFailures.push(`批次清理步骤异常：${e && e.message}`); }
+        // ③ 恢复原活动批次
         // 无条件跑同一条 check（originalActiveId 为 null 时天然满足）——EXPECTED_ASSERTIONS 常量不随
         // "跑本脚本时 dev 库当时有没有 active 批次"这个外部环境状态漂移（对齐 verify-legacy-archive-api.js MED1 同款处理）。
         let restoreOk = true;
-        if (originalActiveId) {
-            const restore = await dbRun(`UPDATE legacy_archive_batches SET status='active' WHERE id=? AND status='retired'`, [originalActiveId]);
-            restoreOk = !restore.err && restore.changes === 1;
-        }
+        try {
+            if (originalActiveId) {
+                const restore = await dbRun(`UPDATE legacy_archive_batches SET status='active' WHERE id=? AND status='retired'`, [originalActiveId]);
+                restoreOk = !restore.err && restore.changes === 1;
+            }
+        } catch (e) { restoreOk = false; finallyFailures.push(`恢复原活动批次异常：${e && e.message}`); }
         must(restoreOk, `M1②清理：原 active 批次（如有）已恢复为 active（${originalActiveId ? `id=${originalActiveId}` : '本次冒烟前无 active 批次，天然满足，未做任何恢复动作'}）`);
-        db.close();
-        if (ownServer) {
-            ownServer.kill();
-            await new Promise(r => setTimeout(r, 500));
-            killPort(TEST_PORT);
-            console.log('[清理] 已关闭本脚本自起的 server + 释放端口');
-        }
+        // ④ 关实例库（读 db.close 回调的 err；db 为 null = 开库之前就失败，无需关）
+        try {
+            if (db) {
+                const closeErr = await new Promise((res) => db.close((err) => res(err || null)));
+                if (closeErr) finallyFailures.push(`关闭实例库失败：${closeErr.message}`);
+            }
+        } catch (e) { finallyFailures.push(`关闭实例库异常：${e && e.message}`); }
+        // ⑤ 收掉自起实例；teardown 失败计入失败（放在断言总数锚之后统计，不影响 must() 计数）。
+        //   实例数据根的删除按形态分：自起实例时由 teardown 删除（含 uploads/legacy-archive）；变量组（共享实例）形态下 teardown 不做事，数据根由批跑器收实例时删除。
+        try { await fx.teardown(); } catch (e) { finallyFailures.push(`teardown（收掉自起实例）失败：${e && e.message}`); }
     }
 
     // 断言总数锚（M1·codex 11 采纳：从写死常量改为动态，对齐 verify-legacy-archive-api.js MED3
@@ -713,9 +763,18 @@ async function main() {
     must(actualAssertionCount === EXPECTED_ASSERTIONS,
         `断言总数锚：实际=${actualAssertionCount} 期望=${EXPECTED_ASSERTIONS}（MAX=${MAX_ASSERTIONS} - 已跳过=${skippedAssertions}；可能新增/删除了断言未同步 MAX_ASSERTIONS，或新增条件分支忘了同步 skippedAssertions）`);
 
+    // 断言总数锚之后统计：try 里的未预期异常 + finally 五步里的失败，逐条计失败（不进 must()，不改锚）
+    if (runError) { fail++; console.log('  ❌ 执行异常：' + (runError && runError.stack || runError)); }
+    for (const msg of finallyFailures) { fail++; console.log('  ❌ 收尾失败：' + msg); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 历史台账归档 Playwright 冒烟存在失败项'); process.exit(1); }
-    console.log('  🎉 历史台账归档 Playwright 冒烟全部通过');
+    if (fail > 0) console.log('  ❌ 历史台账归档 Playwright 冒烟存在失败项');
+    else console.log('  🎉 历史台账归档 Playwright 冒烟全部通过');
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown（上面 finally 里已 await）之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('❌ 脚本执行异常:', e && e.stack || e); process.exit(1); });
+// 入口 .catch 只覆盖 ready() 之前（含 ready 本身）的失败：此时还没开实例库、没起浏览器，只需 teardown；ready 之后的失败都在 main() 的 try/catch/finally 里收尾并计失败。
+main().catch(async (e) => {
+    console.error('❌ 脚本执行异常:', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

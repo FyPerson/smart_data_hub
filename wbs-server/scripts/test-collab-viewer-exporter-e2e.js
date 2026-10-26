@@ -2,7 +2,7 @@
  * v1.72.5 viewer 角色 admin 直派收单 e2e 烟雾测试
  *
  * 用法：node scripts/test-collab-viewer-exporter-e2e.js
- * 前置：本地 server 已启动（localhost:3000）+ 本地 DB 至少 2 个 viewer 用户（示例客服A id=2 / 示例客服B id=4）
+ * 前置：入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）+ 实例库至少 2 个 viewer 用户（示例客服A id=2 / 示例客服B id=4）
  *
  * 覆盖用例（5 个）：
  *   V1  admin 直派给 viewer（示例客服A） → submit-export 成功 200 + 状态 SUBMITTED
@@ -15,21 +15,14 @@
  */
 'use strict';
 
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = fx.BASE;
-const DB_PATH = fx.DB_PATH;
+// [#106 S4c-A2] 被测服务 / 实例库来自 test-env：fixture 的 BASE / DB_PATH 在 ready() 之前读会抛 FX_NOT_READY，
+//   所以不能在模块顶层取；改为 ready() 之后在入口里赋值。
+//   （原 makeTmpFile 及其 path / fs / os 依赖是从未被调用的死代码，整体删除；证据：本文件内 makeTmpFile 只有定义、没有调用点。）
+let BASE = null;
+let DB_PATH = null;
 const createdFixtureIds = [];
-
-function makeTmpFile(name, buf) {
-    const tmpPath = path.join(os.tmpdir(), `viewer-e2e-${Date.now()}-${name}`);
-    fs.writeFileSync(tmpPath, buf);
-    return tmpPath;
-}
 
 async function createAdminDirect(token, exporterId, oaNo) {
     return fx.apiCall('POST', '/api/collab/requests', token, {
@@ -109,23 +102,23 @@ async function postAdminSubmitOnBehalf(reqId, token, options = {}) {
 }
 
 async function getCollab(id) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.get('SELECT * FROM collab_requests WHERE id=?', [id], (err, row) => {
-            db.close();
-            err ? reject(err) : resolve(row);
+            // 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); });
         });
     });
 }
 
 // 2026-09-07 V9a/V9b 翻转配套：读 ADMIN_SUBMIT_ON_BEHALF 日志（flow 值断言用）
 async function getAdminSubmitLogs(id) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.all(
             "SELECT reason FROM collab_operation_logs WHERE collab_request_id=? AND operation_type='ADMIN_SUBMIT_ON_BEHALF' ORDER BY id",
             [id],
-            (err, rows) => { db.close(); err ? reject(err) : resolve(rows || []); }
+            (err, rows) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(rows || []); }); }
         );
     });
 }
@@ -133,10 +126,13 @@ async function getAdminSubmitLogs(id) {
 // 把已指派的夹具改成真·未指派形态（codex 11-M2）。developer_id / developer_name 是 NOT NULL 列，
 //   故写 0 与 '(待指派)' 而非 NULL——与生产真实 PENDING_ASSIGN 单一致。
 async function clearAssignment(id) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run("UPDATE collab_requests SET developer_id=0, developer_name='(待指派)', assigned_at=NULL, assigned_by=NULL WHERE id=?",
-            [id], function (err) { db.close(); err ? reject(err) : resolve(this.changes); });
+            [id], function (err) {
+                const changes = err ? null : this.changes;
+                db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(changes); });
+            });
     });
 }
 
@@ -145,21 +141,21 @@ async function clearAssignment(id) {
 //   这一对上下界才是真正的判别力所在：夹具 deadline='2026-12-31 18:00:00' 是未来时间，
 //   只断言"done_at 非空"或"done_at ≥ 请求前"都拦不住"pending 分支被删→回落 deadline"这个变异。
 async function dbNowLocal() {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.get("SELECT datetime('now','localtime') AS t", [], (err, row) => {
-            db.close(); err ? reject(err) : resolve(row && row.t);
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row && row.t); });
         });
     });
 }
 
-const tests = [];
-function defTest(name, fn) { tests.push({ name, fn }); }
+// [#106 S4c-A2] 用例登记成数组字面量条目（原先是模块顶层的多次 defTest(...) 调用）：静态守卫要求模块顶层只有声明与一个入口调用
+const tests = [
 
 // ============================================================
 // V1: admin 直派给 viewer → viewer submit-export 成功
 // ============================================================
-defTest('V1: admin 直派给 viewer(示例客服A) → viewer submit-export 200 + DONE (v1.72.10 跳过 SUBMITTED 直接终态)', async () => {
+{ name: 'V1: admin 直派给 viewer(示例客服A) → viewer submit-export 200 + DONE (v1.72.10 跳过 SUBMITTED 直接终态)', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V1_${Date.now()}`);
@@ -179,12 +175,12 @@ defTest('V1: admin 直派给 viewer(示例客服A) → viewer submit-export 200 
     if (collab.sql_validation_status !== 'admin_closed') {
         throw new Error(`sql_validation_status expected 'admin_closed', got ${collab.sql_validation_status}`);
     }
-});
+} },
 
 // ============================================================
 // V2: viewer A 跨单越权 submit-export viewer B 的单 → 403
 // ============================================================
-defTest('V2: viewer A 试图 submit-export viewer B 的单 → 403 VIEWER_NOT_EXPORTER', async () => {
+{ name: 'V2: viewer A 试图 submit-export viewer B 的单 → 403 VIEWER_NOT_EXPORTER', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerA = await fx.signAs(fx.VIEWER_ID);   // 示例客服A
     // 直派给 viewer B（示例客服B）
@@ -198,12 +194,12 @@ defTest('V2: viewer A 试图 submit-export viewer B 的单 → 403 VIEWER_NOT_EX
     if (res.body && res.body.code !== 'VIEWER_NOT_EXPORTER') {
         throw new Error(`expected code VIEWER_NOT_EXPORTER, got ${res.body && res.body.code}`);
     }
-});
+} },
 
 // ============================================================
 // V3: admin 直派给 viewer → viewer return-to-dev 成功
 // ============================================================
-defTest('V3: admin 直派给 viewer → viewer return-to-dev 200 + PENDING', async () => {
+{ name: 'V3: admin 直派给 viewer → viewer return-to-dev 200 + PENDING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V3_${Date.now()}`);
@@ -215,12 +211,12 @@ defTest('V3: admin 直派给 viewer → viewer return-to-dev 200 + PENDING', asy
 
     const collab = await getCollab(cr.body.id);
     if (collab.status !== 'PENDING') throw new Error(`status expected PENDING, got ${collab.status}`);
-});
+} },
 
 // ============================================================
 // V4: viewer 调 /notify → 403（保持 requireNonViewer，不放开）
 // ============================================================
-defTest('V4: viewer 调 /notify → 403（保持 requireNonViewer，D3 决策不放开）', async () => {
+{ name: 'V4: viewer 调 /notify → 403（保持 requireNonViewer，D3 决策不放开）', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V4_${Date.now()}`);
@@ -228,12 +224,12 @@ defTest('V4: viewer 调 /notify → 403（保持 requireNonViewer，D3 决策不
 
     const res = await notify(viewerToken, cr.body.id);
     if (res.status !== 403) throw new Error(`expected 403, got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // V5: viewer 调通用 /attachments → 403（保持 requireNonViewer，D2 决策不放开多次追加）
 // ============================================================
-defTest('V5: viewer 调通用 /attachments → 403（保持 requireNonViewer，D2 决策一次性提交）', async () => {
+{ name: 'V5: viewer 调通用 /attachments → 403（保持 requireNonViewer，D2 决策一次性提交）', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V5_${Date.now()}`);
@@ -241,13 +237,13 @@ defTest('V5: viewer 调通用 /attachments → 403（保持 requireNonViewer，D
 
     const res = await postGenericAttachment(cr.body.id, viewerToken);
     if (res.status !== 403) throw new Error(`expected 403, got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // V6: viewer 调 admin-direct-reassign / admin-direct-fallback → 403（requireAdmin 拦截，未被本次改动放开）
 // codex 49 Rec 4 采纳新增
 // ============================================================
-defTest('V6: viewer 调 admin-direct-reassign / admin-direct-fallback → 403（requireAdmin 未放开）', async () => {
+{ name: 'V6: viewer 调 admin-direct-reassign / admin-direct-fallback → 403（requireAdmin 未放开）', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V6_${Date.now()}`);
@@ -268,14 +264,14 @@ defTest('V6: viewer 调 admin-direct-reassign / admin-direct-fallback → 403（
     if (fallbackRes.status !== 403) {
         throw new Error(`fallback expected 403, got ${fallbackRes.status} ${JSON.stringify(fallbackRes.body)}`);
     }
-});
+} },
 
 // ============================================================
 // V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 状态冲突（409 INVALID_STATE_FOR_EXPORT_SUBMIT）
 // codex 49 Rec 4 采纳新增：确认中间件放行后 endpoint 状态守卫仍生效，不存在权限绕过
 // 注：v1.72.10 改造后 V7 路径不变——return-to-dev 仍是 EXPORTING→PENDING，再次 submit 不会因状态机改造受影响
 // ============================================================
-defTest('V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 409 状态冲突而非绕过', async () => {
+{ name: 'V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 409 状态冲突而非绕过', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V7_${Date.now()}`);
@@ -296,13 +292,13 @@ defTest('V7: viewer return-to-dev 后 PENDING 状态再次 submit-export → 409
     if (res.body && res.body.code !== 'INVALID_STATE_FOR_EXPORT_SUBMIT') {
         throw new Error(`expected code INVALID_STATE_FOR_EXPORT_SUBMIT, got ${res.body && res.body.code}`);
     }
-});
+} },
 
 // ============================================================
 // V8: v1.72.10 codex 50 H-2 修订 — viewer 上传 DONE 后 admin 走 admin-submit-on-behalf 上传新 result_data 替换交付物
 // 验证 D3=C 决策 + codex 50 H-2 强制 hasAdminUpload（DONE→DONE 不允许 no-op）+ codex 50 H-1 保留 sql_validation_status
 // ============================================================
-defTest('V8: viewer DONE → admin 上传 result_data 替换 → 仍 DONE + sql_validation_status 保留 admin_closed + done_at 不重写', async () => {
+{ name: 'V8: viewer DONE → admin 上传 result_data 替换 → 仍 DONE + sql_validation_status 保留 admin_closed + done_at 不重写', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V8_${Date.now()}`);
@@ -335,12 +331,12 @@ defTest('V8: viewer DONE → admin 上传 result_data 替换 → 仍 DONE + sql_
     if (after.done_at !== originalDoneAt) {
         throw new Error(`done_at expected unchanged (M-1 保留首次完成时间), original=${originalDoneAt} after=${after.done_at}`);
     }
-});
+} },
 
 // ============================================================
 // V8b: v1.72.10 codex 50 H-2 修订 — DONE→DONE 无附件 → 400 MISSING_ATTACHMENT_FOR_DONE_FIX
 // ============================================================
-defTest('V8b: viewer DONE → admin 调 admin-submit-on-behalf 不传附件 → 400 MISSING_ATTACHMENT_FOR_DONE_FIX', async () => {
+{ name: 'V8b: viewer DONE → admin 调 admin-submit-on-behalf 不传附件 → 400 MISSING_ATTACHMENT_FOR_DONE_FIX', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const viewerToken = await fx.signAs(fx.VIEWER_ID);
     const cr = await createAdminDirect(adminToken, fx.VIEWER_ID, `OA_VW_V8b_${Date.now()}`);
@@ -362,14 +358,14 @@ defTest('V8b: viewer DONE → admin 调 admin-submit-on-behalf 不传附件 → 
     if (res.body && res.body.code !== 'MISSING_ATTACHMENT_FOR_DONE_FIX') {
         throw new Error(`expected code MISSING_ATTACHMENT_FOR_DONE_FIX, got ${res.body && res.body.code}`);
     }
-});
+} },
 
 // ============================================================
 // V8c: v1.72.10 codex 50 H-1 修订 — DONE smoke passed 单调 admin-submit-on-behalf → 保留 passed 不降级
 // 模拟 D1→D2 链路 developer submit + smoke passed 后的 DONE 单，admin 走 DONE→DONE 兑底
 // 关键断言：sql_validation_status='passed' 不被改写成 'admin_closed'
 // ============================================================
-defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_validation_status 保留 passed 不降级', async () => {
+{ name: 'V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_validation_status 保留 passed 不降级', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
@@ -396,7 +392,7 @@ defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_val
     if (after.done_at !== '2026-05-01 10:00:00') {
         throw new Error(`done_at expected unchanged '2026-05-01 10:00:00' (M-1 首次完成时间保留), got ${after.done_at}`);
     }
-});
+} },
 
 // ============================================================
 // V9: v1.72.10 codex 50 L-1 修订 — admin-submit-on-behalf 状态准入边界全覆盖（参数化）
@@ -407,7 +403,7 @@ defTest('V8c: DONE smoke passed 单 admin 调 admin-submit-on-behalf → sql_val
 //   ARCHIVED（V9d·ARCHIVED_PROTECTED）仍 409，是本端点放开后**唯一**还在拒的既有用例（软作废 archived_at
 //   由 verify-collab-admin-close-exporting.js B 组覆盖）；archived_final 历史上就没有独立用例，本次不补。
 // ============================================================
-defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/EXPORTING 200(逐状态 flow)、ARCHIVED 409', async () => {
+{ name: 'V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/EXPORTING 200(逐状态 flow)、ARCHIVED 409', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
 
     // V9a【2026-09-07 由 409 翻转为 200】：PENDING_ASSIGN → DONE（还没指派开发就记账闭环）
@@ -515,12 +511,17 @@ defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/E
             throw new Error(`V9d expected ARCHIVED_PROTECTED (终态保护优先), got ${res.body && res.body.code}`);
         }
     }
-});
+} },
+];
 
 // ============================================================
 // 主流程
 // ============================================================
 (async () => {
+    // ready() 是入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
+    DB_PATH = fx.DB_PATH;
     console.log('=== v1.72.5 viewer 角色 admin 直派收单 e2e 烟雾测试 ===\n');
     let passed = 0;
     let failed = 0;
@@ -538,10 +539,22 @@ defTest('V9: admin-submit-on-behalf 状态边界 —— PENDING_ASSIGN/PENDING/E
     }
 
     console.log(`\n清理 ${createdFixtureIds.length} 条测试 fixture...`);
-    for (const id of createdFixtureIds) {
-        try { await fx.cleanup(id); } catch (e) { /* ignore */ }
+    // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+    for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of createdFixtureIds.slice()) {
+            try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+        }
     }
+    if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
+
+    let teardownFailed = false;
+    try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); teardownFailed = true; }
 
     console.log(`\n=== ${passed} PASS / ${failed} FAIL ===`);
-    process.exit(failed === 0 ? 0 : 1);
-})();
+    fx.finish(failed === 0 && !teardownFailed ? 0 : 1);   // teardown 已落定；只设退出码（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    console.error('viewer-exporter e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

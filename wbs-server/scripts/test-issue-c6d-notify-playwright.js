@@ -1,7 +1,12 @@
 /**
  * v1.74.0 C7/c6d — 通知开发按钮「点击 → UI 反馈」端到端 Playwright 实测
  *
- * 用法：本地 server(3000) 已启动后 node scripts/test-issue-c6d-notify-playwright.js
+ * 用法：node scripts/test-issue-c6d-notify-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   本文件在 SOURCE_READERS 名单里（D2b⁗ / D6 读 server.js 源码做静态断言，只读、不进 sink）：迁移后不 require child_process、无 sink 调用。
+ *   造数：经 API 建 3 条需求单（c6d通知成功测试 / c6d通知失败测试 / c6d业务方完成通知-无手机号），收尾按状态码清理（200 / 404 算清掉，每个编号单独 try，共 2 轮），遗留计失败。
+ *   收口批：三个夹具标题都带运行标记 RUN_TAG（[c6d-<pid>-<时间戳>]），清理先按标记补查（建单后客户端没拿到编号也能清到）；建单助手校验 HTTP 200 与正整数编号，不满足即抛错退 1。
+ *   固定用户 id：1 admin / 19（有手机号）/ 8（无手机号，D2 / D5 依赖，快照库里须保持无手机号，首跑核对）。
  *
  * 背景（盘点 2026-06-01）：c6c 已验通知按钮**存在性**（C7/C8），但未验"点击后 UI 反馈"。
  *   唯一缺的端到端环 = 点通知开发按钮 → 真发/降级 → toast + 详情页通知徽章状态变化。本脚本补这一环。
@@ -22,23 +27,44 @@
 const path = require('path');
 const fs = require('fs');   // 〔P6-A〕D2b⁗ 源码级断言要读 server.js
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let RUN_TAG = null;    // [#106 S4d-2 收口批] ready() 之后赋值：[c6d-<pid>-<时间戳>]，每个夹具标题都带它；建单后客户端没拿到编号时，清理按标记补查
 const ADMIN_ID = 1, DEV_WITH_PHONE = 19, DEV_NO_PHONE = 8;
 
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(uid) {
-    const u = await new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.get('SELECT id,username,display_name,role FROM users WHERE id=?', [uid], (e, r) => { db.close(); e ? rej(e) : res(r); }); });
-    if (!u) throw new Error(`user ${uid} not found`);
-    return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(uid);
 }
-function dbGet(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, p, (e, r) => { db.close(); e ? rej(e) : res(r); }); }); }
-async function apiCreate(token, body) { const r = await fetch(`${BASE_URL}/api/issues`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return (await r.json()).id; }
-async function apiDelete(token, id) { await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); }
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGet(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.get(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+async function dbAll(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.all(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+// [#106 S4d-2 收口批] 建单助手校验状态码与正整数编号，不满足即抛错（原来 undefined 编号被清理过滤器静默忽略）；服务端已落库而这里没拿到编号的，由 cleanupCreated 按 RUN_TAG 补查
+async function apiCreate(token, body) {
+    const r = await fetch(`${BASE_URL}/api/issues`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let j = null; try { j = await r.json(); } catch (_) { j = null; }
+    const id = j && j.id;
+    if (r.status !== 200 || !Number.isInteger(id) || id <= 0) throw new Error(`建单失败：HTTP ${r.status}，编号=${JSON.stringify(id)}，响应=${JSON.stringify(j).slice(0, 160)}`);
+    return id;
+}
+// [#106 S4d-2] 返回状态码（原来丢弃，删除失败看不见）
+async function apiDelete(token, id) { const r = await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); return r.status; }
 async function apiAssign(token, id, devId) { await fetch(`${BASE_URL}/api/issues/${id}/assign`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ assigned_to: devId }) }); }
 async function apiStatus(token, id, status, reason) { const b = { status }; if (reason) b.last_transition_reason = reason; await fetch(`${BASE_URL}/api/issues/${id}/status`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(b) }); }
 
@@ -79,24 +105,55 @@ async function gotoAs(browser, token) {
 }
 
 const created = [];
+
+/**
+ * [#106 S4d-2] 清理造的需求单：每个编号单独 try / catch，一个失败不中断后续；看状态码（200 / 404 算清掉），只把清理成功的编号移出追踪；
+ * 失败的编号再试一轮（共 2 轮，间隔 200ms）；遗留逐个计失败。原来 `for (...) await apiDelete(...)` 不看状态码，一个抛错还会中断后面的清理
+ */
+async function cleanupCreated(adminToken) {
+    try {   // [#106 S4d-2 收口批] 先按运行标记补查：建单请求服务端已落库、客户端读响应 / 解析失败而没登记编号的单
+        const tagged = RUN_TAG ? await dbAll(`SELECT id FROM issues WHERE title LIKE '%' || ? || '%'`, [RUN_TAG]) : [];
+        for (const r of tagged) if (!created.includes(r.id)) created.push(r.id);
+    } catch (e) { must(false, `清理前按运行标记补查失败：${e && e.message}`); }
+    const lastErr = new Map();
+    for (let round = 0; round < 2; round++) {
+        const pending = created.filter((id) => Number.isInteger(id));
+        if (pending.length === 0) break;
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of pending) {
+            try {
+                const st = await apiDelete(adminToken, id);
+                if (st === 200 || st === 404) { created.splice(created.indexOf(id), 1); lastErr.delete(id); }
+                else lastErr.set(id, `HTTP ${st}`);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    for (const id of created.filter((x) => Number.isInteger(x))) must(false, `清理测试需求单 #${id} 失败（已重试 1 轮）：${lastErr.get(id)}`);
+}
+
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = `[c6d-${process.pid}-${Date.now()}]`;
     const adminToken = await signAs(ADMIN_ID);
     console.log('\n══════ v1.74.0 c6d 通知按钮「点击→UI 反馈」实测 ══════');
-
-    // 造数：① 指派有 phone 开发 + 处理中（D1 mock 成功用）② 指派无 phone 开发 + 处理中（D2 no_phone 真路径用）
-    const idOk = await apiCreate(adminToken, { title: 'c6d通知成功测试', type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
-    created.push(idOk);
-    await apiAssign(adminToken, idOk, DEV_WITH_PHONE);
-    await apiStatus(adminToken, idOk, '处理中');
-
-    const idNoPhone = await apiCreate(adminToken, { title: 'c6d通知失败测试', type: '数据质量', requester_dept: '市场营销部', requester_name: '李', description: 'x' });
-    created.push(idNoPhone);
-    await apiAssign(adminToken, idNoPhone, DEV_NO_PHONE);
-    await apiStatus(adminToken, idNoPhone, '处理中');
 
     const browser = await chromium.launch();
     let allErrs = [];
     try {
+        // 造数：① 指派有 phone 开发 + 处理中（D1 mock 成功用）② 指派无 phone 开发 + 处理中（D2 no_phone 真路径用）
+        // （[#106 S4d-2] 挪进 try：中途某次建单抛错时，已建的单也由 finally 清理）
+        const idOk = await apiCreate(adminToken, { title: 'c6d通知成功测试' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
+        created.push(idOk);
+        await apiAssign(adminToken, idOk, DEV_WITH_PHONE);
+        await apiStatus(adminToken, idOk, '处理中');
+
+        const idNoPhone = await apiCreate(adminToken, { title: 'c6d通知失败测试' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '李', description: 'x' });
+        created.push(idNoPhone);
+        await apiAssign(adminToken, idNoPhone, DEV_NO_PHONE);
+        await apiStatus(adminToken, idNoPhone, '处理中');
+
         // ===== D1 成功态：page.route mock notify-developer 成功 → toast「通知已发送」=====
         const p1 = await gotoAs(browser, adminToken);
         // 拦截 notify-developer：返 mock 成功（不真打 endpoint、不真发钉钉）
@@ -243,7 +300,7 @@ async function main() {
         //   业务方手机号为空时，helper 首行就 return（在读钉钉配置/取 token **之前**），一条钉钉都不会发。
         {
             const idReqNoPhone = await apiCreate(adminToken, {
-                title: 'c6d业务方完成通知-无手机号', type: '数据质量', requester_dept: '市场营销部',
+                title: 'c6d业务方完成通知-无手机号' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部',
                 requester_name: '无手机号业务方', description: 'P6-A 家族扩收用例',
             });
             created.push(idReqNoPhone);
@@ -309,16 +366,21 @@ async function main() {
             `★D4' 预期失败端点的资源报错**等值** ${EXPECTED_NOISE} 条（D2 notify-developer 502 + D5 notify-requester-done 400）` +
             `——实得 ${resourceNoise.length} 条；多了＝冒出计划外失败请求，少了＝该失败的路径没被真正触发`);
     } finally {
-        await browser.close();
-        for (const id of created) await apiDelete(adminToken, id);
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        await cleanupCreated(adminToken);
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL / ${skips.length} SKIP`);
     if (skips.length) {
         console.log('  挂起项（不计入 PASS/FAIL·各自指向已登记待裁定编号）：');
         skips.forEach((s) => console.log(`    · [${s.code}] ${s.label}`));
     }
     console.log(fail === 0 ? '  🎉 c6d 通知按钮点击→UI 反馈实测全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('c6d 实测异常:', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('c6d 实测异常:', e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

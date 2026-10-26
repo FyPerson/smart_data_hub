@@ -15,10 +15,10 @@
  *           在途单不进聚合样本（仅 counts.inflight）
  *   Part 5  DB 集成（sqlite3 :memory: 合成数据）—— 四 loader SQL + type + 响应动作时刻查询 +
  *           ⭐ 每张完结单 raw stage1+stage2+stage3 === totalHours（容差 1e-6）
- *   Part 6  真实 db 双验（../task_pool.db READONLY，存在才跑）—— 全量记录逐单可加性不变量 +
+ *   Part 6  真实 db 双验（READONLY，需 `--real-db <路径>` 显式开启，默认跳过）—— 全量记录逐单可加性不变量 +
  *           每模块/每 byType 组聚合可加性（round1 后容差 0.21 = 4 次四舍五入误差上界）
  *
- * 用法：node scripts/verify-statistics-efficiency.js
+ * 用法：node scripts/verify-statistics-efficiency.js [--real-db <业务库路径>]
  */
 'use strict';
 
@@ -436,13 +436,37 @@ async function runDbIntegration() {
 }
 
 // ============================================================
-// Part 6：真实 db 双验（存在才跑；只读）
+// Part 6：真实 db 双验（[S4e-4] 需 `--real-db <路径>` 显式开启，默认跳过；只读）
+//   不带开关 = SKIP（不计通过、不计失败）；带开关 = 路径必须是存在的文件（不存在即判失败），一律 OPEN_READONLY。
 // ============================================================
+// 开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown，判失败。
+function parseRealDbSwitch() {
+    const argv = process.argv.slice(2);
+    let sw = { given: false, value: '', unknown: null };
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--real-db' || a.startsWith('--real-db=')) {
+            const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+            sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+        } else if (a.startsWith('--real')) {
+            sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+        }
+    }
+    return sw;
+}
+let part6Skipped = false;
 async function runRealDbValidation() {
-    const REAL_DB = path.join(__dirname, '..', 'task_pool.db');
-    console.log('=== Part 6：真实 db 双验（task_pool.db READONLY，逐单+聚合可加性不变量）===\n');
-    if (!fs.existsSync(REAL_DB)) {
-        console.log('  [SKIP] task_pool.db 不存在（非本机环境），跳过真实 db 双验\n');
+    console.log('=== Part 6：真实 db 双验（READONLY，逐单+聚合可加性不变量）===\n');
+    const sw = parseRealDbSwitch();
+    if (!sw.given) {
+        part6Skipped = true;
+        console.log('  [SKIP] Part 6 真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启（不计通过、不计失败；请勿据此断言真实库已验收）\n');
+        return;
+    }
+    const REAL_DB = path.resolve(process.cwd(), sw.value);
+    if (sw.unknown !== null || sw.value === '' || !fs.existsSync(REAL_DB) || !fs.statSync(REAL_DB).isFile()) {
+        check(false, 'Part 6 --real-db 指定的路径存在且是文件', sw.unknown !== null ? `无法识别的开关 ${sw.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）` : sw.value === '' ? '缺少路径参数（用法：--real-db <业务库路径>）' : `路径不存在或不是文件：${REAL_DB}（显式开启时不静默跳过）`);
+        console.log('');
         return;
     }
     const db = new sqlite3.Database(REAL_DB, sqlite3.OPEN_READONLY);
@@ -469,6 +493,7 @@ async function runRealDbValidation() {
 runDbIntegration()
     .then(() => { console.log(''); return runRealDbValidation(); })
     .then(() => {
+        if (part6Skipped) console.log('  ⚠️ 注意：Part 6 真实库只读探针本次未执行（默认跳过，需 `--real-db <路径>` 显式开启），以下结果不含这部分覆盖，请勿据此断言真实库已验收。');
         console.log(`=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
         if (fail > 0) {
             console.log('\n失败明细：');

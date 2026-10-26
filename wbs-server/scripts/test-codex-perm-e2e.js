@@ -2,7 +2,8 @@
  * codex 十六审 #1 #2 权限收敛回归测试（2026-05-19）
  *
  * 用法：node scripts/test-codex-perm-e2e.js
- * 前置：本地 server 已启动 + 数据库里有前置数据（先跑 test-collab-two-level-e2e.js 留单据）
+ * 前置：[#106 S3b] 经 test-env 自起临时隔离实例（来源 = 本检出本地库快照，里面要有协作单作前置数据；没有则 SKIP 退出 0——这是本脚本原有口径）。
+ *   不再打 3000、不再读真实库 / 真实 .env。
  *
  * 覆盖：
  *   P1 admin 查任意 detail → 200
@@ -18,32 +19,15 @@
  */
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
-
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+const testEnv = require('./lib/test-env');
 
 const ADMIN_ID = 1;
 const CONTACT_ID = 3;     // 示例用户A user
 const DEV1_ID = 19;       // 示例用户B user
 
+// 被测服务地址 / 实例库 / 实例密钥都来自 test-env（ready() 完成之前不可用）；签 token 用实例库里的 users 行 + 实例密钥
 async function loginAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    return testEnv.signToken(userId);
 }
 
 async function apiCall(method, path, token, body = null) {
@@ -52,10 +36,28 @@ async function apiCall(method, path, token, body = null) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
     }
-    const r = await fetch(`${BASE}${path}`, opts);
+    const r = await fetch(`${testEnv.env().baseUrl}${path}`, opts);
     let j = null;
     try { j = await r.json(); } catch (_) { }
     return { status: r.status, body: j };
+}
+
+/**
+ * 取到的协作单列表的判定（纯函数；verify-test-env 的静态守卫把它从源码里抽出来做表驱动单测，不实跑本脚本）：
+ *   200 且确为数组且长度 0 → 'SKIP'（原有口径：库里没有协作单作前置数据）；200 且为非空数组 → 'OK'；
+ *   其余一律 'FAIL'——非 200、响应体不是数组（null / 对象 / 字符串）、没有响应，都不能当成 SKIP 退出 0（否则服务挂了 / 鉴权坏了会显示成「跳过」）。
+ */
+function classifyCollabList(res) {
+    if (!res || res.status !== 200 || !Array.isArray(res.body)) return 'FAIL';
+    return res.body.length === 0 ? 'SKIP' : 'OK';
+}
+
+// 收尾：先收掉自起的实例（await teardown），再用 testEnv.finish(code) 设退出码并让进程自然结束；teardown 失败计失败。
+//   finish 只设退出码、不终止执行，调用点之后必须是 return 或函数结束。静态守卫的 FINISH_NOT_LAST 不覆盖这里的本地包装函数 finish，调用点靠人工核对：
+//   入口函数里 gate 为 FAIL、gate 为 SKIP 两处提前收尾之后都 return，末尾汇总处一处是入口函数的最后一条语句。
+async function finish(code) {
+    try { await testEnv.teardown(); } catch (e) { console.error('teardown 失败：' + e.message); code = code || 1; }
+    testEnv.finish(code);   // teardown 已落定（成功或失败都已处理）；只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
 }
 
 (async () => {
@@ -66,15 +68,24 @@ async function apiCall(method, path, token, body = null) {
         console.log(`${tag} ${name} — ${detail}`);
     };
 
+    await testEnv.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     const adminTok = await loginAs(ADMIN_ID);
     const contactTok = await loginAs(CONTACT_ID);
     const dev1Tok = await loginAs(DEV1_ID);
 
     // 取 admin 拉全部列表数据
     const allRes = await apiCall('GET', '/api/collab/requests?my_role=admin', adminTok);
-    if (allRes.status !== 200 || !allRes.body || allRes.body.length === 0) {
+    // [#106 S3b 修复批 2a] 判定见 classifyCollabList：非 200 / 响应结构异常（不是数组）都是失败（退出码非零），只有「200 且确为数组且长度 0」才 SKIP 退出 0
+    const gate = classifyCollabList(allRes);
+    if (gate === 'FAIL') {
+        console.error(`FAIL: 取协作单列表失败或响应结构异常（status=${allRes.status} body=${JSON.stringify(allRes.body === undefined ? null : allRes.body).slice(0, 160)}）`);
+        await finish(1);
+        return;
+    }
+    if (gate === 'SKIP') {
         console.log('SKIP: 当前无协作单，请先跑 test-collab-two-level-e2e.js 准备数据');
-        process.exit(0);
+        await finish(0);
+        return;
     }
     console.log(`准备数据：${allRes.body.length} 条单`);
 
@@ -177,8 +188,9 @@ async function apiCall(method, path, token, body = null) {
     }
 
     console.log(`\n=== 汇总 ${pass} pass / ${fail} fail ===`);
-    process.exit(fail > 0 ? 1 : 0);
-})().catch(e => {
+    await finish(fail > 0 ? 1 : 0);
+})().catch(async e => {
     console.error('ERROR:', e.message);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(2);
 });

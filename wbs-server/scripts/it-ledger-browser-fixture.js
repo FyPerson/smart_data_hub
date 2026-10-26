@@ -129,7 +129,10 @@ async function createFixture(options = {}) {
   // Only unrelated platform startup endpoints are fixtures; every it-assets request is real.
   app.get(['/api/task-tips','/api/pool','/api/transfers/pending','/api/models','/api/admin/todos'],(req,res) => res.json([]));
   app.get('/api/my-workspace',authenticateToken,(req,res) => res.json({stats:{in_progress:0,pending_confirm:0,completed_week:0,completed_month:0,completed_total:0,published_count:0},claimed:[],my_pending_review:[],transfers:[],pending_confirm:[],published:[],my_completed:[]}));
-  app.use(express.static(path.join(__dirname,'../public')));
+  // #106 W4 / S6b：与 server.js 同参数（同一份注入中间件挂在 express.static(public) 之前），夹具里的页面与生产同形。
+  const publicDir = path.join(__dirname,'../public');
+  app.use(require('../utils/html-asset-fingerprint').createHtmlAssetInjector({publicDir,log:{error(){}},startupStamp:String(Date.now())}));
+  app.use(express.static(publicDir));
   const server = await listenOnSafePort(app);
   const base = 'http://127.0.0.1:'+server.address().port;
   async function api(method,endpoint,body,uid=1) {

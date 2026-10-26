@@ -4,7 +4,8 @@
  * 对齐 test-sys-paste-playwright.js / test-quick-log-playwright.js 套件范式：
  *   JWT 注入 + login.html 中继跳转（鉴权页直接 goto 会被 checkAuth 销毁 context）。
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-corr-paste-playwright.js
+ * 用法：node scripts/test-corr-paste-playwright.js
+ * [#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 的本地 server。
  *
  * 覆盖（S4 交付物 §3 最低要求 5 项 + 1 项数组类路径覆盖）：
  *   T1 完成弹窗(single 型)：唯一可见目标 formCompleteFiles/completeFilesPicked → 纯图粘贴自动收入
@@ -22,8 +23,8 @@ const fs = require('fs');
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+let BASE_URL = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
+let SCREENSHOT_DIR = null;   // 失败截图目录：顶层只放纯声明（守卫 R5 / R6），在入口 ready() 之后赋值（os.tmpdir() 子目录）
 
 let pass = 0, fail = 0;
 function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } else { console.log('  ❌ ' + msg); fail++; } return cond; }
@@ -65,6 +66,9 @@ async function dispatchPaste(page, { withImage = true, withText = false, textVal
 }
 
 async function main() {
+    await fx.ready();   // 先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
     const adminTok = await fx.signAs(fx.ADMIN_ID);
     console.log('\n══════ S4 前端 Playwright 冒烟（数据修正 贴图共享层接入） ══════');
 
@@ -330,9 +334,15 @@ async function main() {
         await browser.close();
     }
 
+    try { await fx.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 数据修正贴图接入 Playwright 冒烟存在失败项'); process.exit(1); }
-    console.log('  🎉 数据修正贴图接入 Playwright 冒烟全部通过');
+    if (fail > 0) console.log('  ❌ 数据修正贴图接入 Playwright 冒烟存在失败项');
+    else console.log('  🎉 数据修正贴图接入 Playwright 冒烟全部通过');
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('❌ 脚本执行异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('❌ 脚本执行异常:', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

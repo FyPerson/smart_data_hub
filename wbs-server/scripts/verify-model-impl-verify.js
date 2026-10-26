@@ -50,7 +50,7 @@ const MUTATIONS = [
     to: `const r = await req.query(SQL_READ_BY_SCHEMA.split('@s').join("N'" + obj.schema_name + "'").split('@n').join("N'" + obj.obj_name + "'"));` },
   { id: 'purge-no-recheck', label: 'V-9 purgeLinksOfModel 去掉目标状态复核（0a）', expectPrefix: '0a 目标仍是独立模型', file: OBJ,
     from: "if (!target || target.companion_of !== expectedParentId || target.is_deleted === 1) {", to: 'if (false) {' },
-  { id: 'server-no-expected-parent', label: 'V-10 server.js 转伴生一处不传 expectedParentId（0a）', expectPrefix: '0a server.js：每处 account: true', file: ['server.js'],
+  { id: 'server-no-expected-parent', label: 'V-10 服务端入口转伴生一处不传 expectedParentId（0a）', expectPrefix: '0a server.js：每处 account: true', file: ['server.js'],
     from: 'purgeLinksOfModel(existing.id, { account: true, expectedParentId: parentId, user: { id: userId, display_name: userName } }).catch((pErr) => logger.error(`伴生转换：清理 id=${existing.id} 的实现对象关系失败: ${pErr && pErr.message}`));\n                        updateCompanionModelId',
     to: 'purgeLinksOfModel(existing.id, { account: true, user: { id: userId, display_name: userName } }).catch((pErr) => logger.error(`伴生转换：清理 id=${existing.id} 的实现对象关系失败: ${pErr && pErr.message}`));\n                        updateCompanionModelId' },
   { id: 'hooks-unchecked', label: 'V-11 工厂不校验观察钩子类型（0b）', expectPrefix: '0b 钩子', file: OBJ, from: "if (v !== undefined && typeof v !== 'function') throw new Error(`impl-objects：钩子", to: "if (false) throw new Error(`impl-objects：钩子" },
@@ -71,7 +71,7 @@ const MUTATIONS = [
     { file: VER, from: "            if (!writable) return { outcome: 'stopped' };\n            const w = await write(sql, params);", to: "            const w = await write(sql, params);" },
     { file: VER, from: '        if (!writable) return STOPPED_MARK;\n', to: '' }] },
   { id: 'rf-rejected', label: 'V-28 PROC 不再接受 RF 类型', expectPrefix: 'L-c', file: VER, from: "PROC: ['P', 'RF']", to: "PROC: ['P']" },
-  { id: 'server-no-verify-enabled', label: 'V-29 server.js 挂载 impl-objects 时删掉 verifyEnabled: true', expectPrefix: 'L-e server.js 挂载', file: ['server.js'],
+  { id: 'server-no-verify-enabled', label: 'V-29 服务端入口挂载 impl-objects 时删掉 verifyEnabled: true', expectPrefix: 'L-e 服务端入口挂载', file: ['server.js'],
     from: '  verifyEnabled: true,   // C2b-2：三端核验显式开关（仿 expirySweepEnabled，只有严格等于 true 才启用）；本地副本想关闭就改成 false 或删掉本行\n', to: '' },
   { id: 'merge-inflight', label: 'V-30 在途项也被合并（合并表项在任务结束后才移出，而不是开始时）', expectPrefix: 'W1 同一对象并发触发', edits: [
     { file: VER, from: 'waiting.delete(objectId);\n            if (!accepting) return', to: 'if (!accepting) return' },
@@ -209,14 +209,13 @@ function dbPromisified(file) {
   const run = (sql, p = []) => new Promise((res, rej) => withVia(() => raw.run(sql, p, function (e) { e ? rej(e) : res({ changes: this.changes, lastID: this.lastID }); })));
   const get = (sql, p = []) => new Promise((res, rej) => withVia(() => raw.get(sql, p, (e, r) => (e ? rej(e) : res(r)))));
   const all = (sql, p = []) => new Promise((res, rej) => withVia(() => raw.all(sql, p, (e, r) => (e ? rej(e) : res(r)))));
-  const exec = (sql) => new Promise((res, rej) => withVia(() => raw.exec(sql, (e) => (e ? rej(e) : res()))));
   const close = () => new Promise((res) => raw.close(() => res()));
   // 交给被测模块用的「透传 Proxy」（不记录，只置放行标记）：被测模块的数据库调用一律经它或经记录器 Proxy，不再直接拿原始连接
   const mod = new Proxy(raw, { get(t, k) {
     if (k === 'run' || k === 'get' || k === 'all' || k === 'each' || k === 'exec' || k === 'prepare') return function (...a) { return withVia(() => { const r = t[k](...a); return r === t ? mod : r; }); };
     const v = t[k]; return typeof v === 'function' ? v.bind(t) : v;
   } });
-  return { raw, mod, run, get, all, exec, close };
+  return { raw, mod, run, get, all, close };
 }
 const readFix = (name) => fs.readFileSync(path.join(FIX_DIR, name), 'utf8');
 /** 数仓文件里「CREATE 所在的那一个批次」：按独占一行的 GO 切批，取匹配 CREATE 的批次（截取逻辑写在测试里） */
@@ -746,13 +745,13 @@ async function main() {
   const dbFile = path.join(runDir, 'fixture.db');
   const db = dbPromisified(dbFile);
   const cutSql = (startMark) => { const a = srvText.indexOf(startMark); const b = srvText.indexOf('`', a); return srvText.slice(a, b); };
-  await db.exec(cutSql('CREATE TABLE IF NOT EXISTS model_impl_objects ('));
-  await db.exec(cutSql('CREATE UNIQUE INDEX IF NOT EXISTS idx_impl_obj_identity'));
-  await db.exec(cutSql('CREATE TABLE IF NOT EXISTS model_impl_links ('));
-  await db.exec(`CREATE TABLE data_models (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, layer TEXT, is_deleted INTEGER DEFAULT 0, companion_of INTEGER, config_rev INTEGER NOT NULL DEFAULT 1, tech_owner TEXT);
-    CREATE TABLE model_change_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, model_id INTEGER, model_name TEXT, action TEXT, change_type TEXT, before_value TEXT, after_value TEXT, change_summary TEXT, operator_id INTEGER, operator_name TEXT);
-    CREATE TABLE db_connections (id INTEGER PRIMARY KEY, type TEXT);`);
-  if (MUTATION && MUTATION.fixture === 'trigger') await db.exec("CREATE TABLE zz_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, x INTEGER); CREATE TRIGGER zz_trg AFTER UPDATE ON model_impl_objects BEGIN INSERT INTO zz_audit (x) VALUES (1); END;");   // 变异夹具（G1c）：UPDATE model_impl_objects 时触发器往另一张表写一行
+  await db.run(cutSql('CREATE TABLE IF NOT EXISTS model_impl_objects ('));
+  await db.run(cutSql('CREATE UNIQUE INDEX IF NOT EXISTS idx_impl_obj_identity'));
+  await db.run(cutSql('CREATE TABLE IF NOT EXISTS model_impl_links ('));
+  await db.run('CREATE TABLE data_models (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, layer TEXT, is_deleted INTEGER DEFAULT 0, companion_of INTEGER, config_rev INTEGER NOT NULL DEFAULT 1, tech_owner TEXT)');   // S4e-1：run 只执行第一条语句，原 exec 的多语句串在此逐条拆开
+  await db.run('CREATE TABLE model_change_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, model_id INTEGER, model_name TEXT, action TEXT, change_type TEXT, before_value TEXT, after_value TEXT, change_summary TEXT, operator_id INTEGER, operator_name TEXT)');
+  await db.run('CREATE TABLE db_connections (id INTEGER PRIMARY KEY, type TEXT)');
+  if (MUTATION && MUTATION.fixture === 'trigger') { await db.run('CREATE TABLE zz_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, x INTEGER)'); await db.run('CREATE TRIGGER zz_trg AFTER UPDATE ON model_impl_objects BEGIN INSERT INTO zz_audit (x) VALUES (1); END'); }   // 变异夹具（G1c）：UPDATE model_impl_objects 时触发器往另一张表写一行
   const mkModel = async (o) => (await db.run('INSERT INTO data_models (table_name, layer, is_deleted, companion_of, tech_owner) VALUES (?,?,?,?,?)', [(o && o.name) || ('m' + Math.random().toString(36).slice(2, 8)), 'ODS', (o && o.deleted) ? 1 : 0, (o && o.companion_of) || null, 'x'])).lastID;
   const mkObj = async (o) => (await db.run(
     `INSERT INTO model_impl_objects (obj_type, db_connection_id, schema_name, obj_name, reg_source, reg_hash, hash_algo, doc_path, doc_hash, doc_reported_at, is_deleted, created_at, updated_at, created_by, updated_by)
@@ -946,7 +945,7 @@ async function main() {
     const expSeq = (pairs) => pairs.map(([sql, params]) => ({ sql: normWs(sql), params }));
     // 严格公民时间解析（独立实现，回读校验：2026-02-30、月份 13、小时 24、分钟 60 一律 NaN）
     const strictCivilMs = (v) => {
-      const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(typeof v === 'string' ? v : '');
+      const m = (typeof v === 'string' ? v : '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);   // 无 g 标志：与原 re.exec(str) 同为取首个匹配（S4e-1：文件 require 了 child_process，成员 .exec 一律算 sink）
       if (!m) return NaN;
       const [Y, Mo, D, h, mi, s] = m.slice(1).map(Number);
       const d = new Date(Date.UTC(Y, Mo - 1, D, h, mi, s));
@@ -1006,9 +1005,11 @@ async function main() {
     const diffText = (d) => JSON.stringify({ win: d.win, countsSame: d.countsSame, triggersSame: d.triggersSame, diff: [...d] });
     // K1 钩子自检（正反两面）：① 直接对夹具库的原始连接 db.raw 写（不经 Proxy、不置放行标记）会被原型钩子记为 foreign——这正是「拿到原始连接后的任何直接调用」的判红依据；
     //   ② 经记录器 Proxy 写不会被记为 foreign，且 Proxy 的方法返回值（原始连接）被包回 Proxy 自身（K1b）
+    //   [#106 S4e-1] ① 原来用 db.raw.exec 证明钩子的 exec 入口，现改用 db.raw.run（证明 run 入口 + isWriteSql）：本文件登记 SELF_ISOLATED 后成员 .exec 一律判红，
+    //   不用计算属性等写法绕开守卫。已知收窄：exec 入口不再有正向自检（钩子名单与安装时机未变；被测模块对句柄调 exec 已被 H1 静态规则禁止）。
     {
       const n0 = foreignWrites.length;
-      await new Promise((res, rej) => db.raw.exec('CREATE TABLE zz_hook (a)', (e) => (e ? rej(e) : res())));
+      await new Promise((res, rej) => db.raw.run('CREATE TABLE zz_hook (a)', (e) => (e ? rej(e) : res())));
       const leaked = foreignWrites.slice(n0);
       foreignWrites.splice(n0);   // 自检产生的 foreign 记录清掉，不影响后面的 G1b 断言
       const tmp = recordingDb(db.raw); tmp.reset();
@@ -1584,7 +1585,7 @@ async function main() {
       const decl = ast.body.filter((n) => n.type === 'VariableDeclaration').flatMap((n) => n.declarations).find((d) => d.id && d.id.name === 'implObjectsModule');
       const arg0 = decl && decl.init && decl.init.type === 'CallExpression' ? decl.init.arguments[0] : null;
       const hasProp = !!(arg0 && arg0.type === 'ObjectExpression' && arg0.properties.some((p) => p.key && p.key.name === 'verifyEnabled' && p.value && p.value.value === true));
-      check('L-e server.js 挂载 impl-objects 时传了 verifyEnabled: true（静态解析实参对象字面量，不是注释里的字样）', hasProp);
+      check('L-e 服务端入口挂载 impl-objects 时传了 verifyEnabled: true（静态解析实参对象字面量，不是注释里的字样）', hasProp);
     }
 
     // ── 每日任务经工厂（07:30、候选范围、stop）──

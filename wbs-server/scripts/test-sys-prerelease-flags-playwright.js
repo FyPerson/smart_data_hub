@@ -15,21 +15,17 @@
  *   T5 第 14 层橙色在列表行**与详情抽屉**两处渲染面都真生效（computed style 实测）
  *   T6 flag 的 computed 颜色确为 D2/D3 拍板值（已移出 #dc2626 / 未排期 #64748b）
  *
- * 前置：server 已在 3000 起好（本脚本有意不 spawn，端口纪律同 test-badge-computed-playwright.js）。
+ * 前置：无服务前置（[#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例）。
+ *   原「server 已在 3000 起好、有意不 spawn」的 ready 之前探针（probeServer）、`.env` 的 JWT_SECRET 检查、BADGE_DB_PATH 环境变量均已删除：
+ *   被测服务、库路径、令牌密钥全部来自 test-env（隔离实例本身就是本检出的本地目标，库是快照副本，不会碰业务库）。
  * 跑法：node scripts/test-sys-prerelease-flags-playwright.js
  */
-const path = require('path');
-const http = require('http');
 const sqlite3 = require('sqlite3');
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT = process.env.PORT || '3000';
-const BASE_URL = `http://localhost:${PORT}`;
-const JWT_SECRET = process.env.JWT_SECRET;
-const DB_PATH = process.env.BADGE_DB_PATH || path.join(__dirname, '..', 'task_pool.db');
+let BASE_URL = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
 // 夹具 ID **交给 SQLite 自增分配**（取 this.lastID 记账），只删本次真实创建的那几个 id。
 //   ① 原写法是固定 ID 段 9201-9204 + 无条件 DELETE——只要 DB_PATH 指到含真实数据的库、且真实单 id
@@ -38,7 +34,9 @@ const DB_PATH = process.env.BADGE_DB_PATH || path.join(__dirname, '..', 'task_po
 //      后者插入失败、或清理时删掉对方的夹具（codex 349 号 MED）。自增分配彻底消除这个面。
 //   与既有同族 test-sys-commit-cols-playwright.js 的清理范式一致（createdIds + RUN_TAG 标题标记
 //   核对残留），不是新发明。
-const RUN_TAG = `PRF-${process.pid}`;          // 标题标记：清理后按它核对残留必须为 0
+// [#106 S4d-3 修复批] ready() 之后赋值为 `PRF-<pid>-<Date.now()>`：sys_releases.release_no 有 UNIQUE 约束（routes/sys-iteration/index.js:662），
+//   只用 pid 时，同 pid 的上次残留批次行 `R-PRF-<pid>` 会让本次建批次撞号。残留回查仍是整段全等（title 的「【RUN_TAG】」整段 / release_no = R-RUN_TAG）
+let RUN_TAG = null;                             // 标题标记：清理后按它核对残留必须为 0
 const ID = {};                                  // seed 时填充：unsched / removed / normal / devNull / reopened / heldResumed
 const createdIssueIds = [];                     // 只清这里面的 id
 const createdReleaseIds = [];                   // 本次自造的批次行，同样只清自己造的
@@ -51,9 +49,18 @@ const ok = (m) => { pass++; console.log(`  [OK] ${m}`); };
 const bad = (m) => { fail++; console.log(`  [FAIL] ${m}`); };
 const must = (cond, m) => (cond ? ok(m) : bad(m));
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => (e ? rej(e) : res(r))));
+const closeDb = () => new Promise((res, rej) => { if (!db) return res(); const d = db; db = null; d.close((e) => (e ? rej(e) : res())); });
 
 function ts(daysAgo = 0) {
     const d = new Date(Date.now() - daysAgo * 86400000);
@@ -61,29 +68,32 @@ function ts(daysAgo = 0) {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function probeServer() {
-    return new Promise((resolve) => {
-        const req = http.get({ host: 'localhost', port: PORT, path: '/login.html', timeout: 3000 }, (res) => { res.resume(); resolve(true); });
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
-    });
-}
-
 // 只删本次真实创建的 id，逐个删、单条失败不阻断其余（同 test-sys-commit-cols 的 safeDelete 范式）；
 //   删完按标题标记核对残留，残留非 0 要响亮报出来而不是默默留脏数据。
+// [#106 S4d-3] 有失败或残留则整体再试一轮（共 2 轮，间隔 200ms）；回查失败本身也计入 errs（原来 get 抛错会直接中断整个 finally）；
+//   残留按「【RUN_TAG】」整段 / release_no 全等核对（原 `%PRF-<pid>%` 子串会把 PRF-12 与 PRF-123 的夹具混为一谈）。
 async function cleanup() {
-    const errs = [];
-    for (const id of createdIssueIds) {
-        try { await run(`DELETE FROM sys_issue_timeline WHERE issue_id = ?`, [id]); } catch (e) { errs.push(`timeline#${id}: ${e.message}`); }
-        try { await run(`DELETE FROM sys_issues WHERE id = ?`, [id]); } catch (e) { errs.push(`issue#${id}: ${e.message}`); }
+    let errs = [];
+    let left = -1;
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errs = [];
+        for (const id of createdIssueIds) {
+            try { await run(`DELETE FROM sys_issue_timeline WHERE issue_id = ?`, [id]); } catch (e) { errs.push(`timeline#${id}: ${e.message}`); }
+            try { await run(`DELETE FROM sys_issues WHERE id = ?`, [id]); } catch (e) { errs.push(`issue#${id}: ${e.message}`); }
+        }
+        // 批次要在单据之后删（单据的 release_id 指着它）
+        for (const rid of createdReleaseIds) {
+            try { await run(`DELETE FROM sys_releases WHERE id = ?`, [rid]); } catch (e) { errs.push(`release#${rid}: ${e.message}`); }
+        }
+        try {
+            const a = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`%【${RUN_TAG}】%`]);
+            const b = await get(`SELECT COUNT(*) AS c FROM sys_releases WHERE release_no = ?`, [`R-${RUN_TAG}`]);
+            left = (a ? a.c : -1) + (b ? b.c : -1);
+        } catch (e) { errs.push(`残留回查: ${e.message}`); left = -1; }
+        if (errs.length === 0 && left === 0) break;
     }
-    // 批次要在单据之后删（单据的 release_id 指着它）
-    for (const rid of createdReleaseIds) {
-        try { await run(`DELETE FROM sys_releases WHERE id = ?`, [rid]); } catch (e) { errs.push(`release#${rid}: ${e.message}`); }
-    }
-    const a = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`%${RUN_TAG}%`]);
-    const b = await get(`SELECT COUNT(*) AS c FROM sys_releases WHERE release_no LIKE ?`, [`%${RUN_TAG}%`]);
-    return { left: (a ? a.c : -1) + (b ? b.c : -1), errs };
+    return { left, errs };
 }
 
 async function mkIssue(o) {
@@ -191,7 +201,7 @@ async function seed() {
 async function signAsAdmin() {
     const u = await get(`SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1`);
     if (!u) throw new Error(`${DB_PATH} 里找不到 admin 用户`);
-    return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, JWT_SECRET, { expiresIn: '2h' });
+    return testEnv.signToken(u.id);   // [#106 S4d-3] 实例密钥签（原 jwt.sign + .env 的 JWT_SECRET；有效期 1 小时，本脚本远短于此）
 }
 
 // 取某一行的 flag 实况（DOM 真相，不看源码）
@@ -219,17 +229,16 @@ async function readRow(page, id) {
 }
 
 (async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）；[#106 S4d-3] 原 ready 之前的 probeServer / JWT_SECRET 检查已删
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = `PRF-${process.pid}-${Date.now()}`;   // ready 之后赋值：cleanup / mkIssue / mkRelease 都在此之后才被调用
     console.log('=== 待上线可见性 · 两 flag 真实 DOM 实测 ===\n');
-    if (!JWT_SECRET) { console.log('FAIL：.env 缺 JWT_SECRET'); process.exit(1); }
-    if (!(await probeServer())) {
-        console.log(`未探测到 ${BASE_URL} 上的 server。本脚本有意不自行 spawn（端口纪律）——请先起好：`);
-        console.log(`  cd wbs-server && PORT=${PORT} node server.js`);
-        process.exit(2);
-    }
-    console.log(`1. server 探测到（${BASE_URL}）`);
+    console.log(`1. 被测服务就绪（${BASE_URL}）`);
 
     let browser;
     try {
+        db = await openInstanceDb(DB_PATH);
         const relId = await seed();
         console.log(`2. 夹具已造（单 ${createdIssueIds.join('/')}·批次 ${relId || '(建失败)'}·标记 ${RUN_TAG}）`);
         must(seedErrs.length === 0, `造数阶段无错误${seedErrs.length ? `：${seedErrs.join(' | ')}` : ''}`);
@@ -334,15 +343,25 @@ async function readRow(page, id) {
     } catch (e) {
         bad(`执行异常：${e && e.message}`);
     } finally {
-        if (browser) await browser.close();
+        if (browser) { try { await browser.close(); } catch (e) { bad(`浏览器关闭失败：${e && e.message}`); } }
         // 清理结果进断言：清不干净要红，不能"跑完就算"（脏夹具会污染后续跑与人工亲验）
-        const c = await cleanup();
-        must(c.left === 0, `夹具已清理干净（按标记 ${RUN_TAG} 核对残留 ${c.left} 条，须为 0）`);
-        if (c.errs.length) bad(`清理报错 ${c.errs.length} 条：${c.errs.join(' | ')}`);
-        console.log(`\n4. 夹具清理完成（删 ${createdIssueIds.length} 张）`);
-        db.close();
+        if (db) {
+            const c = await cleanup();
+            must(c.left === 0, `夹具已清理干净（按标记 ${RUN_TAG} 核对残留 ${c.left} 条，须为 0）`);
+            if (c.errs.length) bad(`清理报错 ${c.errs.length} 条：${c.errs.join(' | ')}`);
+            console.log(`\n4. 夹具清理完成（删 ${createdIssueIds.length} 张）`);
+        } else {
+            bad('实例库未打开，夹具无法清理');
+        }
+        try { await closeDb(); } catch (e) { bad(`关闭实例库失败：${e && e.message}`); }
     }
 
+    try { await testEnv.teardown(); } catch (e) { bad(`teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await closeDb(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -38,31 +38,46 @@
  *      系有意——畸形 URL 判 400 比静默落 static 404 更正确，非误伤。
  *   ③ collab 老附件不被误伤（回归·防误拦）——collab 目录下造一个不属于三模块的探针，断言明文
  *      直连仍 200 正常返回（证明正则只拦三前缀、不误伤 /uploads 下其余路径）。
- *   ④ 可选加固：issue-lite 鉴权下载端点本身不受本次合并影响（用真实非作废附件样本只读验证；
- *      无样本时打 NOTE 不计入断言，不虚增 pass·codex 13 MED-2）。
+ *   ④ 可选加固：issue-lite 鉴权下载端点本身不受本次合并影响。
+ *      [#106 S4c-C] 原先读真实库找「真实非作废附件样本」并只读验证（无样本时打 NOTE 不计入断言）；隔离实例里没有真实附件文件，
+ *      改为脚本自己经 API 造样本：admin 建一张 issue-lite 登记单 → 上传一个带唯一标记的小文本附件 → 经鉴权下载端点取回，
+ *      断言 200 且响应体与上传内容逐字节一致（比原先「只判 200」更强），样本在清理阶段经 API / 实例库删除并断言已不存在。
+ *      [#106 S4c-2] 加 ④b：直连 `/uploads/<服务端 multer 实际写出的相对路径>` 断言 403 DIRECT_ACCESS_FORBIDDEN 且响应体不含样本内容（覆盖服务端真实命名写出的文件）。
+ *      原「无样本 → NOTE」分支随之取消：样本由本脚本自造，造不出来就是失败（计 ④a 失败），不再静默跳过。
  *
- * harness 范式对齐 scripts/verify-legacy-archive-api.js（B 套 e2e）：spawn 真实 server.js
- * （独立 TEST_PORT）+ 真库 task_pool.db（④ 只读查询，不写入不清理）+ netstat 精确杀端口 +
- * 原生 http.request 直发原始 path（不经 fetch/WHATWG URL 客户端归一化，测服务端真实解码行为）。
+ * harness 范式对齐 scripts/verify-legacy-archive-api.js（B 套 e2e）：
+ * [#106 S4c-C] 不再自 spawn server.js（独立 TEST_PORT 3466）、不再读写真实库 task_pool.db、不再往检出里的 uploads 写探针文件、
+ * 不再 netstat 杀端口：入口第一条副作用语句 `await testEnv.ready()` 自起临时隔离实例（或核对 TEST_* 变量组），
+ * 探针文件 / junction 全部建在 **实例数据根下的 uploads**（<dataDir>/uploads，server.js 隔离模式的 UPLOAD_DIR）里，
+ * 并在写入前核对每个路径都落在实例数据根之下（assertUnderDataDir）；原生 http.request 直发原始 path（不经 fetch/WHATWG URL 客户端归一化，测服务端真实解码行为）的做法不变，
+ * 主机 / 端口取实例 baseUrl。
+ *
+ * 批跑须 exclusive：junction 探针建在 uploads 下的公开 collab 目录、指向受限 issue-lite 目录，变量组形态下实例被多个脚本共用时，
+ * 不得与其他读写 uploads 的套件并行。
  *
  * 不改 server.js/任何生产代码，不 commit。finally 彻底清理全部探针文件 + 断言清理归零。
  *
  * 用法：node scripts/verify-uploads-guard.js
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const sqlite3 = require('sqlite3');
-const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');
 
-const TEST_PORT = 3466;
-const BASE = `http://localhost:${TEST_PORT}`;
-const ROOT = path.join(__dirname, '..');
-const DB_FILE = path.join(ROOT, 'task_pool.db');
-const UPLOAD_DIR = path.join(ROOT, 'uploads');
-const ADMIN_ID = fx.ADMIN_ID; // 1，admin
+const ADMIN_ID = 1; // admin
+
+// 以下在 ready() 之后的入口里赋值（读 env() 在 ready 之前会抛 TE_NOT_READY）
+let BASE = null;          // 实例 baseUrl（http://127.0.0.1:<port>）
+let TARGET = null;        // new URL(BASE)
+let DATA_DIR = null;      // 实例数据根
+let DB_PATH = null;       // 实例库
+let UPLOAD_DIR = null;    // <DATA_DIR>/uploads
+let COLLAB_PROBE_DIR = null;
+let COLLAB_PROBE_FILE = null;
+let JCT_PATH = null;
+let JCT_TARGET = null;
 
 let pass = 0, fail = 0;
 const results = [];
@@ -76,7 +91,7 @@ function check(name, cond, detail) {
 function rawGet(rawPath, token) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { hostname: 'localhost', port: TEST_PORT, path: rawPath, method: 'GET', headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      { hostname: TARGET.hostname, port: Number(TARGET.port), path: rawPath, method: 'GET', headers: token ? { Authorization: `Bearer ${token}` } : {} },
       (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
@@ -93,49 +108,42 @@ function rawGet(rawPath, token) {
   });
 }
 
-// netstat 精确端口比较（findstr 子串匹配会误命中，对齐 verify-legacy-archive-api.js 范式）
-function killPort(port) {
-  try {
-    const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-    const pids = new Set();
-    out.split(/\r?\n/).forEach(line => {
-      const cols = line.trim().split(/\s+/);
-      if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-        const m = cols[1].match(/:(\d+)$/);
-        if (m && Number(m[1]) === port) pids.add(cols[4]);
-      }
+// 以 OPEN_READWRITE（不带 OPEN_CREATE）打开实例库做一条语句：等 close 回调再落定（关库错误不丢，语句错误优先）
+// [#106 S4c 收口] 两个助手都带打开回调、不带 OPEN_CREATE（dbGet 用 OPEN_READONLY），与 _test-fixture.js 的 openInstanceDb 同源写法（本脚本只用 testEnv、不经 fx）
+function dbRun(sql, params) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE, (oe) => {
+      if (oe) return reject(oe);
+      db.configure('busyTimeout', 5000);
+      db.run(sql, params || [], function onRun(err) {
+        const changes = this && this.changes;
+        db.close((ce) => { const e = err || ce; e ? reject(e) : resolve({ changes }); });
+      });
     });
-    pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore */ } });
-  } catch (_) { /* ignore */ }
+  });
 }
-
 function dbGet(sql, params) {
   return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(DB_FILE);
-    // db.close() 传回调等真正关闭完成后再 resolve——不等待会在本机 Node+sqlite3 组合下留一个
-    // 尚未收尾的 libuv async handle，紧跟着的 process.exit() 偶发触发原生断言崩溃
-    // （`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`，本脚本改前 100% 复现，改后不再复现）。
-    db.get(sql, params || [], (err, row) => {
-      db.close(() => { err ? reject(err) : resolve(row); });
+    const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (oe) => {
+      if (oe) return reject(oe);
+      db.get(sql, params || [], (err, row) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(row); }); });
+    });
+  });
+}
+function dbAll(sql, params) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (oe) => {
+      if (oe) return reject(oe);
+      db.all(sql, params || [], (err, rows) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(rows); }); });
     });
   });
 }
 
-async function waitReady(getLog, ms = 20000) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    // 探测锚：guard 中间件是纯正则判定、不依赖任何模块 schema 就绪，server.js 一旦监听端口即可用。
-    // 用一个明文命中 issue-lite 前缀的探测路径（不要求文件存在——guard 在 express.static 之前
-    // 短路返回 403，与文件是否存在无关）双重确认：日志出现启动文案 + 该路径真的返回 403。
-    if (/Task Pool Server running/.test(getLog())) {
-      try {
-        const r = await fetch(`${BASE}/uploads/issue-lite/__readiness_probe__`);
-        if (r.status === 403) return true;
-      } catch (_) { /* ignore，继续轮询 */ }
-    }
-    await new Promise(r => setTimeout(r, 300));
-  }
-  return false;
+// 路径必须落在实例数据根之下（词法核对；这些路径都由 DATA_DIR 拼出，这里是写入前的硬门）：探针文件 / junction 绝不写到数据根之外
+function assertUnderDataDir(p, what) {
+  const rel = path.relative(path.resolve(DATA_DIR), path.resolve(p));
+  const outside = rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel);
+  if (outside) throw new Error(`${what}（${p}）不在实例数据根（${DATA_DIR}）之下，拒绝写入`);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,44 +171,49 @@ const PROBES = [
   },
 ];
 
-const COLLAB_PROBE_DIR = path.join(UPLOAD_DIR, 'collab', 'SEC_PROBE_COLLAB_TEST');
-const COLLAB_PROBE_FILE = path.join(COLLAB_PROBE_DIR, 'probe.txt');
 const COLLAB_SECRET = 'COLLAB_PASS_THROUGH_OK_9f8e7d3a2b1c';
 
-// ⑥a junction 探针：公开 collab 下造一个指向受限 issue-lite 目录的 junction（mklink /J·无需管理员）
+// ⑥a junction 探针：公开 collab 下造一个指向受限 issue-lite 目录的 junction（fs.symlinkSync 'junction'·无需管理员；原 mklink /J 同类型）
 const JCT_NAME = 'SEC_PROBE_JUNCTION';
-const JCT_PATH = path.join(UPLOAD_DIR, 'collab', JCT_NAME);
-const JCT_TARGET = path.join(UPLOAD_DIR, 'issue-lite');
 let jctReady = false;
 // junction 存在性用 lstat（stat 链接本身·不跟随）——existsSync 会跟随 junction，target 被删的 broken
 // junction 会误判为不存在而跳过清理留残留（codex 16 建议）。
 function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { return false; } }
 
-(async () => {
-  killPort(TEST_PORT);
-  let child = null;
-  let log = '';
+// ④ 自造样本（经 API 建单 + 上传）的句柄：清理阶段据此删除
+const SAMPLE_CONTENT = 'UPLOADS_GUARD_SAMPLE_ATTACHMENT_9f8e7d3a2b1c';
+const SAMPLE_NAME = 'SEC_PROBE_SAMPLE_ATTACHMENT.txt';
+const sample = { issueId: null, attId: null, relFile: null };
+
+// 返回失败项数（不在 helper 里 process.exit：由入口在 teardown 之后 finish）
+async function main() {
   const createdFiles = [];
 
   try {
-    // ===== 前置：造真实探针文件 =====
+    // ===== 前置：造真实探针文件（全部在实例数据根下的 uploads 里）=====
     for (const p of PROBES) {
       const dir = path.join(UPLOAD_DIR, p.mod);
+      assertUnderDataDir(dir, `探针目录 ${p.mod}`);
       fs.mkdirSync(dir, { recursive: true });
       const filePath = path.join(dir, p.file);
+      assertUnderDataDir(filePath, `探针文件 ${p.file}`);
       fs.writeFileSync(filePath, p.secret, 'utf8');
       createdFiles.push(filePath);
       console.log(`[前置] 探针已造：${filePath}`);
     }
+    assertUnderDataDir(COLLAB_PROBE_DIR, 'collab 探针目录');
     fs.mkdirSync(COLLAB_PROBE_DIR, { recursive: true });
+    assertUnderDataDir(COLLAB_PROBE_FILE, 'collab 探针文件');
     fs.writeFileSync(COLLAB_PROBE_FILE, COLLAB_SECRET, 'utf8');
     createdFiles.push(COLLAB_PROBE_FILE);
     console.log(`[前置] collab 探针已造：${COLLAB_PROBE_FILE}`);
 
-    // ⑥a junction 探针：collab\SEC_PROBE_JUNCTION → issue-lite 目录（mklink /J，无需管理员；失败则跳过⑥a）
+    // ⑥a junction 探针：collab\SEC_PROBE_JUNCTION → issue-lite 目录（junction，无需管理员；失败则跳过⑥a）
     try {
-      try { if (junctionExists(JCT_PATH)) fs.rmdirSync(JCT_PATH); } catch (_) { /* 残留清理 */ }
-      execSync(`mklink /J "${JCT_PATH}" "${JCT_TARGET}"`, { shell: 'cmd.exe', stdio: 'ignore' });
+      assertUnderDataDir(JCT_PATH, 'junction 探针位置');
+      assertUnderDataDir(JCT_TARGET, 'junction 探针目标');
+      try { if (junctionExists(JCT_PATH)) fs.rmdirSync(JCT_PATH); } catch (_) { /* 残留清理（rmdirSync 对 junction 只删链接本身） */ }
+      fs.symlinkSync(JCT_TARGET, JCT_PATH, 'junction');
       jctReady = junctionExists(JCT_PATH);
       console.log(`[前置] junction 探针已造：${JCT_PATH} → ${JCT_TARGET}（ready=${jctReady}）`);
     } catch (e) {
@@ -208,15 +221,25 @@ function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { r
       console.log(`[前置] junction 探针创建失败（跳过⑥a·非回归失败）：${e.message}`);
     }
 
-    // ===== 启动测试服务 =====
-    child = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-    const ready = await waitReady(() => log);
-    check('测试服务已就绪（Task Pool Server running + guard 中间件即时可用）', ready);
-    if (!ready) throw new Error('服务未就绪：' + log.slice(-2000));
+    // ===== 测试服务就绪确认（服务由入口 ready() 起好；这里确认 guard 中间件即时可用）=====
+    // 探测锚：guard 中间件是纯正则判定、不依赖任何模块 schema 就绪。用一个明文命中 issue-lite 前缀的探测路径
+    // （不要求文件存在——guard 在 express.static 之前短路返回 403，与文件是否存在无关）双重确认：
+    // 实例日志出现 `[instance] mode=isolated instance=<本实例身份> ` 启动行 + 该路径真的返回 403。
+    // [#106 S4c-2] 原先读 info 级的 "Task Pool Server running"，会被检出 .env 的 LOG_LEVEL 压掉；`[instance]` 行是 server.js:22782 的 console.log，
+    // 不受 LOG_LEVEL 影响，并且带本实例身份，顺带证明读的就是本实例的日志。
+    const instanceId = testEnv.env().instance;
+    let logHasInstanceLine = false;
+    try {
+      const logText = fs.readFileSync(path.join(DATA_DIR, 'server.log'), 'utf8');
+      logHasInstanceLine = !!instanceId && logText.includes(`[instance] mode=isolated instance=${instanceId} `);
+    } catch (_) { /* 读不到日志 → 就绪断言判红 */ }
+    let probeStatus = null;
+    try { probeStatus = (await fetch(`${BASE}/uploads/issue-lite/__readiness_probe__`)).status; } catch (_) { /* 判红 */ }
+    const ready = logHasInstanceLine && probeStatus === 403;
+    check('测试服务已就绪（[instance] 启动行 + guard 中间件即时可用）', ready, `logHasInstanceLine=${logHasInstanceLine} instance=${instanceId} probeStatus=${probeStatus}`);
+    if (!ready) throw new Error('服务未就绪（日志无本实例的 [instance] 启动行或 guard 探测不是 403）');
 
-    const adminTok = await fx.signAs(ADMIN_ID);
+    const adminTok = await testEnv.signToken(ADMIN_ID);
     const allRawBodies = [];
 
     // ===== ① 三模块前缀 %编码变体全堵（核心回归） =====
@@ -306,7 +329,7 @@ function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { r
         r6.status === 403 && r6.body && r6.body.code === 'DIRECT_ACCESS_FORBIDDEN' && !r6.raw.includes(PROBES[0].secret),
         `status=${r6.status} head=${(r6.raw || '').slice(0, 120)}`);
     } else {
-      console.log('  ⓘ ⑥a junction 探针未就绪（mklink /J 创建失败·可能权限/文件系统限制）——本条不计入断言');
+      console.log('  ⓘ ⑥a junction 探针未就绪（junction 创建失败·可能权限/文件系统限制）——本条不计入断言');
     }
     // ⑥b NUL/控制字符（codex 15 LOW）：%00 解码为 NUL，早前会进 path.join 抛错落 500——须 400 拦下。
     let r6b = await rawGet('/uploads/collab/%00', adminTok);
@@ -330,41 +353,45 @@ function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { r
     check('collab 探针明文直连 → 200（不属于三前缀正则，未被新中间件误拦）', r.status === 200, `status=${r.status}`);
     check('collab 探针响应体与写入内容逐字节一致（非误伤成 403/404 空壳）', r.raw === COLLAB_SECRET, `raw=${(r.raw || '').slice(0, 100)}`);
 
-    // ===== ④ 可选加固：issue-lite 鉴权下载端点本身不受合并影响（只读，用真实非作废附件样本）=====
-    const attRow = await dbGet(
-      `SELECT a.id, a.file_name FROM issue_lite_attachments a
-         JOIN issue_lite i ON a.issue_lite_id = i.id
-        WHERE i.voided_at IS NULL
-        ORDER BY a.id DESC LIMIT 1`
-    );
-    if (attRow) {
-      // requireIssueLiteSchemaReady 挂在该端点上，schema 初始化独立于 /uploads guard 中间件的
-      // 就绪时机（guard 是纯正则、server.listen 后即可用；issue-lite schema 走 db 回调链异步初始化，
-      // 可能稍晚才绪）——本轮实测发现 waitReady() 只探测了 guard 中间件就绪就会偶发撞上 503
-      // ISSUE_LITE_SCHEMA_NOT_READY 窗口。这条断言的判定目标是"下载端点不受本次 uploads 中间件
-      // 合并影响"，不是"顺带验证 schema 初始化时序"，503 属于与被测改动无关的启动竞态噪音——短重试
-      // 几次让 schema 就绪窗口过去，不满足才判红。
-      let dl = null;
-      for (let attempt = 0; attempt < 10; attempt++) {
-        dl = await fetch(`${BASE}/api/issue-lite/attachments/${attRow.id}/download`, { headers: { Authorization: `Bearer ${adminTok}` } });
-        if (dl.status !== 503) break;
-        await new Promise((res) => setTimeout(res, 300));
-      }
-      check(`④ issue-lite 鉴权下载端点（/api/issue-lite/attachments/${attRow.id}/download）不受 uploads 中间件合并影响 → 200`,
-        dl.status === 200, `status=${dl.status} file_name=${attRow.file_name}`);
-    } else {
-      // codex 13 MED-2：无样本时早前 check(...,true) 会把"未测"算成 pass 虚增通过数——改为仅打印
-      // NOTE、不计入断言（既不算 pass 也不算 fail），如实反映"这一路径本轮未覆盖"。
-      console.log('  ⓘ ④ 未找到可用的非作废 issue-lite 附件真实样本（环境限制）——本条不计入断言（不虚增 pass）');
+    // ===== ④ 可选加固：issue-lite 鉴权下载端点本身不受合并影响（自造样本：建单 + 上传，再经鉴权端点下载）=====
+    // 原先读真实库找「真实非作废附件样本」；隔离实例里没有真实附件文件，改为本脚本自造样本（见文件头 ④ 说明）。
+    // 样本建在 uploads/issue-lite（受限目录）里，正是被 guard 拦直连、只允许鉴权端点读取的那类文件。
+    const mk = await fetch(`${BASE}/api/issue-lite`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminTok}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'uploads-guard 自造样本单（测后清理）', requester_name: 'UG样本', requester_dept: '信息技术部', requester_phone: '13800000000' }),
+    });
+    const mkBody = await mk.json().catch(() => null);
+    sample.issueId = mkBody && mkBody.issue && Number.isInteger(mkBody.issue.id) ? mkBody.issue.id : null;
+    let upStatus = null;
+    if (sample.issueId) {
+      const fd = new FormData();
+      fd.append('files', new Blob([Buffer.from(SAMPLE_CONTENT, 'utf8')], { type: 'text/plain' }), SAMPLE_NAME);
+      const up = await fetch(`${BASE}/api/issue-lite/${sample.issueId}/attachments`, { method: 'POST', headers: { Authorization: `Bearer ${adminTok}` }, body: fd });
+      upStatus = up.status;
+      const upBody = await up.json().catch(() => null);
+      sample.attId = upBody && upBody.attachment && Number.isInteger(upBody.attachment.id) ? upBody.attachment.id : null;
+    }
+    check('④a 自造样本：建 issue-lite 登记单 + 上传附件成功（取得单 id 与附件 id）',
+      !!sample.issueId && !!sample.attId, `建单 status=${mk.status} issueId=${sample.issueId} 上传 status=${upStatus} attId=${sample.attId}`);
+    if (sample.attId) {
+      const att = await dbGet('SELECT file_name FROM issue_lite_attachments WHERE id = ?', [sample.attId]);
+      sample.relFile = att && att.file_name ? att.file_name : null;   // 形如 issue-lite/<id>_<ts>_<rand>_<name>，清理阶段据此核对物理文件已删
+      const dl = await fetch(`${BASE}/api/issue-lite/attachments/${sample.attId}/download`, { headers: { Authorization: `Bearer ${adminTok}` } });
+      const dlText = Buffer.from(await dl.arrayBuffer()).toString('utf8');
+      check(`④ issue-lite 鉴权下载端点（/api/issue-lite/attachments/${sample.attId}/download）不受 uploads 中间件合并影响 → 200 且响应体与上传内容逐字节一致`,
+        dl.status === 200 && dlText === SAMPLE_CONTENT, `status=${dl.status} bodyHead=${dlText.slice(0, 80)}`);
+      // ④b 直连自造样本（服务端 multer 实际写出的相对路径，覆盖「服务端真实命名写出的文件」，而不只是脚本手造的探针文件）：guard 必须拦成 403 且不吐原文
+      const rd = sample.relFile ? await rawGet(`/uploads/${sample.relFile}`, adminTok) : null;
+      check(`④b 直连服务端真实写出的样本文件 /uploads/${sample.relFile} → 403 DIRECT_ACCESS_FORBIDDEN 且响应体不含样本内容`,
+        !!rd && rd.status === 403 && !!rd.body && rd.body.code === 'DIRECT_ACCESS_FORBIDDEN' && !rd.raw.includes(SAMPLE_CONTENT),
+        rd ? `status=${rd.status} head=${(rd.raw || '').slice(0, 120)}` : '库里取不到附件的 file_name（relFile 为空），无法直连');
     }
 
   } catch (e) {
     check('e2e 执行异常', false, e.message + '\n' + (e.stack || ''));
   } finally {
-    try { if (child) child.kill('SIGKILL'); } catch (_) { /* ignore */ }
-    killPort(TEST_PORT);
-
-    // ===== 彻底清理：先删 junction（仅删链接·绝不递归进 target·issue-lite 内容不受影响）→ 探针文件 =====
+    // ===== 彻底清理：先删 junction（仅删链接·绝不递归进 target·issue-lite 内容不受影响）→ 探针文件 → 自造样本 =====
     const cleanupErrors = [];
     try {
       // fs.rmdirSync 对 junction 只移除 reparse 链接本身，不递归 target；严禁用 rmSync({recursive:true})（会顺 junction 删掉 issue-lite）
@@ -384,6 +411,47 @@ function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { r
     } catch (e) {
       cleanupErrors.push(`${COLLAB_PROBE_DIR}(目录): ${e.message}`);
     }
+    // ④ 自造样本清理（[#106 S4c-2 收口] 按 issueId 查该单**全部**附件的 id 与 file_name，逐个经 API 删并核物理文件，不再只认 sample.attId / sample.relFile：
+    //   上传已落库落盘但响应读取失败时 attId / relFile 为空，旧写法会直接删附件行、丢掉文件清理依据，物理文件成孤儿且断言照样通过）。
+    //   顺序：先查（失败 → 计清理失败，且不删任何行）→ 逐个 API 删附件 → 核每个物理文件不存在 → 全部确定后才删附件行 / 编辑日志 / 登记单行；
+    //   任一步没做到都计入清理失败，行留着作为现场依据。物理文件检查必须明确通过：physOk 只有「每个附件的路径都确定且文件都已不存在」才为 true，null / 未检查一律不算通过。
+    const sampleResult = { queried: false, atts: [], undetermined: [], apiFailed: [], filesLeft: [], rowsLeft: null, issueLeft: null, physOk: null };
+    if (sample.issueId || sample.attId || sample.relFile) {
+      try {
+        if (!sample.issueId) throw new Error(`已知附件 #${sample.attId} / ${sample.relFile} 但不知道所属登记单 id，无法按单查全部附件，需人工核实实例 uploads/issue-lite`);
+        const rows = await dbAll('SELECT id, file_name FROM issue_lite_attachments WHERE issue_lite_id = ?', [sample.issueId]);
+        sampleResult.queried = true;
+        const tok = await testEnv.signToken(ADMIN_ID);
+        const filePaths = [];   // 待核对不存在的物理文件（绝对路径）
+        for (const a of rows) {
+          if (!a.file_name || typeof a.file_name !== 'string') { sampleResult.undetermined.push(a.id); continue; }   // 无法确定文件路径：计失败
+          const full = path.join(UPLOAD_DIR, a.file_name);
+          assertUnderDataDir(full, `附件 #${a.id} 的物理文件`);
+          filePaths.push({ id: a.id, full });
+          const del = await fetch(`${BASE}/api/issue-lite/attachments/${a.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${tok}` } });
+          if (del.status !== 200) sampleResult.apiFailed.push(`#${a.id}→${del.status}`);
+        }
+        // 已知但不在行里的 relFile（行已被别处删掉的异常形态）也核一遍
+        if (sample.relFile && !filePaths.some((p) => p.full === path.join(UPLOAD_DIR, sample.relFile))) {
+          const full = path.join(UPLOAD_DIR, sample.relFile);
+          assertUnderDataDir(full, '样本物理文件 relFile');
+          filePaths.push({ id: null, full });
+        }
+        sampleResult.atts = filePaths;
+        sampleResult.filesLeft = filePaths.filter((p) => fs.existsSync(p.full)).map((p) => p.full);
+        sampleResult.physOk = sampleResult.undetermined.length === 0 && sampleResult.apiFailed.length === 0 && sampleResult.filesLeft.length === 0;
+        if (sampleResult.physOk) {
+          // 清理依据齐全且文件都确认不存在了，才删行（编辑日志 → 附件行 → 登记单）
+          await dbRun('DELETE FROM issue_lite_edit_logs WHERE issue_lite_id = ?', [sample.issueId]);
+          await dbRun('DELETE FROM issue_lite_attachments WHERE issue_lite_id = ?', [sample.issueId]);
+          await dbRun('DELETE FROM issue_lite WHERE id = ?', [sample.issueId]);
+        } else {
+          cleanupErrors.push(`自造样本清理未完成（行保留作现场依据）：无法确定路径的附件 ${JSON.stringify(sampleResult.undetermined)}；API 删除失败 ${JSON.stringify(sampleResult.apiFailed)}；仍存在的物理文件 ${JSON.stringify(sampleResult.filesLeft)}`);
+        }
+      } catch (e) {
+        cleanupErrors.push(`自造样本清理: ${e.message}`);
+      }
+    }
 
     check('清理：全部探针文件删除过程无异常', cleanupErrors.length === 0, JSON.stringify(cleanupErrors));
 
@@ -395,22 +463,56 @@ function junctionExists(p) { try { fs.lstatSync(p); return true; } catch (_) { r
       check('清理断言：junction 探针已移除', !junctionExists(JCT_PATH), JCT_PATH);
       check('清理断言：junction target（issue-lite 目录）未被误删', fs.existsSync(JCT_TARGET), JCT_TARGET);
     }
+    if (sample.issueId || sample.attId || sample.relFile) {
+      // 行残留：按单查剩余附件行数与登记单行（查询失败 → 不是明确通过）；物理文件：sampleResult.physOk 必须严格为 true（null 不算通过）
+      try {
+        const left = sample.issueId ? await dbGet('SELECT COUNT(*) AS c FROM issue_lite_attachments WHERE issue_lite_id = ?', [sample.issueId]) : null;
+        const iss = sample.issueId ? await dbGet('SELECT id FROM issue_lite WHERE id = ?', [sample.issueId]) : null;
+        sampleResult.rowsLeft = left ? left.c : null;
+        sampleResult.issueLeft = sample.issueId ? !!iss : null;
+      } catch (e) { sampleResult.rowsLeft = `查询失败：${e.message}`; }
+      check('清理断言：④ 自造样本（该单全部附件行 / 登记单行 / 物理文件）均已不存在，且路径均已确定、API 删除成功',
+        sampleResult.queried === true && sampleResult.physOk === true && sampleResult.rowsLeft === 0 && sampleResult.issueLeft === false,
+        JSON.stringify({ queried: sampleResult.queried, physOk: sampleResult.physOk, rowsLeft: sampleResult.rowsLeft, issueLeft: sampleResult.issueLeft, undetermined: sampleResult.undetermined, apiFailed: sampleResult.apiFailed, filesLeft: sampleResult.filesLeft }));
+    }
   }
 
   console.log('─────── S-SEC /uploads 直连拦截 %编码绕过修复 回归验证结果 ───────');
   results.forEach(l => console.log(l));
   console.log(`\n总判定：${fail === 0 ? '✅ PASS' : '❌ FAIL'}（${pass} 通过 / ${fail} 失败，共 ${pass + fail} 条断言）`);
+  // 原先这里有一段 500ms 延时：④ 用 fetch().arrayBuffer() 拉二进制后紧接 kill 子进程 + process.exit() 会偶发触发
+  // Node 底层原生断言崩溃（libuv UV_HANDLE_CLOSING，Windows + Node v24）。现在收尾改走入口的 teardown → finish(code)
+  // （只设退出码、不立刻 process.exit，见 lib/test-env.js finish），不再需要手写延时。
+  return fail;
+}
 
-  // 本机实测踩坑（本次新发现，Windows + Node v24.11.1）：④ 用 fetch().arrayBuffer() 拉取一个
-  // 真实二进制文件（issue-lite 鉴权下载端点）之后，紧接着 child.kill('SIGKILL') 杀掉服务子进程、
-  // 再立即 process.exit() —— 这套时序会偶发触发 Node 底层原生断言崩溃
-  // （`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76`，
-  // exit code 变成非常规值而非本脚本自己的判定结果）。二分定位：去掉二进制 fetch 步骤、或在
-  // 杀子进程与 process.exit() 之间插入一段短延时，两种改法均可稳定消除复现（已用独立最小复现脚本
-  // 反复验证）。这是 undici/fetch 消费二进制响应体的底层 socket handle 在被"立即跟进的
-  // process.exit()"打断时的收尾竞态，与本脚本的业务断言逻辑无关（崩溃发生在所有 22 条断言已经
-  // PASS 且结果已完整打印之后），但会污染进程退出码，误导只看 exit code 的调用方——留一段短延时
-  // 让 undici 内部 socket/handle 完成收尾，再退出。
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  process.exit(fail === 0 ? 0 : 1);
-})();
+(async () => {
+  // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+  // 就绪断言读的是不受 LOG_LEVEL 影响的 `[instance]` 启动行，本文件没有其它依赖 info 级日志的断言，所以不传 extraEnv.LOG_LEVEL
+  await testEnv.ready();   // 先于任何写文件 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+  let code = 1;
+  try {
+    const e = testEnv.env();
+    BASE = e.baseUrl;
+    TARGET = new URL(BASE);
+    DB_PATH = e.dbPath;
+    DATA_DIR = e.dataDir;
+    if (!DATA_DIR) throw new Error('取不到实例数据根（env().dataDir 为 null）：无法确定实例的 uploads 目录，探针文件无处安全落盘，拒绝继续');
+    UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+    COLLAB_PROBE_DIR = path.join(UPLOAD_DIR, 'collab', 'SEC_PROBE_COLLAB_TEST');
+    COLLAB_PROBE_FILE = path.join(COLLAB_PROBE_DIR, 'probe.txt');
+    JCT_PATH = path.join(UPLOAD_DIR, 'collab', JCT_NAME);
+    JCT_TARGET = path.join(UPLOAD_DIR, 'issue-lite');
+    const nFailed = await main();
+    code = nFailed > 0 ? 1 : 0;
+  } catch (e) {
+    console.error('uploads-guard verify 异常：', e && e.stack || e);
+  } finally {
+    try { await testEnv.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+  }
+  testEnv.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+  console.error('uploads-guard verify 启动失败：', e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

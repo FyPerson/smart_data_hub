@@ -8,6 +8,10 @@
 //     通用 sqlite 重定向 wrapper 一并复制过去）后自起的独立进程：server.js 里写死的 `__dirname/uploads`、
 //     `__dirname/archive`（save-scripts / edit-script 会写脚本文件）落在临时目录里，仓库内零临时产物；
 //     依赖走 NODE_PATH 指向仓库 node_modules（不建 junction）。
+//   · [#106 S4b2b] 自隔离套件登记（lib/test-isolation-registry.js 的 SELF_ISOLATED）：守卫对本文件的硬规则——起进程只许 F1 `__filename`（出网拦截探针：`node <本文件> --net-probe`，NODE_OPTIONS 加载副本里的 net-guard）/ F2 副本里的 wrapper /
+//     taskkill·powershell；不再出现业务库文件名（「库在检出目录之外的临时根里」改由 tmpBaseOutsideCheckout 判定：临时根与检出目录互不包含——字面路径与 realpath 各判两个方向，且临时根本身或其上级不得有 .git；
+//     判定函数的纯函数用例 runTmpBaseCases（--only=tmpbase）；副本里的空占位文件改由 wrapper 在无 .git 的源码副本里自建，并有 wrapper 占位用例 runWrapperPlaceholderCases 守着）；
+//     .exec( 调用一律不许（require 了 child_process 的文件里它会被当成 sink），所以正则用 match；写连接上原来没有任何调用点的多语句 exec 已删除。
 //   · 端口：先用 scripts/lib/listen-safe-port.js 在 20000–49999 占一个端口再释放给被测服务（绑定失败自动换端口重试）。
 //   · 外发：空库里没有钉钉凭证 / 通知开关行，也没有系统迭代 #73 到期扫描的候选行（库是新建的，运行时打印核对）；
 //     出网统一拦截：被测服务进程以 `node --require net-guard.js` 启动，非回环地址的 TCP 连接（MSSQL / MySQL / 钉钉…）一律 ECONNREFUSED
@@ -60,16 +64,94 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const { spawn, spawnSync, execFileSync } = require('node:child_process');
 const sqlite3 = require('sqlite3');
 const jwt = require('jsonwebtoken');
 const { listenOnSafePort } = require('./lib/listen-safe-port');
 
 const ROOT = path.resolve(__dirname, '..');
-const REAL_DB_ABS = path.resolve(ROOT, 'task_pool.db');   // 仅作「禁止指向它」的比对用，本文件任何地方都不读不写它
 const tmpArg = process.argv.find(x => x.startsWith('--tmp='));
 const TMP_BASE = path.resolve(tmpArg ? tmpArg.slice(6) : (process.env.MC_C1C_TMP || path.join(os.tmpdir(), 'mc-c1c')));
-require('dotenv').config({ path: path.join(ROOT, '.env') });
+// [#106 S4b2] 不再加载真实 .env：被测服务（源码副本 + 空库）用的 JWT 秘钥与 DB 加密键是每次运行随机生成的模块常量（48 位十六进制 ASCII，满足服务端 ≥32 字节的校验）。
+//   导出给兄弟脚本与 snapshot-model-gate-contract.js 使用；空库里没有任何既有密文，所以不存在「必须是真实键」的前提。
+const JWT_SECRET_RUN = crypto.randomBytes(24).toString('hex');
+const DB_KEY_RUN = crypto.randomBytes(24).toString('hex');
+
+// [#106 S4b2b] 「临时根与检出目录互不包含」判定（取代原来拿库路径跟业务库文件名比对的做法）：检出目录 = 仓库根 path.resolve(ROOT, '..')；两个方向都要判——
+//   临时根在检出目录里面（库与副本会落进仓库工作区）、临时根是检出目录的上级（检出目录里的路径也满足各调用点的 startsWith(TMP_BASE + sep)，等于没有隔离）都不通过。
+//   顺序（全部判定在建任何目录之前完成，通过才 mkdir）：① 字面路径两个方向 → ② 预判真实路径：从临时根向上找最近的已存在祖先（lstat，ENOENT / ENOTDIR 继续向上，其他错误 fail-closed），对它取 fs.realpathSync.native 再拼回
+//   尚不存在的剩余路径段，与检出目录的 realpath 做两向包含判断（外部 junction 指进检出目录、临时根是 junction 下尚不存在的子目录，在这一步就被拦住，mkdir 不会穿过 junction 在检出目录里建东西）→
+//   ③ .git 查找（字面路径的祖先链 + 预判真实路径的祖先链，lstat，同样 fail-closed）→ ④ 全部通过才 mkdir 临时根，mkdir 之后保留 realpath 两向复核（防判定与创建之间的变化）。
+//   「a 包含 b」= path.relative(a, b) 为空串，或既不是上级（不等于 '..'、不以 '..' + 分隔符开头）也不是绝对路径（跨盘时 relative 返回绝对路径）；名为 `..foo` 的子目录因此判「在里面」。
+//   另：临时根本身或其任一上级存在 .git（文件或目录）也不通过——wrapper 看到上层有 .git 就不会在源码副本里建占位库，套件第二次起服务会失败（本机 E:/tmp/.git 就是目录）。
+//   realpath / mkdir 失败也算不通过（fail-closed）。判定函数参数化 (tmpBase, checkout)，默认取 TMP_BASE / CHECKOUT_ROOT，只有默认参数的结果缓存一次（整个进程里临时根不变）。
+//   库、日志、副本、-journal 全都在 TMP_BASE 之下（各调用点另查 startsWith(TMP_BASE + sep)），所以临时根与检出目录互不包含 ⇒ 它们都不在检出目录里。
+const CHECKOUT_ROOT = path.resolve(ROOT, '..');
+function pathContains(outer, inner) {
+  const rel = path.relative(outer, inner);
+  if (rel === '') return true;
+  return !(rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel));
+}
+function judgeTmpBaseOutsideCheckout(tmpBase = TMP_BASE, checkout = CHECKOUT_ROOT) {
+  const no = (why) => ({ outside: false, why });
+  const inside = (t, c, how) => `临时根 ${t} 在检出目录 ${c} 里面或就是检出目录（${how}）：库与副本会落进仓库工作区`;
+  const parentOf = (t, c, how) => `临时根 ${t} 是检出目录 ${c} 的上级（${how}）：检出目录里的路径也满足 startsWith(临时根 + 分隔符)，等于没有隔离`;
+  try {
+    const lt = path.resolve(tmpBase);
+    const lc = path.resolve(checkout);
+    if (pathContains(lc, lt)) return no(inside(lt, lc, '字面路径'));
+    if (pathContains(lt, lc)) return no(parentOf(lt, lc, '字面路径'));
+    // ② 建目录之前预判真实路径：最近的已存在祖先取 realpath，再拼回尚不存在的剩余段
+    const rc = fs.realpathSync.native(lc);
+    const rest = [];
+    let anc = lt;
+    for (;;) {
+      try { fs.lstatSync(anc); break; } catch (e) { if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) throw e; }
+      const up = path.dirname(anc);
+      if (up === anc) throw new Error(`临时根 ${lt} 一路向上都不存在（连根都没有）`);
+      rest.unshift(path.basename(anc));
+      anc = up;
+    }
+    const pt = path.join(fs.realpathSync.native(anc), ...rest);
+    if (pathContains(rc, pt)) return no(inside(pt, rc, 'realpath，建目录前'));
+    if (pathContains(pt, rc)) return no(parentOf(pt, rc, 'realpath，建目录前'));
+    // ③ .git 查找（lstat；ENOENT / ENOTDIR 继续向上，其他错误抛出 → fail-closed）：字面路径的祖先链 + 预判真实路径的祖先链
+    const gitAbove = (start) => {
+      for (let d = start; ; d = path.dirname(d)) {
+        try { fs.lstatSync(path.join(d, '.git')); return path.join(d, '.git'); } catch (e) { if (!e || (e.code !== 'ENOENT' && e.code !== 'ENOTDIR')) throw e; }
+        if (path.dirname(d) === d) return null;
+      }
+    };
+    for (const start of new Set([lt, pt])) {
+      const g = gitAbove(start);
+      if (g !== null) return no(`临时根在某个 git 工作树之下：${g} 存在（临时根 ${start}）：wrapper 不会在源码副本里建占位，套件第二次起服务会失败`);
+    }
+    // ④ 全部通过才建目录；建完保留 realpath 两向复核与 .git 复核（防判定与创建之间路径被换）
+    fs.mkdirSync(lt, { recursive: true });
+    const rt = fs.realpathSync.native(lt);
+    if (pathContains(rc, rt)) return no(inside(rt, rc, 'realpath'));
+    if (pathContains(rt, rc)) return no(parentOf(rt, rc, 'realpath'));
+    if (rt !== pt) {
+      const g = gitAbove(rt);
+      if (g !== null) return no(`临时根在某个 git 工作树之下：${g} 存在（临时根 ${rt}）：wrapper 不会在源码副本里建占位，套件第二次起服务会失败`);
+    }
+    return { outside: true, why: '' };
+  } catch (e) {
+    return no(`无法判定临时根与检出目录是否互不包含（fail-closed）：${e && e.message}`);
+  }
+}
+let tmpBaseVerdict = null;
+/** TMP_BASE 与检出目录互不包含、且不在 git 工作树之下 → true（缓存一次）。导出给兄弟脚本的前提断言用 */
+function tmpBaseOutsideCheckout() {
+  if (tmpBaseVerdict === null) tmpBaseVerdict = judgeTmpBaseOutsideCheckout();
+  return tmpBaseVerdict.outside;
+}
+/** 不通过就抛错（带原因）；通过返回 true */
+function requireTmpBaseOutsideCheckout() {
+  if (!tmpBaseOutsideCheckout()) throw new Error(tmpBaseVerdict.why);
+  return true;
+}
 
 const SAME_SECOND_TEXT = '验收时间与任务创建时间在同一秒，请重新验收';
 const EARLIER_TEXT = '当前版本的验收记录早于任务创建时间，请重新验收';   // 手写期望，不从 acceptance.js 导入（导入就成了测自己）
@@ -88,6 +170,7 @@ let shuttingDown = false;   // 信号处理防重入：第二次信号直接忽�
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { if (shuttingDown) return; shuttingDown = true; runCleanupsSync(); process.exit(130); });
 
 function makeRunDir(tag) {
+  requireTmpBaseOutsideCheckout();   // 先判临时根在检出目录之外（判定里会把 TMP_BASE 建出来）
   fs.mkdirSync(TMP_BASE, { recursive: true });
   const dir = path.join(TMP_BASE, `${tag}-${process.pid}-${Date.now()}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -96,6 +179,7 @@ function makeRunDir(tag) {
 }
 // 只删 TMP_BASE 之下的目录（且不是 TMP_BASE 本身）；本目录树内没有符号链接 / junction
 function removeTree(dir) {
+  requireTmpBaseOutsideCheckout();   // 递归删除之前先确认临时根与检出目录互不包含（只删 TMP_BASE 之下的目录，这一道防的是 TMP_BASE 本身指到检出目录或其上级）
   const target = path.resolve(dir);
   if (!target.startsWith(TMP_BASE + path.sep)) throw new Error(`removeTree 拒绝删除临时根之外的路径：${target}`);
   try { fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 }); } catch (_) { /* 下面复查 */ }
@@ -248,9 +332,8 @@ function copyCode(codeRoot, dest, label, opts) {
   fs.copyFileSync(path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js'), path.join(dest, 'scripts', '_test-it-asset-ledger-server-wrapper.js'));
   fs.writeFileSync(path.join(dest, 'net-guard.js'), NET_GUARD_SRC);
   fs.writeFileSync(path.join(dest, 'sql-trace.js'), SQL_TRACE_SRC);
-  // wrapper 启动校验要求「真实库路径」存在（realpath / inode 比对）：放一个空占位文件；
-  // 服务的建库调用被 wrapper 重定向到临时库，这个占位文件永远不会被打开写入
-  fs.writeFileSync(path.join(dest, 'task_pool.db'), '');
+  // [#106 S4b2b] 不再在副本里预放「真实库路径」的空占位文件：wrapper 启动校验要求它存在（realpath / inode 比对），改由 wrapper 自己在「没有任何上层 .git 的源码副本」里建空占位
+  //   （检出目录里它什么都不做，后面的三层校验照旧 fail-closed 拒绝）。
   // 浏览器类套件（Playwright）需要静态页面：opts.withPublic 时一并复制 public/（约 5MB）
   if (opts && opts.withPublic) copyTree(path.join(codeRoot, 'public'), path.join(dest, 'public'));
   else {
@@ -284,7 +367,7 @@ function wrapDb(db, { readonly, gate }) {
     close: () => new Promise(r => db.close(() => r())),
   };
   if (!readonly) {
-    // 写连接的 run / get / all / exec 一律过闸：服务运行期间任何使用都计数并拒绝（读也不行——写连接会持有锁 / 触发检查点）
+    // 写连接的 run / get / all 一律过闸：服务运行期间任何使用都计数并拒绝（读也不行——写连接会持有锁 / 触发检查点）
     const guarded = (m, fn) => (s, a) => {
       if (gate && gate.up) { gate.writes++; return Promise.reject(new Error(`测试进程在服务运行期间使用写连接 ${m}（已计数并拒绝）：` + String(s).slice(0, 80))); }
       if (gate && m === 'run') gate.fixtureWrites++;
@@ -293,7 +376,8 @@ function wrapDb(db, { readonly, gate }) {
     api.run = guarded('run', (s, a) => p('run', s, a));
     api.get = guarded('get', (s, a) => p('get', s, a));
     api.all = guarded('all', (s, a) => p('all', s, a));
-    api.exec = guarded('exec', (s) => new Promise((resolve, reject) => db.exec(s, (err) => (err ? reject(err) : resolve()))));
+    // [#106 S4b2b] 原 api.exec（sqlite 的多语句 exec）整个文件没有任何调用点（已 grep 兄弟脚本 IO / LX / RL / SN / table-comment-migration / impl-verify），且 SELF_ISOLATED 文件里 .exec( 调用一律不许
+    //   （require 了 child_process 的文件里它会被当成 sink）：直接删除；万一有遗留调用点会 TypeError，不会悄悄只执行第一条语句。
   }
   return api;
 }
@@ -332,6 +416,9 @@ function killPid(pid) {
   if (pidAlive(pid)) noteCleanupFailure(`taskkill 之后进程 ${pid} 仍存在`);
 }
 
+/** NODE_OPTIONS 里加载一个预加载脚本的写法：`--require "<正斜杠路径>"`（被测服务与出网拦截探针共用同一种拼法） */
+function nodeRequireOption(file) { return `--require "${file.split(path.sep).join('/')}"`; }
+
 /** 服务日志里是否有 net-guard 的加载标记（pid 必须等于所起进程；pid 后用非数字边界，避免 12 匹配 123） */
 function guardMarkerPresent(logText, pid) {
   return new RegExp(`\\[net-guard\\] loaded pid=${pid}(?!\\d)`).test(logText);
@@ -366,7 +453,8 @@ async function schemaReady(dbPath) {
  */
 async function recoverDbAfterCrash(dbPath) {
   const base = path.resolve(dbPath);
-  if (!base.startsWith(TMP_BASE + path.sep) || base === REAL_DB_ABS) throw new Error(`recoverDbAfterCrash 拒绝处理临时根之外的文件：${base}`);
+  requireTmpBaseOutsideCheckout();
+  if (!base.startsWith(TMP_BASE + path.sep)) throw new Error(`recoverDbAfterCrash 拒绝处理临时根之外的文件：${base}`);
   const left = ['-journal', '-wal', '-shm'].filter(s => fs.existsSync(base + s));
   if (!fs.existsSync(base)) return '库文件尚未生成，无需恢复';
   if (!left.length) return '无 -journal / -wal / -shm 残留';
@@ -383,7 +471,8 @@ async function recoverDbAfterCrash(dbPath) {
 /** 删掉一个临时库及其 -journal / -wal / -shm（只允许删 TMP_BASE 之下的文件；仅作恢复失败时的兜底） */
 function removeDbFiles(dbPath) {
   const base = path.resolve(dbPath);
-  if (!base.startsWith(TMP_BASE + path.sep) || base === REAL_DB_ABS) throw new Error(`removeDbFiles 拒绝处理临时根之外的文件：${base}`);
+  requireTmpBaseOutsideCheckout();
+  if (!base.startsWith(TMP_BASE + path.sep)) throw new Error(`removeDbFiles 拒绝处理临时根之外的文件：${base}`);
   const removed = [];
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
     const f = base + suffix;
@@ -437,13 +526,13 @@ async function startInstance({ copyRoot, dbPath, tag, coldStart, injectCrashOnAt
       stdio: ['ignore', fd, fd],
       env: {
         ...process.env,
-        NODE_OPTIONS: `--require "${path.join(copyRoot, 'net-guard.js').split(path.sep).join('/')}" --require "${path.join(copyRoot, 'sql-trace.js').split(path.sep).join('/')}"`,
+        NODE_OPTIONS: `${nodeRequireOption(path.join(copyRoot, 'net-guard.js'))} ${nodeRequireOption(path.join(copyRoot, 'sql-trace.js'))}`,
         MC_SQL_TRACE_FILE: tracePath,
         NODE_PATH: path.join(ROOT, 'node_modules'),
         PORT: String(port),
         IA_TEST_DB_PATH: dbPath,
-        JWT_SECRET: process.env.JWT_SECRET || '',
-        DB_ENCRYPTION_KEY: process.env.DB_ENCRYPTION_KEY || '',
+        JWT_SECRET: JWT_SECRET_RUN,
+        DB_ENCRYPTION_KEY: DB_KEY_RUN,
         SYS_FASTLANE_ENABLE: '0',
         ...(extraEnv || {}),   // G1：时区实例用 { TZ: 'UTC' }（Windows 上对 Node 与 SQLite localtime 都生效，已探测）
         LOG_LEVEL: 'INFO',
@@ -546,11 +635,12 @@ function makeService({ copyRoot, dbPath, tag, gate, extraEnv }) {
 
 /**
  * 在临时目录建空库：用被测代码启动一次让它自建全部表 → 停服务 → 只读校验关键表与列 → 写库切 WAL。
- * 返回 { report }。全程不读本机 task_pool.db。
+ * 返回 { report }。全程不读本机业务库。
  */
 async function createFreshDb(svc, opts) {
   const dest = path.resolve(svc.dbPath);
-  if (!dest.startsWith(TMP_BASE + path.sep) || dest === REAL_DB_ABS) throw new Error(`库必须位于临时根内：${dest}`);
+  requireTmpBaseOutsideCheckout();
+  if (!dest.startsWith(TMP_BASE + path.sep)) throw new Error(`库必须位于临时根内：${dest}`);
   if (fs.existsSync(dest)) throw new Error(`期望是全新空库，但文件已存在：${dest}`);
   // 冷启动走确定性流程（startInstance coldStart）：建表信号 + 失败清理重来；MC_COLD_INJECT_CRASH=1 或 opts.injectCrash 是仅测试用的故障注入（首次冷启动必退出一次）
   await svc.start({ coldStart: true, injectCrashOnAttempt1: !!(opts && opts.injectCrash) || process.env.MC_COLD_INJECT_CRASH === '1' });
@@ -576,7 +666,7 @@ async function createFreshDb(svc, opts) {
     }
     const cfg = await rd.get('SELECT COUNT(*) AS c FROM system_configs');
     const cand = await rd.get('SELECT COUNT(*) AS c FROM sys_issues WHERE fast_release_auth_at IS NOT NULL');
-    report.push(`空库由被测代码自建：${tables.length} 张表（关键表与 config_rev / invalidated 列已核对）；冷启动第 ${coldAttempts} 次成功（建表信号=只读探测关键表与列）；不读本机 task_pool.db`);
+    report.push(`空库由被测代码自建：${tables.length} 张表（关键表与 config_rev / invalidated 列已核对）；冷启动第 ${coldAttempts} 次成功（建表信号=只读探测关键表与列）；不读本机业务库`);
     report.push(`system_configs 行数 = ${cfg.c}（无钉钉凭证 / 通知开关）；sys_issues 中 fast_release_auth_at 非空的行 = ${cand.c}（#73 到期扫描候选恒空）`);
     if (cfg.c !== 0 || cand.c !== 0) throw new Error('新建空库里出现了预期外的种子数据（凭证 / 到期扫描候选），不能启动做测试');
   } finally { await rd.close(); }
@@ -584,7 +674,7 @@ async function createFreshDb(svc, opts) {
 }
 
 function signToken(user) {
-  return jwt.sign({ id: user.id, username: user.username, role: user.role, display_name: user.display_name }, process.env.JWT_SECRET, { expiresIn: '2h' });
+  return jwt.sign({ id: user.id, username: user.username, role: user.role, display_name: user.display_name }, JWT_SECRET_RUN, { expiresIn: '2h' });
 }
 
 function makeApi(baseUrlOrGetter) {
@@ -663,30 +753,233 @@ async function waitFor(fn, timeoutMs = 4000, intervalMs = 60) {
 const settle = (ms = 500) => new Promise(r => setTimeout(r, ms));
 
 // ───────────────────────────── 测试主体 ─────────────────────────────
-const NET_PROBE_SRC = [
-  "const net = require('net');",
-  "const out = []; let n = 0;",
-  "function step() { if (++n === 11) { console.log(out.join('|')); process.exit(0); } }",
-  "const dgram = require('dgram'); const dns = require('dns');",
-  "const u = dgram.createSocket('udp4');",
-  "u.send(Buffer.from('x'), 9, '192.0.2.1', (e) => { out.push('udp:' + (e ? e.message : 'SENT')); u.close(); step(); });",
-  "dns.lookup('mc-blocked.example', (e) => { out.push('dns:' + (e ? e.message : 'RESOLVED')); step(); });",
+// [#106 S4b2b] 出网拦截探针：原来是一段 `node --require net-guard.js -e <源码串>` 的内联脚本；改成本文件自己的一个函数——被测进程用 `node <本文件> --net-probe` 起，
+//   NODE_OPTIONS 加载副本里的 net-guard（与起被测服务同一种拼法 nodeRequireOption）。逻辑逐行等价：11 项探针、完成计数 = 11 时打印 out.join('|') 并 exit(0)，8 秒超时打印 '|TIMEOUT' 并 exit(2)。
+function runNetProbe() {
+  const net = require('net');
+  const out = []; let n = 0;
+  function step() { if (++n === 11) { console.log(out.join('|')); process.exit(0); } }
+  const dgram = require('dgram'); const dns = require('dns');
+  const u = dgram.createSocket('udp4');
+  u.send(Buffer.from('x'), 9, '192.0.2.1', (e) => { out.push('udp:' + (e ? e.message : 'SENT')); u.close(); step(); });
+  dns.lookup('mc-blocked.example', (e) => { out.push('dns:' + (e ? e.message : 'RESOLVED')); step(); });
   // DNS 其余入口：dns.resolve4 / dns.promises.resolve4 / new dns.Resolver().resolve4（探针共 11 项，完成计数 = 11）
-  "dns.resolve4('mc-blocked.example', (e) => { out.push('r4:' + (e ? e.message : 'RESOLVED')); step(); });",
-  "dns.promises.resolve4('mc-blocked.example').then(() => { out.push('pr4:RESOLVED'); step(); }, (e) => { out.push('pr4:' + e.message); step(); });",
-  "new dns.Resolver().resolve4('mc-blocked.example', (e) => { out.push('rs4:' + (e ? e.message : 'RESOLVED')); step(); });",
-  "new dns.promises.Resolver().resolve4('mc-blocked.example').then(() => { out.push('prs4:RESOLVED'); step(); }, (e) => { out.push('prs4:' + e.message); step(); });",
-  "dns.resolve6('mc-blocked.example', (e) => { out.push('r6:' + (e ? e.message : 'RESOLVED')); step(); });",
-  "dns.reverse('192.0.2.1', (e) => { out.push('rev:' + (e ? e.message : 'RESOLVED')); step(); });",
-  "dns.lookupService('192.0.2.1', 80, (e) => { out.push('ls:' + (e ? e.message : 'RESOLVED')); step(); });",
-  "const a = net.connect({ host: '192.0.2.1', port: 1433 });",
-  "a.on('error', (e) => { out.push('ext:' + e.message); step(); });",
-  "a.on('connect', () => { out.push('ext:CONNECTED'); a.destroy(); step(); });",
-  "const b = net.connect({ host: '127.0.0.1', port: Number(process.env.PROBE_PORT) });",
-  "b.on('connect', () => { out.push('lo:CONNECTED'); b.destroy(); step(); });",
-  "b.on('error', (e) => { out.push('lo:' + e.message); step(); });",
-  "setTimeout(() => { console.log(out.join('|') + '|TIMEOUT'); process.exit(2); }, 8000);",
-].join('\n');
+  dns.resolve4('mc-blocked.example', (e) => { out.push('r4:' + (e ? e.message : 'RESOLVED')); step(); });
+  dns.promises.resolve4('mc-blocked.example').then(() => { out.push('pr4:RESOLVED'); step(); }, (e) => { out.push('pr4:' + e.message); step(); });
+  new dns.Resolver().resolve4('mc-blocked.example', (e) => { out.push('rs4:' + (e ? e.message : 'RESOLVED')); step(); });
+  new dns.promises.Resolver().resolve4('mc-blocked.example').then(() => { out.push('prs4:RESOLVED'); step(); }, (e) => { out.push('prs4:' + e.message); step(); });
+  dns.resolve6('mc-blocked.example', (e) => { out.push('r6:' + (e ? e.message : 'RESOLVED')); step(); });
+  dns.reverse('192.0.2.1', (e) => { out.push('rev:' + (e ? e.message : 'RESOLVED')); step(); });
+  dns.lookupService('192.0.2.1', 80, (e) => { out.push('ls:' + (e ? e.message : 'RESOLVED')); step(); });
+  const a = net.connect({ host: '192.0.2.1', port: 1433 });
+  a.on('error', (e) => { out.push('ext:' + e.message); step(); });
+  a.on('connect', () => { out.push('ext:CONNECTED'); a.destroy(); step(); });
+  const b = net.connect({ host: '127.0.0.1', port: Number(process.env.PROBE_PORT) });
+  b.on('connect', () => { out.push('lo:CONNECTED'); b.destroy(); step(); });
+  b.on('error', (e) => { out.push('lo:' + e.message); step(); });
+  setTimeout(() => { console.log(out.join('|') + '|TIMEOUT'); process.exit(2); }, 8000);
+}
+// 入口最前面识别 --net-probe：本进程只做探针，不进主流程（文件底部的 main 入口也据此跳过）
+const NET_PROBE_MODE = require.main === module && process.argv.includes('--net-probe');
+if (NET_PROBE_MODE) runNetProbe();
+
+// ───────────────────────────── wrapper 占位文件用例（S4b2b）─────────────────────────────
+/** 目录树快照：相对路径 → 字节数（文件）/ -1（目录）。只读，用来判「运行前后目录条目差集」 */
+function snapshotTree(dir) {
+  const out = new Map();
+  const walk = (d, rel) => {
+    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) { out.set(r, -1); walk(path.join(d, ent.name), r); } else out.set(r, fs.lstatSync(path.join(d, ent.name)).size);
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+/**
+ * wrapper 的「源码副本占位」行为（_test-it-asset-ledger-server-wrapper.js）：在 run 目录里建「wrapper + 桩 server 入口」的迷你副本——
+ *   (a) 上层放一个 .git 目录（模拟检出目录）：wrapper 不得建任何文件，三层校验照旧 fail-closed 退出 1（IA_TEST_DB_PATH 已存在，realpath 真实库路径抛错 → 拒绝），桩入口没有被执行；
+ *   (d) 上层有 .git、真实库与临时库都不存在：wrapper 不建任何文件，临时库不存在使 realpath / inode 两项校验都被跳过，桩入口照常被执行（与改前行为一致；(a) 与 (d) 合起来界定「拒绝」成立的条件 = 临时库已存在）；
+ *   (b) 上层没有 .git（源码副本）：wrapper 建出恰好一个 0 字节文件作占位（用运行前后目录树的差集判断，不写业务库文件名），桩入口被执行（退出 0）。
+ *   (c) 上层没有 .git 且临时库已存在（服务第二次启动的形态：三层校验要读真实库路径）：占位照建、校验走完、退出 0、桩入口被执行。
+ * 起 wrapper 用 F2 写法（脚本参数是 path.join(…, '<wrapper 文件名>')）。
+ */
+function runWrapperPlaceholderCases() {
+  const results = [];
+  const rec = (name, ok, detail) => {
+    const d = ok ? '' : String(detail === undefined ? '' : detail).slice(0, 600);
+    results.push({ name, ok: !!ok, detail: d });
+    if (!ok) console.log(`FAIL ${name}\n  ${d}`);
+  };
+  const STUB_MARK = 'STUB_ENTRY_RAN';
+  const build = (tag, withGit) => {
+    const base = makeRunDir(`wrapper-ph-${tag}`);
+    const app = path.join(base, 'app');
+    fs.mkdirSync(path.join(app, 'scripts'), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js'), path.join(app, 'scripts', '_test-it-asset-ledger-server-wrapper.js'));
+    fs.writeFileSync(path.join(app, 'server.js'), `console.log('${STUB_MARK}');\n`);
+    if (withGit) fs.mkdirSync(path.join(base, '.git'));
+    const tempDb = path.join(app, 'mini-temp.db');
+    return { base, app, tempDb };
+  };
+  const runWrapper = (m) => spawnSync(process.execPath, [path.join(m.app, 'scripts', '_test-it-asset-ledger-server-wrapper.js')], {
+    cwd: m.app, encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, IA_TEST_DB_PATH: m.tempDb, NODE_PATH: path.join(ROOT, 'node_modules') },
+  });
+  // (a) 上层有 .git
+  const a = build('a', true);
+  fs.writeFileSync(a.tempDb, '');   // 临时库已存在：这样三层校验才会走到「读真实库路径的 realpath」，缺文件时 fail-closed 退出 1
+  const aBefore = snapshotTree(a.base);
+  const ra = runWrapper(a);
+  const aAfter = snapshotTree(a.base);
+  const aNew = [...aAfter.keys()].filter(k => !aBefore.has(k));
+  rec('wrapper 占位 (a)：上层有 .git → 退出 1（三层校验 fail-closed 拒绝）', ra.status === 1, `status=${ra.status} signal=${ra.signal} stderr=${String(ra.stderr).slice(0, 300)}`);
+  rec('wrapper 占位 (a)：上层有 .git → 运行前后目录树没有任何新增条目（不在「检出目录」里建文件）', aNew.length === 0 && aAfter.size === aBefore.size, `新增=${aNew.join(',')}`);
+  rec('wrapper 占位 (a)：上层有 .git → 桩入口没有被执行', !String(ra.stdout).includes(STUB_MARK) && !String(ra.stderr).includes(STUB_MARK), `stdout=${String(ra.stdout).slice(0, 200)}`);
+  // (b) 上层没有 .git
+  const b = build('b', false);
+  const bBefore = snapshotTree(b.base);
+  const rb = runWrapper(b);
+  const bAfter = snapshotTree(b.base);
+  const bNew = [...bAfter.keys()].filter(k => !bBefore.has(k));
+  rec('wrapper 占位 (b)：上层没有 .git（源码副本）→ 退出 0', rb.status === 0, `status=${rb.status} signal=${rb.signal} stderr=${String(rb.stderr).slice(0, 300)}`);
+  rec('wrapper 占位 (b)：运行前后目录条目差集恰为一个 0 字节文件，且在副本根（app/）下', bNew.length === 1 && bAfter.get(bNew[0]) === 0 && /^app\/[^/]+$/.test(bNew[0]), `新增=${JSON.stringify(bNew.map(k => [k, bAfter.get(k)]))}`);
+  rec('wrapper 占位 (b)：桩入口被执行（require 到了副本里的入口）', String(rb.stdout).includes(STUB_MARK), `stdout=${String(rb.stdout).slice(0, 200)}`);
+  // (c) 上层没有 .git 且临时库已存在（服务第二次启动的真实形态：三层校验要读真实库路径）：占位照建，校验通过，桩入口被执行
+  const c = build('c', false);
+  fs.writeFileSync(c.tempDb, '');
+  const cBefore = snapshotTree(c.base);
+  const rc = runWrapper(c);
+  const cAfter = snapshotTree(c.base);
+  const cNew = [...cAfter.keys()].filter(k => !cBefore.has(k));
+  rec('wrapper 占位 (c)：源码副本 + 临时库已存在 → 退出 0（占位使 realpath / inode 校验能走完）且桩入口被执行', rc.status === 0 && String(rc.stdout).includes(STUB_MARK), `status=${rc.status} stdout=${String(rc.stdout).slice(0, 200)} stderr=${String(rc.stderr).slice(0, 300)}`);
+  rec('wrapper 占位 (c)：运行前后目录条目差集恰为一个 0 字节文件，且在副本根（app/）下', cNew.length === 1 && cAfter.get(cNew[0]) === 0 && /^app\/[^/]+$/.test(cNew[0]), `新增=${JSON.stringify(cNew.map(k => [k, cAfter.get(k)]))}`);
+  // (d) 上层有 .git，真实库路径与临时库都不存在：wrapper 什么都不建；②③ 两项校验都因临时库不存在被跳过，照常 require 入口——与改前行为一致（拒绝只在临时库已存在时才成立，见 (a)）
+  const d = build('d', true);
+  const dBefore = snapshotTree(d.base);
+  const rd = runWrapper(d);
+  const dAfter = snapshotTree(d.base);
+  const dNew = [...dAfter.keys()].filter(k => !dBefore.has(k));
+  rec('wrapper 占位 (d)：上层有 .git、真实库与临时库都不存在 → 退出 0 且桩入口被执行（校验被跳过，与改前行为一致）', rd.status === 0 && String(rd.stdout).includes(STUB_MARK), `status=${rd.status} signal=${rd.signal} stdout=${String(rd.stdout).slice(0, 200)} stderr=${String(rd.stderr).slice(0, 300)}`);
+  rec('wrapper 占位 (d)：上层有 .git → 检出侧没有建占位文件（运行前后目录树没有任何新增条目）', dNew.length === 0 && dAfter.size === dBefore.size && !fs.existsSync(d.tempDb), `新增=${dNew.join(',')}`);
+  return results;
+}
+
+// ───────────────────────────── 临时根判定用例（S4b2b M1）─────────────────────────────
+/**
+ * judgeTmpBaseOutsideCheckout(tmpBase, checkout) 的纯函数用例：在 run 目录里造「假检出目录」co，逐个方向判。
+ *   不通过：里面（含不存在的子目录：字面预判，不得 mkdir）· 相等 · 父级 · 祖父级 · 名为 ..foo 的子目录（判「在里面」）· 经 junction 才暴露的包含（建目录前的 realpath 预判，两个方向；含「外部 junction 指进检出目录、临时根是其下尚不存在的子目录」，检出目录里不得建出任何东西）·
+ *     临时根本身 / 上级有 .git（目录与文件两种；临时根尚不存在时一层都不得建出来）· 检出目录不存在（fail-closed）；
+ *   通过：兄弟目录 · 名为 ..foo 的兄弟目录 · 名字以检出目录名开头的兄弟（co2）；跨盘只对纯函数 pathContains 断言（不碰另一个盘）。
+ */
+function runTmpBaseCases() {
+  const results = [];
+  const rec = (name, ok, detail) => {
+    const d = ok ? '' : String(detail === undefined ? '' : detail).slice(0, 600);
+    results.push({ name, ok: !!ok, detail: d });
+    if (!ok) console.log(`FAIL ${name}\n  ${d}`);
+  };
+  const J = judgeTmpBaseOutsideCheckout;
+  const base = makeRunDir('tmpbase');
+  const co = path.join(base, 'co');
+  fs.mkdirSync(co);
+  const expectNo = (name, tb, ck, re) => { const v = J(tb, ck); rec(name, v.outside === false && re.test(v.why), JSON.stringify(v)); return v; };
+  const expectYes = (name, tb, ck) => { const v = J(tb, ck); rec(name, v.outside === true, JSON.stringify(v)); return v; };
+
+  const tbIn = path.join(co, 'tmp');
+  expectNo('临时根判定：临时根在检出目录里面 → 不通过（原因写「里面」，且是字面预判拒绝的）', tbIn, co, /里面.*（字面路径）/);
+  rec('临时根判定：在里面时字面预判先拒绝，没有 mkdir 出临时根', !fs.existsSync(tbIn), tbIn);
+  expectNo('临时根判定：临时根就是检出目录（相等）→ 不通过', co, co, /里面或就是.*（字面路径）/);
+  expectNo('临时根判定：临时根是检出目录的父级 → 不通过（原因写「上级」，字面预判）', base, co, /上级（字面路径）/);
+  const deep = path.join(base, 'a', 'b', 'deep-co');
+  fs.mkdirSync(deep, { recursive: true });
+  expectNo('临时根判定：临时根是检出目录的祖父级以上 → 不通过（原因写「上级」，字面预判）', base, deep, /上级（字面路径）/);
+  const tbDots = path.join(co, '..foo');
+  expectNo('临时根判定：名为 ..foo 的子目录是「在里面」（不能被当成 .. 开头的外部路径）', tbDots, co, /里面.*（字面路径）/);
+  rec('临时根判定：..foo 子目录同样是字面预判拒绝，没有 mkdir', !fs.existsSync(tbDots), tbDots);
+  expectYes('临时根判定：兄弟目录 → 通过', path.join(base, 'tb-sibling'), co);
+  expectYes('临时根判定：名为 ..foo 的兄弟目录 → 通过', path.join(base, '..foo'), co);
+  expectYes('临时根判定：名字以检出目录名开头的兄弟（co2 vs co）→ 通过（不是字符串前缀比较）', path.join(base, 'co2'), co);
+  expectNo('临时根判定：检出目录不存在（realpath 抛错）→ fail-closed 不通过，不当成「在外面」', path.join(base, 'tb-failclosed'), path.join(base, 'no-such-checkout'), /fail-closed/);
+  rec('临时根判定：默认参数的判定与缓存结果一致（当前运行的临时根与检出目录互不包含）', J().outside === true && tmpBaseOutsideCheckout() === true, JSON.stringify(J()));
+
+  // realpath 才暴露的包含：junction（不依赖管理员权限）。两个 junction 在函数结尾先拆掉，再让 run 目录的清理去删普通目录
+  const links = [];
+  const mkJunction = (target, link) => { fs.symlinkSync(target, link, 'junction'); links.push({ target, link }); };
+  try {
+    const realCo = path.join(base, 'real-co');
+    fs.mkdirSync(realCo);
+    const coLink = path.join(base, 'colnk');
+    mkJunction(realCo, coLink);
+    expectNo('临时根判定：检出目录经 junction 指到真实目录，临时根在真实目录里面（尚不存在）→ 建目录前的 realpath 预判「里面」不通过', path.join(realCo, 'tmp'), coLink, /里面.*（realpath，建目录前）/);
+    rec('临时根判定：上一条被拒绝时没有建出临时根', !fs.existsSync(path.join(realCo, 'tmp')), path.join(realCo, 'tmp'));
+    // 19b-M1：外部 junction 指向检出目录，临时根是 junction 下尚不存在的子目录——字面路径看起来在检出目录之外，mkdir 会穿过 junction 在检出目录里建目录；必须在建目录之前拒绝，检出目录里不得出现新目录
+    const jIn = path.join(base, 'jl-into-co');
+    mkJunction(co, jIn);
+    const coBefore = fs.readdirSync(co).sort().join('|');
+    expectNo('临时根判定：外部 junction 指向检出目录，临时根是 junction 下尚不存在的子目录 → 建目录前预判「里面」不通过', path.join(jIn, 'newsub', 'deeper'), co, /里面.*（realpath，建目录前）/);
+    rec('临时根判定：上一条被拒绝时检出目录里没有建出任何新条目（mkdir 没有穿过 junction）', fs.readdirSync(co).sort().join('|') === coBefore && !fs.existsSync(path.join(co, 'newsub')), `前=${coBefore} 后=${fs.readdirSync(co).sort().join('|')}`);
+    const deepRoot = path.join(base, 'deep-root');
+    const deepCo = path.join(deepRoot, 'co3');
+    fs.mkdirSync(deepCo, { recursive: true });
+    const tbLink = path.join(base, 'tblnk');
+    mkJunction(deepRoot, tbLink);
+    expectNo('临时根判定：临时根经 junction 指到检出目录的上级 → 建目录前的 realpath 预判「上级」不通过', tbLink, deepCo, /上级（realpath，建目录前）/);
+    // .git 只出现在 realpath 之后的祖先链上（字面路径的祖先链上没有）：junction 指向 git 工作树的**子目录**（.git 在上一层），临时根是其下尚不存在的子目录——
+    //   lstat 穿过 junction 只能看到 sub 这一层，看不到上一层的 .git；只查字面链的实现（变异 H5c）判通过
+    const gw = path.join(base, 'gw');
+    fs.mkdirSync(path.join(gw, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(gw, 'sub'));
+    const gwLink = path.join(base, 'jl-into-gw');
+    mkJunction(path.join(gw, 'sub'), gwLink);
+    expectNo('临时根判定：.git 只在 realpath 之后的祖先链上（junction 指向 git 工作树的子目录，临时根是其下尚不存在的子目录）→ 不通过', path.join(gwLink, 'tb-new'), co, /git 工作树/);
+    rec('临时根判定：上一条被拒绝时没有穿过 junction 建出临时根', !fs.existsSync(path.join(gw, 'sub', 'tb-new')), path.join(gw, 'sub', 'tb-new'));
+    // .git 只出现在字面路径的祖先链上（realpath 之后没有）：字面路径在 git 工作树 G 里，经 G/j junction 跳到树外——只查 realpath 链的实现（变异 H5d）判通过
+    const gB = path.join(base, 'gB');
+    fs.mkdirSync(path.join(gB, '.git'), { recursive: true });
+    const outB = path.join(base, 'outB');
+    fs.mkdirSync(outB);
+    const gbLink = path.join(gB, 'j');
+    mkJunction(outB, gbLink);
+    expectNo('临时根判定：.git 只在字面路径的祖先链上（字面路径在 git 工作树里、经 junction 跳到树外）→ 不通过', path.join(gbLink, 'tb'), co, /git 工作树/);
+    rec('临时根判定：上一条被拒绝时没有穿过 junction 建出临时根', !fs.existsSync(path.join(outB, 'tb')), path.join(outB, 'tb'));
+  } catch (e) {
+    rec('临时根判定：junction 用例造链接失败（本机不允许建 junction 时需要显式处理，不能静默跳过）', false, e && e.message);
+  } finally {
+    for (const { target, link } of links) {
+      try { fs.rmdirSync(link); } catch (e) { noteCleanupFailure(`junction 拆除失败：${link}：${e && e.message}`); }
+      if (fs.existsSync(link) || !fs.existsSync(target)) noteCleanupFailure(`junction 拆除后状态不对（链接仍在或目标丢失）：${link} -> ${target}`);
+    }
+  }
+
+  // 临时根本身或上级有 .git
+  const gr = path.join(base, 'gr');
+  fs.mkdirSync(path.join(gr, '.git'), { recursive: true });
+  expectNo('临时根判定：临时根的上级有 .git 目录 → 不通过（原因写「git 工作树」）', path.join(gr, 'tb'), co, /git 工作树/);
+  rec('临时根判定：上一条被拒绝时没有建出临时根（.git 查找在建目录之前完成）', !fs.existsSync(path.join(gr, 'tb')), path.join(gr, 'tb'));
+  expectNo('临时根判定：临时根在 git 工作树下且尚不存在（多层）→ 不通过，且一层都没建出来', path.join(gr, 'not-yet', 'deeper', 'tb'), co, /git 工作树/);
+  rec('临时根判定：上一条被拒绝时没有建出 not-yet 目录', !fs.existsSync(path.join(gr, 'not-yet')), path.join(gr, 'not-yet'));
+  const gr2 = path.join(base, 'gr2');
+  fs.mkdirSync(gr2);
+  fs.writeFileSync(path.join(gr2, '.git'), 'gitdir: elsewhere\n');
+  expectNo('临时根判定：临时根的上级有 .git 文件（worktree 形态）→ 不通过', path.join(gr2, 'x', 'tb'), co, /git 工作树/);
+  const gr3 = path.join(base, 'gr3');
+  fs.mkdirSync(path.join(gr3, '.git'), { recursive: true });
+  expectNo('临时根判定：临时根本身含 .git → 不通过', gr3, co, /git 工作树/);
+  expectYes('临时根判定：对照——同样的兄弟目录结构，上层没有 .git → 通过', path.join(base, 'no-git-parent', 'tb'), co);
+
+  // 跨盘
+  if (process.platform === 'win32') {
+    // 纯函数断言（19b N3）：只对 pathContains 用另一个盘符的虚构路径做断言，不再对另一个盘的真实目录调用判定函数（判定函数会 mkdir / 读真实目录）
+    const mine = path.parse(path.resolve(base)).root.slice(0, 1).toUpperCase();
+    const otherLetter = mine === 'D' ? 'E' : 'D';
+    const other = `${otherLetter}:\\any\\dir`;
+    rec('临时根判定：跨盘的路径互不包含（path.relative 返回绝对路径，不被当成「在里面」；纯函数断言，不碰另一个盘）', pathContains(other, co) === false && pathContains(co, other) === false, `${other} vs ${co}`);
+  } else {
+    console.log('  [tmpbase] 非 Windows，跨盘断言跳过');
+  }
+  return results;
+}
 
 // K1 / L1 写入点的变异锚点表：pre = 前置查询的 [from, to]；stmt = 语句级条件的 [from, to]（stmtAll = [from, to, 命中次数]：同形语句多处时整体替换）
 const LINK_MUTATIONS = {
@@ -1099,11 +1392,12 @@ async function runSuite(cfg) {
     ctx.traceLastSeq = () => { const r = ctx.traceRecords(); return r.length ? r[r.length - 1].seq : 0; };
     ctx.rev = async (id) => (await rd.get('SELECT config_rev FROM data_models WHERE id = ?', [id])).config_rev;
     ctx.row = (id) => rd.get('SELECT * FROM data_models WHERE id = ?', [id]);
-    check('前提：被测服务端口不是 3000，库不是本机真实库，且不是从本机库复制而来', svc.port !== 3000 && path.resolve(dbPath) !== REAL_DB_ABS, `port=${svc.port}`);
+    check('前提：被测服务端口不是 3000，库在检出目录之外的临时根里', svc.port !== 3000 && tmpBaseOutsideCheckout() && path.resolve(dbPath).startsWith(TMP_BASE + path.sep), `port=${svc.port} tmpBaseOutside=${tmpBaseOutsideCheckout()}`);
     check('前提：被测服务日志里有 net-guard 加载标记（pid 与所起进程一致）——服务确实加载了出网拦截',
       svc.inst.guardLoaded === true && guardMarkerPresent(fs.readFileSync(svc.inst.logPath, 'utf8'), svc.inst.pid), `pid=${svc.inst.pid}`);
     // 出网拦截探针：用与被测服务进程同一份预加载脚本起一个探针进程——外部地址（TEST-NET-1 保留段）必须被拒，回环必须放行
-    const probe = spawnSync(process.execPath, ['--require', path.join(copyRoot, 'net-guard.js'), '-e', NET_PROBE_SRC], { encoding: 'utf8', timeout: 20000, env: { ...process.env, PROBE_PORT: String(svc.port) } });
+    //   [#106 S4b2b] 探针进程 = 本文件自己带 --net-probe 再起一次（node <本文件> --net-probe），预加载经 NODE_OPTIONS 注入副本里的 net-guard（与起被测服务同一种拼法）
+    const probe = spawnSync(process.execPath, [__filename, '--net-probe'], { encoding: 'utf8', timeout: 20000, env: { ...process.env, NODE_OPTIONS: nodeRequireOption(path.join(copyRoot, 'net-guard.js')), PROBE_PORT: String(svc.port) } });
     const probeOut = `${probe.stdout || ''}`.trim();
     // 探针完成计数 = 11 项；进程必须正常退出（status 0、无 signal、无 error、输出不含 TIMEOUT），且 11 个结果标签各恰好出现一次
     const probeTags = probeOut.split('|').map(x => x.split(':')[0]);
@@ -2095,7 +2389,7 @@ const ATTRIBUTION = {
 function classifyWindow(win) {
   return win.map((r) => {
     const s = stripSql(r.sql);
-    const m = /config_rev\s*=\s*config_rev\s*\+\s*(\?|\d+)/i.exec(s);
+    const m = String(s).match(/config_rev\s*=\s*config_rev\s*\+\s*(\?|\d+)/i);   // [#106 S4b2b] 原 .exec(s)：非全局正则的 match 结果同形；SELF_ISOLATED 文件里 .exec( 一律不许
     let kind = null, amount = null;
     if (m) {
       if (m[1] === '?') { kind = 'inline'; amount = Number(r.params[(s.slice(0, m.index).match(/\?/g) || []).length]); }
@@ -3201,19 +3495,23 @@ async function runReopen(ctx) {
 
 // ───────────────────────────── 主流程 ─────────────────────────────
 async function main() {
-  if (!process.env.JWT_SECRET || !process.env.DB_ENCRYPTION_KEY) { console.log('FAIL 缺少 JWT_SECRET / DB_ENCRYPTION_KEY（读自 wbs-server/.env）'); process.exit(1); }
   let pass = 0, fail = 0;
   const count = (r) => { for (const x of r) { if (x.ok) pass++; else fail++; } };
 
-  // 调试用过滤（缺省全跑）：--only=real,tz,tzBroken,n1,tzr,tzjs,h3x,h2x 只跑所列的基础套件（不带 --mut 时不跑变异）；--mut=<id,id> 只跑所列变异
+  // 调试用过滤（缺省全跑）：--only=real,tz,tzBroken,n1,tzr,tzjs,h3x,h2x,p57,wrapper,tmpbase 只跑所列的基础套件（不带 --mut 时不跑变异）；--mut=<id,id> 只跑所列变异
   const argOf = (k) => { const a = process.argv.find(x => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3).split(',').filter(Boolean) : null; };
   const ONLY = argOf('only');
   const MUTF = argOf('mut');
   const want = (k) => !ONLY || ONLY.includes(k);
   // 收口批 2 LOW-6：过滤名拼错不得静默空转出绿——--only 的套件名必须在已知集合内（空值也不行），--mut 的变异名在变异清单建好后同样核对；未知一律 exit 2
-  const ONLY_KNOWN = ['real', 'tz', 'tzBroken', 'n1', 'h3x', 'h2x', 'p57', 'tzr', 'tzjs'];
+  const ONLY_KNOWN = ['real', 'tz', 'tzBroken', 'n1', 'h3x', 'h2x', 'p57', 'tzr', 'tzjs', 'wrapper', 'tmpbase'];
   if (ONLY && (ONLY.length === 0 || ONLY.some(x => !ONLY_KNOWN.includes(x)))) { console.log(`FAIL 未知的 --only 套件名：${ONLY.filter(x => !ONLY_KNOWN.includes(x)).join(',') || '（空）'}（已知：${ONLY_KNOWN.join(',')}）`); process.exit(2); }
   if (MUTF && MUTF.length === 0) { console.log('FAIL --mut 没有给出变异名'); process.exit(2); }
+
+  // 0. [#106 S4b2b] wrapper 占位文件用例（迷你副本，不起被测服务）
+  if (want('wrapper')) count(runWrapperPlaceholderCases());
+  // 0b. [#106 S4b2b] 临时根判定的纯函数用例（假检出目录，不起服务）
+  if (want('tmpbase')) count(runTmpBaseCases());
 
   // 1. 真实套件
   const real = want('real') ? await runSuite({ groups: new Set(['accounting', 'gates', 'reopen', 'states', 'k']), mutation: null, quiet: false }) : null;
@@ -3240,7 +3538,7 @@ async function main() {
   if (want('tzr')) { const tzrRun = await runSuite({ groups: new Set(['tzr']), mutation: null, quiet: false, coverageExempt: true, tzRetry: true }); count(tzrRun.results); }   // 不钉 TZ：Windows 上 TZ=Asia/Shanghai 只影响 Node、不影响 SQLite localtime（实测差 7 小时），本机即北京时间，与其余「正常实例」套件同口径
   // R4：JS 时区检测抛异常 → unknown → SQLite 自检通过后 ok
   if (want('tzjs')) { const tzjsRun = await runSuite({ groups: new Set(['tzjs']), mutation: null, quiet: false, coverageExempt: true, tzJsFail: true }); count(tzjsRun.results); }
-  if (real) console.log(`  服务运行期间测试进程写库次数 = ${real.writeEvidence.writesWhileUp}（夹具写入 ${real.writeEvidence.fixtureWrites} 次，全部发生在服务停止期间；运行期只持只读连接）；不读本机 task_pool.db`);
+  if (real) console.log(`  服务运行期间测试进程写库次数 = ${real.writeEvidence.writesWhileUp}（夹具写入 ${real.writeEvidence.fixtureWrites} 次，全部发生在服务停止期间；运行期只持只读连接）；不读本机业务库`);
 
   // 2. 变异自证：须判红，且红灯与变异有因果（首条失败断言名按前缀核对）
   const mutations = [
@@ -3317,7 +3615,7 @@ async function main() {
     { id: 'h2-guard-off', label: 'M-H2 PUT 两条最终 UPDATE 的 config_rev 版本条件改成恒真（读旧行之后他人改了同一行的注入用例须判红）', groups: ['h2x'], expectPrefix: 'H2x ', runCfg: { injectH2: true } },
     { id: 'h2-nodim-guard-off', label: 'M-H2a PUT「不带 dim_config」那条 UPDATE 的版本条件改成恒真（只该被「不带 dim_config 分支」用例判红；「带 dim_config 分支」用例须全绿）', groups: ['h2x'], expectPrefix: 'H2x 不带 dim_config 分支：读旧行之后', mustPass: ['H2x 带 dim_config 分支', 'H2x 对照'], runCfg: { injectH2: true } },
     { id: 'h2-dim-guard-off', label: 'M-H2b PUT「带 dim_config」那条 UPDATE 的版本条件改成恒真（只该被「带 dim_config 分支」用例判红；「不带 dim_config 分支」用例须全绿）', groups: ['h2x'], expectPrefix: 'H2x 带 dim_config 分支：读旧行之后', mustPass: ['H2x 不带 dim_config 分支', 'H2x 对照'], runCfg: { injectH2: true } },
-    { id: 'h2-404-writes', label: 'M-H2c PUT 404 分流先把请求里的 table_comment 写库再回 404（状态码仍对；整行零落库用例须判红——门槛只要求不带 dim_config 分支，404 分流在 server.js 只有一处，两个分支共用）', groups: ['h2x'], expectPrefix: 'H2x 不带 dim_config 分支：404 时本请求零落库', runCfg: { injectH2: true } },
+    { id: 'h2-404-writes', label: 'M-H2c PUT 404 分流先把请求里的 table_comment 写库再回 404（状态码仍对；整行零落库用例须判红——门槛只要求不带 dim_config 分支，404 分流在服务端入口文件里只有一处，两个分支共用）', groups: ['h2x'], expectPrefix: 'H2x 不带 dim_config 分支：404 时本请求零落库', runCfg: { injectH2: true } },
     { id: 'h3-null-clause-off', label: 'M-H3d /api/update 清空关联 UPDATE 漏写 OR linked_model_id IS NULL（DONE 且本来没关联、只改标题的放行侧对照须判红；前置检查仍在，只有语句条件这一层漏）', groups: ['gates'], expectPrefix: 'H3 对照：DONE 且本来没关联' },
     { id: 'h3-guard-off', label: 'M-H3c /api/update 前置检查与语句级条件一起去掉（现有 H3 用例须判红）', groups: ['gates'], expectPrefix: 'H3 DONE 任务' },
   ];
@@ -3350,10 +3648,10 @@ async function main() {
   process.exitCode = fail === 0 ? 0 : 1;
 }
 
-if (require.main === module) {
+if (require.main === module && !NET_PROBE_MODE) {
   main().catch((e) => { console.log(`FAIL 套件异常：${e && e.stack || e}`); process.exitCode = 1; }).finally(() => {
     runCleanupsSync();
     if (cleanupFailures.length) { console.log(`FAIL 清理复查：${cleanupFailures.length} 项未通过（临时目录 / 进程仍在）\n  ${cleanupFailures.join('\n  ')}`); process.exitCode = 1; }
   });
 }
-module.exports = { waitTzConclusion, cleanupFailures, noteCleanupFailure, pidAlive, guardMarkerPresent, ROOT, REAL_DB_ABS, TMP_BASE, makeRunDir, removeTree, copyTree, copyCode, replaceExactlyOnce, startInstance, makeService, createFreshDb, openWriter, openReader, makeApi, makeFixtures, signToken, registerCleanup, runCleanupsSync, waitFor, settle };
+module.exports = { JWT_SECRET_RUN, DB_KEY_RUN, waitTzConclusion, cleanupFailures, noteCleanupFailure, pidAlive, guardMarkerPresent, ROOT, tmpBaseOutsideCheckout, TMP_BASE, makeRunDir, removeTree, copyTree, copyCode, replaceExactlyOnce, startInstance, makeService, createFreshDb, openWriter, openReader, makeApi, makeFixtures, signToken, registerCleanup, runCleanupsSync, waitFor, settle };

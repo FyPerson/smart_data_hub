@@ -5,11 +5,22 @@
  * mock 全局 fetch，不依赖真钉钉、不依赖运行中的服务。
  *
  * 运行：node scripts/verify-dingtalk-file-helper.js
+ *
+ * [#106 S3b] 外部调用闸（utils/external-gate.js）：在隔离模式的检出里（线检出 / 带 SDH_* 的环境）dingtalk-notify 的 fetchWithTimeout 会先问闸门，
+ *   闸门把请求截给钉钉替身，本脚本替换的 global.fetch 就收不到任何调用（断言全部变成「替身的应答」）。本脚本测的是 helper 自己对 global.fetch 的请求构造与响应解析，
+ *   与运行模式无关，所以显式向闸门注入「正常模式」配置（_setConfigProviderForTest），并在跑断言之前核对闸门确实放行（dingtalkFetchOverride() === null）。
+ *   本脚本不联网、不开库、不起服务（global.fetch 是进程内替身），因此不需要 test-env.ready()。
  */
 'use strict';
 
 const assert = require('assert');
+const externalGate = require('../utils/external-gate.js');
+externalGate._setConfigProviderForTest(() => ({ mode: 'normal', kind: 'normal', external: 'real', refuse: false }));
 const d = require('../utils/dingtalk-notify.js');
+if (externalGate.dingtalkFetchOverride() !== null) {
+    console.error('前置失败：注入正常模式配置后外部调用闸仍在截流（dingtalkFetchOverride() 非 null），global.fetch 替身不会被调用，本脚本的断言没有意义');
+    process.exit(1);
+}
 
 let passed = 0, failed = 0;
 async function t(name, fn) {

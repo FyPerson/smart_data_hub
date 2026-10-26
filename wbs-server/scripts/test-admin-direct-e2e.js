@@ -2,7 +2,7 @@
  * v1.72.3 admin 直派模式 e2e 烟雾测试
  *
  * 用法：node scripts/test-admin-direct-e2e.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *
  * 覆盖用例：
  *   T1  admin 直派创建 → EXPORTING + assign_mode='admin_direct' + 字段写入正确
@@ -24,7 +24,6 @@
 'use strict';
 
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
 const createdFixtureIds = [];
@@ -66,36 +65,32 @@ async function notify(token, id) {
 }
 
 async function getCollab(id) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
         db.get('SELECT * FROM collab_requests WHERE id=?', [id], (err, row) => {
-            db.close();
-            err ? reject(err) : resolve(row);
+            // [#106 S4c-A2] 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); });
         });
     });
 }
 
 async function getOpLogs(id) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
         db.all('SELECT * FROM collab_operation_logs WHERE collab_request_id=? ORDER BY id DESC',
             [id], (err, rows) => {
-                db.close();
-                err ? reject(err) : resolve(rows || []);
+                db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(rows || []); });
             });
     });
 }
 
-const tests = [];
-
-function defTest(name, fn) {
-    tests.push({ name, fn });
-}
+// [#106 S4c-A2] 用例登记成数组字面量条目（原先是模块顶层的多次 defTest(...) 调用）：静态守卫要求模块顶层只有声明与一个入口调用
+const tests = [
 
 // ============================================================
 // T1：admin 直派创建
 // ============================================================
-defTest('T1: admin 直派创建 → EXPORTING + assign_mode=admin_direct', async () => {
+{ name: 'T1: admin 直派创建 → EXPORTING + assign_mode=admin_direct', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const res = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T1_${Date.now()}`);
     if (res.status !== 200) throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
@@ -114,12 +109,12 @@ defTest('T1: admin 直派创建 → EXPORTING + assign_mode=admin_direct', async
     const logs = await getOpLogs(res.body.id);
     const createLog = logs.find(l => l.operation_type === 'ADMIN_DIRECT_CREATE');
     if (!createLog) throw new Error('ADMIN_DIRECT_CREATE 日志缺失');
-});
+} },
 
 // ============================================================
 // T2：非 admin 调改派 → 403
 // ============================================================
-defTest('T2: 非 admin（dev1）调改派 → 403', async () => {
+{ name: 'T2: 非 admin（dev1）调改派 → 403', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const dev1Token = await fx.signAs(fx.DEV1_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T2_${Date.now()}`);
@@ -127,12 +122,12 @@ defTest('T2: 非 admin（dev1）调改派 → 403', async () => {
 
     const res = await reassign(dev1Token, cr.body.id, fx.PUBLISHER_ID);
     if (res.status !== 403) throw new Error(`expected 403, got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // T3：同时填 contact_person + exporter → 400
 // ============================================================
-defTest('T3: 同时填 contact_person + exporter → 400 CONFLICTING_ASSIGN_MODE', async () => {
+{ name: 'T3: 同时填 contact_person + exporter → 400 CONFLICTING_ASSIGN_MODE', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const res = await fx.apiCall('POST', '/api/collab/requests', adminToken, {
         oa_request_no: `OA_AD_T3_${Date.now()}`,
@@ -146,12 +141,12 @@ defTest('T3: 同时填 contact_person + exporter → 400 CONFLICTING_ASSIGN_MODE
     });
     if (res.status !== 400) throw new Error(`expected 400, got ${res.status} ${JSON.stringify(res.body)}`);
     if (res.body.code !== 'CONFLICTING_ASSIGN_MODE') throw new Error(`expected code CONFLICTING_ASSIGN_MODE, got ${res.body.code}`);
-});
+} },
 
 // ============================================================
 // T4：两者都不填 → 400 MISSING_ASSIGN_MODE
 // ============================================================
-defTest('T4: 两者都不填 → 400 MISSING_ASSIGN_MODE', async () => {
+{ name: 'T4: 两者都不填 → 400 MISSING_ASSIGN_MODE', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const res = await fx.apiCall('POST', '/api/collab/requests', adminToken, {
         oa_request_no: `OA_AD_T4_${Date.now()}`,
@@ -163,21 +158,21 @@ defTest('T4: 两者都不填 → 400 MISSING_ASSIGN_MODE', async () => {
     });
     if (res.status !== 400) throw new Error(`expected 400, got ${res.status} ${JSON.stringify(res.body)}`);
     if (res.body.code !== 'MISSING_ASSIGN_MODE') throw new Error(`expected MISSING_ASSIGN_MODE, got ${res.body.code}`);
-});
+} },
 
 // ============================================================
 // T5：非 admin 走 admin_direct → 403（被 requireAdmin 中间件拦）
 // ============================================================
-defTest('T5: 非 admin 走 admin_direct 创建 → 403', async () => {
+{ name: 'T5: 非 admin 走 admin_direct 创建 → 403', fn: async () => {
     const dev1Token = await fx.signAs(fx.DEV1_ID);
     const res = await createAdminDirect(dev1Token, fx.EXPORTER_ID, `OA_AD_T5_${Date.now()}`);
     if (res.status !== 403) throw new Error(`expected 403, got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // T6 + T7：admin 改派 + 改派同一人
 // ============================================================
-defTest('T6+T7: admin 改派 → 字段更新 + 日志 + 同人改派也允许', async () => {
+{ name: 'T6+T7: admin 改派 → 字段更新 + 日志 + 同人改派也允许', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T67_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -197,12 +192,12 @@ defTest('T6+T7: admin 改派 → 字段更新 + 日志 + 同人改派也允许',
     const logs = await getOpLogs(cr.body.id);
     const reassignLogs = logs.filter(l => l.operation_type === 'ADMIN_DIRECT_REASSIGN');
     if (reassignLogs.length !== 2) throw new Error(`expected 2 reassign logs, got ${reassignLogs.length}`);
-});
+} },
 
 // ============================================================
 // T8：admin 切回流转
 // ============================================================
-defTest('T8: admin 切回流转 → PENDING_ASSIGN + exporter NULL + assign_mode 保留', async () => {
+{ name: 'T8: admin 切回流转 → PENDING_ASSIGN + exporter NULL + assign_mode 保留', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T8_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -221,12 +216,12 @@ defTest('T8: admin 切回流转 → PENDING_ASSIGN + exporter NULL + assign_mode
     const fbLog = logs.find(l => l.operation_type === 'ADMIN_DIRECT_FALLBACK');
     if (!fbLog) throw new Error('ADMIN_DIRECT_FALLBACK log missing');
     if (!fbLog.reason || !fbLog.reason.includes('测试切回原因')) throw new Error(`reason missing fallback_reason text: ${fbLog.reason}`);
-});
+} },
 
 // ============================================================
 // T9：admin 直派单作废
 // ============================================================
-defTest('T9: admin 直派单 EXPORTING 状态可作废 → 200', async () => {
+{ name: 'T9: admin 直派单 EXPORTING 状态可作废 → 200', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T9_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -236,12 +231,12 @@ defTest('T9: admin 直派单 EXPORTING 状态可作废 → 200', async () => {
 
     const collab = await getCollab(cr.body.id);
     if (!collab.archived_at) throw new Error('archived_at not set');
-});
+} },
 
 // ============================================================
 // T10：normal 模式协作单调改派 → 409
 // ============================================================
-defTest('T10: normal 模式协作单调改派 → 409 NOT_ADMIN_DIRECT_MODE', async () => {
+{ name: 'T10: normal 模式协作单调改派 → 409 NOT_ADMIN_DIRECT_MODE', fn: async () => {
     const ctx = await fx.createPendingFixture();  // 创建 normal 模式 PENDING 协作单
     createdFixtureIds.push(ctx.id);
 
@@ -250,12 +245,12 @@ defTest('T10: normal 模式协作单调改派 → 409 NOT_ADMIN_DIRECT_MODE', as
     const res = await reassign(adminToken, ctx.id, fx.PUBLISHER_ID);
     if (res.status !== 409) throw new Error(`expected 409, got ${res.status} ${JSON.stringify(res.body)}`);
     if (res.body.code !== 'NOT_ADMIN_DIRECT_MODE') throw new Error(`code expected NOT_ADMIN_DIRECT_MODE, got ${res.body.code}`);
-});
+} },
 
 // ============================================================
 // T11：admin 直派 EXPORTING /notify 权限（仅 admin）
 // ============================================================
-defTest('T11: admin 直派单 EXPORTING /notify 非 admin → 403', async () => {
+{ name: 'T11: admin 直派单 EXPORTING /notify 非 admin → 403', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T11_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -264,12 +259,12 @@ defTest('T11: admin 直派单 EXPORTING /notify 非 admin → 403', async () => 
     const dev1Token = await fx.signAs(fx.DEV1_ID);
     const res = await notify(dev1Token, cr.body.id);
     if (res.status !== 403) throw new Error(`expected 403, got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // T12：改派历史 endpoint
 // ============================================================
-defTest('T12: GET /reassign-history → 返回改派记录数组', async () => {
+{ name: 'T12: GET /reassign-history → 返回改派记录数组', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T12_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -283,12 +278,12 @@ defTest('T12: GET /reassign-history → 返回改派记录数组', async () => {
     if (res.status !== 200) throw new Error(`expected 200, got ${res.status}`);
     if (!Array.isArray(res.body.logs)) throw new Error('logs not array');
     if (res.body.logs.length !== 3) throw new Error(`expected 3 logs, got ${res.body.logs.length}`);
-});
+} },
 
 // ============================================================
 // T13：mutex 串行化（并发 reassign + fallback）
 // ============================================================
-defTest('T13: mutex 串行化 reassign + fallback 并发 → 1 成功 1 不会 deadlock', async () => {
+{ name: 'T13: mutex 串行化 reassign + fallback 并发 → 1 成功 1 不会 deadlock', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_AD_T13_${Date.now()}`);
     createdFixtureIds.push(cr.body.id);
@@ -311,12 +306,15 @@ defTest('T13: mutex 串行化 reassign + fallback 并发 → 1 成功 1 不会 d
     if (okCount < 1) throw new Error(`expected at least 1 success, r1=${r1.status} r2=${r2.status}`);
     // 不能出现 503 mutex busy（5s 超时足够）
     // 注：如果真出现 503 是 mutex 拥堵，业务上也可接受
-});
+} },
+];
 
 // ============================================================
 // 主流程
 // ============================================================
 (async () => {
+    // [#106 S4c-A2] ready() 是入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     console.log('=== v1.72.3 admin 直派模式 e2e 烟雾测试 ===\n');
     let passed = 0;
     let failed = 0;
@@ -335,10 +333,22 @@ defTest('T13: mutex 串行化 reassign + fallback 并发 → 1 成功 1 不会 d
 
     // cleanup
     console.log(`\n清理 ${createdFixtureIds.length} 条测试 fixture...`);
-    for (const id of createdFixtureIds) {
-        try { await fx.cleanup(id); } catch (e) { /* ignore */ }
+    // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+    for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of createdFixtureIds.slice()) {
+            try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+        }
     }
+    if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
+
+    let teardownFailed = false;
+    try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); teardownFailed = true; }
 
     console.log(`\n=== ${passed} PASS / ${failed} FAIL ===`);
-    process.exit(failed === 0 ? 0 : 1);
-})();
+    fx.finish(failed === 0 && !teardownFailed ? 0 : 1);   // teardown 已落定；只设退出码（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    console.error('admin-direct e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

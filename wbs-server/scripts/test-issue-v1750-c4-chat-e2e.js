@@ -1,7 +1,7 @@
 /**
  * v1.75.0 commit C — C4 需求拉群 create-chat 进程内 e2e（对齐 collab create-chat e2e 范式）
  *
- * 用法：本地 server 已启动（localhost:3000）后 node scripts/test-issue-v1750-c4-chat-e2e.js
+ * 用法：node scripts/test-issue-v1750-c4-chat-e2e.js（入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组，四个必须同时给）
  *
  * 验证前置校验路径（不碰钉钉真连——本地无钉钉配置，成功路径走 Commit D 真机）：
  *   T1 id 非法（abc）→ 400 INVALID_ID
@@ -20,19 +20,24 @@
 'use strict';
 
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// [#106 S4c-B] 被测服务 / 实例库来自 test-env：fx.BASE / fx.DB_PATH 在 ready() 之前读会抛 FX_NOT_READY，故改为 ready() 之后在入口里赋值，
+//   不再写死 3000 与业务库 task_pool.db。（T10 仍读源码 server.js：本脚本在 SOURCE_READERS 里，读的是检出里的源码文本，不起主服务。）
+let BASE = null;
+let DB_PATH = null;
 
 const ADMIN_ID = 1, VIEWER_ID = 2, DEV_ID = 8;  // 与 _test-fixture 对齐
 const createdIssueIds = [];
 
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.run(sql, params, function (err) { db.close(); err ? reject(err) : resolve({ lastID: this.lastID, changes: this.changes }); });
+        db.run(sql, params, function (err) {
+            // 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            const out = err ? null : { lastID: this.lastID, changes: this.changes };
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(out); });
+        });
     });
 }
 
@@ -94,7 +99,15 @@ async function main() {
 
         // T5 user 是本单 assigned_to → 过权限（无钉钉配置则 500 NO_DINGTALK_CONFIG，证明过了权限校验）
         const t5 = await api('POST', `/api/issues/${issueId}/create-chat`, devToken, {});
-        const t5PassedPerm = t5.body?.code === 'NO_DINGTALK_CONFIG' || t5.status === 502 || t5.status === 200;
+        // [#106 S4c] 隔离实例带虚拟钉钉配置（不再是「无钉钉配置 → NO_DINGTALK_CONFIG」），请求会走到权限之后的成员 / 手机号校验（如 NO_PHONE，server.js 建群路径）；
+        //   原白名单（NO_DINGTALK_CONFIG / 502 / 200）是旧环境的穷举；只增补两个确定发生在权限校验之后的业务码 NO_PHONE / MEMBER_NOT_FOUND（仍是白名单，500 崩溃等不算过权限）
+        // [#106 S4c 收口] 判据改为「状态码 + 业务码」组合（业务码单独匹配会让 500 崩溃携带这些码时误判过权限）。出处 server.js POST /api/issues/:id/create-chat：
+        //   NO_DINGTALK_CONFIG → 500（server.js:13819）；MEMBER_NOT_FOUND → 400（server.js:13838-13841）；NO_PHONE → 400（server.js:13892-13897）；502 = GETTOKEN_FAILED 等钉钉侧失败（server.js:13850）。
+        const t5PassedPerm = (t5.status === 400 && t5.body?.code === 'NO_PHONE')
+            || (t5.status === 400 && t5.body?.code === 'MEMBER_NOT_FOUND')
+            || (t5.status === 500 && t5.body?.code === 'NO_DINGTALK_CONFIG')
+            || t5.status === 502
+            || t5.status === 200;
         assert(t5PassedPerm && t5.body?.code !== 'NOT_ALLOWED', `T5 本单负责人过权限校验（实际 ${t5.status}/${t5.body?.code}，非 NOT_ALLOWED 即证明过权限）`);
 
         // T6 admin 任意单 → 过权限（同上）
@@ -151,18 +164,48 @@ async function main() {
         fail++;
     } finally {
         // 清理测试单（删 issue + 子表，对齐 DELETE endpoint 行为；直接删库）
-        for (const id of createdIssueIds) {
-            await dbRun('DELETE FROM issue_comments WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun('DELETE FROM issue_status_history WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun('DELETE FROM issue_attachments WHERE issue_id = ?', [id]).catch(() => {});
-            await dbRun('DELETE FROM issues WHERE id = ?', [id]).catch(() => {});
+        // [#106 S4c 收口] 每个单的四条 DELETE 放在同一个 try/catch：任一条失败该编号留在追踪数组里（不再 .catch(() => {}) 吞掉），剩余编号再试一轮；
+        //   仍遗留的每个计 1 次失败（fail），不中断后续清理与 teardown
+        const totalIssues = createdIssueIds.length;
+        for (let round = 0; round < 2 && createdIssueIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of createdIssueIds.slice()) {
+                try {
+                    await dbRun('DELETE FROM issue_comments WHERE issue_id = ?', [id]);
+                    await dbRun('DELETE FROM issue_status_history WHERE issue_id = ?', [id]);
+                    await dbRun('DELETE FROM issue_attachments WHERE issue_id = ?', [id]);
+                    await dbRun('DELETE FROM issues WHERE id = ?', [id]);
+                    createdIssueIds.splice(createdIssueIds.indexOf(id), 1);
+                } catch (e) { console.log(`  清理需求 #${id} 失败（第 ${round + 1} 轮）：${e.message}`); }
+            }
         }
-        console.log(`  （已清理 ${createdIssueIds.length} 条测试单）`);
+        if (createdIssueIds.length > 0) { console.log(`  ❌ 测试单清理失败，遗留 id=${createdIssueIds.join(',')}`); fail += createdIssueIds.length; }
+        console.log(`  （已清理 ${totalIssues - createdIssueIds.length} / ${totalIssues} 条测试单）`);
     }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 v1.75.0 commit C C4 前置校验 e2e 全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    return fail;   // 不在 helper 里 process.exit：由入口在 teardown 之后 finish
 }
 
-main();
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）。
+    //   原入口是裸 `main();`（没有 .catch，main 抛错会变成未处理拒绝）。
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        BASE = fx.BASE;
+        DB_PATH = fx.DB_PATH;
+        const nFailed = await main();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('e2e 脚本异常:', e);
+    } finally {
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('issue-v1750-c4-chat e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

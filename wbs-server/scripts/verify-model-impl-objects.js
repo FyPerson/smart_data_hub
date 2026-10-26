@@ -186,7 +186,6 @@ function selfTest() {
 }
 
 async function main() {
-  if (!process.env.JWT_SECRET || !process.env.DB_ENCRYPTION_KEY) { console.log('FAIL 缺少 JWT_SECRET / DB_ENCRYPTION_KEY（读自 wbs-server/.env）'); process.exit(1); }
   let pass = 0, fail = 0;
   const check = (name, cond, detail) => { if (cond) pass++; else { fail++; console.log(`FAIL ${name}${detail === undefined ? '' : '\n  ' + detail}`); } };
 
@@ -261,7 +260,8 @@ async function main() {
     await H.createFreshDb(svc);
     // 外部源占位行：用既有种子脚本写进夹具库（服务已停止；TARGET_DB 与 --allow-db-override 成对出现）。本文件不直写 db_connections。
     const seed = spawnSync(process.execPath, [path.join(__dirname, '_seed-collab-external-source.js'), '--apply', '--allow-db-override'], {
-      encoding: 'utf8', env: { ...process.env, TARGET_DB: dbPath }, timeout: 30000,
+      // [#106 S4b2] DB 加密键显式传随机常量（共享助手不再加载真实 .env；种子脚本自己的 dotenv 不覆盖已存在的键）
+      encoding: 'utf8', env: { ...process.env, TARGET_DB: dbPath, DB_ENCRYPTION_KEY: H.DB_KEY_RUN }, timeout: 30000,
     });
     check('夹具：种子脚本在夹具库写入外部源占位连接（RESULT=CREATED）', seed.status === 0 && /RESULT=CREATED/.test(seed.stdout || ''), `status=${seed.status} out=${(seed.stdout || '').slice(-300)} err=${(seed.stderr || '').slice(-300)}`);
 
@@ -380,7 +380,7 @@ async function main() {
       ];
       check('Y9 唯一索引 idx_impl_obj_identity：index_xinfo 的键列恰为 4 列、顺序 obj_type / 表达式 / 表达式 / obj_name，排序规则 BINARY / BINARY / NOCASE / NOCASE，均升序',
         JSON.stringify(keyCols) === JSON.stringify(wantCols), JSON.stringify(xinfo));
-      const m = /^CREATE UNIQUE INDEX\s+idx_impl_obj_identity\s+ON\s+model_impl_objects\s*\(([\s\S]*)\)\s+WHERE\s+([\s\S]+)$/i.exec(sql.trim());
+      const m = sql.trim().match(/^CREATE UNIQUE INDEX\s+idx_impl_obj_identity\s+ON\s+model_impl_objects\s*\(([\s\S]*)\)\s+WHERE\s+([\s\S]+)$/i);   // [#106 S4b2b] 原 .exec(…)：非全局正则 match 结果同形；SELF_ISOLATED 文件里 .exec( 一律不许
       const splitTop = (s) => { const out = []; let depth = 0; let cur = ''; for (const ch of s) { if (ch === '(') depth++; if (ch === ')') depth--; if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; } out.push(cur.trim()); return out; };
       const colTexts = m ? splitTop(m[1]).map((t) => t.replace(/\s+/g, ' ')) : [];
       check('Y9 唯一索引：sqlite_master 里的列文本逐项等于期望（含两个表达式的 IFNULL 与 COLLATE NOCASE 写法）', JSON.stringify(colTexts) === JSON.stringify(['obj_type', 'IFNULL(db_connection_id,0)', "IFNULL(schema_name,'') COLLATE NOCASE", 'obj_name COLLATE NOCASE']), JSON.stringify(colTexts));
@@ -865,17 +865,17 @@ async function main() {
           };
           db.get = wrapQ(origGet); db.all = wrapQ(origAll);
         }
-        const exec = (sql, p) => new Promise((res, rej) => db.run(sql, p || [], function (e) { if (e) rej(e); else res(this); }));
+        const runSql = (sql, p) => new Promise((res, rej) => db.run(sql, p || [], function (e) { if (e) rej(e); else res(this); }));
         const q = (sql, p) => new Promise((res, rej) => db.all(sql, p || [], (e, rows) => (e ? rej(e) : res(rows))));
-        await exec('CREATE TABLE data_models (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, is_deleted INTEGER DEFAULT 0, companion_of INTEGER, tech_owner TEXT, created_by_id INTEGER, config_rev INTEGER NOT NULL DEFAULT 1)');
+        await runSql('CREATE TABLE data_models (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, is_deleted INTEGER DEFAULT 0, companion_of INTEGER, tech_owner TEXT, created_by_id INTEGER, config_rev INTEGER NOT NULL DEFAULT 1)');
         // 列要补齐到 source / delete / doc 的 UPDATE 用到的全部列（updated_at / updated_by / prod_* / verified_at / last_*）：否则这些语句在内存库里先报「no such column」，
         //   走到数据库错误分支而不是内部不变量分支（P57 LOW-2：IMPL_INVARIANT 用例要的是不变量分支）
-        await exec('CREATE TABLE model_impl_objects (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_hash TEXT, is_deleted INTEGER DEFAULT 0, obj_type TEXT, reg_source TEXT, doc_hash TEXT, hash_algo TEXT, prod_hash TEXT, prod_missing INTEGER DEFAULT 0, verified_at TEXT, last_attempt_at TEXT, last_error TEXT, updated_at TEXT, updated_by TEXT)');
-        await exec('CREATE TABLE model_impl_links (model_id INTEGER NOT NULL, object_id INTEGER NOT NULL, role TEXT NOT NULL, sort_no INTEGER NOT NULL DEFAULT 0, created_at TEXT, created_by TEXT, PRIMARY KEY (model_id, object_id))');
-        await exec('CREATE TABLE model_change_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, model_id INTEGER, model_name TEXT, action TEXT, change_type TEXT, before_value TEXT, after_value TEXT, change_summary TEXT, operator_id INTEGER, operator_name TEXT)');
-        await exec('CREATE TABLE other_mod (x INTEGER)');
-        for (const n of ['m1', 'm2']) await exec('INSERT INTO data_models (table_name, tech_owner) VALUES (?, ?)', [n, 'x']);
-        for (let i = 0; i < 3; i++) await exec('INSERT INTO model_impl_objects (reg_hash) VALUES (NULL)');
+        await runSql('CREATE TABLE model_impl_objects (id INTEGER PRIMARY KEY AUTOINCREMENT, reg_hash TEXT, is_deleted INTEGER DEFAULT 0, obj_type TEXT, reg_source TEXT, doc_hash TEXT, hash_algo TEXT, prod_hash TEXT, prod_missing INTEGER DEFAULT 0, verified_at TEXT, last_attempt_at TEXT, last_error TEXT, updated_at TEXT, updated_by TEXT)');
+        await runSql('CREATE TABLE model_impl_links (model_id INTEGER NOT NULL, object_id INTEGER NOT NULL, role TEXT NOT NULL, sort_no INTEGER NOT NULL DEFAULT 0, created_at TEXT, created_by TEXT, PRIMARY KEY (model_id, object_id))');
+        await runSql('CREATE TABLE model_change_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, model_id INTEGER, model_name TEXT, action TEXT, change_type TEXT, before_value TEXT, after_value TEXT, change_summary TEXT, operator_id INTEGER, operator_name TEXT)');
+        await runSql('CREATE TABLE other_mod (x INTEGER)');
+        for (const n of ['m1', 'm2']) await runSql('INSERT INTO data_models (table_name, tech_owner) VALUES (?, ?)', [n, 'x']);
+        for (let i = 0; i < 3; i++) await runSql('INSERT INTO model_impl_objects (reg_hash) VALUES (NULL)');
         const pass = (req, res, next) => next();
         const logger = { warn() {}, error() {}, info() {} };
         const mod = createImplObjects({ db, logger, authenticateToken: (req, res, next) => { req.user = { id: 1, role: 'admin', username: 'a', display_name: 'a' }; next(); }, requireAdmin: pass, requireNonViewer: pass, canEditModel: o.canEdit || (() => true), ...hooks });
@@ -884,7 +884,7 @@ async function main() {
         const base = `http://127.0.0.1:${srv.address().port}`;
         const put = async (mid, links) => { const res = await fetch(`${base}/api/models/${mid}/impl-links`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ links }) }); return { status: res.status, json: await res.json().catch(() => null) }; };
         const call = async (method, urlPath, body) => { const res = await fetch(`${base}/api${urlPath}`, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: res.status, json: await res.json().catch(() => null) }; };
-        return { db, exec, q, put, call, mod, close: () => new Promise((resolve) => srv.close(() => db.close(() => resolve()))) };
+        return { db, runSql, q, put, call, mod, close: () => new Promise((resolve) => srv.close(() => db.close(() => resolve()))) };
       };
       // ── Y2：PF-3 锁内复核，确定性同步点：① 持锁者持锁 ② 竞态请求预检通过并进入锁等待（onLockQueued）③ 此时删除模型 ④ 放行持锁者 ⑤ 竞态请求锁内复核失败 400
       {
@@ -900,7 +900,7 @@ async function main() {
           const pRacer = env.put(2, [{ object_id: 2, role: 'r' }]);
           await within(racerQueued.promise, 5000, '竞态请求预检通过并进入锁等待（onLockQueued）');
           const dequeuedBeforeDelete = acquiredN;   // 竞态请求此刻还没拿到锁
-          await env.exec('UPDATE data_models SET is_deleted = 1 WHERE id = 2');   // 模型在等锁期间被软删除（不经本模块锁，与 server.js 的软删除 UPDATE 同形）
+          await env.runSql('UPDATE data_models SET is_deleted = 1 WHERE id = 2');   // 模型在等锁期间被软删除（不经本模块锁，与 server.js 的软删除 UPDATE 同形）
           holdGate.resolve();
           const [rh, rr2] = [await pHolder, await pRacer];
           const l2 = await env.q('SELECT * FROM model_impl_links WHERE model_id = 2');
@@ -912,9 +912,9 @@ async function main() {
       {
         const env = await mkEnv({});
         try {
-          await env.exec('BEGIN TRANSACTION'); await env.exec('INSERT INTO other_mod (x) VALUES (1)');
+          await env.runSql('BEGIN TRANSACTION'); await env.runSql('INSERT INTO other_mod (x) VALUES (1)');
           const ra = await env.put(1, [{ object_id: 1, role: 'r' }]);
-          await env.exec('INSERT INTO other_mod (x) VALUES (2)'); await env.exec('COMMIT');   // 若本模块无条件 ROLLBACK 过，这里 COMMIT 会报 no transaction is active
+          await env.runSql('INSERT INTO other_mod (x) VALUES (2)'); await env.runSql('COMMIT');   // 若本模块无条件 ROLLBACK 过，这里 COMMIT 会报 no transaction is active
           const other = (await env.q('SELECT x FROM other_mod ORDER BY x')).map((r2) => r2.x).join();
           check('Y8 他模块先开事务：本模块 ⇒ 503 IMPL_TX_BUSY；他模块事务不受损（两行都提交），本模块没有写入任何关系', ra.status === 503 && ra.json && ra.json.code === 'IMPL_TX_BUSY' && other === '1,2' && (await env.q('SELECT * FROM model_impl_links')).length === 0, JSON.stringify([ra, other]));
         } finally { await env.close(); }
@@ -926,7 +926,7 @@ async function main() {
         try {
           const p = env.put(1, [{ object_id: 1, role: 'a' }, { object_id: 2, role: 'b' }]);
           await within(txBegun.promise, 5000, '本模块事务已开（onTxBegun）');
-          let otherErr = null; try { await env.exec('BEGIN TRANSACTION'); } catch (e) { otherErr = e; }   // 他模块的 BEGIN 撞上本模块事务
+          let otherErr = null; try { await env.runSql('BEGIN TRANSACTION'); } catch (e) { otherErr = e; }   // 他模块的 BEGIN 撞上本模块事务
           gate.resolve();
           const rb = await p;
           const links = (await env.q('SELECT object_id FROM model_impl_links WHERE model_id = 1 ORDER BY object_id')).map((x) => x.object_id).join();
@@ -942,7 +942,7 @@ async function main() {
         try {
           const p = env.put(1, [{ object_id: 1, role: 'a' }]);
           await within(txBegun.promise, 5000, '本模块事务已开（onTxBegun）');
-          await env.exec('ROLLBACK');   // 他模块无条件 ROLLBACK（真实 sqlite 连接上滚掉了本模块事务）
+          await env.runSql('ROLLBACK');   // 他模块无条件 ROLLBACK（真实 sqlite 连接上滚掉了本模块事务）
           gate.resolve();
           const rc = await p;
           check('Y8 / X2 他模块无条件 ROLLBACK 滚掉本模块事务 ⇒ 503 IMPL_TX_LOST，文案为「结果未知：本次写入可能部分落库，请先 GET 核对当前集合再决定是否重放」', rc.status === 503 && rc.json && rc.json.code === 'IMPL_TX_LOST' && /结果未知/.test(rc.json.error) && /GET/.test(rc.json.error), JSON.stringify(rc));
@@ -964,8 +964,8 @@ async function main() {
             { trace, canEdit: (o2 && o2.canEdit) || undefined, onQuery: o2 && o2.onQuery ? (sql) => o2.onQuery(envRef, sql) : undefined,
               afterRun: o2 && o2.afterRun ? (sql, err) => o2.afterRun(envRef, sql, err) : undefined });
           envRef = env;
-          await env.exec("UPDATE model_impl_objects SET obj_type = 'FDL_TASK' WHERE id = 1");
-          await env.exec("UPDATE model_impl_objects SET obj_type = 'PROC' WHERE id = 2");
+          await env.runSql("UPDATE model_impl_objects SET obj_type = 'FDL_TASK' WHERE id = 1");
+          await env.runSql("UPDATE model_impl_objects SET obj_type = 'PROC' WHERE id = 2");
           trace.length = 0;   // 夹具语句不计入
           return { env, trace };
         };
@@ -993,9 +993,9 @@ async function main() {
         } finally { await t.env.close(); }
         // links 的锁内复核四类：锁外那一次通过，等锁期间（onLockQueued 钩子）模型被改，锁内预检失败
         for (const [label, code, status, mutate] of [
-          ['MODEL_NOT_FOUND', 'MODEL_NOT_FOUND', 400, (e) => e.exec('DELETE FROM data_models WHERE id = 1')],
-          ['MODEL_DELETED', 'MODEL_DELETED', 400, (e) => e.exec('UPDATE data_models SET is_deleted = 1 WHERE id = 1')],
-          ['COMPANION_NOT_LINKABLE', 'COMPANION_NOT_LINKABLE', 400, (e) => e.exec('UPDATE data_models SET companion_of = 2 WHERE id = 1')],
+          ['MODEL_NOT_FOUND', 'MODEL_NOT_FOUND', 400, (e) => e.runSql('DELETE FROM data_models WHERE id = 1')],
+          ['MODEL_DELETED', 'MODEL_DELETED', 400, (e) => e.runSql('UPDATE data_models SET is_deleted = 1 WHERE id = 1')],
+          ['COMPANION_NOT_LINKABLE', 'COMPANION_NOT_LINKABLE', 400, (e) => e.runSql('UPDATE data_models SET companion_of = 2 WHERE id = 1')],
           ['FORBIDDEN', 'FORBIDDEN', 403, null],
         ]) {
           let allow = true;
@@ -1010,10 +1010,10 @@ async function main() {
         try {
           const sk = await t.env.mod.purgeLinksOfModel(1, { account: true, expectedParentId: 2 });   // 模型 1 此刻不是主表 2 的伴生表
           check('P52 purge-account：目标不是该主表的伴生表 ⇒ skipped NOT_COMPANION_OF_PARENT，全程没有 BEGIN / COMMIT / ROLLBACK（不再开空事务）', sk.skipped === 'NOT_COMPANION_OF_PARENT' && sk.accounted === false && noTx(t.trace), JSON.stringify([sk, t.trace]));
-          await t.env.exec('UPDATE data_models SET companion_of = 2 WHERE id = 1'); t.trace.length = 0;
+          await t.env.runSql('UPDATE data_models SET companion_of = 2 WHERE id = 1'); t.trace.length = 0;
           const nr = await t.env.mod.purgeLinksOfModel(1, { account: true, expectedParentId: 2 });
           check('P52 purge-account：是伴生表但没有关系可清 ⇒ { changes: 0, accounted: false }，不开事务', nr.changes === 0 && nr.accounted === false && !nr.skipped && noTx(t.trace), JSON.stringify([nr, t.trace]));
-          await t.env.exec("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'r', 0)"); t.trace.length = 0;
+          await t.env.runSql("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'r', 0)"); t.trace.length = 0;
           const ok = await t.env.mod.purgeLinksOfModel(1, { account: true, expectedParentId: 2 });
           const seq = t.trace.filter((x) => ['BEGIN', 'COMMIT', 'ROLLBACK'].includes(x)).join();
           check('P52 purge-account 对照：有关系 ⇒ 清除并记账（accounted、config_rev +1），事务顺序 BEGIN, COMMIT', ok.accounted === true && ok.changes === 1 && seq === 'BEGIN,COMMIT' && (await revOf(t.env, 1)) === 2, JSON.stringify([ok, t.trace]));
@@ -1065,10 +1065,10 @@ async function main() {
           // purge-account：模型 1 是主表 2 的伴生表且挂着对象 1；翻转发生在「预检通过之后、BEGIN 之前」（onPrechecked）
           const mkPurge = async (flipSql) => {
             const holder = {};
-            const tt = await mkP52(withBystander(flipSql ? { ev: { onPrechecked: async () => { await holder.env.exec(flipSql); } } } : null, holder));
+            const tt = await mkP52(withBystander(flipSql ? { ev: { onPrechecked: async () => { await holder.env.runSql(flipSql); } } } : null, holder));
             holder.env = tt.env;
-            await tt.env.exec('UPDATE data_models SET companion_of = 2 WHERE id = 1');
-            await tt.env.exec("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'r', 0)");
+            await tt.env.runSql('UPDATE data_models SET companion_of = 2 WHERE id = 1');
+            await tt.env.runSql("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'r', 0)");
             tt.trace.length = 0;
             return tt;
           };
@@ -1105,12 +1105,12 @@ async function main() {
             const holder = {};
             const tt = await mkP52(withBystander(hooks ? hooks(holder) : null, holder), o2 ? o2(holder) : undefined);
             holder.env = tt.env;
-            for (const [oid, role] of seed) await tt.env.exec('INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, ?, ?, 0)', [oid, role]);
+            for (const [oid, role] of seed) await tt.env.runSql('INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, ?, ?, 0)', [oid, role]);
             tt.trace.length = 0;
             return tt;
           };
-          const flipAfterPrecheck = (sql) => (h) => ({ ev: { onPrechecked: async () => { await h.env.exec(sql); } } });
-          const flipAfterBegin = (sql) => (h) => ({ ev: { onTxBegun: async () => { await h.env.exec(sql); } } });
+          const flipAfterPrecheck = (sql) => (h) => ({ ev: { onPrechecked: async () => { await h.env.runSql(sql); } } });
+          const flipAfterBegin = (sql) => (h) => ({ ev: { onTxBegun: async () => { await h.env.runSql(sql); } } });
           const SOFT_DEL = 'UPDATE data_models SET is_deleted = 1 WHERE id = 1';
           const TO_COMPANION = 'UPDATE data_models SET companion_of = 2 WHERE id = 1';
           // 对照：不翻转 ⇒ 200，挂上、config_rev +1、一条日志、事务 BEGIN,COMMIT
@@ -1154,7 +1154,7 @@ async function main() {
           //   409 带 partial: true 与实际 links；第 2 条没有执行；事务照常 COMMIT（不回滚，随后由排队的 purgeLinksOfModel(account) 清掉并接着记账）
           {
             let fired = false;
-            t = await mkLinks([], null, () => ({ afterRun: async (e, sql) => { if (!fired && /^\s*INSERT INTO model_impl_links/i.test(sql)) { fired = true; await e.exec(TO_COMPANION); } } }));
+            t = await mkLinks([], null, () => ({ afterRun: async (e, sql) => { if (!fired && /^\s*INSERT INTO model_impl_links/i.test(sql)) { fired = true; await e.runSql(TO_COMPANION); } } }));
             try {
               const rm = await t.env.put(1, [{ object_id: 1, role: 'r' }, { object_id: 2, role: 'r' }, { object_id: 3, role: 'r' }]);   // 请求 3 个对象：第 1 条生效、翻转、第 2 条被挡，第 3 条必须不再执行（§8.2）
               check('P57 links 中途翻转（第 1 条 INSERT 之后模型转伴生表）：⇒ 409 MODEL_STATE_CHANGED，partial === true，links 为实际集合 [{object_id:1}]',
@@ -1187,7 +1187,7 @@ async function main() {
           //   UPDATE 已生效（role a → b），所以 409 带 partial: true 与实际 links；但 role 变化不是集合变化 ⇒ 不递增、不留痕
           {
             let fired2 = false;
-            t = await mkLinks([[1, 'a']], null, () => ({ afterRun: async (e, sql) => { if (!fired2 && /^\s*UPDATE model_impl_links/i.test(sql)) { fired2 = true; await e.exec(TO_COMPANION); } } }));
+            t = await mkLinks([[1, 'a']], null, () => ({ afterRun: async (e, sql) => { if (!fired2 && /^\s*UPDATE model_impl_links/i.test(sql)) { fired2 = true; await e.runSql(TO_COMPANION); } } }));
             try {
               const ru = await t.env.put(1, [{ object_id: 1, role: 'b' }, { object_id: 2, role: 'r' }]);
               check('P57 links UPDATE 生效后翻转（只改 role，后续 INSERT 被挡）：⇒ 409 MODEL_STATE_CHANGED，partial === true，links 为实际集合（对象 1 的 role 已是 b）',
@@ -1201,22 +1201,22 @@ async function main() {
           // §7：is_deleted 为 NULL 按存活（与 LIVE_MODEL_PRED / 预检 JS 口径一致）——条件写不得把 NULL 行当成已删
           t = await mkLinks([], null);
           try {
-            await t.env.exec('UPDATE data_models SET is_deleted = NULL WHERE id = 1');
+            await t.env.runSql('UPDATE data_models SET is_deleted = NULL WHERE id = 1');
             const rn = await t.env.put(1, [{ object_id: 1, role: 'r' }]);
             check('P57 NULL is_deleted·links：模型 is_deleted = NULL 按存活——挂接 ⇒ 200 changed，关系 {1}，config_rev +1', rn.status === 200 && rn.json && rn.json.changed === true && (await linkIds(t.env, 1)) === '1' && (await revOf(t.env, 1)) === 2, JSON.stringify(rn));
           } finally { await t.env.close(); }
           t = await mkPurge(null);
           try {
-            await t.env.exec('UPDATE data_models SET is_deleted = NULL WHERE id = 1');
+            await t.env.runSql('UPDATE data_models SET is_deleted = NULL WHERE id = 1');
             const pn = await t.env.mod.purgeLinksOfModel(1, { account: true, expectedParentId: 2 });
             check('P57 NULL is_deleted·purge-account：伴生表 is_deleted = NULL 按存活——清除并记账（accounted、changes 1、关系清空、config_rev +1）', pn.accounted === true && pn.changes === 1 && !pn.skipped && (await linkIds(t.env, 1)) === '' && (await revOf(t.env, 1)) === 2, JSON.stringify(pn));
           } finally { await t.env.close(); }
           // §7：removeLinksForDeletedModel 的 DELETE 自带「此刻确为已删除」条件——排队等锁期间模型被恢复并重新挂接，不得误删合法关系
           {
             const mkRm = async (restoreInQueue) => {
-              const tt = await mkP52(restoreInQueue ? { onLockQueued: async (e) => { await e.exec('UPDATE data_models SET is_deleted = 0 WHERE id = 1'); await e.exec("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 2, 'new', 0)"); } } : null);
-              await tt.env.exec('UPDATE data_models SET is_deleted = 1 WHERE id = 1');
-              await tt.env.exec("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'old', 0)");
+              const tt = await mkP52(restoreInQueue ? { onLockQueued: async (e) => { await e.runSql('UPDATE data_models SET is_deleted = 0 WHERE id = 1'); await e.runSql("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 2, 'new', 0)"); } } : null);
+              await tt.env.runSql('UPDATE data_models SET is_deleted = 1 WHERE id = 1');
+              await tt.env.runSql("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 1, 'old', 0)");
               tt.trace.length = 0;
               return tt;
             };
@@ -1234,7 +1234,7 @@ async function main() {
           }
           // §7 LOW-2：IMPL_INVARIANT 分支——预检通过后对象被锁外置为已删（onPrechecked 里改），事务体 UPDATE 的 changes 为 0 ⇒ 500 IMPL_INVARIANT + ROLLBACK
           {
-            const softDelObj = (oid) => (h) => ({ ev: { onPrechecked: async () => { await h.env.exec(`UPDATE model_impl_objects SET is_deleted = 1 WHERE id = ${oid}`); } } });
+            const softDelObj = (oid) => (h) => ({ ev: { onPrechecked: async () => { await h.env.runSql(`UPDATE model_impl_objects SET is_deleted = 1 WHERE id = ${oid}`); } } });
             let h = {};
             t = await mkP52(softDelObj(2)(h));
             h.env = t.env;
@@ -1247,7 +1247,7 @@ async function main() {
             t = await mkP52(softDelObj(2)(h));
             h.env = t.env;
             try {
-              await t.env.exec("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 2, 'r', 0)");
+              await t.env.runSql("INSERT INTO model_impl_links (model_id, object_id, role, sort_no) VALUES (1, 2, 'r', 0)");
               t.trace.length = 0;
               const rd3 = await t.env.call('DELETE', '/model-impl-objects/2');
               check('P57 IMPL_INVARIANT·delete：预检通过后对象被锁外软删 ⇒ 500 IMPL_INVARIANT，事务 BEGIN…ROLLBACK，先执行的关系 DELETE 已回滚（关系仍在）、模型 1 的 config_rev 不变',
@@ -1534,7 +1534,7 @@ async function main() {
     void oBody;
 
     // ═════════ 十二、收尾：服务运行期间测试进程写库次数 = 0；无 3000 端口 ═════════
-    check('前提：被测服务端口不是 3000，库不是本机真实库', svc.port !== 3000 && path.resolve(dbPath) !== H.REAL_DB_ABS, `port=${svc.port}`);
+    check('前提：被测服务端口不是 3000，库在检出目录之外的临时根里', svc.port !== 3000 && H.tmpBaseOutsideCheckout() && path.resolve(dbPath).startsWith(H.TMP_BASE + path.sep), `port=${svc.port} tmpBaseOutside=${H.tmpBaseOutsideCheckout()}`);
     check('服务运行期间测试进程写库次数 = 0（写连接只在服务停止时使用，写闸计数）', gate.writes === 0, `writes=${gate.writes}`);
   } catch (e) {
     let tail = '';

@@ -26,41 +26,85 @@
  *      200，且本次未再调用附件上传接口、accept 请求体携带首次上传的附件 id
  *   T5 步骤①（加载）后、步骤②（采用）前再次发生修正——采用后 accept 仍 409，回到步骤①、uploadedIds
  *      不丢（无需重新上传）
+ *
+ * 用法：node scripts/test-sys-submit-amend-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   造数：经 API 建单（标题 [pw-submit-amend]-<类型>-<RUN_TAG>-<序号>，描述带 [RT-AMEND:<RUN_TAG>] 标记，RUN_TAG 每次运行唯一），
+ *   收尾直连实例库按「登记的 id」级联删除（每张单、每一步各自 try，共 2 轮，间隔 200ms），清完再按描述标记回查零残留，遗留计失败。
+ *   临时 png 放 os.tmpdir() 下本脚本独有的 sys-submit-amend-* 子目录，收尾用 removeTreeChecked 删并确认（失败计失败）。
+ *   固定用户 id：1 admin / 8（示例开发A，本人开发）/ 9（示例开发B，搭子与他人修正来源）/ 13（对接人）。OA 号 2026091030x / 40x / 50x / 70x / 80x 是 set-oa-number 的写入值，
+ *   不是查询键且无唯一约束（routes/sys-iteration/index.js:12890-12927 的 set-oa-number 只比对本单旧值），不用改。
+ *   批跑建议：needsService:true；非 exclusive（只建自己标记的单，按 id 清理）；不需要服务端开关。
  */
 'use strict';
 const assert = require('assert');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;        // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
 const ADMIN_ID = 1;
 const DEV_ID = 8;         // 示例开发A——本文件的「本人」开发账号
 const SECOND_DEV_ID = 9;  // 示例开发B——两人团队场景的搭子/T4 的「他人」修正来源
 
-const RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-const RUN_TAG_MARKER = `[RT-AMEND:${RUN_TAG}]`;
+let RUN_TAG = null;         // [#106 S4d-5] ready() 之后赋值：每次运行唯一的标记（原为顶层 Date.now() + crypto.randomBytes）
+let RUN_TAG_MARKER = null;  // 同上：`[RT-AMEND:${RUN_TAG}]`
+let TMP_DIR = null;         // [#106 S4d-5] ready() 之后赋值：os.tmpdir() 下本脚本独有的临时目录（放 T4/T5/T10 的凭证 png），收尾 removeTreeChecked
 const TITLE_PREFIX = '[pw-submit-amend]';
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+// [#106 S4d-5 收口批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
 }
 function jsonHeaders(tok) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` }; }
 function futureEstStr(days) {
@@ -96,6 +140,29 @@ async function deleteIssueFully(issueId) {
     await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [issueId]);
     await dbRun(`DELETE FROM sys_issues WHERE id=?`, [issueId]);
 }
+/**
+ * [#106 S4d-5] 清理本轮登记的全部单据：每张单各自 try（一张抛错不阻止其余），有失败整体再试一轮（共 2 轮，间隔 200ms），清完回查 sys_issues 是否还有这些 id；
+ * 返回最后一轮仍未清掉的失败说明数组（调用方计失败）。原来只 console.warn，清理失败不计失败；留给调用方的「按描述标记回查零残留」断言保留。
+ * 已清掉的 id 移出 createdIds（再调一次不重复处理，入口 .catch 复用）。
+ */
+async function cleanupFixtures() {
+    if (!db) return [];
+    let errors = [];
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        for (const id of createdIds.slice()) {
+            try {
+                await deleteIssueFully(id);
+                const left = await dbGet('SELECT COUNT(*) AS n FROM sys_issues WHERE id=?', [id]);
+                if (left.n !== 0) { errors.push(`issue #${id} 回查仍有残留`); continue; }
+                createdIds.splice(createdIds.indexOf(id), 1);
+            } catch (e) { errors.push(`issue #${id}: ${e && e.message}`); }
+        }
+        if (errors.length === 0) break;
+    }
+    return errors;
+}
 
 const _defaultDialogHandler = (d) => d.accept();
 async function loginPage(browser, token) {
@@ -118,17 +185,7 @@ function withOneShotDialog(page, handler) {
     page.once('dialog', async (d) => { try { await handler(d); } finally { page.on('dialog', _defaultDialogHandler); } });
 }
 
-function ensureServerListening(timeoutMs = 3000) {
-    const u = new URL(BASE_URL);
-    const host = u.hostname;
-    const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
-    return new Promise((resolve, reject) => {
-        const sock = net.createConnection({ port, host });
-        const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时`)); }, timeoutMs);
-        sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js`)); });
-    });
-}
+// [#106 S4d-5] 原 ensureServerListening（net 探测默认 3000 端口）已删：隔离实例由 testEnv.ready() 起并核对身份。
 
 // ── API 夹具 ──────────────────────────────────────────────────────────────
 let seq = 0;
@@ -293,7 +350,13 @@ async function mkFixturePending(adminTok) {
 }
 
 async function main() {
-    await ensureServerListening();
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+    RUN_TAG_MARKER = `[RT-AMEND:${RUN_TAG}]`;
+    TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sys-submit-amend-'));
+    db = await openInstanceDb(DB_PATH);
     const adminTok = await signAs(ADMIN_ID);
     const devTok = await signAs(DEV_ID);
     const secondDevTok = await signAs(SECOND_DEV_ID);
@@ -462,7 +525,7 @@ async function main() {
             await page.click('#siDActions button:has-text("验收通过")');
             await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
             // 上传一个凭证文件（PNG 最小合法字节）。
-            const tmpPng = path.join(os.tmpdir(), `pw-amend-evidence-${id}.png`);
+            const tmpPng = path.join(TMP_DIR, `pw-amend-evidence-${id}.png`);
             fs.writeFileSync(tmpPng, Buffer.from('89504e470d0a1a0a', 'hex'));
             await page.setInputFiles('#siPickerInput_accept-evidence', tmpPng);
             await page.fill('#f_note', 'Playwright T4：验收说明');
@@ -598,7 +661,7 @@ async function main() {
 
             await page.click('#siDActions button:has-text("验收通过")');
             await page.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
-            const tmpPng = path.join(os.tmpdir(), `pw-amend-evidence-t5-${id}.png`);
+            const tmpPng = path.join(TMP_DIR, `pw-amend-evidence-t5-${id}.png`);
             fs.writeFileSync(tmpPng, Buffer.from('89504e470d0a1a0a', 'hex'));
             await page.setInputFiles('#siPickerInput_accept-evidence', tmpPng);
             await page.fill('#f_note', 'Playwright T5：验收说明');
@@ -946,7 +1009,7 @@ async function main() {
             // [C4e·codex 540 L1] 加载失败后先选一个待上传文件——若 candidateAdopted 判据出现漏洞，
             // 有待上传文件时最容易连带把"确认按钮不该可提交"这件事伪装成"提交了但反正没传附件所以
             // 看起来没事"；选中文件后再直调，才是"这条路径真的走不到上传/accept"的完整证据。
-            const tmpPngT10 = path.join(os.tmpdir(), `pw-amend-evidence-t10-${id}.png`);
+            const tmpPngT10 = path.join(TMP_DIR, `pw-amend-evidence-t10-${id}.png`);
             fs.writeFileSync(tmpPngT10, Buffer.from('89504e470d0a1a0a', 'hex'));
             await page.setInputFiles('#siPickerInput_accept-evidence', tmpPngT10);
             // [C4f·Opus 复核 M1] 前置自证——picker 白名单/大小闸可能静默拒收非法文件，若被拒 siPickerFiles
@@ -1235,19 +1298,28 @@ async function main() {
         }
 
     } finally {
-        await browser.close();
-        for (const id of createdIds) {
-            try { await deleteIssueFully(id); } catch (e) { console.warn(`⚠️ 清理 issue #${id} 失败：${e.message}`); }
-        }
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        // [#106 S4d-5] 清理见 cleanupFixtures：每张单各自 try / 2 轮 / 回查 / 遗留计失败（原来只 console.warn）；临时目录 removeTreeChecked 删并确认
+        const cleanupErrs = await cleanupFixtures();
+        must(cleanupErrs.length === 0, cleanupErrs.length === 0 ? '收尾清理：本轮登记的单据全部级联删除并回查无残留' : `收尾清理失败（已重试 1 轮）：${cleanupErrs.join(' | ')}`);
         const leftover = await dbAll(`SELECT id FROM sys_issues WHERE description LIKE ?`, [`%${RUN_TAG_MARKER}%`]);
         must(leftover.length === 0, `收尾清理：本轮标记（${RUN_TAG}）零残留，实得残留 id=${JSON.stringify(leftover.map(r => r.id))}`);
-        db.close();
+        try { if (TMP_DIR) removeTreeChecked(TMP_DIR); } catch (e) { must(false, `临时目录清理失败 ${TMP_DIR}：${e && e.message}`); }
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
+        try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
         // 收尾清理断言（可能改变 fail 计数）必须先跑完，报告汇总才是最终真实结果——原实现把这行
         // console.log 放在 try 块末尾、清理之前，会把清理阶段的失败漏进汇总数字。
         console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
         if (failDetails.length) console.log('失败明细：\n  - ' + failDetails.join('\n  - '));
-        if (fail > 0) process.exitCode = 1;
     }
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（原为 process.exitCode = 1；不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    try { await cleanupFixtures(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { if (TMP_DIR) removeTreeChecked(TMP_DIR); } catch (_) { /* 已在报错路径 */ }
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

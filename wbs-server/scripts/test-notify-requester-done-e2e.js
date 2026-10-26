@@ -9,18 +9,14 @@
  *   已读跟踪分支（用 setCollabState 直接造 done_* 状态，T11-T14）。
  *   三步全成功（T1）/ 部分失败矩阵 done_* 不落（T9）需真钉钉环境或浏览器实测验证。
  *
- * 运行：先起服务（node server.js），再 node scripts/test-notify-requester-done-e2e.js
+ * 运行：node scripts/test-notify-requester-done-e2e.js（入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组，四个必须同时给）
  */
 'use strict';
-// Safe isolated mode: the T12 window cases use real production handlers and controlled
-// DingTalk responses (UNREAD / empty / READ), with no task_pool.db access.
-if (process.argv.includes('--isolated-read-status')) {
-    const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'verify-notify-read-endpoints.js'),'--window-only'],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
-    process.exit(result.status===0?0:1);
-}
+// [#106 S4c-A2] 原模块顶层的 `--isolated-read-status` 可执行块（spawnSync 跑兄弟脚本后 process.exit）已移出顶层：
+//   静态守卫要求模块顶层只有声明与一个入口调用。该参数已移除（已读状态窗口套件本就是 T12 在跑，也可直接运行 verify-notify-read-endpoints.js），
+//   收到旧参数时在入口里报错并以 1 结束，见入口函数（做法同 verify-issue-lite-c2.js:66-72）。
 
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
 const createdFixtureIds = [];
@@ -51,10 +47,11 @@ async function readStatus(token, id, recipient) {
 }
 
 async function getCollab(id) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
         db.get('SELECT * FROM collab_requests WHERE id=?', [id], (err, row) => {
-            db.close(); err ? reject(err) : resolve(row);
+            // [#106 S4c-A2] 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); });
         });
     });
 }
@@ -70,27 +67,27 @@ async function makeDoneDirectFixture(adminToken, oaNo, { withActiveResultData = 
     await fx.setCollabState(id, { status: 'DONE', contact_person_id: contactId });
     if (withActiveResultData) {
         // 造一条 active result_data 附件（xlsx）
+        const db = await fx.openInstanceDb(fx.DB_PATH);
         await new Promise((resolve, reject) => {
-            const db = new sqlite3.Database(fx.DB_PATH);
             db.run(
                 `INSERT INTO collab_attachments
                     (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name, status)
                  VALUES (?, 'result_data', ?, ?, ?, ?, 'active')`,
                 [id, `collab/_e2e/${id}_result.xlsx`, '测试数据.xlsx', fx.EXPORTER_ID, 'exporter', ],
-                (err) => { db.close(); err ? reject(err) : resolve(); }
+                (err) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(); }); }
             );
         });
     }
     return id;
 }
 
-const tests = [];
-function defTest(name, fn) { tests.push({ name, fn }); }
+// [#106 S4c-A2] 用例登记成数组字面量条目（原先是模块顶层的多次 defTest(...) 调用）：静态守卫要求模块顶层只有声明与一个入口调用
+const tests = [
 
 // ============================================================
 // T2：权限——非本单 exporter/创建人/admin → 403 NOT_AUTHORIZED_TO_NOTIFY（v1.77.0 改码）
 // ============================================================
-defTest('T2: 无关用户通知 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
+{ name: 'T2: 无关用户通知 → 403 NOT_AUTHORIZED_TO_NOTIFY', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T2_${Date.now()}`);
     // VIEWER2（示例客服B，非本单 exporter，非创建人（创建人=admin），也非 admin）
@@ -99,12 +96,12 @@ defTest('T2: 无关用户通知 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
     if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
         throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T3：权限——admin 代发放行（走到钉钉前不报 403/409）
 // ============================================================
-defTest('T3: admin 代发放行 → 走过守卫到附件物理检查 409 RESULT_DATA_FILE_MISSING', async () => {
+{ name: 'T3: admin 代发放行 → 走过守卫到附件物理检查 409 RESULT_DATA_FILE_MISSING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T3_${Date.now()}`);
     const res = await notifyRequesterDone(adminToken, id);
@@ -114,12 +111,12 @@ defTest('T3: admin 代发放行 → 走过守卫到附件物理检查 409 RESULT
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
         throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (admin 放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T4：状态——非 DONE → 409 INVALID_STATE_FOR_NOTIFY
 // ============================================================
-defTest('T4: 非 DONE 状态通知 → 409 INVALID_STATE_FOR_NOTIFY', async () => {
+{ name: 'T4: 非 DONE 状态通知 → 409 INVALID_STATE_FOR_NOTIFY', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const cr = await createAdminDirect(adminToken, fx.EXPORTER_ID, `OA_NRD_T4_${Date.now()}`);
     // L-1：先断言 create 成功，失败时报错聚焦（区分 fixture 失败 vs 待测接口失败）
@@ -130,13 +127,13 @@ defTest('T4: 非 DONE 状态通知 → 409 INVALID_STATE_FOR_NOTIFY', async () =
     if (res.status !== 409 || res.body.code !== 'INVALID_STATE_FOR_NOTIFY') {
         throw new Error(`expected 409 INVALID_STATE_FOR_NOTIFY, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T5：范围——normal 路径放行（2026-06-09 codex 78：不再限定 admin_direct，
 //   normal forward 单 DONE + 有效 exporter + 有 phone → 走到附件物理检查）
 // ============================================================
-defTest('T5: normal 路径通知放行 → 走过范围守卫到 409 RESULT_DATA_FILE_MISSING', async () => {
+{ name: 'T5: normal 路径通知放行 → 走过范围守卫到 409 RESULT_DATA_FILE_MISSING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5_${Date.now()}`);
     // 改成 normal 路径（模拟 forward 产生 exporter 的 normal 单 DONE）
@@ -146,13 +143,13 @@ defTest('T5: normal 路径通知放行 → 走过范围守卫到 409 RESULT_DATA
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
         throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (normal 放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T5b：权限——exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUTHORIZED_TO_NOTIFY（v1.77.0 改码）
 //   （hasValidExporter 在权限守卫起作用：占位单上原 exporter 用户已无身份，且非创建人）
 // ============================================================
-defTest('T5b: exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
+{ name: 'T5b: exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUTHORIZED_TO_NOTIFY', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5b_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
@@ -162,14 +159,14 @@ defTest('T5b: exporter_user_id=0 占位 + 非 admin 非创建人 → 403 NOT_AUT
     if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
         throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY (占位值非 admin 非创建人), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T5c（v1.77.0 翻案）：exporter_user_id=0 + admin → developer 交付路径放行
 //   原 codex 79 H-1 的 409 NOT_EXPORTER_PATH 已业务驱动放开（开发 /submit 路径 DONE 单
 //   有 active result_data，创建人/admin 可发）；白名单断言停在物理检查证明放行
 // ============================================================
-defTest('T5c: exporter_user_id=0 + admin → developer 路径放行至 409 RESULT_DATA_FILE_MISSING', async () => {
+{ name: 'T5c: exporter_user_id=0 + admin → developer 路径放行至 409 RESULT_DATA_FILE_MISSING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5c_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
@@ -177,14 +174,14 @@ defTest('T5c: exporter_user_id=0 + admin → developer 路径放行至 409 RESUL
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
         throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (developer 路径放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T5d（v1.77.0 新增）：创建人（非 admin 非 exporter）→ 放行至 409 RESULT_DATA_FILE_MISSING
 //   协作单创建 endpoint 仅 admin（生产现实创建人=admin，isAdmin 已短路 isCreator）——
 //   isCreator 分支用 setCollabState 改 created_by=publisher 模拟"创建人非 admin"验证逻辑本身
 // ============================================================
-defTest('T5d: 创建人（非 admin）发送开发交付文件 → 放行至 409 RESULT_DATA_FILE_MISSING', async () => {
+{ name: 'T5d: 创建人（非 admin）发送开发交付文件 → 放行至 409 RESULT_DATA_FILE_MISSING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5d_${Date.now()}`);
     // 开发交付路径（exporter=0）+ 创建人改为 publisher（非 admin 非 exporter）
@@ -194,13 +191,13 @@ defTest('T5d: 创建人（非 admin）发送开发交付文件 → 放行至 409
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_FILE_MISSING') {
         throw new Error(`expected 409 RESULT_DATA_FILE_MISSING (创建人放行+假路径), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T5e（v1.77.0 新增）：对接人（非创建人非 exporter 非 admin）→ 403
 //   边界固化：对接人是内部流转角色，不在发送权限内
 // ============================================================
-defTest('T5e: 对接人发送 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
+{ name: 'T5e: 对接人发送 → 403 NOT_AUTHORIZED_TO_NOTIFY', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T5e_${Date.now()}`);
     await fx.setCollabState(id, { exporter_user_id: 0 });
@@ -209,83 +206,83 @@ defTest('T5e: 对接人发送 → 403 NOT_AUTHORIZED_TO_NOTIFY', async () => {
     if (res.status !== 403 || res.body.code !== 'NOT_AUTHORIZED_TO_NOTIFY') {
         throw new Error(`expected 403 NOT_AUTHORIZED_TO_NOTIFY (对接人非创建人), got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T6：业务方负责人手机号空 → 400 REQUESTER_PHONE_EMPTY
 //   （2026-06-09 codex 78：收件人=requester_phone 反查；原 contact_person 无钉钉
 //    REQUESTER_NO_DINGTALK 分支已删除——不再读 contact_person）
 // ============================================================
-defTest('T6: requester_phone 空 → 400 REQUESTER_PHONE_EMPTY', async () => {
+{ name: 'T6: requester_phone 空 → 400 REQUESTER_PHONE_EMPTY', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T6_${Date.now()}`, { requesterPhone: null });
     const res = await notifyRequesterDone(adminToken, id);
     if (res.status !== 400 || res.body.code !== 'REQUESTER_PHONE_EMPTY') {
         throw new Error(`expected 400 REQUESTER_PHONE_EMPTY, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T7：result_data 0 个 active → 409 RESULT_DATA_MISSING
 // ============================================================
-defTest('T7: 无 active result_data → 409 RESULT_DATA_MISSING', async () => {
+{ name: 'T7: 无 active result_data → 409 RESULT_DATA_MISSING', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T7_${Date.now()}`, { withActiveResultData: false });
     const res = await notifyRequesterDone(adminToken, id);
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_MISSING') {
         throw new Error(`expected 409 RESULT_DATA_MISSING, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T8：result_data 多个 active → 409 RESULT_DATA_AMBIGUOUS
 // ============================================================
-defTest('T8: 多个 active result_data → 409 RESULT_DATA_AMBIGUOUS', async () => {
+{ name: 'T8: 多个 active result_data → 409 RESULT_DATA_AMBIGUOUS', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T8_${Date.now()}`);
     // 再插一条 active result_data
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
         db.run(
             `INSERT INTO collab_attachments
                 (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name, status)
              VALUES (?, 'result_data', ?, ?, ?, ?, 'active')`,
             [id, `collab/_e2e/${id}_result2.xlsx`, '测试数据2.xlsx', fx.EXPORTER_ID, 'exporter'],
-            (err) => { db.close(); err ? reject(err) : resolve(); }
+            (err) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(); }); }
         );
     });
     const res = await notifyRequesterDone(adminToken, id);
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_AMBIGUOUS') {
         throw new Error(`expected 409 RESULT_DATA_AMBIGUOUS, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T8b：result_data 非 xlsx → 409 RESULT_DATA_NOT_XLSX（codex 54 M-2）
 // ============================================================
-defTest('T8b: result_data 非 xlsx → 409 RESULT_DATA_NOT_XLSX', async () => {
+{ name: 'T8b: result_data 非 xlsx → 409 RESULT_DATA_NOT_XLSX', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T8b_${Date.now()}`, { withActiveResultData: false });
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
         db.run(
             `INSERT INTO collab_attachments
                 (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name, status)
              VALUES (?, 'result_data', ?, ?, ?, ?, 'active')`,
             [id, `collab/_e2e/${id}_result.csv`, '测试数据.csv', fx.EXPORTER_ID, 'exporter'],
-            (err) => { db.close(); err ? reject(err) : resolve(); }
+            (err) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(); }); }
         );
     });
     const res = await notifyRequesterDone(adminToken, id);
     if (res.status !== 409 || res.body.code !== 'RESULT_DATA_NOT_XLSX') {
         throw new Error(`expected 409 RESULT_DATA_NOT_XLSX, got ${res.status} ${JSON.stringify(res.body)}`);
     }
-});
+} },
 
 // ============================================================
 // T11：已读跟踪——造 done_notify_message_key + done_read_at 已固化 → read:true 直接返回
 // ============================================================
-defTest('T11: done_read_at 已固化 → notify-read-status 返 read:true cached', async () => {
+{ name: 'T11: done_read_at 已固化 → notify-read-status 返 read:true cached', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T11_${Date.now()}`);
     await fx.setCollabState(id, {
@@ -297,42 +294,52 @@ defTest('T11: done_read_at 已固化 → notify-read-status 返 read:true cached
     if (res.status !== 200) throw new Error(`expected 200, got ${res.status} ${JSON.stringify(res.body)}`);
     if (res.body.read !== true) throw new Error(`expected read:true, got ${JSON.stringify(res.body)}`);
     if (!res.body.cached) throw new Error(`expected cached:true (固化值直接返回), got ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // T12：7 天窗口（用户 2026-09-28 拍板）——窗口内查钉钉按证据判定；满 7 天且未固化已读直接答
 //   「超期无法查询」、不外呼。需要可控的钉钉响应与调用计数，故委托隔离钉钉桩套件
 //   （25h UNREAD / 25h READ 毫秒 / 约 6.96 天空列表 / 8 天 UNREAD、空列表、READ 均超期 共六条）
 // ============================================================
-defTest('T12: 7 天窗口六条（隔离钉钉桩）', async () => {
+{ name: 'T12: 7 天窗口六条（隔离钉钉桩）', fn: async () => {
     const result=require('child_process').spawnSync(process.execPath,[path.join(__dirname,'verify-notify-read-endpoints.js'),'--window-only'],{encoding:'utf8',timeout:300000,killSignal:'SIGKILL'});
     if(result.status!==0)throw Error(result.stdout+result.stderr);
-});
+} },
 
 // ============================================================
 // T12b：未通知（done_notified_at 为 NULL）→ 400 尚未通知
 // ============================================================
-defTest('T12b: done_notified_at 为 NULL → 400 尚未通知', async () => {
+{ name: 'T12b: done_notified_at 为 NULL → 400 尚未通知', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T12b_${Date.now()}`);
     const res = await readStatus(adminToken, id, 'requester_done');
     if (res.status !== 400) throw new Error(`expected 400 (尚未通知), got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
 
 // ============================================================
 // T17：回归——recipient 非法值 → 400
 // ============================================================
-defTest('T17: notify-read-status recipient 非法值 → 400', async () => {
+{ name: 'T17: notify-read-status recipient 非法值 → 400', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const id = await makeDoneDirectFixture(adminToken, `OA_NRD_T17_${Date.now()}`);
     const res = await readStatus(adminToken, id, 'bogus_recipient');
     if (res.status !== 400) throw new Error(`expected 400 (非法 recipient), got ${res.status} ${JSON.stringify(res.body)}`);
-});
+} },
+];
 
 // ============================================================
 // 主流程
 // ============================================================
 (async () => {
+    // ready() 是入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    // 已删除的旧参数：收到就报错并以退出码 1 结束，不静默忽略。
+    //   写在 ready() 之后的第一条：静态守卫要求 `await ready()` 是入口函数体里第一条有副作用的语句，ready() 之前不能放任何检查（同 verify-issue-lite-c2.js:66-72）；
+    //   此处不碰实例库 / 网络，只多一次自起实例的启动与收掉；走末尾 .catch：尽力 teardown 后 process.exit(1)。
+    if (process.argv.includes('--isolated-read-status')) {
+        console.error('--isolated-read-status 参数已移除：已读状态套件请改跑 verify-notify-read-endpoints.js');
+        throw new Error('--isolated-read-status 参数已移除');
+    }
     console.log('=== 导出通知业务方 notify-requester-done e2e 烟雾测试 ===');
     console.log('（钉钉三步成功路径 T1 / 部分失败 T9 需真钉钉或浏览器实测，本脚本测守卫/状态/范围/附件/已读分支）\n');
     let passed = 0, failed = 0;
@@ -348,9 +355,20 @@ defTest('T17: notify-read-status recipient 非法值 → 400', async () => {
         }
     }
     console.log(`\n清理 ${createdFixtureIds.length} 条测试 fixture...`);
-    for (const id of createdFixtureIds) {
-        try { await fx.cleanup(id); } catch (e) { /* ignore */ }
+    // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+    for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of createdFixtureIds.slice()) {
+            try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+        }
     }
+    if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
+    let teardownFailed = false;
+    try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); teardownFailed = true; }
     console.log(`\n结果：${passed} passed / ${failed} failed`);
-    process.exit(failed > 0 ? 1 : 0);
-})();
+    fx.finish(failed > 0 || teardownFailed ? 1 : 0);   // teardown 已落定；只设退出码（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    console.error('notify-requester-done e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

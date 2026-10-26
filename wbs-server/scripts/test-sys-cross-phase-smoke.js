@@ -21,12 +21,12 @@
  *   这也是支持下方"用例 1 含 1 张已作废夹具"（提示-2）的必要前提：已作废单不在「待上线」筛选范围内，
  *   status 过滤存在时该夹具会从 map 里直接消失，断言无从谈起。
  *
- * 用法：外部 server:3000 已起（本文件不自拉服务，同 test-sys-release-mgmt-playwright.js 头部契约）后：
- *   node scripts/test-sys-cross-phase-smoke.js
+ * 用法：node scripts/test-sys-cross-phase-smoke.js（[#106 S4c-B] 入口 `await fx.ready()` 自起隔离实例或核对 TEST_* 变量组，不再需要手工起 server:3000）
  *
- * ⚠️ 一次只跑一个写 db 的套件——本文件直连 task_pool.db 造夹具 + 写 sys_issues/sys_issue_dev_assignees/
- *   sys_releases/sys_release_audit，与其余 test-sys-*-playwright.js／test-sys-*-smoke.js 一样不支持并发
- *   跑多份实例。
+ * ⚠️ 批跑须 exclusive（[#106 S4c-B] 锚点 §9 #10）——本文件直连**实例库**造夹具 + 写 sys_issues/sys_issue_dev_assignees/
+ *   sys_releases/sys_release_audit；夹具把 admin 同时设为 dev 在册人与 intake_liaison，会抬高 admin 角色『待我处理』基线，
+ *   同一实例上并行的其他套件（如 test-sys-my-pending-playwright.js 的 MPPW- ①组）会读到被抬高的基线，故不得与它们并行。
+ *   原先「失败保留现场」的做法已按裁定去掉（见下方用例说明末段）：隔离实例里失败也清理夹具。
  *
  * 数据隔离：全部造数标题/批次号恒 XPHS- 前缀（与 RELMG-/MPPW-/FLPW- 等既有前缀区分）。
  *
@@ -55,23 +55,16 @@
  *     双路）→ 逐字段与编辑前快照完全一致 + db 直查 sys_release_audit 恰 1 条 action='edit'
  *     （index.js:16249，同上现场 grep 核实）。
  *
- * 若两用例任一真实翻红：可能是跨阶段真缺陷，脚本会保留现场（不清理已产生的数据）并以非 0 退出码
- * 停手报告，不自行改产品代码（同交付纪律）。⚠️ 保留的夹具会抬高 admin 角色『待我处理』基线（dev 在册
- * 行 + intake_liaison 均指向 ADMIN_ID），下次跑 test-sys-my-pending-playwright.js（MPPW-）①组的
- * admin 基线读数会受其影响（同 08-27 值班基线漂移一类的环境漂移面，非该套件自身回归）——排查完成、
- * 确认非本脚本引入的真缺陷后，应尽快手工清理本次保留的现场，恢复 MPPW- 的基线可比性。
+ * 若两用例任一真实翻红：可能是跨阶段真缺陷，脚本以非 0 退出码停手报告，不自行改产品代码（同交付纪律）。
+ * [#106 S4c-B] 原「保留现场（不清理已产生的数据）」已按锚点 §9 #10 裁定去掉：被测对象现在是隔离实例，失败也照常清理夹具
+ * （保留的夹具会抬高 admin『待我处理』基线并污染共享实例，隔离后既无必要也有害）；排查需要现场时看失败清单与实例日志。
  */
 'use strict';
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
-const net = require('net');
+const fx = require('./_test-fixture');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#106 S4c-B] 被测服务 / 实例库 / 签名来自 test-env：fx.BASE / fx.DB_PATH 在 ready() 之前读会抛 FX_NOT_READY，故改为 ready() 之后在入口里赋值；
+//   原 dotenv / `process.env.TEST_BASE_URL || 3000` / 指向业务库 task_pool.db 的 DB_PATH / JWT_SECRET 与自写 jwt 签名都已删除（签名走 fx.signAs）。
+let BASE_URL = null;
 const TITLE_PREFIX = 'XPHS-';
 const ADMIN_ID = 1;   // 同时充当「dev 在册人」「intake_liaison」两个身份的目标 uid——GET /sys-issues 的
                        // my_dev_pending/is_my_intake_liaison 两列是相对**调用者自身 uid** 计算的
@@ -79,16 +72,12 @@ const ADMIN_ID = 1;   // 同时充当「dev 在册人」「intake_liaison」两�
                        // 既满足 admin 专属端点（POST/PATCH/DELETE /sys-releases 均 requireAdmin），又让
                        // 这两个派生列对同一份 GET 响应天然非零，不必再造第二个真实用户身份。
 
-const db = new sqlite3.Database(DB_PATH);
+// 库句柄在入口里 ready() 之后用 fx.DB_PATH 打开、入口 finally 里等 close 回调后关闭（原先在模块顶层就打开业务库）
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 
-async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
-}
 async function fetchJson(url, tok, opts = {}) {
     const r = await fetch(`${BASE_URL}${url}`, {
         method: opts.method || 'GET',
@@ -107,26 +96,8 @@ function must(cond, msg) {
     return cond;
 }
 
-// ── server 编排探测（照抄 test-sys-release-mgmt-playwright.js：TCP 监听 + 应用层 readiness） ──────
-function ensureServerListening(timeoutMs = 3000) {
-    const u = new URL(BASE_URL);
-    const host = u.hostname;
-    const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
-    return new Promise((resolve, reject) => {
-        const sock = net.createConnection({ port, host });
-        const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
-        sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件（本脚本不自起 server）`)); });
-    });
-}
-async function ensureAppReadinessEndpoint() {
-    const r = await fetch(`${BASE_URL}/api/sys-issues/_readiness`).catch((e) => {
-        throw new Error(`应用 readiness 探测请求失败（${e.message}）——端口监听者可能不是目标 server.js`);
-    });
-    if (r.status !== 401) {
-        throw new Error(`应用 readiness 探测异常：期望 401（authenticateToken 未登录，证明路由存在且是本模块），实得 ${r.status}——监听该端口的可能不是目标 server.js（孤儿进程/端口被其它服务占用）`);
-    }
-}
+// [#106 S4c-B] 原「server 编排探测」（TCP 监听探活 + 应用层 /_readiness 探测）已删：入口 ready() 返回时 test-env 已确认实例与全部模块就绪，
+//   监听者就是它自起的实例，不存在孤儿进程 / 端口被占用的探测对象。
 
 // ── 夹具：直连 SQL 造「待上线」成员单（同 test-sys-release-mgmt-playwright.js mkPendingIssue 范式，
 //   补 intake_required=1——sys_issues.intake_required 列定义为 INTEGER NOT NULL DEFAULT 0
@@ -175,18 +146,13 @@ async function fetchSnapshot(tok, ids) {
     return { map, httpMatchedCount: map.size, rawItemsTotal: items.length };
 }
 
+// 返回失败项数（不在 helper 里 process.exit：由入口在 teardown 之后 finish）
 async function main() {
-    await ensureServerListening();
-    console.log('  ✅ 端口 Listen 探测通过（server 已就绪）');
-    await ensureAppReadinessEndpoint();
-    console.log('  ✅ 应用 readiness 端点探测通过（确认监听者是目标 server.js，非孤儿/误占用进程）');
-
-    const adminTok = await signAs(ADMIN_ID);
+    const adminTok = await fx.signAs(ADMIN_ID);
     const createdIssueIds = [];
     let release1Id = null, release1No = null;
     let release2Id = null, release2No = null;
     let devAssigneeRowId = null;
-    let keepFixturesOnFailure = false;
 
     try {
         console.log('\n══════ 跨阶段状态联动冒烟（R 删除/编辑 × P 派生列，XPHS-）══════');
@@ -233,7 +199,6 @@ async function main() {
         const add1R = await fetchJson(`/api/sys-releases/${release1Id}/add-issues`, adminTok, { method: 'POST', body: { issue_ids: allIds } });
         if (add1R.status !== 200 || !add1R.body || add1R.body.count !== allIds.length) throw new Error(`[夹具-加单] 应 200 且 count=${allIds.length}，实得 ${add1R.status} ${JSON.stringify(add1R.body)}`);
         console.log(`  （批次1 #${release1Id} / ${release1No} 已建，${allIds.length} 张成员已挂）`);
-        keepFixturesOnFailure = true;   // 真实数据已产生，此后任一断言翻红都要保留现场（不清理）
 
         // 提示-2：第 5 张走真实 POST /sys-issues/:id/void（同 RELMG- ④组先例）——void 是"任意态→已作废"
         //   的终态转移且不清 release_id（S11 既有事实），转态后仍挂在本批次名下，构成 O4 §3 步骤③要
@@ -387,13 +352,7 @@ async function main() {
         fail++;
         failDetails.push('顶层异常: ' + (e && e.message || e));
     } finally {
-        if (fail > 0 && keepFixturesOnFailure) {
-            console.log(`\n  ⚠️ 检测到 ${fail} 项失败——按交付纪律保留现场，跳过清理（夹具单 ID：${JSON.stringify(createdIssueIds)}；批次：#${release1Id}(${release1No})/#${release2Id}(${release2No})），不自行改产品代码，人工排查后手工清理。保留的夹具会抬高 admin 角色『待我处理』基线（dev 在册行 + intake_liaison 均指向 ADMIN_ID），下次跑 test-sys-my-pending-playwright.js（MPPW-）①组的 admin 基线读数会受其影响，排查完成后应尽快手工清理。`);
-            db.close();
-            console.log(`\n=== FAIL：${pass} 项通过 / ${fail} 项失败（现场已保留） ===`);
-            failDetails.forEach(m => console.log('  - ' + m));
-            process.exit(1);
-        }
+        // [#106 S4c-B] 原「失败保留现场」分支（含 process.exit(1)）已按锚点 §9 #10 删除：隔离实例里失败也照常清理夹具。
         let cleanupErrorCount = 0;
         const CHILD_TABLES = ['sys_issue_dev_commits', 'sys_fast_release_executors', 'sys_issue_timeline', 'sys_issue_dev_events', 'sys_issue_dev_assignees'];
         const RESIDUAL_CHECK_TABLES = [...CHILD_TABLES, 'sys_issue_attachments', 'sys_issue_release_commit_snapshots', 'sys_issue_delete_audit'];
@@ -414,7 +373,7 @@ async function main() {
             } catch (e) { cleanupErrorCount++; console.warn(`批次兜底清理失败 #${relId}: ${e.message}`); }
         }
         // ⭐ 拦截-5：release_no 精确清（IN (?,?)），不用 LIKE 'XPHS-%' 通配——通配会连带抹掉"上一次失败
-        //   运行按交付纪律保留下来的现场"，与上方 keepFixturesOnFailure 的保留意图自相矛盾（同 RELMG-
+        //   运行按交付纪律保留下来的现场"（[#106 S4c-B] 保留现场已去掉，精确清仍保留：只清本次自己造的批次，不误伤同实例上别人的 XPHS- 行）（同 RELMG-
         //   :455/:475 一带的精确清范式对齐，非本脚本自创写法）。
         const xphsReleaseNos = [release1No, release2No].filter(Boolean);
         if (xphsReleaseNos.length) {
@@ -454,10 +413,30 @@ async function main() {
             fail++;
             failDetails.push(`夹具清理不干净：清理异常 ${cleanupErrorCount} 次 / 逐表残留 ${JSON.stringify(residualDetail)}（合计 ${totalResidual} 行）——本地库已被本次测试运行污染，需人工核实`);
         }
-        db.close();
         console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) { console.log('失败清单：'); failDetails.forEach(m => console.log('  - ' + m)); process.exit(1); }
+        if (fail > 0) { console.log('失败清单：'); failDetails.forEach(m => console.log('  - ' + m)); }
     }
+    return fail;
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        BASE_URL = fx.BASE;
+        db = await fx.openInstanceDb(fx.DB_PATH);   // [#106 S4c 收口] 带打开回调、不建空库；打开失败进下面的 catch（code 保持 1）
+        const nFailed = await main();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('顶层异常:', e && e.stack || e);
+    } finally {
+        if (db) await new Promise((resolve) => { db.close((cerr) => { if (cerr) { console.error(`关库失败：${cerr.message}`); code = 1; } resolve(); }); });
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('sys-cross-phase smoke 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

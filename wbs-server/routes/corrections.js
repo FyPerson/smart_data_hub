@@ -1,5 +1,5 @@
 // routes/corrections.js — 数据修正模块（从 server.js 抽离，巨型文件拆分首试点）
-// 生成：scripts/build-routes-corrections.js 程序化切割 server.js 三区（行为零变更）
+// 生成：scripts/_archive/build-routes-corrections.js 程序化切割 server.js 三区（行为零变更）
 //   区1 readiness(原195-245) / 区2 DDL+migration(1991-2261) / 区3 主体+18端点(18289-19802)
 //   16 共享符号经 deps 局部注入；18 端点 app.xxx('/api/corrections...') 改 router.xxx('/...')
 //   导出 { initSchema, router, _internals }——_internals 供 verify require 真实逻辑（根治 RC-L2 复刻漂移）
@@ -2459,7 +2459,7 @@ const CORRECTION_ATTACHMENT_RULES = {
     error_proof: { exts: CORRECTION_BASE_EXTS.concat(CORRECTION_ERROR_PROOF_EXTRA_EXTS, ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
     fix_proof:   { exts: CORRECTION_BASE_EXTS.concat(ARCHIVE_EXTS), sizeByExt: ARCHIVE_SIZE_BY_EXT, defaultSize: 20 * 1024 * 1024 },
 };
-// 派生联合白名单（符号名保留，供 fileFilter / _internals / probe-correction-symbols 既有消费者不变）。
+// 派生联合白名单（符号名保留，供 fileFilter / _internals / 原 probe-correction-symbols 探针（已归档到 scripts/_archive/） 既有消费者不变）。
 const CORRECTION_ALLOWED_EXTS = Array.from(new Set(
     Object.values(CORRECTION_ATTACHMENT_RULES).flatMap((r) => r.exts)
 ));
@@ -4071,9 +4071,13 @@ router.post('/:id/create-chat', authenticateToken, requireCorrectionSchemaReady,
     }
 });
 
+  // [#106 S3a] 只读就绪访问函数（汇总就绪接口 GET /api/health/ready 用）：只折算 CORRECTION_SCHEMA_STATE，不碰库、不触发初始化；上面的 requireCorrectionSchemaReady 与 503 行为不变
+  const getReadiness = () => require('../utils/health-ready').summarizeState(CORRECTION_SCHEMA_STATE);
+
   return {
     initSchema,
     router,
+    getReadiness,
     _internals: { CORRECTION_STATUSES, CORRECTION_STATUS_TRANSITIONS, CORRECTION_TYPES, CORRECTION_SOURCE_SYSTEMS, CORRECTION_NOTIFY_SENDABLE, CORRECTION_READ_FIELD_MAP, CORRECTION_ALLOWED_EXTS, CORRECTION_ATTACHMENT_RULES, validateCorrectionAttachmentRule, CORRECTION_CHAT_EXCLUDE_IDS, CORRECTION_CHAT_ALLOWED_STATUSES, CORRECTION_REQUESTS_KEY_COLS, CORRECTION_ATTACHMENTS_KEY_COLS, CORRECTION_HISTORY_KEY_COLS, CORRECTION_REQUESTERS_KEY_COLS, CORRECTION_REQUESTERS_NOTNULL_COLS, CORRECTION_REQUESTER_NOTIFY_STATUSES, normalizeCorrectionDatetime, correctionDefaultDeadline, parsePositiveCorrectionId, correctionTransition, correctionActor, isCorrectionChatExcludedId, requireCorrectionSchemaReady, CORRECTION_SCHEMA_STATE, CORRECTION_RELAY_USER_IDS, isCorrectionRelayWhitelisted, normalizeCorrectionRequesters, writeCorrectionRequesters, resolveCorrectionGroupAnchor, isGroupMemberDoneForBusinessNotify, runCorrectionMigration, resolveReworkOriginalDeveloper, insertReworkChildCorrection, validateInputOaNumber },
   };
 };

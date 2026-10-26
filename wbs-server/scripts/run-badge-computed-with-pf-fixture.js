@@ -25,8 +25,16 @@
  *   收尾 0 残留与基线比对。若哪天要在共享库上跑它，这条前提失效，事务化必须重新评估。
  *
  * 用法：
- *   PORT=3000 node scripts/run-badge-computed-with-pf-fixture.js
+ *   node scripts/run-badge-computed-with-pf-fixture.js
  *   node scripts/run-badge-computed-with-pf-fixture.js --skip-cleanup   （反向证明专用，见下）
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / PORT / BADGE_DB_PATH / 业务库 task_pool.db / .env。
+ *   子进程（test-badge-computed-playwright.js）的环境 = 本进程环境 + testEnv.childEnv()（四个 TEST_* 变量：实例身份 / 地址 / 实例库路径 / 实例密钥）；
+ *   不传真实库路径、不传 .env 内容、不再传 PORT。子进程按变量组形态核对后使用同一个实例，其 teardown 是空操作，实例由本进程在最后 teardown。
+ *   批跑建议：needsService:true；exclusive（空表硬断言 + 在实例里造 / 删 periodic_tasks / periodic_task_runs / periodic_task_pushes，且子进程要读全部徽章页）；不需要服务端开关。
+ *   Q3 裁定（主会话 2026-10-21）：下面的空表硬断言（periodic_tasks / periodic_task_runs 必须为空）原样保留；实例库是来源库的隔离化副本，若副本里这两张表非空，
+ *   断言会如实判红（登记「快照非空」，不放宽）。
+ *   首跑核对点：① 实例里 periodic_tasks / periodic_task_runs 是否为空；② seed() 要 `db_connections` 里有 connection_type='source' 且 type 为 sqlserver / mysql 的一行（建任务端点会校验）；
+ *   ③ 经真实 /api/periodic-tasks 建任务 / 禁用在隔离实例上是否可用（本批只做静态改造，未核对这两个端点在隔离模式下会不会触发外部库闸 EXTERNAL_DISABLED，首跑确认）。
  *
  * 造数范式沿用 test-unify-visual-playwright.js（真实 API 建任务 + db 直插 runs + 幂等
  *   pre-clean + 收尾 0 残留断言），**两处有意不同**：
@@ -53,15 +61,13 @@ const path = require('path');
 const http = require('http');
 const { spawn } = require('child_process');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT = process.env.PORT || '3000';
-const BASE_URL = `http://localhost:${PORT}`;
-const DB_PATH = process.env.BADGE_DB_PATH || path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;
-const SKIP_CLEANUP = process.argv.includes('--skip-cleanup');
+let BASE_URL = null;     // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let API_HOST = null;     // [#106 S4d-5] ready() 之后赋值：从 baseUrl 解出的主机 / 端口（原来写死 localhost + PORT）
+let API_PORT = null;
+let DB_PATH = null;      // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SKIP_CLEANUP = false;   // [#106 S4d-5] 顶层的 process.argv.includes(...) 调用会被守卫 R6 判红：改 let，main 里 ready() 之后赋值
 
 const FX = '[BADGE-COMPUTED]';
 const TASK_A_NAME = `${FX} PF 徽章覆盖-五态`;
@@ -69,8 +75,9 @@ const TASK_B_NAME = `${FX} PF 徽章覆盖-已禁用`;
 // 〔S5b-fix·M6〕每轮唯一 nonce，写进 description。
 //   固定标题只能证明"库里有一行叫这个名字的任务"，证明不了"这行是我这一轮建的"——
 //   上一轮崩溃留下的同名残留会替本轮的造数背书，而本轮可能其实一条都没建成。
-const NONCE = `R${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-const TASK_DESC = `${FX} computed 覆盖夹具·nonce=${NONCE}，跑完自动清理`;
+//   [#106 S4d-5] 顶层的 Date.now() / Math.random() 调用会被守卫 R6 判红：NONCE / TASK_DESC 改 let，ready() 之后赋值。
+let NONCE = null;
+let TASK_DESC = null;
 // 任务 A 必须排第一（列表 ORDER BY created_at DESC）。显式回填而非依赖插入顺序：
 //   created_at 精确到秒，同秒建两条时 ORDER BY 是不稳定的，"大多数时候对"不是判据。
 const TS_A = '2026-07-02 10:00:00';
@@ -88,10 +95,32 @@ const RUN_FIXTURES = [
     { status: 'queued', started: '2026-06-01 09:00:00', finished: null, rows: null, file: null, fileStatus: 'missing', err: null },
 ];
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => (e ? rej(e) : res(r))));
 const dbAll = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => (e ? rej(e) : res(r))));
 const dbRun = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { (e ? rej(e) : res(this)); }));
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let pass = 0;
@@ -113,7 +142,7 @@ function rawReq(token, method, p, body) {
     return new Promise((resolve) => {
         const data = body !== undefined ? JSON.stringify(body) : null;
         const r = http.request({
-            host: 'localhost', port: PORT, method, path: p,
+            host: API_HOST, port: API_PORT, method, path: p,   // [#106 S4d-5] 原为写死的 localhost + PORT：改用 ready() 之后从实例 baseUrl 解出的主机 / 端口
             headers: {
                 Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
                 ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
@@ -140,27 +169,16 @@ async function api(token, method, p, body) {
     return last;
 }
 
-function probeServer() {
-    return new Promise((resolve) => {
-        const req = http.get({ host: 'localhost', port: PORT, path: '/login.html', timeout: 3000 }, (res) => {
-            res.resume();
-            resolve(res.statusCode > 0);
-        });
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
-    });
-}
+// [#106 S4d-5] 原 probeServer（http.get 探测 localhost:PORT/login.html）已删：隔离实例由 testEnv.ready() 起并核对身份（/api/version 的 instance 与 mode）。
 
 // 〔S5b-fix·M5〕返回 {user, token}：run 行的 triggered_by 要写**真实**的 admin id。
 //   原来硬编码 1，在 admin 不是 1 号的库上会插出一条指向别人（甚至指向不存在用户）的留痕行——
 //   页面照样渲染得出来，所以红不了，但夹具已经在伪造审计字段了。
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行），不再自读 .env 的 JWT_SECRET。
 async function signAsAdmin() {
     const user = await dbGet("SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1");
     if (!user) throw new Error('库里找不到 admin 用户，无法签发 JWT');
-    const token = jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET, { expiresIn: '2h' }
-    );
+    const token = await testEnv.signToken(user.id);
     return { user, token };
 }
 
@@ -372,7 +390,9 @@ function runComputed() {
     return new Promise((resolve) => {
         const child = spawn(process.execPath, [path.join(__dirname, 'test-badge-computed-playwright.js')], {
             cwd: path.join(__dirname, '..'),
-            env: { ...process.env, PORT },
+            // [#106 S4d-5] 子进程环境 = 本进程环境 + test-env 的变量组（TEST_INSTANCE / TEST_BASE_URL / TEST_DB_PATH / TEST_JWT_SECRET），子进程按变量组形态核对后使用同一个实例；
+            //   原来传的是 PORT（让子进程连 3000 上的真实 server）。不传真实库路径、不传 .env 内容。
+            env: { ...process.env, ...testEnv.childEnv() },
         });
         let out = '';
         child.stdout.on('data', (c) => { out += c; process.stdout.write(c); });
@@ -397,15 +417,17 @@ function parseComputed(out) {
     };
 }
 
-(async function main() {
+async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    { const u = new URL(BASE_URL); API_HOST = u.hostname.replace(/^\[|\]$/g, ''); API_PORT = Number(u.port); }
+    DB_PATH = testEnv.env().dbPath;
+    SKIP_CLEANUP = process.argv.includes('--skip-cleanup');
+    NONCE = `R${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    TASK_DESC = `${FX} computed 覆盖夹具·nonce=${NONCE}，跑完自动清理`;
+    db = await openInstanceDb(DB_PATH);
     console.log('=== S5b · Periodic_Fetch computed 补跑编排 ===\n');
-    if (!JWT_SECRET) { console.log('FAIL：.env 里没有 JWT_SECRET'); process.exit(1); }
-    if (!(await probeServer())) {
-        console.log(`未探测到 ${BASE_URL} 上的 server。本脚本有意不自行 spawn（端口纪律）：`);
-        console.log(`  cd wbs-server && PORT=${PORT} node server.js`);
-        process.exit(2);
-    }
-    console.log(`0. server 探测到（${BASE_URL}）·db=${DB_PATH}·nonce=${NONCE}`);
+    console.log(`0. 隔离实例就绪（${BASE_URL}）·db=${DB_PATH}·nonce=${NONCE}`);
     // 〔H3〕外键强制开关：SQLite 默认 OFF，本连接同样不开。打印出来是为了让"删 run 不级联删 push"
     //   这个前提可见——本脚本的删除顺序正是建立在它之上，而不是假设数据库会替我们兜底。
     const fkRow = await dbGet('PRAGMA foreign_keys');
@@ -569,14 +591,28 @@ function parseComputed(out) {
             }
             if (parts.length) {
                 console.error(`  [finally-cleanup] ${parts.join('｜')} —— 剩余数据仍带 ${FX} 标记，重跑本脚本可再清`);
+                // [#106 S4d-5] 兜底清理失败计失败（原来只 console.error，不进 fail 计数；主路径已经走到 0 残留断言时才有第二道保险，主路径中途抛错时这里是唯一的清理）
+                check(false, '兜底清理（finally）五阶段走完且无残留', parts.join('｜'));
             } else {
                 console.log(`  [finally-cleanup] 兜底清理走完五阶段（runs 已删 / tasks 已删）·本轮 run 子记录已清空（留档 run id ${finalRes.runIdCount} 个）`);
             }
         }
-        db.close();
+        // [#106 S4d-5] 原为 db.close()（不等回调）：改等 close 回调，失败计失败
+        try { await closeDb(); } catch (e) { check(false, '关闭实例库', e && e.message); }
     }
+
+    // [#106 S4d-5] 收掉自起实例（变量组形态为空操作）；失败计失败
+    try { await testEnv.teardown(); } catch (e) { check(false, 'teardown（收掉自起实例）', e && e.message); }
 
     console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：编排断言 ${pass} 项通过 / ${fail} 项失败 ===`);
     if (fail > 0) failures.forEach((f, i) => console.log(`  ${i + 1}. ${f.label}${f.detail ? ' — ' + f.detail : ''}`));
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    // [#106 S4d-5] 原为 process.exit(...)：改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+    testEnv.finish(fail === 0 ? 0 : 1);
+}
+
+main().catch(async (e) => {
+    console.error('编排脚本异常：', e && e.stack || e);
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

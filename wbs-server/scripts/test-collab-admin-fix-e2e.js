@@ -2,7 +2,7 @@
  * admin-fix endpoint e2e（v1.70.0 Step 3，方案 §3-A）
  *
  * 用法：node scripts/test-collab-admin-fix-e2e.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *
  * 8 个用例：
  *   T1 admin 改 target_db_connection_id + reason → 200 + 字段变更 + sql_validation_error 清空
@@ -23,6 +23,16 @@ const fx = require('./_test-fixture');
 
 const createdFixtureIds = [];
 
+// [#106 S4c-A1] 只读查实例库（原先三处直接打开 <wbs>/task_pool.db 业务库）：fx.DB_PATH 在 ready() 之后才可读，本函数只在用例体内调用；
+//   等 close 回调再落定，关库错误不丢（语句错误优先）。
+// [#106 S4c 收口] 经 fx.openInstanceDb 打开（带打开回调、不建空库；该助手以读写模式打开，本函数仍只执行 SELECT）。
+async function dbGetOnce(sql, params) {   // [#106 S4c 送审前小修] 原名 dbGetReadonly：现经读写模式的 fx.openInstanceDb 打开，名字不再暗示只读
+    const db = await fx.openInstanceDb(fx.DB_PATH);
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); }); });
+    });
+}
+
 async function adminFix(token, id, body) {
     return fx.apiCall('POST', `/api/collab/requests/${id}/admin-fix`, token, body);
 }
@@ -36,18 +46,15 @@ async function archive(token, id, body) {
     return fx.apiCall('POST', `/api/collab/requests/${id}/archive`, token, body || {});
 }
 
-const tests = [];
-
-function test(name, fn) {
-    tests.push({ name, fn });
-}
+// [#106 S4c-A1] 用例登记成数组字面量条目（原先是模块顶层的 22 次 test(...) 调用）：静态守卫要求模块顶层只有声明与一个入口调用
+const tests = [
 
 // ============================================================================
 // T1 admin 改 description + reason → 200 + 字段变更 + sql_error 清空
 //    模拟 5/21 OA-364265 场景（SUBMITTED + failed），但改 description 而非 target_db
 //    （生产环境 source 库通常只配 1 个 BMS，无法测改到另一个 id；改字段类型测试在 T1）
 // ============================================================================
-test('T1 admin 改 description → 200 + 字段变更 + sql_validation 清空', async () => {
+{ name: 'T1 admin 改 description → 200 + 字段变更 + sql_validation 清空', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -72,14 +79,14 @@ test('T1 admin 改 description → 200 + 字段变更 + sql_validation 清空', 
     if (r.body.collab.sql_validation_error !== null) throw new Error(`sql_validation_error 未清空：${r.body.collab.sql_validation_error}`);
     if (r.body.collab.sql_validation_status !== null) throw new Error(`sql_validation_status 未清空：${r.body.collab.sql_validation_status}`);
     if (!r.body.cleared_sql_validation) throw new Error(`cleared_sql_validation != true（codex 26 审 #1 字段重命名）`);
-});
+} },
 
 // ============================================================================
 // T1b admin 改 target_db_connection_id 到不存在的 ID → 400 BUSINESS_VALIDATION_FAILED
 //      生产环境通常只有 1-2 个 source 库，无法 happy-path 测真改值，
 //      改用 business 校验失败路径覆盖 target_db 字段的实际通路
 // ============================================================================
-test('T1b admin 改 target_db_connection_id 到 9999（不存在）→ 400 BUSINESS_VALIDATION_FAILED', async () => {
+{ name: 'T1b admin 改 target_db_connection_id 到 9999（不存在）→ 400 BUSINESS_VALIDATION_FAILED', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -92,12 +99,12 @@ test('T1b admin 改 target_db_connection_id 到 9999（不存在）→ 400 BUSIN
     if (!Array.isArray(r.body.detail) || !r.body.detail.some(m => /9999/.test(m))) {
         throw new Error(`detail 应含 9999，实际：${JSON.stringify(r.body.detail)}`);
     }
-});
+} },
 
 // ============================================================================
 // T2 dev1（非 admin）调 → 403
 // ============================================================================
-test('T2 dev1（非 admin）调 admin-fix → 403', async () => {
+{ name: 'T2 dev1（非 admin）调 admin-fix → 403', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -106,12 +113,12 @@ test('T2 dev1（非 admin）调 admin-fix → 403', async () => {
         reason: '测试非 admin 权限拦截',
     });
     if (r.status !== 403) throw new Error(`期望 403 实际 ${r.status}: ${JSON.stringify(r.body)}`);
-});
+} },
 
 // ============================================================================
 // T3 reason 太短 → 400 REASON_TOO_SHORT
 // ============================================================================
-test('T3 reason 太短 (< 10) → 400 REASON_TOO_SHORT', async () => {
+{ name: 'T3 reason 太短 (< 10) → 400 REASON_TOO_SHORT', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -121,12 +128,12 @@ test('T3 reason 太短 (< 10) → 400 REASON_TOO_SHORT', async () => {
     });
     if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}`);
     if (r.body.code !== 'REASON_TOO_SHORT') throw new Error(`期望 code=REASON_TOO_SHORT 实际 ${r.body.code}`);
-});
+} },
 
 // ============================================================================
 // T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（codex 二审 #7 min:1）
 // ============================================================================
-test('T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（人员字段 min:1）', async () => {
+{ name: 'T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（人员字段 min:1）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -140,12 +147,12 @@ test('T4 developer_id=0 → 400 FIELD_VALIDATION_FAILED（人员字段 min:1）'
     if (!Array.isArray(r.body.detail) || !r.body.detail.some(m => /min|不能小于 1/.test(m))) {
         throw new Error(`detail 应含 min/不能小于 1 提示，实际：${JSON.stringify(r.body.detail)}`);
     }
-});
+} },
 
 // ============================================================================
 // T5 DONE 状态 → 409 TERMINAL_STATE_PROTECTED
 // ============================================================================
-test('T5 DONE 状态调 admin-fix → 409 TERMINAL_STATE_PROTECTED', async () => {
+{ name: 'T5 DONE 状态调 admin-fix → 409 TERMINAL_STATE_PROTECTED', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -163,12 +170,12 @@ test('T5 DONE 状态调 admin-fix → 409 TERMINAL_STATE_PROTECTED', async () =>
     });
     if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'TERMINAL_STATE_PROTECTED') throw new Error(`期望 code=TERMINAL_STATE_PROTECTED 实际 ${r.body.code}（reason 长度校验推后应优先暴露 TERMINAL）`);
-});
+} },
 
 // ============================================================================
 // T6 改非白名单字段（status）→ 400 FIELD_NOT_ALLOWED
 // ============================================================================
-test('T6 改非白名单字段 status → 400 FIELD_NOT_ALLOWED', async () => {
+{ name: 'T6 改非白名单字段 status → 400 FIELD_NOT_ALLOWED', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -183,13 +190,13 @@ test('T6 改非白名单字段 status → 400 FIELD_NOT_ALLOWED', async () => {
     if (!Array.isArray(r.body.allowed_fields) || !r.body.allowed_fields.includes('target_db_connection_id')) {
         throw new Error(`allowed_fields 应含 target_db_connection_id，实际：${JSON.stringify(r.body.allowed_fields)}`);
     }
-});
+} },
 
 // ============================================================================
 // T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED
 //    PENDING_ASSIGN 还没指派开发，改 developer 应走 assign endpoint 而非 admin-fix
 // ============================================================================
-test('T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED', async () => {
+{ name: 'T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED', fn: async () => {
     // 不用 createPendingFixture（它已 assign 到 PENDING）；手工造 PENDING_ASSIGN
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     const oaNo = `OA_FX_PA_${Date.now()}`;
@@ -214,12 +221,12 @@ test('T7 PENDING_ASSIGN 改 developer_id → 409 FIELD_STATUS_NOT_ALLOWED', asyn
     if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'FIELD_STATUS_NOT_ALLOWED') throw new Error(`期望 code=FIELD_STATUS_NOT_ALLOWED 实际 ${r.body.code}`);
     if (r.body.field !== 'developer_id') throw new Error(`期望 field=developer_id 实际 ${r.body.field}`);
-});
+} },
 
 // ============================================================================
 // T9 codex 26 审 #1 验证：sql_validation_status 单独残留（error 为空）admin-fix 也清空
 // ============================================================================
-test('T9 sql_validation_status=failed 但 sql_error 为空 → admin-fix 仍清空 status（codex 26 审 #1）', async () => {
+{ name: 'T9 sql_validation_status=failed 但 sql_error 为空 → admin-fix 仍清空 status（codex 26 审 #1）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -243,12 +250,12 @@ test('T9 sql_validation_status=failed 但 sql_error 为空 → admin-fix 仍清�
     if (!r.body.cleared_sql_validation) {
         throw new Error(`期望 cleared_sql_validation=true 实际 ${r.body.cleared_sql_validation}`);
     }
-});
+} },
 
 // ============================================================================
 // T10 codex 26 审 #7 验证：clear_sql_validation_error 非布尔类型 → 400
 // ============================================================================
-test('T10 clear_sql_validation_error="false" 字符串 → 400 FIELD_VALIDATION_FAILED（codex 26 审 #7）', async () => {
+{ name: 'T10 clear_sql_validation_error="false" 字符串 → 400 FIELD_VALIDATION_FAILED（codex 26 审 #7）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -259,12 +266,12 @@ test('T10 clear_sql_validation_error="false" 字符串 → 400 FIELD_VALIDATION_
     });
     if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}`);
     if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
-});
+} },
 
 // ============================================================================
 // T8 GET allowed-fields 不同状态返不同字段集
 // ============================================================================
-test('T8 GET allowed-fields 按状态返字段集', async () => {
+{ name: 'T8 GET allowed-fields 按状态返字段集', fn: async () => {
     const adminToken = await fx.signAs(fx.ADMIN_ID);
 
     // v1.78.0：新增 deadline 后 SUBMITTED 6 字段 / PENDING_ASSIGN 5 字段（均含 deadline）
@@ -287,12 +294,12 @@ test('T8 GET allowed-fields 按状态返字段集', async () => {
     const r3 = await getAllowedFields(adminToken, 'DONE');
     if (r3.status !== 200) throw new Error(`DONE HTTP ${r3.status}`);
     if (r3.body.allowed_fields.length !== 0) throw new Error(`DONE 期望 0 字段实际 ${r3.body.allowed_fields.length}`);
-});
+} },
 
 // ============================================================================
 // T11 v1.70.3 业务需求变更：admin 在 DONE 状态作废 → 200 + archived_at set + 完成字段保留
 // ============================================================================
-test('T11 v1.70.3 admin 在 DONE 状态作废 → 200 + archived_at set + sql_validated_at/done_at 等保留', async () => {
+{ name: 'T11 v1.70.3 admin 在 DONE 状态作废 → 200 + archived_at set + sql_validated_at/done_at 等保留', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -310,17 +317,11 @@ test('T11 v1.70.3 admin 在 DONE 状态作废 → 200 + archived_at set + sql_va
     if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}`);
 
     // 验证 DB：archived_at 已 set + 完成字段保留（status/sql_validated_at/done_at/submission_version 不动）
-    const row = await new Promise((resolve, reject) => {
-        const sqlite3 = require('sqlite3');
-        const path = require('path');
-        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
-        db.get(
-            `SELECT status, sql_validation_status, sql_validated_at, done_at, submission_version, archived_at, archived_reason, archived_by
-               FROM collab_requests WHERE id = ?`,
-            [ctx.id],
-            (e, r) => { db.close(); e ? reject(e) : resolve(r); }
-        );
-    });
+    const row = await dbGetOnce(
+        `SELECT status, sql_validation_status, sql_validated_at, done_at, submission_version, archived_at, archived_reason, archived_by
+           FROM collab_requests WHERE id = ?`,
+        [ctx.id]
+    );
     if (!row.archived_at) throw new Error('archived_at 未 set');
     if (row.archived_reason !== 'v1.70.3 测试 DONE 后作废') throw new Error(`archived_reason 不匹配：${row.archived_reason}`);
     if (row.status !== 'DONE') throw new Error(`status 应保持 DONE，实际 ${row.status}（v1.70.3 拍板：作废只标 archived_at 不动完成字段）`);
@@ -328,12 +329,12 @@ test('T11 v1.70.3 admin 在 DONE 状态作废 → 200 + archived_at set + sql_va
     if (row.sql_validated_at !== '2026-05-22 15:45:47') throw new Error(`sql_validated_at 应保留历史值`);
     if (row.done_at !== '2026-05-22 15:45:47') throw new Error(`done_at 应保留历史值`);
     if (row.submission_version !== 1) throw new Error(`submission_version 应保留 1`);
-});
+} },
 
 // ============================================================================
 // T12 v1.70.3：admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED
 // ============================================================================
-test('T12 v1.70.3 admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED（终态保护）', async () => {
+{ name: 'T12 v1.70.3 admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED（终态保护）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -347,12 +348,12 @@ test('T12 v1.70.3 admin 在 ARCHIVED 终态作废 → 409 ARCHIVED_PROTECTED（�
     const r = await archive(ctx.adminToken, ctx.id, { archived_reason: '尝试作废已归档单' });
     if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'ARCHIVED_PROTECTED') throw new Error(`期望 code=ARCHIVED_PROTECTED 实际 ${r.body.code}`);
-});
+} },
 
 // ============================================================================
 // T13 v1.70.3：非 admin 在 DONE 状态调 archive → 403
 // ============================================================================
-test('T13 v1.70.3 dev1（非 admin）在 DONE 状态调 archive → 403', async () => {
+{ name: 'T13 v1.70.3 dev1（非 admin）在 DONE 状态调 archive → 403', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -364,12 +365,12 @@ test('T13 v1.70.3 dev1（非 admin）在 DONE 状态调 archive → 403', async 
 
     const r = await archive(ctx.dev1Token, ctx.id, { archived_reason: 'dev 尝试作废' });
     if (r.status !== 403) throw new Error(`期望 403 实际 ${r.status}: ${JSON.stringify(r.body)}`);
-});
+} },
 
 // ============================================================================
 // T14 v1.70.3 codex 29 审 #2：admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submission_version=0 守卫后中间态也可作废）
 // ============================================================================
-test('T14 v1.70.3 admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submission_version=0 守卫）', async () => {
+{ name: 'T14 v1.70.3 admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submission_version=0 守卫）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -383,12 +384,12 @@ test('T14 v1.70.3 admin 在 SUBMITTED+v1 状态作废 → 200（验证删 submis
 
     const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 验证 SUBMITTED+v1 可作废' });
     if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}`);
-});
+} },
 
 // ============================================================================
 // T15 v1.70.3 codex 29 审 #2：admin 在 PENDING+v1 状态作废 → 200（原 submission_version=0 守卫会拒绝此用例）
 // ============================================================================
-test('T15 v1.70.3 admin 在 PENDING+v1 状态作废 → 200（原 submission_version=0 守卫直接相关回归点）', async () => {
+{ name: 'T15 v1.70.3 admin 在 PENDING+v1 状态作废 → 200（原 submission_version=0 守卫直接相关回归点）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -400,12 +401,12 @@ test('T15 v1.70.3 admin 在 PENDING+v1 状态作废 → 200（原 submission_ver
 
     const r = await archive(ctx.adminToken, ctx.id, { archived_reason: 'v1.70.3 验证 PENDING+v1 可作废（删 submission_version=0 守卫后）' });
     if (r.status !== 200) throw new Error(`期望 200 实际 ${r.status}: ${JSON.stringify(r.body)}（原 submission_version=0 守卫会拒此用例，本次应放行）`);
-});
+} },
 
 // ============================================================================
 // T16 v1.78.0：admin 改 deadline → 200 + DB 写入归一化为 'YYYY-MM-DD HH:mm:ss'
 // ============================================================================
-test('T16 v1.78.0 admin 改 deadline（T 分隔无秒）→ 200 + DB 归一化空格分隔补秒', async () => {
+{ name: 'T16 v1.78.0 admin 改 deadline（T 分隔无秒）→ 200 + DB 归一化空格分隔补秒', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
 
@@ -424,22 +425,16 @@ test('T16 v1.78.0 admin 改 deadline（T 分隔无秒）→ 200 + DB 归一化�
     if (!r.body.success) throw new Error(`success != true`);
 
     // 核验 DB：deadline 归一化为空格分隔 + 补秒
-    const row = await new Promise((resolve, reject) => {
-        const sqlite3 = require('sqlite3');
-        const path = require('path');
-        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
-        db.get(`SELECT deadline FROM collab_requests WHERE id = ?`, [ctx.id],
-            (e, r) => { db.close(); e ? reject(e) : resolve(r); });
-    });
+    const row = await dbGetOnce(`SELECT deadline FROM collab_requests WHERE id = ?`, [ctx.id]);
     if (row.deadline !== '2026-06-20 17:00:00') {
         throw new Error(`deadline 应归一化为 '2026-06-20 17:00:00'，实际：'${row.deadline}'`);
     }
-});
+} },
 
 // ============================================================================
 // T16b v1.78.0 codex 审 low-2：审计日志 changes.deadline 记归一化后落库值（与 DB 同源）
 // ============================================================================
-test('T16b v1.78.0 admin 改 deadline → 审计日志 changes.deadline 为归一化值（非原始 T 分隔入参）', async () => {
+{ name: 'T16b v1.78.0 admin 改 deadline → 审计日志 changes.deadline 为归一化值（非原始 T 分隔入参）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
     await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
@@ -452,29 +447,23 @@ test('T16b v1.78.0 admin 改 deadline → 审计日志 changes.deadline 为归�
 
     // insertCollabLog 是 fire-and-forget，稍等异步写入
     await new Promise(res => setTimeout(res, 300));
-    const log = await new Promise((resolve, reject) => {
-        const sqlite3 = require('sqlite3');
-        const path = require('path');
-        const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'), sqlite3.OPEN_READONLY);
-        db.get(
-            `SELECT reason FROM collab_operation_logs
-              WHERE collab_request_id = ? AND operation_type = 'ADMIN_FIX'
-              ORDER BY id DESC LIMIT 1`,
-            [ctx.id],
-            (e, row) => { db.close(); e ? reject(e) : resolve(row); }
-        );
-    });
+    const log = await dbGetOnce(
+        `SELECT reason FROM collab_operation_logs
+          WHERE collab_request_id = ? AND operation_type = 'ADMIN_FIX'
+          ORDER BY id DESC LIMIT 1`,
+        [ctx.id]
+    );
     if (!log) throw new Error('未找到 ADMIN_FIX 审计日志');
     const parsed = JSON.parse(log.reason);
     if (!parsed.changes || parsed.changes.deadline !== '2026-06-22 09:30:00') {
         throw new Error(`审计日志 changes.deadline 应为归一化值 '2026-06-22 09:30:00'，实际：'${parsed.changes && parsed.changes.deadline}'`);
     }
-});
+} },
 
 // ============================================================================
 // T17 v1.78.0：deadline 非法格式 → 400 FIELD_VALIDATION_FAILED
 // ============================================================================
-test('T17 v1.78.0 deadline 非法格式（2026-13-45）→ 400 FIELD_VALIDATION_FAILED', async () => {
+{ name: 'T17 v1.78.0 deadline 非法格式（2026-13-45）→ 400 FIELD_VALIDATION_FAILED', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
     await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
@@ -485,12 +474,12 @@ test('T17 v1.78.0 deadline 非法格式（2026-13-45）→ 400 FIELD_VALIDATION_
     });
     if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
-});
+} },
 
 // ============================================================================
 // T18 v1.78.0：deadline 空字符串 → 400（DATETIME NOT NULL 不允许清空）
 // ============================================================================
-test('T18 v1.78.0 deadline 空字符串 → 400 FIELD_VALIDATION_FAILED（不可清空）', async () => {
+{ name: 'T18 v1.78.0 deadline 空字符串 → 400 FIELD_VALIDATION_FAILED（不可清空）', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
     await fx.setCollabState(ctx.id, { status: 'SUBMITTED', submission_version: 1 });
@@ -501,12 +490,12 @@ test('T18 v1.78.0 deadline 空字符串 → 400 FIELD_VALIDATION_FAILED（不可
     });
     if (r.status !== 400) throw new Error(`期望 400 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'FIELD_VALIDATION_FAILED') throw new Error(`期望 code=FIELD_VALIDATION_FAILED 实际 ${r.body.code}`);
-});
+} },
 
 // ============================================================================
 // T19 v1.78.0：DONE 终态改 deadline → 409 TERMINAL_STATE_PROTECTED（终态保护对 deadline 同样生效）
 // ============================================================================
-test('T19 v1.78.0 DONE 状态改 deadline → 409 TERMINAL_STATE_PROTECTED', async () => {
+{ name: 'T19 v1.78.0 DONE 状态改 deadline → 409 TERMINAL_STATE_PROTECTED', fn: async () => {
     const ctx = await fx.createPendingFixture();
     createdFixtureIds.push(ctx.id);
     await fx.setCollabState(ctx.id, {
@@ -522,12 +511,15 @@ test('T19 v1.78.0 DONE 状态改 deadline → 409 TERMINAL_STATE_PROTECTED', asy
     });
     if (r.status !== 409) throw new Error(`期望 409 实际 ${r.status}: ${JSON.stringify(r.body)}`);
     if (r.body.code !== 'TERMINAL_STATE_PROTECTED') throw new Error(`期望 code=TERMINAL_STATE_PROTECTED 实际 ${r.body.code}`);
-});
+} },
+];
 
 // ============================================================================
 // 跑测
 // ============================================================================
 (async () => {
+    // ready() 是入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     let passed = 0, failed = 0;
     const failures = [];
 
@@ -547,17 +539,34 @@ test('T19 v1.78.0 DONE 状态改 deadline → 409 TERMINAL_STATE_PROTECTED', asy
     console.log(`总数: ${tests.length}, 通过: ${passed}, 失败: ${failed}`);
 
     // cleanup
-    let cleaned = 0;
-    for (const id of createdFixtureIds) {
-        try { await fx.cleanup(id); cleaned++; }
-        catch (e) { console.log(`⚠️ cleanup fail id=${id}: ${e.message}`); }
+    // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的计失败（cleanupFailed），不中断后续清理与 teardown
+    const totalFixtures = createdFixtureIds.length;
+    for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of createdFixtureIds.slice()) {
+            try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); }
+            catch (e) { console.log(`⚠️ cleanup fail id=${id} (第 ${round + 1} 轮): ${e.message}`); }
+        }
     }
-    console.log(`✅ fixtures cleaned up: ${cleaned}/${createdFixtureIds.length}`);
+    const cleanupFailed = createdFixtureIds.length > 0;
+    if (cleanupFailed) console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`);
+    console.log(`${cleanupFailed ? '❌' : '✅'} fixtures cleaned up: ${totalFixtures - createdFixtureIds.length}/${totalFixtures}`);
+
+    let teardownFailed = false;
+    try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); teardownFailed = true; }
 
     if (failures.length > 0) {
         console.log('\n失败详情:');
         for (const f of failures) console.log(`  ❌ ${f.name}: ${f.error}`);
-        process.exit(1);
+    } else if (cleanupFailed || teardownFailed) {
+        // [#106 S4c 送审前小修] 断言全过但夹具清理 / teardown 失败时不得打印「全部通过」
+        console.log(`\n用例断言全部通过，但${cleanupFailed ? '夹具清理失败' : ''}${cleanupFailed && teardownFailed ? '、' : ''}${teardownFailed ? 'teardown 失败' : ''}（退出码 1）`);
+    } else {
+        console.log('\n全部通过 ✅');
     }
-    console.log('\n全部通过 ✅');
-})();
+    fx.finish(failures.length > 0 || cleanupFailed || teardownFailed ? 1 : 0);   // teardown 已落定；只设退出码（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    console.error('admin-fix e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

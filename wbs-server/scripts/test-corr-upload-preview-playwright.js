@@ -2,7 +2,7 @@
  * 数据修正 · 上传交互优化 + 创建人搜索 Playwright 行为实测（2026-07-23）
  *
  * 用法：node scripts/test-corr-upload-preview-playwright.js
- * 前置：本地 server 已启动（默认 localhost:3000，可用 TEST_BASE_URL 环境变量覆盖，如 http://localhost:3100）
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000 / TEST_BASE_URL）
  *
  * 覆盖：
  *   U1 attachModal 追加式选择+预览：选 1 图片+1 xlsx → 缩略图+占位各 1；再追加 1 图片 → 3 项；
@@ -45,12 +45,29 @@ function makeTmpFiles() {
     return { dir, png1, png2, xlsx };
 }
 
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
+
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
     console.log('=== 数据修正 上传交互优化+创建人搜索 Playwright 实测 ===\n');
     const tmp = makeTmpFiles();
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ viewport: { width: 1500, height: 950 } });
-    const page = await context.newPage();
+    let browser = null;   // [#106 S4d-1 修复批 2] 浏览器启动 / newContext / newPage 都在下面同一个 try 里：任何一步抛错，finally 都会（已创建才）关浏览器并删临时目录
     const consoleErrors = [];
     // 409 负向用例（U3b 主单引导 mock）会让浏览器打一条网络层 resource 日志——页面代码处理正常，
     // 属预期噪音。L-3（codex 复审）：豁免仅在 allow409 标志开启的用例段内生效，防全局豁免掩盖
@@ -59,16 +76,19 @@ function makeTmpFiles() {
     // U4c（S1 max=5 真实拦截用例）：超5个文件提交触发后端 multer 400，浏览器同样打一条网络层
     // resource 日志——同上豁免范式，仅在该用例段内生效，防掩盖其他接口意外 400 的回归。
     let allow400 = false;
-    page.on('console', m => {
-        if (m.type() !== 'error') return;
-        if (allow409 && /Failed to load resource.*409/.test(m.text())) return;
-        if (allow400 && /Failed to load resource.*400/.test(m.text())) return;
-        consoleErrors.push(m.text());
-    });
-    page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
     try {
-        const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({ viewport: { width: 1500, height: 950 } });
+        const page = await context.newPage();
+        page.on('console', m => {
+            if (m.type() !== 'error') return;
+            if (allow409 && /Failed to load resource.*409/.test(m.text())) return;
+            if (allow400 && /Failed to load resource.*400/.test(m.text())) return;
+            consoleErrors.push(m.text());
+        });
+        page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
+        const BASE = fx.BASE;   // ready() 之后取
         const token = await fx.signAs(fx.ADMIN_ID);
         await page.goto(`${BASE}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
@@ -667,10 +687,16 @@ function makeTmpFiles() {
         console.log('\nP. console 健康');
         expect(consoleErrors.length === 0, `全程 0 console error（实际 ${consoleErrors.length}${consoleErrors.length ? '：' + consoleErrors.slice(0, 3).join(' | ') : ''}）`);
     } finally {
-        await browser.close();
-        fs.rmSync(tmp.dir, { recursive: true, force: true });
+        // [#106 S4d-1] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过临时目录清理；任一失败都计失败
+        if (browser) { try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); } }
+        try { removeTreeChecked(tmp.dir); } catch (e) { expect(false, `清理临时文件目录失败 ${tmp.dir}：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('上传预览实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

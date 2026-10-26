@@ -116,7 +116,7 @@
  *     （openValidationModal / openDimETLModal / openDwdScriptModal / openDDLModal / openDimDDLModal / openDwdDDLModal / openDimConfigViewModal /
  *      openDwdConfigViewModal / openWorkbench / openEditModal / viewModelChangeLogs / deleteModel）。
  *
- * 改本文件须同时改 Model_Center.html 引用处的 ?v= 与 scripts/verify-shared-css-cache-bust.js 里的登记（指纹 + 版本 + log）。
+ * 页面引用的缓存串（?v=auto）由服务端按文件内容自动注入，改本文件无需手改页面（页面缓存串由 scripts/verify-shared-css-cache-bust.js 的 S1–S6 静态守卫把关）。
  */
 
         // ==================== 分页相关变量 ====================
@@ -299,7 +299,7 @@
             if (core.CORE_VERSION !== 'mcc3') {
                 catalogCoreVersionWarned = true;
                 console.error('[模型目录] model-catalog-core.js 版本不匹配：期望 mcc3，实际 ' + core.CORE_VERSION +
-                    '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，检查 Model_Center.html 里 model-catalog-core.js 的 ?v= 缓存串是否已 bump。');
+                    '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，请确认 Model_Center.html 是经服务端打开的（缓存串由服务端按文件内容自动注入），而非本地文件或旧缓存副本。');
             }
         }
 

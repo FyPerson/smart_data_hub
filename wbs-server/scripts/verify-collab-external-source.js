@@ -4,6 +4,8 @@
  * 方案 SSOT：docs/local/数据协作模块/数据协作接入小程序_方案_20260902_v1.6.md §5.2 G2
  * 派单 spec：C2a 附录 + c2a-research-plan.md + handoff-C1-to-C2a.md（G1 登记手册/环境坑）
  *
+ * [#106 S4b2] 运行面已迁移到 test-env（见下方 require 之后的说明）：隔离实例 + 快照库 + 实例数据根里的 uploads；以下是迁移前的原说明，保留作历史。
+ *
  * 运行面（自包含·零真实库）：
  *   - 全新空 sqlite 文件（不拷贝 task_pool.db），server 经 _test-it-asset-ledger-server-wrapper.js
  *     （通用 sqlite3.Database 重定向 wrapper，非 IT 资产专属，本脚本直接复用）起在独立端口，
@@ -60,229 +62,37 @@
  */
 'use strict';
 
-const { spawn, spawnSync, execSync, execFileSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
+const testEnv = require('./lib/test-env');
+const { ISOLATED_ENCRYPTION_KEY, encryptWithKey } = require('../utils/aes-password');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const ROOT = path.join(__dirname, '..');
-const TEST_PORT = 3411;
-const BASE = `http://localhost:${TEST_PORT}`;
-const REAL_DB = path.join(ROOT, 'task_pool.db');
-const TEMP_DB = path.join(os.tmpdir(), `collab-external-source-test-${process.pid}.db`);
-const WRAPPER_PATH = path.join(__dirname, '_test-it-asset-ledger-server-wrapper.js'); // 通用重定向 wrapper，非 IT 资产专属
-const UNIT_COLLAB_ROOT = path.join(os.tmpdir(), `collab-ext-src-unit-${process.pid}`);
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
-//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
-//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
-//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
-  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
-  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
-  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
-  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
-  process.exit(1);
-}
-// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
-//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
-//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
-if (!/^[!-~]+$/.test(ENCRYPTION_KEY) || Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
-  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
-  process.exit(1);
-}
-// 〔H1·codex 07 质量审〕上传根 uploads/collab 没有独立隔离（不改 server.js，先例如此）——旧版
-// 清理按"id ≥ 900000 全局扫描删除"理论上可能误删同一区间内的真实附件目录（虽然实际生产单号
-// 远小于 900000，但"理论上可能"就该堵）。改三件套：①随机取 base（每次运行不同，降低"假设
-// 900000 永远安全"的隐性耦合）；②开跑前对 [base+1, base+999] 区间做零写预检，撞了直接拒绝
-// 启动；③清理只删"本次运行登记过的精确路径"且路径 id 必须落在本次 base 区间内（两条件同时
-// 满足才删，见 registerCleanupPath/cleanupUploadArtifacts）。
-// 〔08-M3·codex 08 审〕并行 G2 区间租约：本机可能同时跑多个 G2 实例（如人工亲验 + agent 并行
-// 回归），随机 SEQ_BASE 存在极小概率两个实例同时抽中同一个基线区间，导致互相污染彼此的
-// uploads/collab 残留判定（precheckNoResidualInRange/cleanupUploadArtifacts 都以 SEQ_BASE 区间
-// 为唯一隔离边界）。用 os.tmpdir() 下的排他锁文件做进程间互斥：`fs.openSync(path, 'wx')`
-// （wx=独占创建，已存在则抛 EEXIST）拿到该区间的独占租约，抢不到就换一个新的随机基线重试
-// （最多 5 次）；进程正常/异常退出前都释放（见 releaseSeqBaseLease 调用点：主 IIFE finally +
-// SIGINT/SIGTERM 处理器）。
-// 〔为什么不改 server.js 给每个 G2 实例独立上传根〕上传根隔离需要改产品代码本身（server.js 的
-// 上传目录硬编码指向 uploads/collab），本文件既有约定是"不改 server.js/共享代码，只在测试脚本
-// 侧想办法隔离"（见下方"上传根未做物理隔离"说明）——区间租约是这个约定下的进程间互斥手段，
-// 不是产品能力，也不改变上传根本身的物理位置。
-// 〔S2·Opus 预筛〕锁超龄阈值：正常一次 G2 运行几分钟内结束，若锁文件 mtime 已超过这个阈值，
-// 大概率是上一次运行崩溃/被外部杀掉（未走到 finally/exit 释放），而不是真的有另一个实例还在跑。
-const SEQ_BASE_LOCK_STALE_MS = 2 * 60 * 60 * 1000; // 2 小时
-// 〔09-H2·codex 09 审〕原锁文件内容是一行纯文本（`pid=... at=...`），release 时只看路径是否
-// 存在就无条件 unlink——没有校验"这把锁现在还是不是我建的那把"。真实坏法：进程 A 的锁被判超龄
-// 后被进程 B 接管（B 写入了自己的新锁文件），若 A 之后才走到自己的 finally/exit 清理，会把 B
-// 刚建立、正在使用的锁文件删掉，导致 B 和后续第三个实例都可能撞上同一个"空出来"的区间，是本该
-// 互斥的租约机制被自己的清理逻辑破坏。改锁文件内容为 JSON `{pid, token, ts}`（token=本进程本次
-// 运行专属的随机 16 位十六进制串），release 前先读文件核对 token 是否与自己持有的一致，只有
-// 匹配才真删；不匹配（锁已被他人接管）只记日志，不动它。另外，"超龄"只是判定可接管的必要条件，
-// 不是充分条件——接管前必须额外用 `process.kill(pid, 0)` 探测原持有者进程是否还存活：ESRCH
-// （进程确实不存在）才允许接管；EPERM（探测到有这个 pid 但无权限信号，通常意味着确实存在）或
-// 未抛错（存活）一律不接管，防"进程只是这次运行异常久，锁文件 mtime 超过阈值"被误判成"陈旧"
-// 抢走它正在使用的区间。
-function canTakeOverStaleLock(holder, isStale) {
-    if (!isStale) return false;
-    if (!holder || typeof holder.pid !== 'number') return false; // 读不到/解析不出持有者 pid，保守不接管
-    try {
-        process.kill(holder.pid, 0);
-        return false; // 未抛错——进程存活，不接管
-    } catch (killErr) {
-        return !!(killErr && killErr.code === 'ESRCH'); // 只有"进程确实不存在"才允许接管；EPERM 等一律不接管
-    }
-}
-// release 的核心判定（参数化 lockPath/token，供生产调用与自证测试共用）——单独抽出的理由：
-// `releaseSeqBaseLease()` 本身必须保持零参数签名，它被 `process.on('exit', releaseSeqBaseLease)`
-// 直接注册为回调，Node 会把进程退出码当第一个实参传给它；若改成"第一参数是 lockPath"，退出码
-// 会被误当路径字符串使用，是完全不同的坑，不能通过给 releaseSeqBaseLease 加参数来做测试钩子。
-function releaseLeaseAtPath(lockPath, token) {
-    try {
-        if (!lockPath || !fs.existsSync(lockPath)) return { deleted: false, reason: 'not-exists' };
-        const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-        if (holder && holder.token === token) {
-            fs.unlinkSync(lockPath);
-            return { deleted: true };
-        }
-        return { deleted: false, reason: 'token-mismatch' };
-    } catch (_) {
-        return { deleted: false, reason: 'error' }; // 句柄/权限/JSON 解析异常——同原逻辑的 ignore，不阻断收尾
-    }
-}
-// 〔H1·codex 12b 质量审〕接管陈旧锁的核心判定，从 acquireSeqBaseLease 内联代码抽成独立函数
-// （参数化 lockPath/firstReadHolder/myToken）——原因有二：① 抽成纯函数才能被下方自证测试直接
-// 调用，不必依赖 acquireSeqBaseLease 内部的随机 base 选择逻辑去人工构造交错场景；② 修复本身
-// 引入了"接管前重读校验"这个新步骤，独立命名把这段判定与"怎么选基线/重试几次"的外层循环
-// 关注点分开，读起来更清楚。
-//
-// 修的是什么竞态：原逻辑是"读一次持有者信息 → 判定陈旧 → 直接 unlink+重建"，中间没有任何二次
-// 确认。若进程 A 读到旧持有者信息后，进程 B 抢先完成了整个接管流程（B 已经把锁文件换成了自己的
-// 新锁），A 拿着"过时"的判断继续往下走，会把 B 刚建立、正在使用的锁文件删掉重建成 A 自己的——
-// 两个进程都以为自己独占了同一个区间，租约互斥形同虚设。
-//
-// 修法（两次重读 + 绝不删除已变化的锁）：
-//   ① 接管前重读：unlink 之前，用 lockPath 现在的实际内容与 firstReadHolder（调用方最初判定
-//      "陈旧"时读到的那份快照）逐字段比对（pid/token/ts）。不一致 = 这把锁在我们判定陈旧之后
-//      已经被别人动过（多半是被抢先接管），说明我们手里的"陈旧"判断已经过时——直接放弃接管、
-//      不删除这把现在属于别人的锁，交还调用方换一个新的随机基线重试。
-//   ② 创建成功后回读：`wx` 独占创建理论上不可能被并发写入覆盖内容，这一步是纵深防御（防未知的
-//      文件系统/驱动层怪异行为），若回读发现 token 不是自己的，同样不删除，直接判失败换基线。
-//   任何一步判定失败都不做任何删除动作——"接管失败"只意味着"这次没抢到"，从不意味着"可以把
-//   现在看到的锁文件清空重来"。
-function attemptLeaseTakeover(lockPath, firstReadHolder, myToken) {
-    // ① 接管前重读：核对锁文件当前内容是否仍与首次判定"陈旧"时读到的一致
-    let holderNow = null;
-    try { holderNow = JSON.parse(fs.readFileSync(lockPath, 'utf8')); }
-    catch (_) { return { ok: false, reason: 'reread-failed' }; } // 文件已消失/损坏——按"已变化"处理，不删除，放弃接管
-    const unchanged = !!(holderNow && firstReadHolder &&
-        holderNow.pid === firstReadHolder.pid &&
-        holderNow.token === firstReadHolder.token &&
-        holderNow.ts === firstReadHolder.ts);
-    if (!unchanged) return { ok: false, reason: 'holder-changed' }; // 已被他人接管/刷新——放弃，绝不删除这把已变化的锁
-
-    // ② 接管：确认内容未变后，才真正删旧锁、以 wx 独占创建自己的锁
-    let fd = null;
-    try {
-        fs.unlinkSync(lockPath);
-        fd = fs.openSync(lockPath, 'wx');
-        fs.writeSync(fd, JSON.stringify({ pid: process.pid, token: myToken, ts: Date.now(), takeover: true }));
-        fs.closeSync(fd);
-        fd = null;
-    } catch (_) {
-        // 〔15-M1 采纳〕wx 创建已成功（fd 非 null）而 write/close 失败：该文件是本进程刚独占创建的
-        // （wx 语义保证此刻他人不可能持有同名文件），留下空/半截锁会让后续运行解析失败、保守拒绝
-        // 接管，一次可恢复的写失败就变成长期假故障——先关 fd 再删掉本进程自己的产物（Windows 上
-        // 打开中的文件不能 unlink，顺序不可倒）
-        if (fd !== null) {
-            try { fs.closeSync(fd); } catch (_) { /* 已关/关失败都不影响下面的所有权校验与删除 */ }
-            // 〔16-M1 采纳〕删前最终所有权校验：内容可解析且 token 是自己的 → 本进程产物；不可解析（半截写入）→
-            // 也是本进程产物（不可解析的锁任何人都保守不接管，见 canTakeOverStaleLock）；可解析但 token 不是自己的
-            // → 本进程曾被暂停超过陈旧阈值、锁已被他人接管，绝不删除（与 ①/③ 同一条「只删自己的」协议）
-            // 〔P26·codex 17 三条收紧〕a) 只有「可解析的对象且 token 是自己的」才算 mine-parsable，falsy/非对象/缺
-            // token 一律按非本进程处理；b) 读失败分两类：ENOENT=已不存在（等价 cleaned），其他 I/O 错误=所有权
-            // 未确认不删；只有「读到了但 JSON.parse 失败」才是本进程半截产物；c) unlink ENOENT 归等价 cleaned
-            let owner = 'other';
-            let raw = null;
-            try { raw = fs.readFileSync(lockPath, 'utf8'); }
-            catch (e) { return { ok: false, reason: e && e.code === 'ENOENT' ? 'takeover-write-failed-cleaned' : 'takeover-write-failed-read-failed' }; }
-            try {
-                const cur = JSON.parse(raw);
-                owner = (cur !== null && typeof cur === 'object' && cur.token === myToken) ? 'mine' : 'other';
-            } catch (_) { owner = 'mine'; /* 读到了但解析失败——本进程半截产物 */ }
-            if (owner === 'other') return { ok: false, reason: 'takeover-write-failed-not-owner' };
-            // 〔16-M2 采纳〕只有 unlink 真成功（或 ENOENT 已不存在）才报 cleaned；其他删失败给独立 reason，不掩盖残留
-            try { fs.unlinkSync(lockPath); }
-            catch (e) { return { ok: false, reason: e && e.code === 'ENOENT' ? 'takeover-write-failed-cleaned' : 'takeover-write-failed-cleanup-failed' }; }
-            return { ok: false, reason: 'takeover-write-failed-cleaned' };
-        }
-        // unlink/openSync 失败（如竞态窗口被抢先创建）——不做任何删除动作，直接判失败换基线
-        return { ok: false, reason: 'takeover-write-failed' };
-    }
-
-    // ③ 创建成功后回读校验：确认文件里现在确实是自己的 token（wx 独占创建理论上不会被抢，这里是
-    //    纵深防御）；不匹配说明锁现在是别人的，绝不删除，直接判失败换基线
-    let confirm = null;
-    try { confirm = JSON.parse(fs.readFileSync(lockPath, 'utf8')); }
-    catch (_) { return { ok: false, reason: 'confirm-read-failed' }; }
-    if (!confirm || confirm.token !== myToken) return { ok: false, reason: 'overwritten-after-create' };
-    return { ok: true };
-}
-function acquireSeqBaseLease() {
-    const maxAttempts = 5;
-    const myToken = crypto.randomBytes(8).toString('hex'); // 本进程本次运行专属，16 位十六进制
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const base = 900000 + Math.floor(Math.random() * 90) * 1000; // [900000, 989000] 步长 1000
-        const lockPath = path.join(os.tmpdir(), `collab-external-g2-${base}.lock`);
-        try {
-            const fd = fs.openSync(lockPath, 'wx'); // wx：独占创建，路径已存在则抛 EEXIST
-            fs.writeSync(fd, JSON.stringify({ pid: process.pid, token: myToken, ts: Date.now() }));
-            fs.closeSync(fd);
-            return { base, lockPath, token: myToken };
-        } catch (e) {
-            if (e.code === 'EEXIST') {
-                // 超龄 + 原持有者进程已确认不存在，才视为陈旧接管候选——是否真的能接管交给下面
-                // attemptLeaseTakeover 做二次重读确认（H1 修复点），不在这里直接 unlink。
-                let holder = null;
-                try { holder = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch (_) { /* 读取/解析失败——holder 为 null，canTakeOverStaleLock 对此保守判不可接管 */ }
-                let stale = false;
-                try {
-                    const st = fs.statSync(lockPath);
-                    stale = (Date.now() - st.mtimeMs) > SEQ_BASE_LOCK_STALE_MS;
-                } catch (_) { /* statSync 失败（如文件已被并发删除）——当非陈旧处理，走下面 continue */ }
-                if (canTakeOverStaleLock(holder, stale)) {
-                    const takeover = attemptLeaseTakeover(lockPath, holder, myToken);
-                    if (takeover.ok) return { base, lockPath, token: myToken };
-                    // 接管失败（含"已被他人抢先接管"这个 H1 修复要拦的场景）——attemptLeaseTakeover
-                    // 内部已保证不删除任何文件，这里直接落到下面 continue 换基线重试
-                }
-                continue; // 未超龄/持有者仍存活/接管失败——该基线视为仍被占用，换一个随机基线重试
-            }
-            throw e; // 非"已存在"的异常（如权限问题）不吞，交给顶层 catch 暴露
-        }
-    }
-    console.error(`[verify-collab-external-source] 区间租约获取失败：连续 5 次随机基线均已被占用（其他实例正在运行？），拒绝启动`);
-    process.exit(1);
-}
-function releaseSeqBaseLease() {
-    const result = releaseLeaseAtPath(SEQ_BASE_LOCK_PATH, SEQ_BASE_LOCK_TOKEN);
-    if (!result.deleted && result.reason === 'token-mismatch') {
-        console.error('[verify-collab-external-source] 区间租约释放跳过：锁文件已被其他持有者接管（token 不匹配），不删除');
-    }
-    // 'not-exists'/'error' 均静默——同原逻辑的 ignore（句柄/权限/JSON 解析异常不阻断收尾）
-}
-const { base: SEQ_BASE, lockPath: SEQ_BASE_LOCK_PATH, token: SEQ_BASE_LOCK_TOKEN } = acquireSeqBaseLease();
-const SEQ_RANGE_END = SEQ_BASE + 1000; // [SEQ_BASE, SEQ_RANGE_END) 是本次运行的专属 id 区间
-// 〔S2·Opus 预筛〕`process.on('exit', ...)` 是最后一道防线——Node 的 'exit' 事件在进程即将终止前
-// 同步触发，覆盖本文件所有 `process.exit(...)` 调用路径（含还没来得及走到 handleTermSignal/主 IIFE
-// finally 的早退分支，如参数校验阶段的意外 throw）；`releaseSeqBaseLease()` 内部已是幂等的
-// "存在才删"，重复调用（finally 里也会调一次）无副作用，不会因为调用两次而报错。
-process.on('exit', releaseSeqBaseLease);
+// [#106 S4b2] 运行面（已迁移到 test-env）：经 scripts/lib/test-env.js 的 ready() 拿到隔离实例（本检出库快照 + 隔离模式 server.js，端口随机，
+//   uploads/archive 在实例数据根里，teardown 时整体删除）。不再自起 wrapper / 写死端口 3411 / 用全新空库 / 本文件自己读 .env / 区间租约 / 清理真实 uploads/collab（§S 的种子子进程里，种子脚本自己的 dotenv 仍会读检出目录的 .env——本文件显式传 DB_ENCRYPTION_KEY 与 TARGET_DB，不依赖其内容）。
+//   - 服务端的固定连接密文用隔离实例的固定键 ISOLATED_ENCRYPTION_KEY（utils/aes-password.js；server.js 在隔离模式下从不读 DB_ENCRYPTION_KEY）。
+//   - §S 种子脚本黑盒测试用的 DB 加密键是脚本内随机生成的 ≥32 位 ASCII（ENCRYPTION_KEY，入口里 ready 之后赋值），显式传给种子子进程；种子子进程自己的 dotenv 不覆盖已存在的键。
+//   - 原来跑在「全新空库」上，现在是快照库：造数前先在实例库里清掉协作单、周期任务、数据库连接（见 seedData）。
+let ROOT = null;                    // 本检出 wbs-server 目录（require utils / 读源码文本用）；入口里赋值
+let UPLOAD_ROOT = null;             // 实例数据根下的 uploads 目录（HTTP 层读上传文件用）；入口里赋值
+let BASE = null;                    // ready() 之后赋值：testEnv.env().baseUrl
+let TEMP_DB = null;                 // ready() 之后赋值：testEnv.env().dbPath（实例库；沿用旧名，造数用）
+let UNIT_COLLAB_ROOT = null;        // §U 单元层用的临时 uploads/collab 根；入口里赋值
+let ENCRYPTION_KEY = null;          // §S 种子脚本黑盒测试用的随机 DB 加密键；入口里赋值
+// ============================================================================
+// [#106 S4b2] 原「区间租约」基建整套删除（SEQ_BASE 随机区间 + 租约锁文件 canTakeOverStaleLock / releaseLeaseAtPath / attemptLeaseTakeover / acquireSeqBaseLease /
+// releaseSeqBaseLease + 残留扫描 collectResidualHits / precheckNoResidualInRange + 登记清理 registerCleanupPath / cleanupUploadArtifacts + 区间租约两节自证 §Q 09-H2 / 12b-H1）。
+// 它存在的唯一原因是 uploads/collab 物理目录与真实生产共用同一棵目录树（server.js 硬编码，不因 db 而异），G2/G3 并行时要靠随机区间互不污染并逐文件清理。
+// 现在服务跑在隔离实例里：按隔离模式的设计 uploads 在实例数据根（临时目录），teardown 时整体删除；"真实目录树运行前后没有新条目"由本脚本收尾的只读比对核对（见主流程的 listRealUploadsCollab），不是靠推断；G3 对应基建同步删除。
+// SEQ_BASE 只保留为固定的 id 起点（造数时把 collab_requests / collab_attachments 的 sqlite_sequence 设到这里，使本脚本造的单号不与快照里的既有单号相撞）。
+// 被删自证的职责：租约机制本身已不存在，对应断言一并删除；上传确实落了盘、真实目录运行前后没有新条目这两项职责由主流程收尾的两条断言接替（countInstanceUploadArtifacts / listRealUploadsCollab）。
+// ============================================================================
+const SEQ_BASE = 900000;
+// uploads/collab 的路径段：检出目录下真实的那棵（listRealUploadsCollab 默认）与实例数据根下的那棵（countInstanceUploadArtifacts、收尾的正向对照）都用 path.join(<根>, ...COLLAB_SEGS)，同源，不会一边改了另一边漏改
+const COLLAB_SEGS = ['uploads', 'collab'];
 
 let pass = 0, fail = 0, skipCount = 0;
 const failures = [];
@@ -307,21 +117,15 @@ function section(title) { console.log(`\n=== ${title} ===`); }
 // 通用 helper：加密、JWT、HTTP、sqlite 直连
 // ============================================================================
 
-// 复用 server.js:2776-2782 生产实现（先例 scripts/test-collab-mysql-smoke-e2e.js:60-66）
+// [#106 S4b2] 服务端（隔离实例）的固定连接密文用隔离实例的固定键，不是真实 DB_ENCRYPTION_KEY（server.js 隔离模式从不读它；utils/aes-password.js）。
+//   §S 种子脚本黑盒测试用的密文改用 aesEncryptWithKey(…, ENCRYPTION_KEY)（见 §S），与种子子进程拿到的 DB 加密键同源。
 function encryptPassword(password) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);
-    let encrypted = cipher.update(password, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
+    return encryptWithKey(ISOLATED_ENCRYPTION_KEY, password);   // 隔离实例的服务端用这把固定键（utils/aes-password.js），不是真实 DB_ENCRYPTION_KEY
 }
 
-function signAs(user) {
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+// signAs 现在是异步的（testEnv.signToken 从实例库读用户行）；调用点全部 await
+async function signAs(user) {
+    return testEnv.signToken(user.id);
 }
 
 async function apiCall(method, urlPath, token, body) {
@@ -377,174 +181,45 @@ function tdbGet(sql, params = []) {
 function tdbAll(sql, params = []) {
     return new Promise((resolve, reject) => { tdb.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || []))); });
 }
+// sqlite_sequence 没有唯一约束：INSERT OR REPLACE 在快照库（已有该表的序列行）里会插出第二行；先 UPDATE，没有该行再 INSERT
+async function setSequence(name, seq) {
+    const r = await tdbRun('UPDATE sqlite_sequence SET seq = ? WHERE name = ?', [seq, name]);
+    if (r.changes === 0) await tdbRun('INSERT INTO sqlite_sequence(name, seq) VALUES(?, ?)', [name, seq]);
+}
 
 // ============================================================================
-// 进程/端口/文件清理（照 test-it-asset-ledger-playwright.js 范式：按 PID 树杀 + 端口兜底扫描 +
-//   归属校验，禁全杀 node）
+// [#106 S4b2] 原 getProcessCommandLine / killPort（netstat 按端口杀 wrapper 进程）/ killChildTree / cleanupTempDb 随自起服务删除：实例由 test-env 起停。
 // ============================================================================
-function getProcessCommandLine(pid) {
-    try {
-        const out = execSync(
-            `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine"`,
-            { encoding: 'utf8', shell: 'cmd.exe' }
-        );
-        return out.trim();
-    } catch (_) { return ''; }
-}
-function normalizePathForMatch(s) { return String(s || '').toLowerCase().replace(/\//g, '\\'); }
-function killPort(port, phase) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach((line) => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach((pid) => {
-            const cmdLine = getProcessCommandLine(pid);
-            const owned = normalizePathForMatch(cmdLine).includes(normalizePathForMatch(WRAPPER_PATH));
-            if (!owned) {
-                if (phase === 'startup') {
-                    console.error(`[verify-collab-external-source] 端口 ${port} 被无关进程占用（PID ${pid}），拒绝启动`);
-                    process.exit(1);
-                }
-                console.log(`  ⚠️ 跳过 PID ${pid}（端口 ${port} 占用者非本套件 wrapper 进程，不误杀）`);
-                return;
-            }
-            try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore */ }
-        });
-    } catch (_) { /* ignore */ }
-}
-function killChildTree(c) {
-    if (!c || !c.pid) return;
-    try { execSync(`taskkill /T /F /PID ${c.pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore */ }
-}
 function closeTdb() {
     return new Promise((resolve) => {
         if (!tdb) return resolve();
         tdb.close(() => resolve());
     });
 }
-function cleanupTempDb() {
-    for (const suffix of ['', '-journal', '-wal', '-shm']) {
-        const p = TEMP_DB + suffix;
-        try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {
-            console.log(`  ⚠️ 临时库文件删除失败（句柄未释放）：${p}（${e.message}）`);
+// [#106 S4b2] 原 forceRemoveDir（fs.rmSync + PowerShell 兜底，作用于真实 ROOT/uploads/collab）/ 残留扫描 / 登记清理 / computeFinalDirName / cleanupUploadArtifacts 整套删除：
+//   uploads/collab 现在在实例数据根里，teardown 时整体删除。原「清理闭环」断言（上传残留文件尝试删 ≥1，证明上传确实落了盘）的职责由 countInstanceUploadArtifacts() 的
+//   「实例数据根 uploads/collab 里 id>SEQ_BASE 的条目 ≥1」断言接替（主流程 finally 里）。
+/**
+ * 实例数据根 uploads/collab 下（深度 ≤3，不跟随链接）「普通文件」的个数——只计文件（Dirent.isFile），目录不计；文件自己的名字以 id>SEQ_BASE 的数字打头，或它的某一级祖先目录名（<id>_*、_pending/<id>）以 id>SEQ_BASE 的数字打头才计。
+ * 数据根未知（变量组形态下清单对不上）→ null（调用方计失败，不跳过）
+ */
+function countInstanceUploadArtifacts() {
+    const dataDir = testEnv.env().dataDir;
+    if (!dataDir) return null;
+    let n = 0;
+    const walk = (dir, depth, underId) => {
+        let ents;
+        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+        for (const e of ents) {
+            if (e.isSymbolicLink()) continue;
+            const idNum = Number((e.name.match(/^(\d+)/) || [])[1]);   // [#106 S4b2b] 非全局正则的 match 与 exec 结果同形；SELF_ISOLATED 文件里 .exec( 一律不许（require 了 child_process 的文件里它会被当成 sink）
+            const hit = underId || (Number.isInteger(idNum) && idNum > SEQ_BASE);
+            if (e.isFile() && hit) n++;
+            if (e.isDirectory() && depth < 3) walk(path.join(dir, e.name), depth + 1, hit);
         }
-    }
-}
-// 〔G2 现场发现〕本机上 fs.rmSync({recursive:true,force:true})（含显式 maxRetries/retryDelay）
-// 对本仓路径下的目录会"不抛错但也不真删"——目录复查后仍 existsSync===true。已用 PowerShell
-// Remove-Item 交叉验证：同一路径 PowerShell 一次成功，证明不是句柄占用/权限问题，是 Node
-// fs.rmSync 在本机对该路径的怪异行为（未深究根因，超出本批范围）。规避：fs.rmSync 失败（复查
-// 仍存在）时回退 PowerShell Remove-Item -Recurse -Force 兜底。
-function forceRemoveDir(p) {
-    // S2〔主会话预筛·2026-09-02〕硬断言：只允许删 uploads/collab 之下的路径。recursive+force
-    // 删除破坏力不小，调用方传参算错（如拼接 collabBase 时手滑）绝不能被这个函数悄悄放行，
-    // 必须在真正动手删之前就地拒绝并抛错，而不是删完才发现删错了地方。
-    const collabRootAbs = path.resolve(ROOT, 'uploads', 'collab');
-    const target = path.resolve(p);
-    if (target !== collabRootAbs && !target.startsWith(collabRootAbs + path.sep)) {
-        throw new Error(`forceRemoveDir: 拒绝删除 uploads/collab 之外的路径：${target}`);
-    }
-    try { fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 }); } catch (_) { /* 兜底走下面 PowerShell */ }
-    if (!fs.existsSync(target)) return;
-    // execFileSync 直接起 powershell.exe（不经 cmd.exe/shell），参数各自独立数组项传入；目标路径
-    // 走环境变量传给子进程，命令文本本身不拼接任何外部输入，无字符串拼接注入面。
-    try {
-        execFileSync('powershell', [
-            '-NoProfile', '-Command',
-            'Remove-Item -LiteralPath $env:G2_RM_TARGET -Recurse -Force -ErrorAction Stop',
-        ], { env: { ...process.env, G2_RM_TARGET: target } });
-    } catch (_) { /* 留给复查逻辑记录为残留 */ }
-}
-
-// 〔H1·codex 07 质量审〕开跑前预检：[SEQ_BASE+1, SEQ_RANGE_END) 区间内若已存在任何
-// _pending/<id> 或 <id>_* 正式目录，直接 fail 退出（零写）——防止本次运行的随机 base 恰好撞上
-// 真实数据（虽然此区间远超真实生产单号量级，理论撞上仍应拒绝而非静默继续）。
-// 〔08-M4·codex 08 审〕原判据窄了两处：① `_pending/<name>` 要求 name 整体是纯数字（Number(name)
-//   对任何非纯数字尾巴都返回 NaN，漏判如 "900123.tmp" 这类"数字开头但带后缀"的条目）；
-//   ② `uploads/collab/<name>` 要求正则 `^(\d+)_`（数字后紧跟下划线），漏判"数字开头但不带下划线
-//   后缀"的条目（如裸 "900123" 或 "900123.log"）。收紧为"两个目录下的**全部条目**（文件或
-//   目录皆算，不限后缀），名称以数字开头且该数字落在 (SEQ_BASE, SEQ_RANGE_END) 区间即计残留"
-//   ——用统一的 leadingDigits 提取，不再区分"是否带下划线/是否纯数字"。
-function leadingDigitsOf(name) {
-    const m = /^(\d+)/.exec(name);
-    return m ? Number(m[1]) : NaN;
-}
-// 〔M4·codex 12b 质量审〕递归残留扫描（深度 ≤3，受控——不跟随符号链接，避免潜在环路）：原实现
-// 只查 uploads/collab 与 uploads/collab/_pending 两层的直接子项名称，若某个坏实现把文件写到了
-// 更深一层目录（如 uploads/collab/<id>_desc/ 之下又建了一层子目录、或 _pending/<id>/ 下又嵌套了
-// 一层子目录），旧实现完全看不见——收尾复扫（F5）复用同一份逻辑，同样看不见，是"零残留"结论
-// 的一个盲区。改为对 uploads/collab 整棵树受控递归（depth 从 1 起，最深到 3 层），沿途每一层的
-// 每个条目名称都单独做一次"提取前导数字 id + 是否落在本次区间"判断（不只判断顶层名称）；
-// `_pending` 是 uploads/collab 的直接子目录，天然被同一次递归覆盖，不需要单独再扫一遍。
-function collectResidualHits(dirPath, depth, maxDepth, hits) {
-    const inRange = (n) => Number.isInteger(n) && n > SEQ_BASE && n < SEQ_RANGE_END;
-    let entries;
-    try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); } catch (_) { return; }
-    for (const entry of entries) {
-        if (entry.isSymbolicLink()) continue; // 受控：不跟随符号链接，避免潜在环路
-        const idNum = leadingDigitsOf(entry.name);
-        const fullPath = path.join(dirPath, entry.name);
-        if (inRange(idNum)) hits.push(fullPath);
-        if (entry.isDirectory() && depth < maxDepth) {
-            collectResidualHits(fullPath, depth + 1, maxDepth, hits);
-        }
-    }
-}
-function precheckNoResidualInRange() {
-    const collabBase = path.join(ROOT, 'uploads', 'collab');
-    const hits = [];
-    try {
-        if (fs.existsSync(collabBase)) collectResidualHits(collabBase, 1, 3, hits);
-    } catch (e) {
-        hits.push(`(预检异常: ${e.message})`);
-    }
-    return hits;
-}
-
-// 〔H1〕本次运行登记的精确清理路径清单——只有"路径被登记过"且"路径 id 落在本次 SEQ_BASE 区间
-// 内"两条件同时满足才会被删除（见 cleanupUploadArtifacts）。createPendingRequest 每造一条
-// fixture 就把该单的 _pending 目录与最终归档目录都登记进来（无论最终是否真的落盘）。
-const registeredCleanupPaths = [];
-function registerCleanupPath(p) { registeredCleanupPaths.push(p); }
-// G2-F6〔删假注释，改真复用〕computeAttachmentDirName 已在 versioning.js:1013-1015 的
-// `_internal` 里导出——旧注释"未导出，内联复刻"是过时的假话（R2 核实：`_internal.
-// computeAttachmentDirName` 确实存在），这里直接 require 真实实现，不再自己维护一份算法副本
-// （双份实现一旦其中一份改了截断规则/替换字符集而另一份没跟着改，就会悄悄算出不一样的目录名）。
-function computeFinalDirName(id, description) {
-    return require(path.join(ROOT, 'utils', 'collab-attachment-versioning'))._internal.computeAttachmentDirName(id, description);
-}
-
-// 清理本次种下的 uploads/collab 残留——只删"本次运行登记过 + id 落在本次 SEQ_BASE 区间内"的
-// 精确路径清单（H1 两道守卫同时满足才删），断言「尝试删 ≥1 且清单内残留 0」（不静默）。
-function cleanupUploadArtifacts() {
-    const collabBase = path.join(ROOT, 'uploads', 'collab');
-    let attempted = 0;
-    const remaining = [];
-    const idInRange = (idNum) => Number.isInteger(idNum) && idNum > SEQ_BASE && idNum < SEQ_RANGE_END;
-    try {
-        for (const p of registeredCleanupPaths) {
-            const base = path.basename(p);
-            const idNum = Number(base) || Number((/^(\d+)_/.exec(base) || [])[1]);
-            if (!idInRange(idNum)) continue; // 第二道守卫：即使登记过，id 不在本次区间内也不删
-            if (!fs.existsSync(p)) continue; // 登记过但从未真正落盘（如提交失败早退），无需删
-            attempted++;
-            forceRemoveDir(p);
-            if (fs.existsSync(p)) remaining.push(p);
-        }
-    } catch (e) {
-        console.log(`  ⚠️ 清理 uploads/collab 残留时异常：${e.message}`);
-    }
-    ok('清理闭环：上传残留文件尝试删 ≥1 且登记清单内复查残留 = 0（不静默，仅删精确登记路径）',
-        attempted >= 1 && remaining.length === 0,
-        `attempted=${attempted}, remaining=${remaining.length}${remaining.length ? '：' + remaining.slice(0, 5).join('; ') : ''}`);
-    // 上传根未做物理隔离（uploads/collab 与真实生产共用同一目录树，不改 server.js 先例）——
-    // 靠"随机 base 唯一前缀 + 精确登记清单 + 复查残留"三件套隔离，不是靠改路径本身隔离。
+    };
+    walk(path.join(dataDir, ...COLLAB_SEGS), 1, false);
+    return n;
 }
 
 let termCleanupStarted = false;
@@ -553,81 +228,20 @@ function handleTermSignal(sig) {
         if (termCleanupStarted) return;
         termCleanupStarted = true;
         console.log(`\n[verify-collab-external-source] 收到 ${sig}，执行清理后退出`);
-        killChildTree(child);
         await closeTdb();
-        cleanupTempDb();
-        releaseSeqBaseLease(); // 08-M3：中断退出同样要释放区间租约，不留死锁文件卡住后续运行
+        try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
         process.exit(130);
     };
 }
-let child = null;
-process.on('SIGINT', handleTermSignal('SIGINT'));
-process.on('SIGTERM', handleTermSignal('SIGTERM'));
 
 // ============================================================================
-// §SETUP：起临时 server + 种子数据
+// §SETUP：服务就绪核对 + 种子数据
+// [#106 S4b2] 原 startServer / startServerOnce 自起 wrapper + 日志轮询 + 「全新空库冷启动崩溃」重试整段删除（#127 那个空库首启建表竞态在快照库上不存在）：实例由 test-env 起停。
+// 「服务就绪」的判定：原来靠日志 "Task Pool Server running" / "schema 就绪"；改为一次真实请求——未带 token 访问 /api/collab/requests 必须 401。
 // ============================================================================
-// 〔G2 现场发现·与本批业务逻辑无关的既有 bug，未修复，仅规避〕针对**全新空 sqlite 文件**（0 表）
-// 冷启动时，server.js 有极早期（"Task Pool Server running" 打出后几毫秒内）未捕获异常：
-//   Uncaught Exception: SQLITE_ERROR: no such table: main.collab_requests/collab_dev_plan_items/
-//   collab_attachments/collab_operation_logs —— 全新库上某段未走 db.serialize() 的启动期查询
-//   抢在对应 CREATE TABLE 完成前执行；server.js:21126 的 uncaughtException 处理器记录后
-//   `setTimeout(() => process.exit(1), 1000)`，进程在打出 "Task Pool Server running" 约 1 秒后
-//   自杀。生产/常规 dev 库因为表早已存在，从未触发过这条路径；本次是本仓第一次针对*真正空*
-//   sqlite 文件冷启动做验证，暴露出来。复现用 node 直跑 wrapper（零 G2 代码参与）反复确认必现，
-//   与本批改动无关，修复涉及审计 server.js 启动期全部未 serialize 查询——超出 C2a 范围，不动。
-// 规避：进程崩溃后 schema 已基本创建完（CREATE TABLE 是快操作，1 秒内基本都跑完了），对**同一个**
-//   临时库文件重新起一次，第二次因表已存在不会再触发这条竞态，直接稳定运行。最多重试 2 次。
-async function startServerOnce() {
-    let log = '';
-    const c = spawn(process.execPath, [WRAPPER_PATH], {
-        cwd: ROOT,
-        env: { ...process.env, PORT: String(TEST_PORT), IA_TEST_DB_PATH: TEMP_DB, LOG_LEVEL: 'INFO' },
-    });
-    let exited = false;
-    c.on('exit', () => { exited = true; });
-    c.stdout.on('data', (d) => { log += d.toString(); });
-    c.stderr.on('data', (d) => { log += d.toString(); });
-    const deadline1 = Date.now() + 20000;
-    let listening = false;
-    while (Date.now() < deadline1) {
-        if (/Task Pool Server running/.test(log)) { listening = true; break; }
-        if (exited) break;
-        await new Promise((r) => setTimeout(r, 300));
-    }
-    // 二次等待 schema 真就绪（取数质量双校验迁移，独立于 app.listen，见 handoff §2 风险点）
-    const deadline2 = Date.now() + 10000;
-    let schemaReady = false;
-    while (Date.now() < deadline2) {
-        if (/schema 就绪|健康检查通过：collab_quality_record/.test(log)) { schemaReady = true; break; }
-        if (exited) break;
-        await new Promise((r) => setTimeout(r, 300));
-    }
-    // 额外稳定性观察窗：已知崩溃发生在 "Server running" 后约 1 秒内（uncaughtException 处理器的
-    // 1000ms setTimeout），这里多等一段确认进程真的挺住了，而不是刚巧还没来得及死
-    const stabilizeDeadline = Date.now() + 2500;
-    while (Date.now() < stabilizeDeadline && !exited) {
-        await new Promise((r) => setTimeout(r, 200));
-    }
-    return { child: c, listening, schemaReady, exited, getLog: () => log };
-}
-
-async function startServer() {
-    const maxAttempts = 2;
-    let result = null;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        result = await startServerOnce();
-        if (!result.exited) {
-            if (attempt > 1) {
-                console.log(`  ⚠️ server 第 1 次冷启动崩溃（全新空库启动期竞态，见脚本头注释），第 ${attempt} 次针对同一临时库重启后稳定`);
-            }
-            return result;
-        }
-        console.log(`  ⚠️ server 第 ${attempt} 次启动在稳定观察窗内退出（疑似全新空库启动期竞态），日志尾部：\n${result.getLog().slice(-800)}`);
-        killChildTree(result.child);
-        await new Promise((r) => setTimeout(r, 300));
-    }
-    return result; // 两次都崩，原样返回最后一次结果（listening/schemaReady 由调用方按 exited 状态判断）
+async function probeServing() {
+    const r = await fetch(`${BASE}/api/collab/requests`);
+    return r.status;
 }
 
 // 〔08-H1 前置重构〕原为 seedData() 内部闭包——本批（08-H1）H8 反序夹具需要在 seedData() 已
@@ -644,8 +258,16 @@ async function insertConn(row) {
 }
 
 async function seedData() {
-    tdb = new sqlite3.Database(TEMP_DB);
+    // 实例库（ready() 建好的快照）：只开已存在的库，不带 OPEN_CREATE
+    tdb = await new Promise((resolve, reject) => { const d = new sqlite3.Database(TEMP_DB, sqlite3.OPEN_READWRITE, (e) => (e ? reject(e) : resolve(d))); });
     await new Promise((resolve, reject) => tdb.run('PRAGMA busy_timeout = 5000', (e) => (e ? reject(e) : resolve())));
+    // [#106 S4b2] 清场：本脚本原来跑在「全新空库」上（只有服务自建的表与默认行）。快照库里有真实的协作单与外部连接（含生产同名的「小程序-智荟人力」/ MINIAPP_ZHHL），
+    //   H2/H3/H8 等用例按 source_system_code / type 分流、期望「恰好一条」，P/Q1 周期取数用例按连接表整体判断。所以造数前先清掉协作单（外键级联清子表）、外部连接与周期任务。
+    await tdbRun('PRAGMA foreign_keys = ON');
+    await tdbRun('DELETE FROM collab_requests');
+    await tdbRun('PRAGMA foreign_keys = OFF');
+    await tdbRun('DELETE FROM periodic_tasks');
+    await tdbRun('DELETE FROM db_connections');
 
     // -- 用户三名（与 server.js 默认建的 admin 用户名冲突时会被静默跳过 —— 我们就是要用它）
     const users = {};
@@ -709,8 +331,8 @@ async function seedData() {
     });
 
     // -- sqlite_sequence 预抬（collab_requests / collab_attachments）
-    await tdbRun(`INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES('collab_requests', ?)`, [SEQ_BASE]);
-    await tdbRun(`INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES('collab_attachments', ?)`, [SEQ_BASE]);
+    await setSequence('collab_requests', SEQ_BASE);
+    await setSequence('collab_attachments', SEQ_BASE);
 
     return { users, conn };
 }
@@ -721,8 +343,8 @@ async function seedData() {
 let oaCounter = 0;
 async function createPendingRequest(ctx, targetConnId, overrides = {}) {
     oaCounter++;
-    const adminToken = signAs(ctx.users.admin);
-    const businessToken = signAs(ctx.users.business);
+    const adminToken = await signAs(ctx.users.admin);
+    const businessToken = await signAs(ctx.users.business);
     const oaNo = `OA_G2EXT_${process.pid}_${oaCounter}`;
     const createRes = await apiCall('POST', '/api/collab/requests', adminToken, {
         oa_request_no: oaNo,
@@ -737,19 +359,14 @@ async function createPendingRequest(ctx, targetConnId, overrides = {}) {
         throw new Error(`fixture 建单失败: ${createRes.status} ${JSON.stringify(createRes.body)}`);
     }
     const id = createRes.body.id;
-    // 〔H1·codex 07 质量审〕建单拿到 id 后立即登记本单可能产生的两类物理路径（_pending 暂存目录
-    // + 最终归档目录），不管本次测试用例后续是否真的会让文件落到这两个位置——登记只是"记一笔
-    // 备查"，cleanupUploadArtifacts 会自己判断路径是否存在，登记了但从未落盘不算残留。
-    const collabBase = path.join(ROOT, 'uploads', 'collab');
-    registerCleanupPath(path.join(collabBase, '_pending', String(id)));
-    registerCleanupPath(path.join(collabBase, computeFinalDirName(id, overrides.description || `G2外部源测试单${oaCounter}`)));
+    // [#106 S4b2] 原来这里登记本单可能产生的 _pending / 最终归档目录供收尾清理真实 uploads/collab；实例数据根整体删除，不再登记。
     const assignRes = await apiCall('POST', `/api/collab/requests/${id}/assign`, businessToken, {
         developer_id: ctx.users.developer.id,
     });
     if (assignRes.status !== 200) {
         throw new Error(`fixture 指派失败: ${assignRes.status} ${JSON.stringify(assignRes.body)}`);
     }
-    return { id, oaNo, devToken: signAs(ctx.users.developer), adminToken, businessToken };
+    return { id, oaNo, devToken: await signAs(ctx.users.developer), adminToken, businessToken };
 }
 
 function xlsxContent() { return 'fake xlsx binary content not validated (external_skip / smoke-未达比对阶段)'; }
@@ -760,7 +377,18 @@ function sqlContent() { return 'SELECT 1 AS health_check'; }
 // sqlite 文件，只建 db_connections 单表，不复用本文件的主 TEMP_DB/tdb），spawn 子进程真跑种子
 // 脚本，不 require 其内部函数（黑盒验证，贴近真实调用方式：`node scripts/_seed-...js --apply`）。
 // ============================================================================
-const SEED_SCRIPT_PATH = path.join(__dirname, '_seed-collab-external-source.js');
+// [#106 S4b2b] 种子脚本路径不再存成变量：两处起子进程的地方首元素内联 path.join(__dirname, '_seed-collab-external-source.js')（守卫 F3 形态：静态上就能看出起的是哪个脚本）。
+let seedSpawnCount = 0;   // 已起的种子子进程个数（起子进程之前才加；S6(c) 用它证明「运行时断言抛错时没有起子进程」）
+/**
+ * 起种子子进程之前的运行时断言（[#106 S4b2b]）：最终 env 里 TARGET_DB 不是非空字符串、且参数里又没有 --allow-db-override，这个组合会让种子脚本落到它的默认库（业务库）——直接抛错、不起子进程。
+ * 其余两种半对（TARGET_DB 非空但没带开关、带了开关但 TARGET_DB 为空）由种子脚本自己的成对校验拒绝，S6(a) / S6(b) 证明；本断言不替它们挡，也不放行它们。
+ */
+function assertSeedNotDefaultDb(env, fullArgs) {
+    const hasTarget = typeof env.TARGET_DB === 'string' && env.TARGET_DB !== '';
+    if (!hasTarget && !fullArgs.includes('--allow-db-override')) {
+        throw new Error('拒绝起种子子进程：最终环境里 TARGET_DB 不是非空字符串、参数里也没有 --allow-db-override——这个组合会让种子脚本落到它的默认库');
+    }
+}
 const seedTestDbPaths = []; // 本次运行创建的全部 S 组临时库路径，收尾统一清理（含 -journal/-wal/-shm）
 
 function newSeedTestDbPath(tag) {
@@ -781,7 +409,7 @@ function cleanupSeedTestDbs() {
 function createSeedTestDbTable(dbPath) {
     return new Promise((resolve, reject) => {
         const conn = new sqlite3.Database(dbPath);
-        conn.exec(`CREATE TABLE db_connections (
+        conn.run(`CREATE TABLE db_connections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             type TEXT DEFAULT 'sqlserver',
@@ -844,24 +472,29 @@ function sCorruptColumn(dbPath, col, value) {
 // 从子进程环境里删除该变量（而非字面量字符串 'undefined'），用于 S2 的"密钥缺失"用例。
 function runSeedScriptSync(dbPath, args, opts = {}) {
     const { allowOverride = true, envPatch = {} } = opts;
-    const env = { ...process.env };
+    // [#106 S4b2] DB 加密键显式传脚本内随机生成的 ENCRYPTION_KEY（不再靠父进程 dotenv 继承真实键）；envPatch 仍可覆盖它（S2 的缺失 / 过短、S8③ / S9b 的错键）
+    const env = { ...process.env, DB_ENCRYPTION_KEY: ENCRYPTION_KEY };
     if (dbPath === null) delete env.TARGET_DB; else env.TARGET_DB = dbPath;
     for (const [k, v] of Object.entries(envPatch)) {
         if (v === undefined) delete env[k]; else env[k] = v;
     }
     const fullArgs = allowOverride ? [...args, '--allow-db-override'] : [...args];
-    const r = spawnSync(process.execPath, [SEED_SCRIPT_PATH, ...fullArgs], { env, encoding: 'utf8' });
+    assertSeedNotDefaultDb(env, fullArgs);   // [#106 S4b2b] 起子进程之前的运行时断言（见该函数）
+    seedSpawnCount += 1;
+    const r = spawnSync(process.execPath, [path.join(__dirname, '_seed-collab-external-source.js'), ...fullArgs], { env, encoding: 'utf8' });
     return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 // 异步（非阻塞）调用——仅 S7 真并发用例需要两个子进程同时在跑，spawnSync 做不到。
 function spawnSeedScriptAsync(dbPath, args, opts = {}) {
     const { allowOverride = true, envPatch = {} } = opts;
-    const env = { ...process.env, TARGET_DB: dbPath };
+    const env = { ...process.env, DB_ENCRYPTION_KEY: ENCRYPTION_KEY, TARGET_DB: dbPath };   // [#106 S4b2] 同 runSeedScriptSync：显式传随机 DB 加密键
     for (const [k, v] of Object.entries(envPatch)) {
         if (v === undefined) delete env[k]; else env[k] = v;
     }
     const fullArgs = allowOverride ? [...args, '--allow-db-override'] : [...args];
-    const child = spawn(process.execPath, [SEED_SCRIPT_PATH, ...fullArgs], { env });
+    assertSeedNotDefaultDb(env, fullArgs);   // [#106 S4b2b] 同 runSeedScriptSync：起子进程之前的运行时断言（同步抛错，不返回 Promise）
+    seedSpawnCount += 1;
+    const child = spawn(process.execPath, [path.join(__dirname, '_seed-collab-external-source.js'), ...fullArgs], { env });
     let stdout = '', stderr = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
     child.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -955,6 +588,10 @@ async function runSeedScriptTests() {
             ok('S3(c) 前置：apply → CREATED（前置条件）', rC0.status === 0 && /RESULT=CREATED/.test(rC0.stdout), `实得 exit=${rC0.status} stdout=${rC0.stdout}`);
             const rC = runSeedScriptSync(dbPathC, ['--check-only']);
             ok('S3(c) 契约行存在 → STATE=OK 退出 0', rC.status === 0 && /STATE=OK/.test(rC.stdout), `实得 exit=${rC.status} stdout=${rC.stdout}`);
+            // 正向对照（修复批 1 M3）：成对且带合法密钥的有效运行，stdout 恰有一行 TARGET_DB=<这个临时库的绝对路径>。S6(b) 的「没有 TARGET_DB= 行」断言靠它保持判别力——种子脚本哪天删了这行打印，那条断言不会静默失效
+            const rCTargetLines = rC.stdout.split(/\r?\n/).filter((l) => l.startsWith('TARGET_DB='));
+            ok('S3(c) 正向对照：成对且带合法密钥的有效运行，stdout 恰有一行等于 TARGET_DB=<该临时库的绝对路径>（S6(b) 的「无 TARGET_DB= 行」断言的判别力来源）',
+                rCTargetLines.length === 1 && rCTargetLines[0] === `TARGET_DB=${path.resolve(dbPathC)}`, `实得 ${JSON.stringify(rCTargetLines)}`);
 
             // (d) 篡改一列 → CONFLICT_CONTRACT
             const dbPathD = newSeedTestDbPath('s3d-contract');
@@ -999,7 +636,7 @@ async function runSeedScriptTests() {
             if (rows.length === 1) {
                 let decrypted = null, threw = null;
                 try { decrypted = aesDecryptWithKey(rows[0].password, ENCRYPTION_KEY); } catch (e) { threw = e; }
-                ok("S4 同源性：种子写入的密文能被本文件独立复制的 AES 解密实现解出明文 '-'（证明 key 派生/密文格式字节级一致，两份 server.js 算法的独立照抄互相能解，非另起一套加密）",
+                ok("S4 同源性：种子写入的密文能被本文件独立复制的 AES 解密实现解出明文 '-'（证明 key 派生/密文格式字节级一致，两份照抄服务端入口文件加密算法的独立实现互相能解，非另起一套加密）",
                     !threw && decrypted === '-', threw ? `解密抛错：${threw.message}` : `实得明文='${decrypted}'`);
             }
         }
@@ -1015,7 +652,7 @@ async function runSeedScriptTests() {
             await createSeedTestDbTable(dbPath);
             await sInsertRawConn(dbPath, {
                 name: '小程序-智荟人力', type: 'sqlserver', host: 'h', port: 1, database: 'd', default_schema: null,
-                username: 'u', password: encryptPassword('-'), is_default: 0, connection_type: 'source', source_system_code: null,
+                username: 'u', password: aesEncryptWithKey('-', ENCRYPTION_KEY), is_default: 0, connection_type: 'source', source_system_code: null,   // [#106 S4b2] §S 种子脚本黑盒测试：密文用脚本内随机 DB 加密键（与传给种子子进程的同源）
             });
             const r = runSeedScriptSync(dbPath, ['--check-only']);
             ok('S5 同名不同码 → STATE=CONFLICT_NAME 退出 5', r.status === 5 && /STATE=CONFLICT_NAME/.test(r.stdout), `实得 exit=${r.status} stdout=${r.stdout}`);
@@ -1074,17 +711,39 @@ async function runSeedScriptTests() {
             //   完全不同的分支走出来的假阳性（比如回填出的路径恰好也校验失败）。改用
             //   `envPatch: { TARGET_DB: '' }`（空字符串，非删除）——空串已"存在"于传给子进程的
             //   env，dotenv 不会覆盖，确定性地让子进程读到"未设置"这个空值，与本机 `.env` 内容
-            //   无关（同 S2 对 DB_ENCRYPTION_KEY 的既有处理手法）。另加真实 task_pool.db 的
-            //   mtime/size 快照——该库路径与种子脚本的默认写入路径逐字相同（均解析到
-            //   `wbs-server/task_pool.db`），一次快照同时覆盖"真实库"与"默认路径"两个说法，证明
-            //   本用例的 421 拒绝发生在任何 openDb 调用之前，没有静默打开甚至写入这个文件。
-            const realDbSnapBefore = snapshotRealDbState();
-            const rB = runSeedScriptSync(null, ['--check-only'], { allowOverride: true, envPatch: { TARGET_DB: '' } });
-            ok('S6(b) --allow-db-override 给了但 TARGET_DB 为空（dotenv 不会回填，确定性未设置）→ 退出 1（对称方向，防拼错/未导出静默写默认库）',
+            //   无关（同 S2 对 DB_ENCRYPTION_KEY 的既有处理手法）。
+            // [#106 S4b2b] 原来这里对种子脚本默认写入的库文件做 mtime/size/sha1 指纹前后比对（要在本文件里写出那个库的文件名并读它的字节）。改成行为证据：
+            //   ① stderr 含种子脚本的拒绝原文（成对校验的第二条拒绝分支：allowDbOverride 为真而 TARGET_DB 没设）；
+            //   ② stdout + stderr 里没有任何以 `TARGET_DB=` 开头的行——种子脚本在解析出库路径之后、打开库之前才打印这一行（位置在上面那个拒绝分支之后），
+            //      没有这一行 ⇒ 拒绝发生在解析 / 打开库路径之前。
+            //   设计（修复批 1 M3）：这条用例本身不能拿业务库当回归探针——所以同时把 DB_ENCRYPTION_KEY 置空串（空串算「已存在」，种子脚本的 dotenv 不回填，S2 同款写法）。种子脚本的顺序是
+            //   开关白名单 → 成对校验 → DB_ENCRYPTION_KEY 校验 → 解析并打印库路径 → 打开库：成对校验万一回退，子进程也会先在密钥校验处退出 1，到不了解析和打开；
+            //   拒绝原文断言仍钉在成对分支（成对校验先于密钥校验，所以原文是成对分支的，不是密钥分支的）。「无 TARGET_DB= 行」断言的判别力由 S3(c) 的正向对照（有效运行恰打印一行）守着。
+            const rB = runSeedScriptSync(null, ['--check-only'], { allowOverride: true, envPatch: { TARGET_DB: '', DB_ENCRYPTION_KEY: '' } });
+            ok('S6(b) --allow-db-override 给了但 TARGET_DB 为空（空串已存在于子进程环境，不会被回填，确定性未设置）→ 退出 1（对称方向，防拼错/未导出静默写默认库）',
                 rB.status === 1, `实得 exit=${rB.status} stderr=${rB.stderr.slice(0, 200)}`);
-            const realDbSnapAfterDiffs = diffRealDbSnapshots(realDbSnapBefore, snapshotRealDbState());
-            ok('S6(b) 真实 task_pool.db（=种子脚本默认路径）元数据与内容哈希均未变化（mtime/size/sha1 快照比对）',
-                realDbSnapAfterDiffs.length === 0, realDbSnapAfterDiffs.join('; '));
+            ok('S6(b) 拒绝原文：stderr 含「带了 --allow-db-override 但未设置 TARGET_DB」（成对校验的拒绝分支，不是别的退出 1 的路径）',
+                rB.stderr.includes('带了 --allow-db-override 但未设置 TARGET_DB'), `stderr=${rB.stderr.slice(0, 300)}`);
+            const targetDbLines = `${rB.stdout}\n${rB.stderr}`.split(/\r?\n/).filter((l) => l.startsWith('TARGET_DB='));
+            ok('S6(b) stdout + stderr 里没有以 TARGET_DB= 开头的行（种子脚本打印解析后的库路径发生在拒绝分支之后：没有这一行 ⇒ 拒绝发生在解析 / 打开库路径之前）',
+                targetDbLines.length === 0, `出现了：${targetDbLines.join(' | ').slice(0, 300)}`);
+        }
+        // S6(c)：本文件自己的运行时断言（runSeedScriptSync / spawnSeedScriptAsync 起子进程之前）——最终 env 里 TARGET_DB 不是非空字符串、参数里又没有 --allow-db-override，
+        //   这个组合会让种子脚本落到它的默认库，所以助手直接抛错、不起子进程。
+        {
+            const before = seedSpawnCount;
+            let syncThrew = null; let asyncThrew = null; let asyncReturned = false;
+            // envPatch 置空 DB_ENCRYPTION_KEY：运行时断言万一回退，子进程会先在密钥校验处退出 1，到不了解析 / 打开默认库（见 S6(b) 的设计说明）
+            try { runSeedScriptSync(null, ['--check-only'], { allowOverride: false, envPatch: { DB_ENCRYPTION_KEY: '' } }); } catch (e) { syncThrew = e; }
+            try { spawnSeedScriptAsync(null, ['--check-only'], { allowOverride: false, envPatch: { DB_ENCRYPTION_KEY: '' } }); asyncReturned = true; } catch (e) { asyncThrew = e; }
+            ok('S6(c) 运行时断言：runSeedScriptSync(null, [--check-only], { allowOverride: false }) 同步抛错，且没有起子进程（起子进程计数不变）',
+                syncThrew !== null && /默认库/.test(syncThrew.message) && seedSpawnCount === before, `threw=${syncThrew && syncThrew.message} 计数 ${before}→${seedSpawnCount}`);
+            ok('S6(c) 运行时断言：spawnSeedScriptAsync 同款组合同步抛错（不是返回 Promise 再失败），没有起子进程',
+                asyncThrew !== null && !asyncReturned && /默认库/.test(asyncThrew.message) && seedSpawnCount === before, `threw=${asyncThrew && asyncThrew.message} returned=${asyncReturned} 计数 ${before}→${seedSpawnCount}`);
+            // 对照：TARGET_DB 非空（哪怕没带开关）或带了开关（哪怕 TARGET_DB 为空）都不触发这条断言（后两者由种子脚本自己拒绝，上面 S6(a) / S6(b) 已证）
+            let ctlThrew = null;
+            try { assertSeedNotDefaultDb({ TARGET_DB: 'x' }, ['--check-only']); assertSeedNotDefaultDb({ TARGET_DB: '' }, ['--check-only', '--allow-db-override']); } catch (e) { ctlThrew = e; }
+            ok('S6(c) 对照：assertSeedNotDefaultDb 对「TARGET_DB 非空但没带开关」与「带了开关但 TARGET_DB 为空」都不抛（由种子脚本自己的成对校验拒绝）', ctlThrew === null, ctlThrew && ctlThrew.message);
         }
 
         // S7：真并发（〔09-M1〕从"两个子进程同时起跑、听天由命"改为"测试连接先持锁再放锁"的
@@ -1198,7 +857,7 @@ async function runSeedScriptTests() {
             // 不参与 evaluate() 的契约行比较（source_system_code 与 CONTRACT_CODE='MINIAPP_ZHHL' 不同）。
             await sInsertRawConn(dbPath, {
                 name: 'S9a-无关关系型行', type: 'sqlserver', host: 'h', port: 1, database: 'd', default_schema: null,
-                username: 'u', password: encryptPassword('-'), is_default: 0, connection_type: 'source', source_system_code: 'S9A_UNRELATED',
+                username: 'u', password: aesEncryptWithKey('-', ENCRYPTION_KEY), is_default: 0, connection_type: 'source', source_system_code: 'S9A_UNRELATED',
             });
             const rCheck = runSeedScriptSync(dbPath, ['--check-only']);
             ok('S9a check-only：关系型行+正确密钥 → KEY_PROBE=OK 且流程继续到 STATE=NOT_FOUND（坏法：探针误判正确密钥为不匹配，提前退出 8 挡住后续判定）',
@@ -1218,7 +877,7 @@ async function runSeedScriptTests() {
             await createSeedTestDbTable(dbPath);
             await sInsertRawConn(dbPath, {
                 name: 'S9b-无关关系型行', type: 'mysql', host: 'h', port: 1, database: 'd', default_schema: null,
-                username: 'u', password: encryptPassword('-'), is_default: 0, connection_type: 'source', source_system_code: 'S9B_UNRELATED',
+                username: 'u', password: aesEncryptWithKey('-', ENCRYPTION_KEY), is_default: 0, connection_type: 'source', source_system_code: 'S9B_UNRELATED',
             });
             const wrongKey = ENCRYPTION_KEY === 'W'.repeat(32) ? 'V'.repeat(32) : 'W'.repeat(32);
             ok('S9b 前置：构造的错密钥与真实 DB_ENCRYPTION_KEY 确实不同（同 S8③ 去巧合写法）',
@@ -1265,7 +924,7 @@ async function runSeedScriptTests() {
             await createSeedTestDbTable(dbPath);
             runSeedScriptSync(dbPath, ['--apply']); // baseline：真实契约行（CONTRACT_PASSWORD_PLAINTEXT='-'）
             const secretPlaintext = 'S9D-SECRET-CONFLICT-PLAINTEXT-DO-NOT-LEAK';
-            await sCorruptColumn(dbPath, 'password', encryptPassword(secretPlaintext));
+            await sCorruptColumn(dbPath, 'password', aesEncryptWithKey(secretPlaintext, ENCRYPTION_KEY));
             const r = runSeedScriptSync(dbPath, ['--check-only']);
             ok("S9d 契约行密码解密成功但明文≠'-' → STATE=CONFLICT_CONTRACT 退出 2",
                 r.status === 2 && /STATE=CONFLICT_CONTRACT/.test(r.stdout), `实得 exit=${r.status} stdout=${r.stdout}`);
@@ -1548,7 +1207,7 @@ function runStaticSentinels() {
     // 失守），它就会被裸查询选中并进入连库链。谓词数量下限锚定当前实测 8 处（只增不减）。
     const bareDefaultHits = (serverSrc.match(/is_default\s*=\s*1\s+LIMIT\s+1/g) || []).length;
     const guardedDefaultHits = (serverSrc.match(/is_default\s*=\s*1\s+AND\s+\(connection_type\s*=\s*'warehouse'\s+OR\s+connection_type\s+IS\s+NULL\)\s+LIMIT\s+1/g) || []).length;
-    ok(`Q-P21 server.js 取默认连接查询恒带 connection_type 谓词（裸 is_default=1 LIMIT 1 计 0、带谓词 ≥8；坏法：新端点漏谓词 → external 行被置默认即入连库链）`,
+    ok(`Q-P21 服务端入口文件里取默认连接的查询恒带 connection_type 谓词（裸 is_default=1 LIMIT 1 计 0、带谓词 ≥8；坏法：新端点漏谓词 → external 行被置默认即入连库链）`,
         bareDefaultHits === 0 && guardedDefaultHits >= 8, `bare=${bareDefaultHits} guarded=${guardedDefaultHits}`);
 
     // ============================================================================
@@ -1599,8 +1258,7 @@ function runStaticSentinels() {
     function l1ScanForHits(text) {
         const hits = [];
         L1_STMT_RE.lastIndex = 0;
-        let m;
-        while ((m = L1_STMT_RE.exec(text))) {
+        for (const m of text.matchAll(L1_STMT_RE)) {   // [#106 S4b2b] 原 while + .exec 循环；全局正则的 matchAll 与逐次 exec 命中序列相同（SELF_ISOLATED 文件里 .exec( 一律不许）
             const literal = l1ExtractEnclosingLiteral(text, m.index);
             if (literal) hits.push({ index: m.index, fingerprint: l1NormalizeSqlFingerprint(literal.content) });
         }
@@ -1631,98 +1289,7 @@ function runStaticSentinels() {
             fpColListChanged !== fpVarA, `fpColListChanged=${fpColListChanged} fpVarA=${fpVarA}`);
     }
 
-    section('§Q（09-H2）区间租约所有权自证：token 不匹配不删 / 存活 pid 的超龄锁不接管');
-    {
-        // ① 他人 token 的锁——release 不应删除。用真实临时文件模拟"锁文件内容是别人的 token"
-        //    （pid 故意填 1，与本进程无关——这条用例只测 token 比对分支，不涉及存活探测）。
-        const foreignLockPath = path.join(os.tmpdir(), `collab-external-g2-h2-foreign-${process.pid}-${Date.now()}.lock`);
-        fs.writeFileSync(foreignLockPath, JSON.stringify({ pid: 1, token: 'foreign-token-not-mine', ts: Date.now() }));
-        const releaseForeignResult = releaseLeaseAtPath(foreignLockPath, 'my-own-token-different-from-foreign');
-        ok('H2① release 对 token 不匹配的锁文件不删除（坏法：不核对 token，无条件 unlink，会误删他人已接管的租约）',
-            !releaseForeignResult.deleted && fs.existsSync(foreignLockPath),
-            `result=${JSON.stringify(releaseForeignResult)} 文件仍存在=${fs.existsSync(foreignLockPath)}`);
-        try { fs.unlinkSync(foreignLockPath); } catch (_) { /* 测试收尾清理，非断言对象 */ }
-
-        // ② 对照组：token 匹配的锁文件应正常删除——证明①不是"永远不删"，而是精确按 token 判断。
-        const ownLockPath = path.join(os.tmpdir(), `collab-external-g2-h2-own-${process.pid}-${Date.now()}.lock`);
-        const ownToken = 'my-own-token-for-test';
-        fs.writeFileSync(ownLockPath, JSON.stringify({ pid: process.pid, token: ownToken, ts: Date.now() }));
-        const releaseOwnResult = releaseLeaseAtPath(ownLockPath, ownToken);
-        ok('H2① 对照组：token 匹配的锁文件正常删除（证明①不是判断失灵变成"永远不删"）',
-            releaseOwnResult.deleted && !fs.existsSync(ownLockPath), `result=${JSON.stringify(releaseOwnResult)}`);
-
-        // ③ 存活 pid 的超龄锁——不允许接管。用本进程自身 pid（此刻必然存活）模拟。
-        const canTakeOverAlive = canTakeOverStaleLock({ pid: process.pid, token: 'whatever' }, true);
-        ok('H2② 存活 pid（本进程自身）的超龄锁 → 不允许接管（坏法：只看 mtime 超龄就接管，不核实持有者是否还活着）',
-            canTakeOverAlive === false, `实得 ${canTakeOverAlive}`);
-
-        // ④ 对照组：确已死亡的 pid（spawn 一个立即退出的子进程，等它退出后其 pid 保证不存活）+
-        //    超龄 → 应允许接管——证明③不是"函数被写死恒返回 false"，而是真的在做存活判定。
-        const deadChild = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-        const canTakeOverDead = canTakeOverStaleLock({ pid: deadChild.pid, token: 'whatever' }, true);
-        ok('H2② 对照组：确已死亡 pid + 超龄 → 允许接管（证明②不是函数被写死恒返回 false）',
-            canTakeOverDead === true, `deadPid=${deadChild.pid} 实得 ${canTakeOverDead}`);
-
-        // ⑤ 对照组：未超龄（无论 pid 死活）→ 不接管；超龄但持有者信息缺失/不可解析（holder=null）
-        //    → 保守不接管。
-        const canTakeOverNotStale = canTakeOverStaleLock({ pid: process.pid, token: 'whatever' }, false);
-        ok('H2② 对照组：未超龄 → 不接管（超龄是允许接管的必要条件之一，非充分条件）',
-            canTakeOverNotStale === false, `实得 ${canTakeOverNotStale}`);
-        const canTakeOverNoHolder = canTakeOverStaleLock(null, true);
-        ok('H2② 对照组：超龄但持有者信息缺失/不可解析（holder=null）→ 保守不接管',
-            canTakeOverNoHolder === false, `实得 ${canTakeOverNoHolder}`);
-    }
-
-    section('§Q（12b-H1）陈旧锁接管竞态自证：A 读到旧持有者后 B 抢先接管 → A 放弃换基线，B 的锁完好');
-    {
-        // 直接调用真实的 attemptLeaseTakeover（而不是另写一份模拟逻辑）——自证的是这个函数本身
-        // 在交错场景下的行为，不是"我以为它会怎么表现"。
-        const raceLockPath = path.join(os.tmpdir(), `collab-external-g2-h1-race-${process.pid}-${Date.now()}.lock`);
-        // 构造一把"陈旧锁"：持有者是一个已确认死亡的子进程（呼应上面 H2②对照组的死亡 pid 手法）。
-        const raceDeadChild = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-        const staleHolder = { pid: raceDeadChild.pid, token: 'stale-original-token', ts: Date.now() - SEQ_BASE_LOCK_STALE_MS - 1000 };
-        fs.writeFileSync(raceLockPath, JSON.stringify(staleHolder));
-
-        // A 和 B 都"读到"同一把陈旧锁——firstReadHolder 是各自独立的深拷贝，模拟两个独立进程各自在
-        // 自己的 acquireSeqBaseLease 调用里做了同一次 readFileSync 判定陈旧（时序上早于任何一方
-        // 真正开始接管）。
-        const aFirstRead = JSON.parse(JSON.stringify(staleHolder));
-        const bFirstRead = JSON.parse(JSON.stringify(staleHolder));
-
-        // 交错发生：B 先完成接管（真实调用 attemptLeaseTakeover，落地新锁文件）。
-        const bToken = 'b-token-wins-the-race';
-        const bResult = attemptLeaseTakeover(raceLockPath, bFirstRead, bToken);
-        ok('H1① 前置条件：B 抢先接管成功（确保测试确实构造出了"B 先赢"的时序，不是巧合）',
-            bResult.ok === true, JSON.stringify(bResult));
-
-        // A 用的是自己"首次读到"的陈旧快照（此刻已经过时——文件已经是 B 的了），尝试接管。
-        const aToken = 'a-token-must-lose-the-race';
-        const aResult = attemptLeaseTakeover(raceLockPath, aFirstRead, aToken);
-        ok('H1② A 用过时的首次读快照尝试接管 → 判定为「已被他人接管」而放弃（坏法：不重读直接 unlink，会把 B 刚建立的锁删掉）',
-            aResult.ok === false && aResult.reason === 'holder-changed', JSON.stringify(aResult));
-
-        // B 的锁必须完好无损：文件仍存在，且 token 仍是 B 的（证明 A 的失败尝试没有删除/覆盖它）。
-        let finalHolder = null;
-        try { finalHolder = JSON.parse(fs.readFileSync(raceLockPath, 'utf8')); } catch (_) { /* 若这里都读不到，下面断言直接判失败，不吞错误 */ }
-        ok('H1③ B 的锁在 A 放弃接管之后依然完好（文件存在 + token 仍是 B 的，未被 A 误删/覆盖）',
-            !!finalHolder && finalHolder.token === bToken, `finalHolder=${JSON.stringify(finalHolder)}`);
-
-        try { fs.unlinkSync(raceLockPath); } catch (_) { /* 测试收尾清理，非断言对象 */ }
-
-        // 对照组：若首次读快照与文件当前内容一致（没有发生交错），接管应该正常成功——证明①②③
-        // 不是"attemptLeaseTakeover 恒返回失败"，而是精确按"内容是否被改过"判断。
-        const controlLockPath = path.join(os.tmpdir(), `collab-external-g2-h1-control-${process.pid}-${Date.now()}.lock`);
-        const controlHolder = { pid: raceDeadChild.pid, token: 'control-original-token', ts: Date.now() - SEQ_BASE_LOCK_STALE_MS - 1000 };
-        fs.writeFileSync(controlLockPath, JSON.stringify(controlHolder));
-        const controlResult = attemptLeaseTakeover(controlLockPath, JSON.parse(JSON.stringify(controlHolder)), 'control-new-token');
-        ok('H1④ 对照组：未发生交错（首次读快照与当前文件一致）→ 接管正常成功（证明②不是函数写死恒返回失败）',
-            controlResult.ok === true, JSON.stringify(controlResult));
-        let controlFinal = null;
-        try { controlFinal = JSON.parse(fs.readFileSync(controlLockPath, 'utf8')); } catch (_) { /* 读不到直接让下面断言判失败 */ }
-        ok('H1④ 对照组：接管成功后锁文件确实变成了新 token（证明接管不是空写）',
-            !!controlFinal && controlFinal.token === 'control-new-token', JSON.stringify(controlFinal));
-        try { fs.unlinkSync(controlLockPath); } catch (_) { /* 测试收尾清理，非断言对象 */ }
-    }
+    // [#106 S4b2] 原「§Q（09-H2）区间租约所有权自证」「§Q（12b-H1）陈旧锁接管竞态自证」两节随区间租约基建（releaseLeaseAtPath / canTakeOverStaleLock / attemptLeaseTakeover）一起删除：被测对象已不存在。
 }
 
 // ============================================================================
@@ -1747,7 +1314,7 @@ async function runHttpTests(ctx, serverLogRef) {
         const r = await postSubmitWithRetry(fx.id, fx.devToken, [{ name: 'result.xlsx', content: xlsxContent() }, { name: 'script.sql', content: sqlContent() }]);
         ok(`H0[${label}] HTTP 500`, r.status === 500, `实得 ${r.status} ${JSON.stringify(r.body)}`);
         ok(`H0[${label}] error 文案与现状逐字相同`, r.body && r.body.error === '目标业务库配置缺失或方言不支持（仅支持 SQL Server / MySQL）', JSON.stringify(r.body));
-        const pendingDir = path.join(ROOT, 'uploads', 'collab', '_pending', String(fx.id));
+        const pendingDir = path.join(UPLOAD_ROOT, 'collab', '_pending', String(fx.id));
         ok(`H0[${label}] _pending/{id} 已清空`, !fs.existsSync(pendingDir) || fs.readdirSync(pendingDir).length === 0);
         const row = await tdbGet('SELECT sql_validation_status FROM collab_requests WHERE id=?', [fx.id]);
         // M2（codex 07 质量审）：从"未写成 queued"升级为精确值 + 过程证据——两阶段查询的失败
@@ -1791,11 +1358,11 @@ async function runHttpTests(ctx, serverLogRef) {
             attachRows.length === 2, `实得 ${attachRows.length} 条：${JSON.stringify(attachRows.map((a) => a.attachment_type))}`);
         const dataAtt = attachRows.find((a) => a.attachment_type === 'result_data');
         const scriptAtt = attachRows.find((a) => a.attachment_type === 'result_script');
-        const collabDirAbs = path.join(ROOT, 'uploads', 'collab');
+        const collabDirAbs = path.join(UPLOAD_ROOT, 'collab');
         for (const [label, att, expectedContent] of [['result_data', dataAtt, xlsxContent()], ['result_script', scriptAtt, sqlContent()]]) {
             ok(`M1 ${label} 附件行存在`, !!att, `attachRows=${JSON.stringify(attachRows)}`);
             if (att) {
-                const absPath = path.join(ROOT, 'uploads', att.file_name);
+                const absPath = path.join(UPLOAD_ROOT, att.file_name);
                 const underCollabDir = path.resolve(absPath).startsWith(path.resolve(collabDirAbs) + path.sep);
                 const existsOnDisk = fs.existsSync(absPath);
                 ok(`M1 ${label} 路径在本次运行的 uploads/collab 目录下且文件存在（坏法：file_name 记错路径/rename 失败但仍标 active）`,
@@ -1907,7 +1474,7 @@ async function runHttpTests(ctx, serverLogRef) {
         const r = await postSubmitWithRetry(fx.id, fx.devToken, [{ name: 'result.xlsx', content: xlsxContent() }, { name: 'script.sql', content: sqlContent() }]);
         ok(`H3[${label}] HTTP 422`, r.status === 422, `实得 ${r.status} ${JSON.stringify(r.body)}`);
         ok(`H3[${label}] code=EXTERNAL_SOURCE_NOT_REGISTERED`, r.body && r.body.code === 'EXTERNAL_SOURCE_NOT_REGISTERED', JSON.stringify(r.body));
-        const pendingDir = path.join(ROOT, 'uploads', 'collab', '_pending', String(fx.id));
+        const pendingDir = path.join(UPLOAD_ROOT, 'collab', '_pending', String(fx.id));
         ok(`H3[${label}] _pending 已清空`, !fs.existsSync(pendingDir) || fs.readdirSync(pendingDir).length === 0);
         const row = await tdbGet('SELECT status, sql_validation_status FROM collab_requests WHERE id=?', [fx.id]);
         // 两阶段查询在前置 UPDATE 之前执行（A.1 设计），422 在阶段一分流内拒绝，前置 UPDATE
@@ -1931,7 +1498,7 @@ async function runHttpTests(ctx, serverLogRef) {
         const fx = await createPendingRequest(ctx, ctx.conn.relationalBms);
         const r = await postSubmitWithRetry(fx.id, fx.devToken, [{ name: 'result.xlsx', content: xlsxContent() }, { name: 'script.sql', content: sqlContent() }]);
         ok('H4 失败态 HTTP 500', r.status === 500, `实得 ${r.status}`);
-        const pendingDir = path.join(ROOT, 'uploads', 'collab', '_pending', String(fx.id));
+        const pendingDir = path.join(UPLOAD_ROOT, 'collab', '_pending', String(fx.id));
         // 连接失败分支 cleanupPending() 已清空 _pending
         ok('H4 失败态 _pending 已清空', !fs.existsSync(pendingDir) || fs.readdirSync(pendingDir).length === 0);
     }
@@ -1944,12 +1511,12 @@ async function runHttpTests(ctx, serverLogRef) {
         // G2-F6〔删假注释，改真复用〕computeAttachmentDirName 已导出（见 computeFinalDirName
         // 处的同款说明），直接调用 _internal 版本，不再内联复刻算法。
         const targetDirName = versioning._internal.computeAttachmentDirName(fx.id, desc);
-        const targetDirPath = path.join(ROOT, 'uploads', 'collab', targetDirName);
+        const targetDirPath = path.join(UPLOAD_ROOT, 'collab', targetDirName);
         fs.mkdirSync(path.dirname(targetDirPath), { recursive: true });
         fs.writeFileSync(targetDirPath, 'blocker-file-not-a-directory');
         const r = await postSubmitWithRetry(fx.id, fx.devToken, [{ name: 'result.xlsx', content: xlsxContent() }, { name: 'script.sql', content: sqlContent() }]);
         ok('H4 抛错态 HTTP 500', r.status === 500, `实得 ${r.status} ${JSON.stringify(r.body)}`);
-        const pendingDir = path.join(ROOT, 'uploads', 'collab', '_pending', String(fx.id));
+        const pendingDir = path.join(UPLOAD_ROOT, 'collab', '_pending', String(fx.id));
         ok('H4 抛错态 本次上传文件已删（_pending 清空）', !fs.existsSync(pendingDir) || fs.readdirSync(pendingDir).length === 0);
         const rowAfter = await tdbGet('SELECT submission_version, status, sql_validation_status FROM collab_requests WHERE id=?', [fx.id]);
         // 注：前置 UPDATE（PENDING→SUBMITTED）在两阶段查询之后、activateNewVersion 之前无条件执行，
@@ -1960,7 +1527,7 @@ async function runHttpTests(ctx, serverLogRef) {
         ok('H4 抛错态 submission_version 未被推进（仍为 0）', rowAfter.submission_version === 0, `实得 ${rowAfter.submission_version}`);
         ok('H4 抛错态 status 停在 SUBMITTED（未推进到 DONE，未回滚到 PENDING）', rowAfter.status === 'SUBMITTED', `实得 ${rowAfter.status}`);
         ok("H4 抛错态 sql_validation_status='failed'（ordinal5 未知异常兜底写入）", rowAfter.sql_validation_status === 'failed', `实得 ${rowAfter.sql_validation_status}`);
-        fs.rmSync(targetDirPath, { recursive: true, force: true });
+        if (fs.existsSync(targetDirPath)) fs.unlinkSync(targetDirPath);   // 这是测试预建的「同名文件」阻塞物（不是目录），用 unlink 删（不用 fs.rmSync）
     }
     // 通过态：本机无可用 SQL Server/MySQL（../../mcp-hrd/config.json 已随 08-08 迁移失效），显式 SKIP
     skip('H4 通过态：真实关系库健康 SQL 提交 → DONE【未覆盖·环境阻塞】', '本机/本仓无可达 SQL Server/MySQL 测试凭证（mcp-hrd/config.json 已随 2026-08-08 mcp 迁移失效，新路径不在本仓相对路径可达范围），无法验证真实 smoke 通过路径，与 external_skip 无关（该路径本批未改动，属既有回归风险敞口，非本次引入）');
@@ -2011,12 +1578,12 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- H6：/source 与 /lookup 含①不含②；/lookup 每项带 source_system_code ----
     section('§H6 三处放行：/source、/lookup 含已登记外部源、不含未登记');
     {
-        const r1 = await apiCall('GET', '/api/collab/db-connections/source', signAs(ctx.users.admin));
+        const r1 = await apiCall('GET', '/api/collab/db-connections/source', await signAs(ctx.users.admin));
         ok('H6 /source 200', r1.status === 200, `实得 ${r1.status}`);
         const ids1 = (r1.body || []).map((r) => r.id);
         ok('H6 /source 含①已登记外部源', ids1.includes(ctx.conn.externalRegistered));
 
-        const r2 = await apiCall('GET', '/api/collab/db-connections/lookup', signAs(ctx.users.developer));
+        const r2 = await apiCall('GET', '/api/collab/db-connections/lookup', await signAs(ctx.users.developer));
         ok('H6 /lookup 200', r2.status === 200, `实得 ${r2.status}`);
         const rows2 = r2.body || [];
         const ids2 = rows2.map((r) => r.id);
@@ -2126,7 +1693,7 @@ async function runHttpTests(ctx, serverLogRef) {
             r1.status !== 200, `实得 ${r1.status} ${JSON.stringify(r1.body)}`);
         ok('H9 code=EXTERNAL_SOURCE_NOT_REGISTERED（阶段一挡下，revalidate 层的正确性由 U5/U5b 单独证明）',
             r1.body && r1.body.code === 'EXTERNAL_SOURCE_NOT_REGISTERED', JSON.stringify(r1.body));
-        const pendingDirH9 = path.join(ROOT, 'uploads', 'collab', '_pending', String(fx.id));
+        const pendingDirH9 = path.join(UPLOAD_ROOT, 'collab', '_pending', String(fx.id));
         ok('H9 本次上传文件已清理（_pending 已清空）', !fs.existsSync(pendingDirH9) || fs.readdirSync(pendingDirH9).length === 0);
 
         // 改回原 code → 重提应恢复正常（external_skipped）
@@ -2140,7 +1707,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- P1：external 行①受保护——PUT/DELETE/test 全部 409，库行三列不变 ----
     section('§P1 external 行①：PUT/DELETE/:id/test 全部 409（受保护）');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
         const before = await tdbGet('SELECT type, host, password FROM db_connections WHERE id=?', [ctx.conn.externalRegistered]);
         const rPut = await apiCall('PUT', `/api/db-connections/${ctx.conn.externalRegistered}`, adminTok, {
             name: 'P1-试图改名', type: 'sqlserver', host: 'x', port: 1, database: 'x', username: 'x',
@@ -2165,7 +1732,7 @@ async function runHttpTests(ctx, serverLogRef) {
     section("§P1b 普通行④：PUT type='external' → 400 DB_TYPE_NOT_ALLOWED（禁止晋升）");
     {
         const before = await tdbGet('SELECT type FROM db_connections WHERE id=?', [ctx.conn.relationalBms]);
-        const r = await apiCall('PUT', `/api/db-connections/${ctx.conn.relationalBms}`, signAs(ctx.users.admin), {
+        const r = await apiCall('PUT', `/api/db-connections/${ctx.conn.relationalBms}`, await signAs(ctx.users.admin), {
             name: 'G2-business_db', type: 'external', host: '10.255.255.1', port: 1, database: 'bms', username: 'testuser',
         });
         ok("P1b PUT type='external' → 400（坏法：PUT 未拦 type 晋升）", r.status === 400, `实得 ${r.status} ${JSON.stringify(r.body)}`);
@@ -2186,7 +1753,7 @@ async function runHttpTests(ctx, serverLogRef) {
     }
 
     // ---- P1d（11-M2·白盒裸 SQL 纵深防御）：直接执行 server.js 现行三类语句原文 ----
-    section('§P1d PUT/DELETE 纵深防御（11-M2·白盒裸 SQL）：直接跑 server.js 现行三条 UPDATE + 一条 DELETE 原文');
+    section('§P1d PUT/DELETE 纵深防御（11-M2·白盒裸 SQL）：直接跑服务端入口文件现行三条 UPDATE + 一条 DELETE 原文');
     {
         // 〔安全构造，同 §Q（09-L1）L1① 手法〕下面用于在 server.js 源码文本里定位这四类语句的
         // "锚点子串"全部用数组拼接、不写成连续字面量——若直接写成一段连续包含
@@ -2199,7 +1766,7 @@ async function runHttpTests(ctx, serverLogRef) {
         function p1dFindLiteral(anchorPieces, label) {
             const anchor = anchorPieces.join('');
             const hitCount = serverSrc.split(anchor).length - 1;
-            ok(`P1d 前置：锚点「${label}」在 server.js 中恰命中 1 处（防跨端点/跨分支误锚）`,
+            ok(`P1d 前置：锚点「${label}」在服务端入口文件中恰命中 1 处（防跨端点/跨分支误锚）`,
                 hitCount === 1, `实得命中 ${hitCount} 处，anchor=${anchor}`);
             if (hitCount !== 1) return null;
             const anchorIdx = serverSrc.indexOf(anchor);
@@ -2231,7 +1798,7 @@ async function runHttpTests(ctx, serverLogRef) {
             'DELETE 语句'
         );
 
-        ok('P1d 前置：四条语句原文均成功从 server.js 提取（非 null，坏法：锚点过期/语句被移动导致取不到）',
+        ok('P1d 前置：四条语句原文均成功从服务端入口文件提取（非 null，坏法：锚点过期/语句被移动导致取不到）',
             [putPasswordSql, putNoPasswordSql, putClearDefaultSql, deleteSql].every((s) => typeof s === 'string' && s.length > 0),
             JSON.stringify({ putPasswordSql, putNoPasswordSql, putClearDefaultSql, deleteSql }));
 
@@ -2350,7 +1917,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- P2：POST 建连接——type 白名单 / code 去重 / code 格式 / 缺省 type ----
     section('§P2 POST /api/db-connections：type 白名单 + code 去重原子化 + code 格式 + 缺省 type');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
 
         const r1 = await apiCall('POST', '/api/db-connections', adminTok, {
             name: 'P2-external试探', type: 'external', host: 'x', database: 'x', username: 'x', password: 'x',
@@ -2443,7 +2010,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // 一次带 is_default:1 的重复 POST（必 409），断言 A 的 is_default 全程未被动过。
     section('§P2b F1 回归：POST 重复 code 409 早退时，其他 warehouse 默认连接的 is_default 不受影响');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
 
         const rA = await apiCall('POST', '/api/db-connections', adminTok, {
             name: 'P2b-默认数仓A', host: '10.255.255.1', port: 1, database: 'p2bdb', username: 'u', password: 'p',
@@ -2483,7 +2050,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- P2c（11-M1）：POST connection_type 归一化——未提供/空串缺省 warehouse，越界一律 400 ----
     section('§P2c POST connection_type 归一化（11-M1）：未提供/空串缺省 warehouse，越界一律 400');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
 
         // 1. 不传 connection_type → 200 且库内落 'warehouse'（坏法：归一化误把"未提供"当非法值拒绝）
         const r1 = await apiCall('POST', '/api/db-connections', adminTok, {
@@ -2540,7 +2107,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- P2d（11-H1·D28）：POST 默认位事务原子性——连续换默认行 + 重复 code 早退旧默认不受影响 ----
     section('§P2d POST 默认位事务原子性（11-H1·D28）：连续换默认行/重复 code 早退旧默认不受影响');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
 
         // 5. 连续 N=3 个不同 code 的 warehouse 行 is_default:true POST，每次成功后立即查
         //    is_default=1 AND connection_type='warehouse' 行数恒为 1（坏法：清默认位 UPDATE 与
@@ -2571,7 +2138,7 @@ async function runHttpTests(ctx, serverLogRef) {
     section('§P3 普通行三操作（PUT 改 name / test 真连不可达失败 / DELETE，对照组）');
     {
         const p3Id = ctx.conn.px_p3;
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
         const rPut = await apiCall('PUT', `/api/db-connections/${p3Id}`, adminTok, {
             name: 'PX-P3-已改名', type: 'sqlserver', host: '10.255.255.1', port: 1, database: 'p3db', username: 'testuser', is_default: 0,
         });
@@ -2591,7 +2158,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- P4：真并发 POST 同码 + 注入 INSERT 失败不留悬挂事务 ----
     section('§P4 真并发 POST 同码 + 注入 INSERT 失败不留悬挂事务');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
         const concCode = 'PX_CONC';
         const [rA, rB] = await Promise.all([
             apiCall('POST', '/api/db-connections', adminTok, { name: 'P4-A', host: 'h', database: 'd', username: 'u', password: 'p', connection_type: 'source', source_system_code: concCode }),
@@ -2622,7 +2189,7 @@ async function runHttpTests(ctx, serverLogRef) {
     // ---- H8：D19 两处——table-columns 422 / ODS 校验入口跳过 ----
     section('§H8 D19 两处：table-columns 元数据先查 422 / ODS 校验入口跳过（现取参数形态：source_system + table_name）');
     {
-        const adminTok = signAs(ctx.users.admin);
+        const adminTok = await signAs(ctx.users.admin);
         const logBefore = serverLogRef().length;
         // 〔08-H1·codex 08 审前置修正〕原用 source_system=MINIAPP_ZHHL 测"纯 external → 422"——
         // 但 MINIAPP_ZHHL 这个码同时被③（relationalMiscoded，H2 专用夹具）复用，本批 D19-1 加了
@@ -2696,7 +2263,7 @@ async function runHttpTests(ctx, serverLogRef) {
 // ============================================================================
 async function runPeriodicFetchTests(ctx) {
     section('§Q1 周期取数三路由（创建/更新/执行）：external id 拒 / 关系型 id 现状不变');
-    const adminTok = signAs(ctx.users.admin);
+    const adminTok = await signAs(ctx.users.admin);
     const validTemplate = "SELECT id, order_no, created_at FROM dbo.some_orders WHERE created_at >= '{{MONTH_START}}' AND created_at < '{{MONTH_END}}'";
 
     const rCreateExt = await apiCall('POST', '/api/periodic-tasks', adminTok, {
@@ -2748,65 +2315,85 @@ async function runPeriodicFetchTests(ctx) {
 // ============================================================================
 // 主流程
 // ============================================================================
-// 〔M8·codex 07 质量审〕真实库保护性快照——开跑前记录 task_pool.db 及 -wal/-shm/-journal 四个
-// 文件各自的存在性/大小/mtime，finally 里强制比对，任何一项有差异都计入失败（不是 warn）。
-// 本套件设计上全程只应碰 TEMP_DB，这层快照是"万一哪里手滑写到了真库"的最后一道事后检测网。
-// 〔M5·codex 12b 质量审〕元数据快照（存在性/大小/mtime）只能证明"文件属性没变"，证明不了
-// "内容没变"——理论上存在 mtime 被人为拨回/文件系统时间精度不足等边角情况，让"内容其实被
-// 改写过"但元数据快照看起来没动。只对主库文件（无后缀那份，真正承载数据的那个）额外计算一次
-// 内容哈希（sha1）：-wal/-shm/-journal 是 WAL 模式的辅助文件，体量可能不小且哪怕本次运行完全
-// 没碰真实库，SQLite 自身或其他无关进程的检查点动作也可能重写它们的内容——对这三个仍只比对
-// 元数据，避免把辅助文件的正常波动误判成"本次运行破坏了真实库"；主库文件同时比对元数据 + 内容
-// 哈希，是这份快照里唯一被要求"连内容都不能变"的一份。
-function fileSha1(p) {
-    try { return crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex'); }
-    catch (_) { return null; } // 文件不存在/读取失败——哈希置 null，diff 时仍会先被 exists/size 差异拦下
-}
-function snapshotRealDbState() {
-    const snap = {};
-    for (const suffix of ['', '-wal', '-shm', '-journal']) {
-        const p = REAL_DB + suffix;
-        const isMain = suffix === '';
-        try {
-            const st = fs.statSync(p);
-            snap[suffix || '(main)'] = { exists: true, size: st.size, mtimeMs: st.mtimeMs, sha1: isMain ? fileSha1(p) : undefined };
-        } catch (_) {
-            snap[suffix || '(main)'] = { exists: false, size: null, mtimeMs: null, sha1: isMain ? null : undefined };
+// [#106 S4b2b] 原 M8 / M5「真实库保护性快照」（读业务库文件字节算 sha1 前后比对）整套删除：本文件不再出现业务库文件名，也不读它的字节。
+//   接替它的是下面「检出目录下真实 uploads/collab 的前后条目名比对」（硬门④ 同款，照 verify-periodic-push.js 的写法，只读）：服务跑在隔离实例里，上传物理文件应当只落在实例数据根里，
+//   检出目录里那棵真实目录树运行前后不应出现任何新条目。S6(b) 改用行为证据（见 §S），不再需要库指纹。
+/**
+ * 只读列出 base（默认 <ROOT>/uploads/collab，即检出目录下真实的那棵）下（深度 ≤3、不跟随链接）的条目：相对路径 → { size, mtimeMs }；目录不存在 → { exists: false, names: 空 Map }（不存在是一种合法状态，前后比对时它的变化也算差异）。
+ * base 参数化：跑后先对实例数据根下的 uploads/collab 调同一个函数（正向对照，证明列表函数本身有判别力），再对真实目录前后比对。
+ * 其他读取错误原样抛出（调用方在「跑后」那次捕获并计失败；「跑前」那次让入口 .catch 非零退出）。readdir 与 lstat 之间被删掉的条目跳过。不删、不建任何东西。
+ */
+function listRealUploadsCollab(base = path.join(ROOT, ...COLLAB_SEGS)) {
+    const names = new Map();
+    const walk = (dir, rel, depth) => {
+        let ents;
+        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (rel === '' && e && e.code === 'ENOENT') return false; throw e; }
+        for (const e of ents) {
+            const r = rel ? `${rel}/${e.name}` : e.name;
+            let st;
+            try { st = fs.lstatSync(path.join(dir, e.name)); } catch (err) { if (err && err.code === 'ENOENT') continue; throw err; }
+            names.set(r, { size: st.size, mtimeMs: st.mtimeMs });
+            if (e.isDirectory() && !e.isSymbolicLink() && depth < 3) walk(path.join(dir, e.name), r, depth + 1);
         }
-    }
-    return snap;
+        return true;
+    };
+    const exists = walk(base, '', 1);
+    return { exists, names };
 }
-function diffRealDbSnapshots(before, after) {
-    const diffs = [];
-    for (const key of Object.keys(before)) {
-        const b = before[key], a = after[key];
-        if (b.exists !== a.exists || b.size !== a.size || b.mtimeMs !== a.mtimeMs || b.sha1 !== a.sha1) {
-            diffs.push(`${key}: before=${JSON.stringify(b)} after=${JSON.stringify(a)}`);
-        }
+/** 列表里有没有某一级的名字以数字 id 打头且 id > SEQ_BASE 的条目（本脚本造的单号都在 SEQ_BASE 之上）：列表函数的正向对照用 */
+function listHasIdAboveSeqBase(listing) {
+    return [...listing.names.keys()].some((rel) => rel.split('/').some((seg) => Number((seg.match(/^(\d+)/) || [])[1]) > SEQ_BASE));
+}
+/**
+ * 跑前 / 跑后两次列表的差异（全部是判红依据，fail-closed）：新增条目、已有条目被改动（大小或 mtime 变化）、已有条目消失、「目录存在与否」状态变化（跑前不存在、跑后被创建，或反过来）。
+ * 不再把改动 / 消失降成提示：隔离失效时服务可能改写或删除真实目录里的已有文件，那同样是「碰了真实目录树」。代价是并发写入会误红（标签注明）。
+ */
+function diffRealUploadsCollab(before, after) {
+    const added = [...after.names.keys()].filter((n) => !before.names.has(n)).sort();
+    const changed = [];
+    for (const [n, v] of after.names) {
+        const b = before.names.get(n);
+        if (b && (b.size !== v.size || b.mtimeMs !== v.mtimeMs)) changed.push(`${n}（${b.size}→${v.size} 字节）`);
     }
-    return diffs;
+    changed.sort();
+    const removed = [...before.names.keys()].filter((n) => !after.names.has(n)).sort();
+    return { added, changed, removed, existsChanged: before.exists !== after.exists };
+}
+/** 只删本脚本自己建的临时目录：逐项 lstat，链接只拆链接本身、目录递归清空后 rmdir、文件 unlink（不用 fs.rmSync：Node v24 对含中文路径静默不删）；返回失败清单（空 = 已删净，删后 lstat 确认不存在） */
+function removeOwnTree(dir) {
+    const failed = [];
+    const walk = (d) => {
+        let st;
+        try { st = fs.lstatSync(d); } catch (e) { if (e && e.code === 'ENOENT') return; failed.push(`${d}（lstat ${e && e.code}）`); return; }
+        if (st.isSymbolicLink() || !st.isDirectory()) { try { fs.unlinkSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') failed.push(`${d}（unlink ${e && e.code}）`); } return; }
+        let names = [];
+        try { names = fs.readdirSync(d); } catch (e) { failed.push(`${d}（readdir ${e && e.code}）`); return; }
+        for (const n of names) walk(path.join(d, n));
+        try { fs.rmdirSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') failed.push(`${d}（rmdir ${e && e.code}）`); }
+    };
+    walk(dir);
+    try { fs.lstatSync(dir); failed.push(`${dir}（删除后仍然存在）`); } catch (e) { if (!e || e.code !== 'ENOENT') failed.push(`${dir}（删除后复查 lstat ${e && e.code}）`); }
+    return failed;
 }
 
 (async () => {
+    // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句：拿到隔离实例（本检出库快照 + 隔离模式 server.js）；失败 → 入口 .catch 非零退出。
+    //   S4 迁移约定：任何 sqlite 连接的 close 都等回调完成（closeTdb）再 teardown / process.exit。
+    await testEnv.ready();
+    BASE = testEnv.env().baseUrl;
+    TEMP_DB = testEnv.env().dbPath;
+    ROOT = path.join(__dirname, '..');
+    UNIT_COLLAB_ROOT = path.join(os.tmpdir(), `collab-ext-src-unit-${process.pid}`);
+    ENCRYPTION_KEY = crypto.randomBytes(24).toString('hex');   // 48 位十六进制 ASCII，满足种子脚本的 ≥32 字节 ASCII 校验
+    process.on('SIGINT', handleTermSignal('SIGINT'));
+    process.on('SIGTERM', handleTermSignal('SIGTERM'));
     console.log('=== G2：数据协作接入外部源 —— 单元/HTTP 层验证（C2a+C2b）===');
-    console.log(`本次运行 id 区间：(${SEQ_BASE}, ${SEQ_RANGE_END})`);
-    const realDbSnapshotBefore = snapshotRealDbState();
+    console.log(`本次运行 id 起点：${SEQ_BASE}（实例库 sqlite_sequence 设到这里）`);
 
-    // 〔H1·codex 07 质量审〕零写预检：本次随机 base 区间若已存在残留（哪怕只是上一次运行崩溃
-    // 没清干净），直接拒绝启动——不在"可能已有真实/历史数据"的区间上继续写入。
-    const precheckHits = precheckNoResidualInRange();
-    if (precheckHits.length > 0) {
-        console.error(`[verify-collab-external-source] 零写预检失败：区间 (${SEQ_BASE}, ${SEQ_RANGE_END}) 内已存在残留，拒绝启动：\n  ${precheckHits.join('\n  ')}`);
-        process.exit(1);
-    }
-
-    killPort(TEST_PORT, 'startup');
-    cleanupTempDb();
-
-    if (path.resolve(TEMP_DB) === path.resolve(REAL_DB)) {
-        console.error('[verify-collab-external-source] TEMP_DB 与 REAL_DB 字面同路径，拒绝启动（防误连真实 db）');
-        process.exit(1);
-    }
+    // [#106 S4b2b] 检出目录下真实 uploads/collab 的「跑前」条目名（只读；ready() 之后、主流程之前）；「跑后」在 finally 里再列一次比对。
+    //   登记残余（codex 19c-M2）：基线是在 ready() 之后才采的——入口约定要求 ready() 是入口函数里第一条有副作用的语句，不能挪到它前面；ready() 期间（启动器拍快照、起实例）对真实目录的写入不在本比对范围内。
+    //   替代覆盖已写进 S4e 验收跑的必修约束：停服状态下整批前后对拍真实 uploads/ 目录树。
+    const realUploadsBefore = listRealUploadsCollab();
 
     // §Q 静态哨兵——不依赖 server，任何时候都能跑，先跑一次保证不空等
     runStaticSentinels();
@@ -2815,66 +2402,68 @@ function diffRealDbSnapshots(before, after) {
     // spawn 子进程黑盒调用），提前跑一次不占用 server 冷启动窗口，也不受其稳定性影响。
     await runSeedScriptTests();
 
-    let serverInfo = null;
     try {
-        serverInfo = await startServer();
-        child = serverInfo.child;
-        const serverStable = serverInfo.listening && !serverInfo.exited;
-        ok('server 已就绪（Task Pool Server running）', serverInfo.listening);
-        ok('server 在稳定观察窗内未退出（未撞上全新空库启动期竞态，或重启后已稳定）', !serverInfo.exited);
-        ok('取数质量双校验 schema 就绪信号已出现', serverInfo.schemaReady,
-            serverInfo.schemaReady ? '' : '（未捕获到就绪日志，后续 HTTP 调用靠 postSubmitWithRetry 503 重试兜底）');
+        // 「服务就绪」的判定（原：日志 "Task Pool Server running" + schema 就绪信号 + 稳定观察窗）：一次真实请求——未带 token 访问 /api/collab/requests 必须 401。
+        const probeStatus = await probeServing();
+        ok('隔离实例已就绪（ready() 成功）且在应答本脚本要测的路由：未带 token 访问 /api/collab/requests 得 401', probeStatus === 401, `实得 ${probeStatus}`);
+        const env = testEnv.env();
+        UPLOAD_ROOT = env.dataDir ? path.join(env.dataDir, 'uploads') : null;
 
-        if (!serverStable) {
-            skip('§U 单元层全部用例', 'server 未就绪/不稳定，无可靠 schema 可用');
-            skip('§H HTTP 层全部用例', 'server 未就绪/不稳定');
+        if (probeStatus !== 401) {
+            skip('§U 单元层全部用例', '服务没有在应答 /api/collab/requests（未带 token 应 401），无可靠服务可用');
+            skip('§H HTTP 层全部用例', '服务没有在应答 /api/collab/requests（未带 token 应 401）');
+        } else if (!UPLOAD_ROOT || !env.logFile) {
+            // 变量组形态（批跑器给的实例）下拿不到数据根 / 服务日志：HTTP 层要读实例里的上传文件和服务日志，没有它们就核对不了——[#106 S4b2b] 计失败（fail-closed），不再 skip 放过
+            ok('隔离实例提供数据根与服务日志（§U 单元层 / §H HTTP 层 / §Q1 用例要读实例里的上传文件和服务日志，没有它们这些用例一条都没有运行）', false,
+                `dataDir=${env.dataDir} logFile=${env.logFile}（变量组形态下 sdh-instance.json 对不上或没有日志文件）`);
         } else {
             const ctx = await seedData();
             await runUnitTests(ctx);
-            await runHttpTests(ctx, serverInfo.getLog);
+            await runHttpTests(ctx, () => fs.readFileSync(env.logFile, 'utf8'));
             await runPeriodicFetchTests(ctx);
         }
     } catch (e) {
         console.error('[verify-collab-external-source] 主流程异常:', e);
-        if (process.env.G2_DEBUG && serverInfo) {
-            console.error('[verify-collab-external-source] server 日志尾部:\n' + serverInfo.getLog().slice(-4000));
+        if (process.env.G2_DEBUG && testEnv.env().logFile) {
+            try { console.error('[verify-collab-external-source] server 日志尾部:\n' + fs.readFileSync(testEnv.env().logFile, 'utf8').slice(-4000)); } catch (_) { /* 日志读不到不影响收尾 */ }
         }
         fail++;
         failures.push(`主流程异常: ${e.message}`);
     } finally {
-        killChildTree(child);
-        await closeTdb();
-        cleanupTempDb();
-        cleanupUploadArtifacts();
+        await closeTdb();   // 等 sqlite 关库回调完成（S4 迁移约定）
 
-        // G2-F5〔收尾全扫描，非仅登记清单〕cleanupUploadArtifacts() 只删"本次登记过 + id 落在区间
-        // 内"的精确路径——如果新代码把文件写到了预期外的路径（如目录名算法漂移、或某条新增用例
-        // 直接 fs.writeFileSync 但忘了 registerCleanupPath），cleanupUploadArtifacts 那条"复查
-        // 残留=0"断言本身抓不到（它压根不知道要查那个路径）。这里复用 precheckNoResidualInRange()
-        // 对整个 (SEQ_BASE, SEQ_RANGE_END) 区间做一次不依赖登记清单的独立全扫描——预检已经证明
-        // 开跑前该区间是空的，收尾时区间内任何残留都只能是本次运行漏网的文件，不可能是历史遗留。
-        // 坏法：新端点/新用例把文件写到了非 `_pending/<id>` 或 `<id>_*` 的"预期外路径"但仍落在
-        // id 区间内——若这条断言被删掉、或退化成只检查 registeredCleanupPaths，这类漏网会被
-        // 静默放过（收尾"零残留"结论就是假的）。
-        const postCleanupResidual = precheckNoResidualInRange();
-        ok('F5 收尾全扫描：id 区间 (SEQ_BASE, SEQ_RANGE_END) 内 uploads/collab 与 _pending 残留 = 0（不依赖登记清单，独立复扫）',
-            postCleanupResidual.length === 0,
-            postCleanupResidual.length ? postCleanupResidual.join('; ') : '');
+        // 接替原「清理闭环」的职责之一：证明上传确实落了盘——实例数据根 uploads/collab 下有 id>SEQ_BASE 的普通文件（只计文件，目录不计）。实例数据根未知时没法核对，[#106 S4b2b] 计失败（fail-closed），不再 skip。
+        //   标签只写本条检查了什么（实例数据根里有普通文件）；「只落在隔离实例里」由下一条（检出目录下真实 uploads/collab 运行前后无变化）与本条合起来支撑，各自不越界。
+        const uploadCount = countInstanceUploadArtifacts();
+        if (uploadCount === null) ok('实例数据根 uploads/collab 下有 id>SEQ_BASE 的普通文件（先要能定位实例数据根）', false, '实例数据根未知（变量组形态下 sdh-instance.json 对不上）');
+        else ok('实例数据根 uploads/collab 下有 id>SEQ_BASE 的普通文件（≥1 个文件；目录不计；原「清理闭环」attempted≥1 的职责：证明上传确实落了盘）', uploadCount >= 1, `count=${uploadCount}`);
 
-        try { fs.rmSync(UNIT_COLLAB_ROOT, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+        // [#106 S4b2b] 接替原 M8 / F5 的「没碰真实目录树」检查（只读）：检出目录下真实 uploads/collab 运行前后的条目比对——没有新增、改动、消失，「目录是否存在」状态也不变。
+        //   正向对照（修复批 1 L4）：先用同一个列表函数扫实例数据根的 uploads/collab，必须看得到 id>SEQ_BASE 的条目——证明列表函数本身有判别力（否则「真实目录无新增」可能只是函数什么都没列出来）。实例数据根未知 → 计失败（fail-closed）。
+        const instDataDir = testEnv.env().dataDir;
+        let ctlListing = null; let ctlErr = null;
+        try { if (instDataDir) ctlListing = listRealUploadsCollab(path.join(instDataDir, ...COLLAB_SEGS)); } catch (e) { ctlErr = e; }
+        ok('列表函数的正向对照：同一个 listRealUploadsCollab 扫实例数据根 uploads/collab，看得到 id>SEQ_BASE 的条目（证明下一条「真实目录无新增」用的列表函数有判别力）',
+            ctlListing !== null && ctlListing.exists && listHasIdAboveSeqBase(ctlListing),
+            ctlErr ? `列实例目录失败：${ctlErr.message}` : (instDataDir ? `exists=${ctlListing && ctlListing.exists} 条目数=${ctlListing ? ctlListing.names.size : 0}` : '实例数据根未知'));
+        const REAL_LABEL = '检出目录下真实 uploads/collab 运行前后无变化（无新增、无改动（大小或 mtime）、无消失，目录存在与否不变；深度 ≤3；注意：并发运行的其他测试或本地开发服务写入会让这条误红——fail-closed，宁可误红）';
+        try {
+            const d = diffRealUploadsCollab(realUploadsBefore, listRealUploadsCollab());
+            const short = (a) => `${a.slice(0, 5).join(' | ')}${a.length > 5 ? ` …共 ${a.length}` : ''}`;
+            ok(REAL_LABEL, d.added.length === 0 && d.changed.length === 0 && d.removed.length === 0 && !d.existsChanged,
+                `新增=${short(d.added)}；改动=${short(d.changed)}；消失=${short(d.removed)}${d.existsChanged ? '；目录存在状态变了' : ''}`);
+        } catch (e) {
+            ok(REAL_LABEL, false, `跑后列目录失败：${e && e.message}`);
+        }
 
-        // 〔M8〕真实库保护性快照收尾比对——放在 finally 最后，确保无论主流程正常结束还是抛异常
-        // 提前退出，这条检查都会跑到。任何差异都是 ok() 判失败（fail++），不是 console.warn。
-        const realDbSnapshotAfter = snapshotRealDbState();
-        const realDbDiffs = diffRealDbSnapshots(realDbSnapshotBefore, realDbSnapshotAfter);
-        ok('M8 真实 task_pool.db（含 -wal/-shm/-journal）元数据与内容哈希均未变化（存在性/大小/mtime/主库 sha1 逐项比对）',
-            realDbDiffs.length === 0, realDbDiffs.length ? realDbDiffs.join(' | ') : '');
+        // 单元层的临时 uploads 根（os.tmpdir 下，本脚本自己建的）：逐项删除并 lstat 确认（不用 fs.rmSync：Node v24 对含中文路径静默不删）；删不净计失败
+        const unitLeft = removeOwnTree(UNIT_COLLAB_ROOT);
+        ok('单元层临时 uploads 根已删除（逐项 unlink / rmdir，删后 lstat 确认不存在）', unitLeft.length === 0, unitLeft.slice(0, 3).join('；'));
 
-        // 〔S2·Opus 预筛〕区间租约释放挪到 finally 最末——晚于上面全部清理/复扫/快照比对。释放
-        // 得越早，另一个 G2 实例就能越早抢到同一个随机基线开始往同一区间写数据；若那时本进程的
-        // F5 复扫/M8 快照比对还没跑完，会把另一实例刚写入的正常数据误判成"本次运行的残留"或
-        // 污染快照比对基线。只有本进程确认自己已经彻底清干净、验证完毕，才可以把这个区间交出去。
-        releaseSeqBaseLease();
+        // teardown 抛错：捕获并计失败（不覆盖主流程原错误——它已在上面的 catch 里记过）；teardown 失败时 finish(0) 也会被 test-env 改成 1，这里再计一次失败让汇总行如实
+        let teardownErr = null;
+        try { await testEnv.teardown(); } catch (e) { teardownErr = e; }
+        ok('隔离实例 teardown 成功（实例停止、数据根删除）', teardownErr === null, teardownErr && teardownErr.message);
     }
 
     console.log(`\n=== 汇总：${pass} 通过 / ${fail} 失败 / ${skipCount} 跳过 ===`);
@@ -2890,5 +2479,11 @@ function diffRealDbSnapshots(before, after) {
         console.log('\n未覆盖口径清单（SKIP = 环境阻塞，不计入通过，非永久限制——具体理由见各条）：');
         skips.forEach((s) => console.log(`  - ${s.name}：${s.reason}`));
     }
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    // [#106 S4b2a] teardown 已在上面的 finally 里 await 落定；出口改 finish（只设退出码，不终止执行），它是入口函数的最后一条语句。入口 .catch 里的 process.exit(1) 不改。
+    testEnv.finish(fail === 0 ? 0 : 1);
+})().catch(async (e) => {
+    console.error('[verify-collab-external-source] 入口异常:', e);
+    try { await closeTdb(); } catch (_) { /* ignore */ }
+    try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+    process.exit(1);
+});

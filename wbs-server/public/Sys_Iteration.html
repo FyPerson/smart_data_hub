@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>系统迭代 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* ============================================================
            系统迭代页 · 页面专属残留（共享组件层已迁移至 assets/css/components.css）
@@ -166,7 +166,7 @@
            标签大 2px·同 .u-status-badge 带框先例），独立成类不挂 .u-type-tag 前缀——系统与类型是两个维度，
            挂同一基类会让选择器语义混淆（"这是类型标签的变体"），故各自独立声明同款尺寸值。
            white-space:nowrap 显式声明（449-L1：长系统名"客户报销平台"防候选行内被压缩换行）。
-           落页面内 <style>，不进共享 components.css——O1 是本页专属展示，免 ?v= bump 与四页回归。 */
+           落页面内 <style>，不进共享 components.css——O1 是本页专属展示，免四页回归（W4 前还要免手动 bump ?v=）。 */
         .u-sys-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; white-space: nowrap; }
         /* [观察反馈优化批·2026-08-27] 所属系统徽章七色映射——demo 三轮定稿 V1 六色 + 2026-09-02「小程序-智荟人力」玫红（七系统分色 tinted），
            色值逐字照抄 E:\tmp\demo_待我处理卡与徽章样式_20260827_v1.0.html 区块2 V1 标注，不自创。
@@ -426,7 +426,7 @@
         .si-tl-attach-list li { margin: 2px 0; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
         /* [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件「查看改动」展开区：头行「变更对象 · 变更字段」+ 逐字段两块「修改前 / 修改后」包裹。
-           复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源，不 bump ?v=。 */
+           复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源（W4 前也因此无需手动 bump ?v=）。 */
         .si-tl-change-list { margin: 4px 0 0; padding: 6px 8px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; }
         .si-tl-change-head { color: #374151; margin-bottom: 4px; }
         .si-tl-change-row { padding: 4px 0; }
@@ -1015,19 +1015,19 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
+    <script src="assets/js/app.js?v=auto"></script>
+    <script src="assets/js/unify-helpers.js?v=auto"></script>
     <!-- S3（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层，从本页 v1.133 建单优化批 C4
-         抽取（assets/js/u-paste.js 文件头有完整来源说明）。缓存串尾部 tag 须与该文件 KIT_VERSION 一致，
-         改文件时两处一起 bump——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
+         抽取（assets/js/u-paste.js 文件头有完整来源说明）。该文件 KIT_VERSION 与页面
+         *_KIT_EXPECTED 做接口握手（缓存串由服务端自动注入）——siInitUPaste() 内 UPaste.checkVersion() 会在不一致时 console.error
          （S5 起版本比对逻辑下沉共享层，见 u-paste.js checkVersion()）。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
+    <script src="assets/js/u-paste.js?v=auto"></script>
     <!-- S6（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
          xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）。
          [Codex R5] vendor内容不变；helper升uexport2，旧页面仍走缺省写出路径
          （verify-export-columns 断言 4）。 -->
-    <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
-    <script src="assets/js/u-export.js?v=v1.160.0_uexport2"></script>
+    <script src="assets/vendor/xlsx.mini.min.js?v=auto"></script>
+    <script src="assets/js/u-export.js?v=auto"></script>
     <script>
     /* ============================================================
        系统迭代前端 · 纯 meta 驱动（状态机常量来自 GET /api/sys-issues/meta）
@@ -1975,7 +1975,7 @@
         //   该推荐）。⚠️ **计数复用同一个 siMyReleasesEntryData.pending**（:上方 items.filter 那套
         //   「计划中 ∧ summary∈{sent,partial} ∧ 本人未 done」口径，verify-sys-l7-executor-badge [7]
         //   与前端逐字同源）——绝不另算一份，否则角标说 3 点进去 2 比没有角标更伤信任。
-        //   样式走内联 style 不动共享 CSS（免 bump 全站 ?v= 缓存串，同排期徽章先例）；按钮加
+        //   样式走内联 style 不动共享 CSS（W4 前免手动 bump 全站 ?v= 缓存串，同排期徽章先例）；按钮加
         //   position:relative 作角标定位锚。>99 显示 99+（iOS 惯例，防三位数撑破圆形）。
         //   pending 恒为 Array.filter().length 派生数字非用户输入，拼接安全无需 esc()（沿既有注释口径）。
         btn.style.position = 'relative';
@@ -2406,7 +2406,7 @@
         //   它在此成立依赖「所有值零填充、统一空格分隔」这条不变量 —— 由 normalizeDeadlineDT 单点把守
         //   （verify 有源码守卫断言写 deadline 的地方都经它）。若将来混进 '2026-8-1' 或 'T' 分隔的值，
         //   字典序会错位。排序断言已锁同日纯日期/同日早时分/跨日/空值四类顺序。
-        //   为什么不改共享的 unify-helpers.js：它是四页共享静态资源，改它要 bump 缓存串且波及另外三页。
+        //   为什么不改共享的 unify-helpers.js：它是四页共享静态资源，W4 前改它要手动 bump 缓存串、W4 起虽免 bump 但仍波及另外三页。
         deadline: 'string',      // C3（commit号两列 D11）：新增「期望完成」列——⚠️ 漏登记会让该列排序拿不到
                                  //   类型、退化成非日期序（同下方 SI_STATUS_SORT_ORDER 注释记的同款踩法）。
                                  //   Playwright [T8] 已加通用守卫：每个 u-sortable 的 data-sort-by 必须在本表里。
@@ -3615,7 +3615,7 @@
     //   ⚠️ 只对 status==='待上线' 显示（用户拍板）：更早的状态（开发中/待验证）用户关心的是开发进度，
     //     不是上线排期，那时显示是噪音。
     //   样式走内联 style 而非新增 CSS class——本页既有大量同款用法（如 :3357 的 color:#dc2626），
-    //     且共享 CSS 一改就要 bump 全站 ?v= 缓存串，为一个徽章不值当。
+    //     且（W4 前）共享 CSS 一改就要手动 bump 全站 ?v= 缓存串，为一个徽章不值当。
     function siReleaseScheduleBadgeHtml(i) {
         if (!i || i.status !== '待上线') return '';
         const wrap = (bg, fg, text, title) =>
@@ -12230,7 +12230,7 @@
     //   ② 版本印记比对（对齐 model-detail-normalize.js 的 KIT_VERSION 范式）。行为零变化——回归证据
     //   = test-sys-paste-playwright.js（33/33，抽取等价性判据）。
     // ============================================================
-    const SI_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致，改共享层时两处一起 bump
+    const SI_UPASTE_KIT_EXPECTED = 'upaste3';   // 与库内 KIT_VERSION 做接口握手；缓存串由服务端自动注入
     // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()，页面只留
     // expected 常量 + "未加载"前置判断（这一步天然不能下沉——UPaste 对象都不存在时无法调用它的方法）。
     // 注册本页贴图目标区（原 siPasteResolveTargetKey 逻辑的参数化版本，逐字保留判定语义）：
@@ -12278,7 +12278,7 @@
     //   版本守卫/columns 常量标识符三件套照 Data_Correction.html corrInitExport 现范式（now 通道已收进
     //   共享层，本页 value() 直接写 ctx.overdueRule(r) 即得）。
     // ============================================================
-    const SI_UEXPORT_KIT_EXPECTED = 'uexport2';   // 须与 <script src="...u-export.js?v=..._uexport2"> 缓存串尾部一致
+    const SI_UEXPORT_KIT_EXPECTED = 'uexport2';   // 与库内 KIT_VERSION 做接口握手；缓存串由服务端自动注入
 
     // 系统迭代日期纪律与数据修正/数据协作不同（§3.3 统一规则原文）：按**日期分量**比较、时长只报天——
     //   避免 deadline 日期/日期时间混存形态带来的时区/解析坑。判定用 isValidDatePrefix 取前 10 位字典序

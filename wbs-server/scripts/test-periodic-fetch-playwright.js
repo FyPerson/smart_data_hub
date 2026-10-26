@@ -1,7 +1,11 @@
 /**
  * 周期取数推送 集成点3（⑤ 前端页）Playwright 视觉冒烟测试
  *
- * 用法：PORT=3200 node scripts/test-periodic-fetch-playwright.js（先起本地 server，BASE_URL 指向它）
+ * 用法：node scripts/test-periodic-fetch-playwright.js
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖写死的 PORT 3200 / localhost / 业务库 task_pool.db / .env。
+ *   造数：页面建 1 个周期任务（PW_周期取数测试_<时间戳>，唯一，只写 periodic_tasks 元数据表）；收尾直连实例库删 runs / pushes / tasks 并回查任务行确已不在，
+ *   失败再试一轮（共 2 轮，间隔 200ms），遗留计失败（原来每步回调忽略错误、永远 resolve）。
+ *   固定值：用户 id 1 admin / 2 viewer（快照库里须存在且角色不变）；快照库须至少有 1 个 db_connections（建任务表单下拉依赖，首跑核对）。
  *
  * 范围（任务书 §5 集成点3 verify 要求：视觉冒烟，非 ⑥ 真样本 e2e）：
  *   - 页面渲染 / admin navbar 入口可见（profile 下拉，见 app.js updateUserUI 新增项）/ 0 console error
@@ -16,59 +20,68 @@
  */
 'use strict';
 
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT = process.env.PORT || '3200';
-const BASE_URL = `http://localhost:${PORT}`;
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
 const ADMIN_ID = 1;
 const NON_ADMIN_ID = 2; // role='viewer'（本地 db 副本实测存在，用于非 admin 重定向断言）
 
+// [#106 S4d-3] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    return testEnv.signToken(userId);
 }
 
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+// 三个小助手：失败一律 reject（原来出错 resolve(undefined) / 回调忽略错误），close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGetRow(sql, params) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(row); }); });
+    });
+}
+async function dbRunStmt(sql, params) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => {
+        db.run(sql, params, (err) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(); }); });
+    });
+}
+
+/**
+ * 删测试任务（先删子表：runs/pushes 无 FK CASCADE，本项目 FK 未启用，手动清干净；测试只应产生 0 run/push，这两步是防御性兜底）。
+ * [#106 S4d-3] 每一步失败都 reject；删完回查任务行确已不在；有失败再试一轮（共 2 轮，间隔 200ms）；返回 null = 已清，否则返回失败说明。
+ * 原来每个 db.run 的回调都忽略错误、最后永远 resolve，清理失败时脚本照样退出 0
+ */
 async function cleanupTestTask(taskName) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.serialize(() => {
-            // 先删子表（runs/pushes 无 FK CASCADE，本项目 FK 未启用，手动清干净，测试只应产生 0 run/push
-            // 因为本测试不点击"跑本月"/"确认发送"，这两步是防御性兜底，避免留脏数据）。
-            db.get('SELECT id FROM periodic_tasks WHERE task_name = ?', [taskName], (e, row) => {
-                if (!row) { db.close(); return resolve(); }
-                db.run('DELETE FROM periodic_task_pushes WHERE run_id IN (SELECT id FROM periodic_task_runs WHERE task_id = ?)', [row.id], () => {
-                    db.run('DELETE FROM periodic_task_runs WHERE task_id = ?', [row.id], () => {
-                        db.run('DELETE FROM periodic_tasks WHERE id = ?', [row.id], () => { db.close(); resolve(); });
-                    });
-                });
-            });
-        });
-    });
+    let lastErr = null;
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        try {
+            const row = await dbGetRow('SELECT id FROM periodic_tasks WHERE task_name = ?', [taskName]);
+            if (!row) return null;
+            await dbRunStmt('DELETE FROM periodic_task_pushes WHERE run_id IN (SELECT id FROM periodic_task_runs WHERE task_id = ?)', [row.id]);
+            await dbRunStmt('DELETE FROM periodic_task_runs WHERE task_id = ?', [row.id]);
+            await dbRunStmt('DELETE FROM periodic_tasks WHERE id = ?', [row.id]);
+            const left = await dbGetRow('SELECT id FROM periodic_tasks WHERE id = ?', [row.id]);
+            if (!left) return null;
+            lastErr = '删除后任务行仍在';
+        } catch (e) { lastErr = (e && e.message) || String(e); }
+    }
+    return lastErr;
 }
 
+// [#106 S4d-3] 查询失败 reject（原来出错 resolve(undefined)，与「没查到」分不开）
 async function getTaskByName(taskName) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT * FROM periodic_tasks WHERE task_name = ?', [taskName],
-            (err, row) => { db.close(); resolve(row); });
-    });
+    return dbGetRow('SELECT * FROM periodic_tasks WHERE task_name = ?', [taskName]);
 }
 
 let assertCount = 0;
@@ -79,6 +92,9 @@ function expect(condition, message) {
 }
 
 (async () => {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
     console.log('=== 周期取数推送 集成点3（⑤前端页）Playwright 视觉冒烟测试 ===\n');
 
     const testTaskName = `PW_周期取数测试_${Date.now()}`;
@@ -237,9 +253,16 @@ function expect(condition, message) {
         //   不等待其后的 await），导致失败时清理不到位、留脏测试数据（本脚本调试期真实踩过：首次跑
         //   在步骤5断言失败，catch 里 process.exit(1) 直接退出，finally 的 cleanupTestTask 从未执行，
         //   task_pool.db 里留了一条残留任务）。改为 catch 只记录退出码，finally 做清理，最后统一 exit。
-        await cleanupTestTask(testTaskName);
-        console.log(`\n清理测试任务「${testTaskName}」`);
-        await browser.close();
+        // [#106 S4d-3] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过任务清理；任一失败都计失败（退出码 1）
+        try { await browser.close(); } catch (e) { console.error(`❌ 浏览器关闭失败：${e && e.message}`); exitCode = 1; }
+        const cleanupErr = await cleanupTestTask(testTaskName);
+        if (cleanupErr) { console.error(`❌ 清理测试任务「${testTaskName}」失败（已重试 1 轮）：${cleanupErr}`); exitCode = 1; }
+        else console.log(`\n清理测试任务「${testTaskName}」`);
     }
-    process.exit(exitCode);
-})();
+    try { await testEnv.teardown(); } catch (e) { console.error(`❌ teardown（收掉自起实例）失败：${e && e.message}`); exitCode = 1; }
+    testEnv.finish(exitCode);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('测试异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

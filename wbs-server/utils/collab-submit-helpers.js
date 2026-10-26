@@ -37,10 +37,18 @@ const { compareColumns } = require('./column-alignment-checker');
 //   - grep 全文 server.js 0 处 is_active=1 用法，全部已是 status='active'
 //   - 不存在替换工作；如未来 users 表新增软删字段再抽
 //
-// UPLOAD_DIR 计算与 server.js:22 必须保持等价（path.join(__dirname, 'uploads')）
-//   - server.js 的 __dirname = wbs-server/
-//   - 本文件 __dirname = wbs-server/utils/，所以取 path.dirname(__dirname)
-const UPLOAD_DIR_FOR_RESOLVE = path.join(path.dirname(__dirname), 'uploads');
+// UPLOAD_DIR 计算与 server.js 的 UPLOAD_DIR 必须保持等价：
+//   - [#106 S1a · 偏差 A1] 两边都取自 utils/instance-mode.js 的同一份实例配置（getInstanceConfig().uploadDir）：
+//     正常模式 = <wbs-server>/uploads（与原写法 path.join(path.dirname(__dirname), 'uploads') 逐字相同），
+//     隔离模式 = <数据根>/uploads。原先这里写死 wbs-server/uploads，隔离实例改了数据根后会把协作附件路径解析指回检出目录。
+//   - 首次判定发生在 server.js:20 加载本模块时（早于 server.js 的 dotenv，所以 instance-mode 自己读 <checkoutDir>/.env 合并判定）。
+//     实例配置被拒绝时回退原写法并 console.warn，不让 require 失败；server.js 拒启时，这条回退告警会先于 server.js 的 [FATAL] 打出
+//     （server.js 在 :72 读到同一份被拒配置后 exit(1)）。
+const _instanceConfig = require('./instance-mode').getInstanceConfig();
+if (_instanceConfig.refuse) console.warn(`[collab-submit-helpers] 运行模式判定被拒绝（${_instanceConfig.code}），附件解析根回退到 wbs-server/uploads`);
+const UPLOAD_DIR_FOR_RESOLVE = _instanceConfig.refuse
+    ? path.join(path.dirname(__dirname), 'uploads')
+    : _instanceConfig.uploadDir;
 
 /**
  * 拼接附件物理路径并做越界校验（防 file_name 含 ../ 之类）。

@@ -2,7 +2,9 @@
  * 建单优化批 C4 前端 Playwright 冒烟——Ctrl+V 贴图直传（通用组件层）
  * （方案 v1.3 §5，对齐 test-sys-intake-liaison-playwright.js 套件范式：JWT 注入 + login.html 中继）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-paste-playwright.js
+ * 用法：node scripts/test-sys-paste-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * 覆盖：
  *   T1 建单弹窗打开时仅图片粘贴 → 附件区出现"粘贴截图_*.png"预览
@@ -35,28 +37,20 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#106 S4d-4] BASE_URL / SCREENSHOT_DIR：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
 // codex 220 L-4：原硬编码指向某次会话的临时目录，会话结束即失效——失败截图会静默写失败（目录不存在）
 // 且无从查阅。改用系统临时目录下固定子目录，每次运行前 mkdirSync recursive 确保存在。
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+let SCREENSHOT_DIR = null;
 
 const ADMIN_ID = 1;
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -116,6 +110,9 @@ async function dispatchPaste(page, { withImage = true, imageMimes = null, withTe
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
     const adminTok = await signAs(ADMIN_ID);
     console.log('\n══════ 建单优化批 C4 前端 Playwright 冒烟（Ctrl+V 贴图直传） ══════');
 
@@ -412,13 +409,19 @@ async function main() {
 
         await page.close();
     } finally {
-        await browser.close();
-        db.close();
+        // [#106 S4d-4] 浏览器关闭失败计失败（原来无保护：抛错会盖掉主流程结果）
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
     }
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 建单优化批 C4 前端 Playwright 冒烟存在失败项'); process.exit(1); }
-    console.log('  🎉 建单优化批 C4 前端 Playwright 冒烟全部通过');
+    if (fail > 0) console.log('  ❌ 建单优化批 C4 前端 Playwright 冒烟存在失败项');
+    else console.log('  🎉 建单优化批 C4 前端 Playwright 冒烟全部通过');
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('❌ 脚本执行异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('❌ 脚本执行异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

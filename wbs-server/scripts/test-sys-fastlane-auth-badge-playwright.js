@@ -2,9 +2,14 @@
  * 系统迭代·「已授权先行上线」列表徽章回归（2026-09-11 用户拍板新增）
  *
  * 用法：node scripts/test-sys-fastlane-auth-badge-playwright.js
- * 前置：① 本地 server 已启动（localhost:3000）
- *       ② 本地 .env 有 SYS_FASTLANE_ENABLE=1 —— A 组**走真实授权 API** 写授权六列（不猜字段形态），
+ * 前置：[#106 S4d-3] ① 无服务前置：经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *       ② 被测服务需要 SYS_FASTLANE_ENABLE=1 —— A 组**走真实授权 API** 写授权六列（不猜字段形态），
  *          闸关时授权端点返 403 FAST_RELEASE_FEATURE_DISABLED，A1 断言即红并提示原因。
+ *          这是**服务端**环境变量（server.js:22251 `fastlaneAuthorizeEnabled: process.env.SYS_FASTLANE_ENABLE === '1'`），不是脚本自己的开关：
+ *          · 脚本自起实例（单独运行）时，本脚本在 ready() 的选项里带 extraEnv: { SYS_FASTLANE_ENABLE: '1' }（test-instance.js:238 接受该选项，只拒 SDH_* 与被剔除的键），所以单独运行即可；
+ *          · 批跑器起的共享实例（TEST_* 变量组形态）会忽略 ready() 选项，且 run-test-batch 的 --instance-options-file 不接受 extraEnv（run-test-batch.js:27）：
+ *            共享实例要开，只能靠子进程继承的父进程环境（启动批跑器的 shell 里先设 SYS_FASTLANE_ENABLE=1，不在 STRIPPED_ENV_KEYS 里，会被继承）或本检出 wbs-server/.env 里有该键
+ *            （它在 .env 白名单里：LINE_ENV_WHITELIST，不会被置空）。批跑建议：本脚本 exclusive，并让批跑器所在环境带 SYS_FASTLANE_ENABLE=1。
  *
  * 覆盖的缺口：admin 授权后到开发 submit 挂牌之间，该单在列表上与普通 bug 单毫无区别（flags 链里没有
  *   任何授权态标识），而授权是当天时段性通道、次日 8:00 自动收回，这段时间授权可能悄悄过期而无人察觉。
@@ -22,18 +27,29 @@
  *   业务上非法的授权记录（如给 feature 单造授权行——授权端点本就 409 拒绝），既快又不污染数据。
  */
 'use strict';
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE = 'http://localhost:3000';
-const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB = null;     // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
-const dbGet = (sql, p = []) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.get(sql, p, (e, row) => { d.close(); e ? j(e) : r(row); }); });
-const dbRun = (sql, p = []) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.run(sql, p, function (e) { d.close(); e ? j(e) : r(this); }); });
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+  return new Promise((resolve, reject) => {
+    const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+  });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, p = []) => {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.get(sql, p, (e, row) => { d.close((ce) => { const err = e || ce; err ? j(err) : r(row); }); }); });
+};
+const dbRun = async (sql, p = []) => {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.run(sql, p, function (e) { const ctx = { changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? j(err) : r(ctx); }); }); });
+};
 
 let pass = 0, fail = 0;
 // 夹具清理未收口清单（codex 二轮 L）：清理失败原先只打日志、退出码仍 0 ⇒ 只读退出码的调用方
@@ -41,9 +57,9 @@ let pass = 0, fail = 0;
 const cleanupFailures = [];
 const must = (c, m) => { console.log((c ? '  ✅ ' : '  ❌ ') + m); c ? pass++ : fail++; return c; };
 
+// [#106 S4d-3] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(id) {
-  const u = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [id]);
-  return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, SECRET, { expiresIn: '1h' });
+  return testEnv.signToken(id);
 }
 async function api(method, url, token, body) {
   const r = await fetch(`${BASE}${url}`, {
@@ -99,6 +115,10 @@ async function mkBug(admin, lid, tag, created) {
 }
 
 (async () => {
+  // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）。选项只对自起形态有意义：被测服务需要 SYS_FASTLANE_ENABLE=1（见文件头说明）
+  await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '1' } });
+  BASE = testEnv.env().baseUrl;
+  DB = testEnv.env().dbPath;
   const created = [];
   const browser = await chromium.launch({ headless: true });
   try {
@@ -114,7 +134,7 @@ async function mkBug(admin, lid, tag, created) {
 
     const auth = await api('POST', `/api/sys-issues/${idAuth}/fast-release-authorize`, admin, { note: '验证徽章' });
     // 授权失败则后续断言全部失去意义（会给出"徽章没出现"的误导性结论），直接终止本组
-    if (!must(auth.status === 200, `A1 真实授权 API 200（实得 ${auth.status}；若为 403 请确认本地 .env 的 SYS_FASTLANE_ENABLE=1）`)) {
+    if (!must(auth.status === 200, `A1 真实授权 API 200（实得 ${auth.status}；若为 403 请确认被测服务带 SYS_FASTLANE_ENABLE=1：单独运行由本脚本经 ready 选项带上，批跑共享实例须让批跑器的环境带该变量，见文件头）`)) {
       throw new Error('授权失败，终止——继续跑只会产生误导性结论');
     }
 
@@ -214,30 +234,43 @@ async function mkBug(admin, lid, tag, created) {
 
     must(errs.length === 0, `A 组无 JS 报错（${errs.length} 个${errs.length ? ': ' + errs.slice(0, 2).join(' | ') : ''}）`);
   } finally {
-    await browser.close().catch(() => {});
-    for (const id of created) {
-      try {
-        await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [id]);
-        await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [id]);
-        await dbRun(`DELETE FROM sys_fast_release_executors WHERE issue_id=?`, [id]);
-        await dbRun(`DELETE FROM sys_issues WHERE id=?`, [id]);
-        console.log(`  🧹 已清理 #${id}`);
-      } catch (e) {
-        console.log(`  ❗ #${id} 清理失败，可能残留：${e.message}`);
-        cleanupFailures.push(`#${id}: ${e.message}`);
+    // [#106 S4d-3] 浏览器关闭失败计失败（原来 `.catch(() => {})` 吞掉）；清理：每个编号单独 try，清掉才移出追踪，有失败整体再试一轮（共 2 轮，间隔 200ms），遗留进 cleanupFailures
+    try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+    const lastErr = new Map();
+    for (let round = 0; round < 2 && created.length > 0; round++) {
+      if (round > 0) await new Promise((r) => setTimeout(r, 200));
+      for (const id of created.slice()) {
+        try {
+          await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [id]);
+          await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [id]);
+          await dbRun(`DELETE FROM sys_fast_release_executors WHERE issue_id=?`, [id]);
+          await dbRun(`DELETE FROM sys_issues WHERE id=?`, [id]);
+          console.log(`  🧹 已清理 #${id}`);
+          created.splice(created.indexOf(id), 1);
+          lastErr.delete(id);
+        } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
       }
     }
+    for (const id of created) {
+      console.log(`  ❗ #${id} 清理失败（已重试 1 轮），可能残留：${lastErr.get(id)}`);
+      cleanupFailures.push(`#${id}: ${lastErr.get(id)}`);
+    }
   }
+  try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
   console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
   // 退出码分层（codex 二轮 L）：功能失败=1（优先、不被清理状态覆盖）；功能全绿但夹具清理失败=2。
+  let exitCode = 0;
   if (fail > 0) {
     if (cleanupFailures.length) console.log(`  ❗ 另有 ${cleanupFailures.length} 个夹具清理失败`);
-    process.exit(1);
-  }
-  if (cleanupFailures.length) {
+    exitCode = 1;
+  } else if (cleanupFailures.length) {
     console.log(`  ❗❗ 功能断言全通过，但 ${cleanupFailures.length} 个夹具清理失败——退出码 2（勿当作完全成功）`);
     cleanupFailures.forEach(x => console.log(`     - ${x}`));
-    process.exit(2);
+    exitCode = 2;
   }
-  process.exit(0);
-})().catch(e => { console.error('实测脚本异常:', e.stack || e); process.exit(1); });
+  testEnv.finish(exitCode);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+  console.error('实测脚本异常:', e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

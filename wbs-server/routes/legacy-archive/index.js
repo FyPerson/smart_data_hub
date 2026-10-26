@@ -754,5 +754,8 @@ module.exports = (deps) => {
     escapeLikeKeyword,
   };
 
-  return { initSchema, router, _internals };
+  // [#106 S3a] 只读就绪访问函数（汇总就绪接口 GET /api/health/ready 用）：只折算 LEGACY_ARCHIVE_SCHEMA_STATE，不碰库、不触发初始化；requireLegacyArchiveSchemaReady 与 503 行为不变
+  const getReadiness = () => require('../../utils/health-ready').summarizeState(LEGACY_ARCHIVE_SCHEMA_STATE);
+
+  return { initSchema, router, getReadiness, _internals };
 };

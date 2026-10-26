@@ -1,9 +1,13 @@
 /**
  * 附件压缩包支持方案 C5a：§5 V12 三页前端 Playwright 实测。
  * 范式照抄 test-sys-bug-hold-frontend-playwright.js（直接 SQL 造夹具 + JWT 注入 localStorage +
- * login.html 中继跳转 + 真实本地 server:3000 + 真实 task_pool.db）。
+ * login.html 中继跳转）。
  *
- * 用法：本地 server（3000，已含 C1-C4 代码）就绪后：node scripts/test-attach-archive-frontend-playwright.js
+ * 用法：node scripts/test-attach-archive-frontend-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   依赖隔离实例（本检出本地库的快照）里存在固定用户 id 1 / 8 / 19 与 db_connections id=2（协作单夹具的 target_db_connection_id）——首跑核对。
+ *   临时大文件（51MB / 21MB / 11MB）写在 os.tmpdir() 下本脚本独有的 attach-archive-pw-* 子目录，收尾用 removeTreeChecked 删并确认（失败计失败）。
+ *   失败截图写 os.tmpdir() 下的 attach-archive-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * 覆盖：
  *   1 accept 属性逐入口（系统迭代 spec/delivery/screenshot 三键位 + 三处专用标签入口；修正 7 个 input；
@@ -21,16 +25,16 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'attach-archive-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / SCREENSHOT_DIR / TMP_UPLOAD_DIR / RUN_TAG：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let SCREENSHOT_DIR = null;
+let TMP_UPLOAD_DIR = null;
+let RUN_TAG = null;
 
 const ADMIN_ID = 1;
 const SYS_DEV_ID = 8;      // 示例开发A，既有 sys Playwright 脚本复用账号
@@ -38,14 +42,44 @@ const COLLAB_DEV_ID = 19;  // 示例用户B demo_user_b（_test-fixture.js DEV1_
 const CORR_DEV_ID = 8;     // 复用同一账号即可（修正模块与系统迭代共用 users 表，无跨模块限制）
 const TARGET_DB_CONN_ID = 2;
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
 }
 
 let pass = 0, fail = 0;
@@ -81,14 +115,14 @@ function consoleErrorsExcludingResourceErrors(page) {
 // 落盘构造指定大小的文件（内容全 0x41，MIME 不重要——三页校验均只看扩展名）。
 // ⚠️ playwright setInputFiles 的 {name,mimeType,buffer} 内存传参上限 50MB（>50MB 抛异常），
 //   本文件需要 51MB 用例，统一改走临时文件路径传参，避免这条硬限制。
-const TMP_UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-archive-pw-'));
+// TMP_UPLOAD_DIR：入口 ready() 之后用 fs.mkdtempSync 建，见顶部声明
 function bigFile(name, sizeBytes) {
     const p = path.join(TMP_UPLOAD_DIR, name);
     fs.writeFileSync(p, Buffer.alloc(sizeBytes, 0x41));
     return p;
 }
 
-const RUN_TAG = Date.now();
+// RUN_TAG（Date.now()）：入口 ready() 之后赋值，见顶部声明。
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 夹具登记（finally 统一清理）
@@ -149,6 +183,12 @@ async function mkCollabAttachment(reqId, attachmentType, fileName, originalName,
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'attach-archive-playwright-shots');
+    RUN_TAG = Date.now();
+    TMP_UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-archive-pw-'));
     const adminTok = await signAs(ADMIN_ID);
     const sysDevTok = await signAs(SYS_DEV_ID);
     console.log('\n══════ 附件压缩包支持 C5a：三页 Playwright 前端实测 ══════');
@@ -461,32 +501,55 @@ async function main() {
             await page.close();
         }
     } finally {
+        // [#106 S4d-4] 浏览器关闭失败计失败
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
         // 🧹 清理测试夹具
-        for (const id of createdSysIssueIds) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [id]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [id]);
-            await dbRun(`DELETE FROM sys_issue_attachments WHERE issue_id=?`, [id]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [id]);
+        // [#106 S4d-4] 清理失败计失败：每个编号单独 try（子表按序删，任一步失败该编号保留在追踪里），清掉才移出追踪，
+        //   有失败再试一轮（共 2 轮，间隔 200ms，删除语句幂等）；遗留的编号逐个计失败；删后按编号回查残留（非 0 也计失败）
+        const groups = [
+            { list: createdSysIssueIds, label: 'sys_issues', main: ['sys_issues', 'id'], children: [['sys_issue_timeline', 'issue_id'], ['sys_issue_dev_assignees', 'issue_id'], ['sys_issue_attachments', 'issue_id']] },
+            { list: createdCorrectionIds, label: 'correction_requests', main: ['correction_requests', 'id'], children: [['correction_attachments', 'correction_request_id'], ['correction_status_history', 'correction_request_id']] },
+            { list: createdCollabIds, label: 'collab_requests', main: ['collab_requests', 'id'], children: [['collab_attachments', 'collab_request_id'], ['collab_operation_logs', 'collab_request_id']] },
+        ];
+        const allIdsByGroup = groups.map((g) => g.list.slice());
+        for (const g of groups) {
+            const lastErr = new Map();
+            for (let round = 0; round < 2 && g.list.length > 0; round++) {
+                if (round > 0) await new Promise((r) => setTimeout(r, 200));
+                for (const id of g.list.slice()) {
+                    try {
+                        for (const [t, col] of g.children) await dbRun(`DELETE FROM ${t} WHERE ${col}=?`, [id]);
+                        await dbRun(`DELETE FROM ${g.main[0]} WHERE ${g.main[1]}=?`, [id]);
+                        g.list.splice(g.list.indexOf(id), 1);
+                        lastErr.delete(id);
+                    } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+                }
+            }
+            for (const id of g.list) must(false, `夹具清理失败 ${g.label} #${id}（已重试 1 轮）：${lastErr.get(id)}`);
         }
-        for (const id of createdCorrectionIds) {
-            await dbRun(`DELETE FROM correction_attachments WHERE correction_request_id=?`, [id]);
-            await dbRun(`DELETE FROM correction_status_history WHERE correction_request_id=?`, [id]);
-            await dbRun(`DELETE FROM correction_requests WHERE id=?`, [id]);
-        }
-        for (const id of createdCollabIds) {
-            await dbRun(`DELETE FROM collab_attachments WHERE collab_request_id=?`, [id]);
-            await dbRun(`DELETE FROM collab_operation_logs WHERE collab_request_id=?`, [id]);
-            await dbRun(`DELETE FROM collab_requests WHERE id=?`, [id]);
-        }
-        console.log(`\n  🧹 测试夹具已清理：sys_issues=${createdSysIssueIds.join(',')} correction_requests=${createdCorrectionIds.join(',')} collab_requests=${createdCollabIds.join(',')}`);
-        try { fs.rmSync(TMP_UPLOAD_DIR, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-        await browser.close();
-        db.close();
+        console.log(`\n  🧹 测试夹具已清理：sys_issues=${allIdsByGroup[0].join(',')} correction_requests=${allIdsByGroup[1].join(',')} collab_requests=${allIdsByGroup[2].join(',')}`);
+        try {
+            for (let i = 0; i < groups.length; i++) {
+                const ids = allIdsByGroup[i];
+                if (!ids.length) continue;
+                const r = await dbGet(`SELECT COUNT(*) c FROM ${groups[i].main[0]} WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+                if (r && r.c !== 0) must(false, `夹具清理回查：${groups[i].label} 仍有 ${r.c} 条残留`);
+            }
+        } catch (e) { must(false, `夹具清理回查失败：${e && e.message}`); }
+        // [#106 S4d-4] 临时大文件目录：removeTreeChecked 删并确认（原 fs.rmSync 在 Node v24 对含中文路径静默不删，且错误被吞）
+        try { removeTreeChecked(TMP_UPLOAD_DIR); } catch (e) { must(false, `临时目录清理失败 ${TMP_UPLOAD_DIR}：${e && e.message}`); }
     }
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 附件压缩包支持 C5a 前端 Playwright 实测存在失败项'); process.exit(1); }
-    console.log('  🎉 附件压缩包支持 C5a 前端 Playwright 实测全部通过');
+    if (fail > 0) console.log('  ❌ 附件压缩包支持 C5a 前端 Playwright 实测存在失败项');
+    else console.log('  🎉 附件压缩包支持 C5a 前端 Playwright 实测全部通过');
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('实测脚本异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { if (TMP_UPLOAD_DIR) removeTreeChecked(TMP_UPLOAD_DIR); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

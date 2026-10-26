@@ -2,7 +2,7 @@
  * 数据修正 · 建单人编辑权限（E3）权限矩阵 e2e（2026-07-23）
  *
  * 用法：node scripts/verify-correction-creator-edit.js
- * 前置：本地 server 已启动（默认 localhost:3000，可用 TEST_BASE_URL 覆盖，如 http://localhost:3100）
+ * 前置：入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *
  * 覆盖：
  *   PUT /api/corrections/:id
@@ -27,12 +27,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const UPLOAD_ROOT = path.join(__dirname, '..', 'uploads');
+const testEnv = require('./lib/test-env');   // 仅用 env().dataDir；ready / teardown / finish 一律走 fx
+
+// [#106 S4c-B] 被测服务 / 实例上传根来自 test-env：fx.BASE 在 ready() 之前读会抛 FX_NOT_READY，故改为 ready() 之后在入口里赋值；
+//   原 `process.env.TEST_BASE_URL || 3000`、指向业务库 task_pool.db 的 DB_PATH、检出里的 <wbs>/uploads 都已删除（库句柄在入口里用 fx.DB_PATH 打开）。
+//   UPLOAD_ROOT = <实例数据根>/uploads（server.js 启动时创建）；数据根取不到（变量组形态下 sdh-instance.json 与实例不一致）时抛错，不静默跳过物理文件断言。
+let BASE = null;
+let UPLOAD_ROOT = null;
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
@@ -87,12 +90,36 @@ async function historyCount(db, rid) {
     return r.c;
 }
 
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认（写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked） */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
+
 (async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）。库句柄也挪到 ready 之后才打开（原先在最前面就打开业务库）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 数据修正 建单人编辑权限（E3）权限矩阵 e2e ===\n');
-    const db = new sqlite3.Database(DB_PATH);
+    const db = await fx.openInstanceDb(fx.DB_PATH);   // [#106 S4c 收口] 带打开回调、不建空库；打开失败落到末尾 .catch（teardown 后非零退出）
     const created = [];       // correction ids（清理用）
     const tmpFiles = [];      // 物理临时文件
     try {
+        const dataDir = testEnv.env().dataDir;
+        if (!dataDir) throw new Error('取不到实例数据根（env().dataDir 为 null）：无法确定实例的 uploads 目录，物理文件断言无法进行，拒绝继续');
+        UPLOAD_ROOT = path.join(dataDir, 'uploads');
         const adminToken = await fx.signAs(fx.ADMIN_ID);       // id=1 admin
         const userToken = await fx.signAs(fx.CONTACT_ID);      // id=3 user（建单人）
         const otherToken = await fx.signAs(fx.DEV1_ID);        // id=19 user（非建单人）
@@ -331,17 +358,35 @@ async function historyCount(db, rid) {
         fail++;
     } finally {
         // 清理：附件 → 业务方行 → history → 主表；临时文件/目录
-        try {
-            for (const id of created) {
-                await dbRun(db, 'DELETE FROM correction_attachments WHERE correction_request_id = ?', [id]);
-                await dbRun(db, 'DELETE FROM correction_requesters WHERE correction_request_id = ?', [id]);
-                await dbRun(db, 'DELETE FROM correction_status_history WHERE correction_request_id = ?', [id]);
-                await dbRun(db, 'DELETE FROM correction_requests WHERE id = ?', [id]);
-                const d = path.join(UPLOAD_ROOT, 'correction', String(id));
-                try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+        // [#106 S4c 收口] 每个夹具单独 try/catch（原先整个循环包在一个 try 里，一个夹具的库删除失败就中断其余夹具且只打日志、不计失败）：
+        //   库行删除与落盘目录删除互相独立，两者都成功才从待清理列表移除；剩余编号再试一轮；仍遗留的每个计 1 次失败（fail），不中断后续清理、关库与 teardown
+        const pendingIds = created.filter(Boolean);
+        for (let round = 0; round < 2 && pendingIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of pendingIds.slice()) {
+                let dbOk = false;
+                try {
+                    await dbRun(db, 'DELETE FROM correction_attachments WHERE correction_request_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM correction_requesters WHERE correction_request_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM correction_status_history WHERE correction_request_id = ?', [id]);
+                    await dbRun(db, 'DELETE FROM correction_requests WHERE id = ?', [id]);
+                    dbOk = true;
+                } catch (ce) { console.error(`清理修正单 #${id} 库行失败（第 ${round + 1} 轮）：${ce && ce.message}`); }
+                let diskOk = true;
+                if (UPLOAD_ROOT) {
+                    const d = path.join(UPLOAD_ROOT, 'correction', String(id));
+                    try { removeTreeChecked(d); } catch (re) { diskOk = false; console.error(`清理落盘目录失败 ${d}（第 ${round + 1} 轮）：`, re && re.message); }
+                }
+                if (dbOk && diskOk) pendingIds.splice(pendingIds.indexOf(id), 1);
             }
-        } catch (ce) { console.error('清理失败:', ce && ce.message); }
-        db.close();
-        process.exit(fail > 0 ? 1 : 0);
+        }
+        if (pendingIds.length > 0) { console.error(`修正单夹具清理失败，遗留 id=${pendingIds.join(',')}`); fail += pendingIds.length; }
+        await new Promise((resolve) => { db.close((cerr) => { if (cerr) { console.error(`关库失败：${cerr.message}`); fail++; } resolve(); }); });
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); fail++; }
     }
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('correction-creator-edit verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

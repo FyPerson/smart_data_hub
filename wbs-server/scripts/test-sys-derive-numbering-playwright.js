@@ -2,13 +2,13 @@
  * test-sys-derive-numbering-playwright.js — 系统迭代·派生单子编号「#根_序」真实 DOM 断言
  *   （S13-c·C3，方案 20260813_v1.8 §15.3/§15.4·矩阵仅真实浏览器渲染能证明的面）
  *
- * 循 test-sys-detail-ux-playwright.js 套件范式（外部 server:3000 已运行的真实 task_pool.db +
- * JWT 注入 + login.html 中继跳转 + 直接 SQL 造夹具 + must() 断言计数 + finally 段清理 + 非零退出码）。
- * 与该文件同款契约：本脚本**不**自带端口探测/自启动逻辑——依赖调用方在跑本脚本前已把 server 跑在
- * localhost:3000（含本次改动的最新代码），server 未起时 page.goto/fetch 会失败并落入顶层 catch。
+ * 循 test-sys-detail-ux-playwright.js 套件范式（JWT 注入 + login.html 中继跳转 + 直接 SQL 造夹具 +
+ * must() 断言计数 + finally 段清理 + 非零退出码）。
+ * [#106 S4d-3] 被测服务 / 库 / 令牌密钥改由 scripts/lib/test-env.js 提供（自起临时隔离实例，或 TEST_* 变量组指向已起好的隔离实例）；
+ *   不再依赖外部 server:3000 与真实 task_pool.db / .env；前置的令牌探针改为「合法 token 必过 + 篡改签名段必拒」（见下方探针函数注释）。
+ *   造数标题 SDN-*-<时间戳>，唯一；清理每个 id 各自 try、2 轮、遗留计失败。
  *
- * 用法：本地 server（3000）已重启到含本文件覆盖改动的代码后：
- *   node scripts/test-sys-derive-numbering-playwright.js
+ * 用法：node scripts/test-sys-derive-numbering-playwright.js
  *
  * 夹具设计（direct SQL 造态，同 test-sys-detail-ux-playwright.js mkMember 同款"给定后端字段测前端
  * 渲染"哲学——derive_root_id/derive_seq 的取号正确性已由 verify-sys-derive-numbering.js DN 组真实
@@ -34,72 +34,46 @@
  *   沿用既有范式登记为已知抖动点，不在本文件单独造锁重试机制（重跑即绿，非本次批次的处置范围）。
  */
 'use strict';
-const path = require('path');
-const fs = require('fs');
 const sqlite3 = require('sqlite3');
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+let BASE_URL = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-// [codex 573-M1] 这读的是**本脚本进程最终生效**的 JWT_SECRET（dotenv 加载后；若外部已注入则为注入值），
-//   不等同于「.env 文件里的值」——两者在有外部注入时会不同，故变量名与日志都不写「.env值」。
-const ENV_JWT_SECRET = process.env.JWT_SECRET || null;
-
-const db = new sqlite3.Database(DB_PATH);
-const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
+const closeDb = () => new Promise((res, rej) => { if (!db) return res(); const d = db; db = null; d.close((e) => (e ? rej(e) : res())); });
+const run =(sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
 const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
 
-// 〔现场探针实测发现，2026-08-15〕本次外部 server:3000 实际以 cwd=仓库根启动
-// （`"C:\...\node.exe" wbs-server/server.js`），server.js:31 `require('dotenv').config()`
-// 不带 path 参数、按 **process.cwd()** 解析 .env——仓库根无 .env 文件，dotenv 静默 no-op，
-// 该进程的 JWT_SECRET 因此落回源码里的硬编码兜底值，而非 wbs-server/.env。
-// ⚠️ [#82 2026-09-16] **这条路径已关闭，兜底候选随之删除**：① #76 把 server.js 的 JWT_SECRET 改成
-//   fail-closed（缺失即拒启，不再落回任何字面量）；② #82 把 server.js 那行 dotenv 绑到 `__dirname`，
-//   从任何 cwd 启动都读 wbs-server/.env。
-//   ⚠️ [codex 573-M1 采纳] 但**不能因此断言「要么用 .env 真值、要么起不来，无第三种」**——dotenv
-//   默认**不覆盖**进程里已存在的环境变量，所以 PM2 的 env 注入 / 系统环境变量 / 父进程传入的值
-//   都会优先于 .env 文件内容生效。准确说法是：server 用的是「进程最终生效的 JWT_SECRET」，缺失才拒启；
-//   .env 只是其中一个来源。故下方探活机制**仍有实际用途**——外部注入导致 server 与本脚本拿到
-//   不同 secret 时，靠它给出清晰失败信息，而不是让断言以「token 无效」的模糊形态失败。
-//   下方探活机制**保留**（单候选也值得探活：secret 对不上时能给出清晰失败信息），只是候选两个减为一个。
-// 里配置的真实值。本文件加载 wbs-server/.env（同 test-sys-detail-ux-playwright.js 既有注释
-// "必须加载 .env"）对"从 wbs-server 目录正常启动"的 server 才是对的——那是这条既定规则的
-// 适用前提，这次现场实例的启动方式是例外，不代表规则错。两边硬编码其一都会在另一种启动方式下
-// 失配，故做成"实测优先"：对候选 secret 各签一枚短时效 token，真打一次 /api/auth/me 探活，
-// 谁验证通过就用谁——不猜、不改 server 端启动方式（任务明确不许重启/杀 server），也兼容未来
-// server 改用正常启动方式后 .env 值重新生效的情况。
-// [S13 收口 MED 追-2①] 探针 token 改签**真实**查出来的 admin 行（adminRow 由调用方传入，来自
-// `SELECT ... FROM users WHERE role='admin' AND status='active'` 的真实结果）——若继续硬编码
-// `{id:1,username:'admin'}`，一旦库里 id=1 这个用户不是 active admin（如被停用/角色变了），即便
-// secret 完全猜对，`/auth/me` 里 authenticateToken 的"实时校验用户状态"那一步（server.js:4048-4052）
-// 也会因账号本身不合法返回 403——探针会把这种"账号问题"误诊成"secret 问题"，排查方向从一开始就错。
-async function resolveWorkingJwtSecret(candidates, adminRow) {
-    const tried = [];
-    for (const secret of candidates) {
-        if (!secret) continue;
-        const probeTok = jwt.sign({ id: adminRow.id, username: adminRow.username, display_name: adminRow.display_name, role: adminRow.role }, secret, { expiresIn: '5m' });
-        try {
-            const res = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${probeTok}` } });
-            tried.push(`脚本进程有效密钥→HTTP${res.status}`);
-            if (res.ok) return secret;
-        } catch (e) {
-            tried.push(`脚本进程有效密钥→探活请求异常:${e && e.message}`);
-        }
-    }
-    throw new Error(`JWT_SECRET 无法通过 /api/auth/me 探活（${tried.join('；')}）——server:3000 是否在跑？本脚本进程与 server 进程最终生效的 JWT_SECRET 是否一致？（注意 PM2/系统环境变量会覆盖 .env 文件）`);
+// [#106 S4d-3] 令牌探针改写：被测服务的密钥来自隔离实例（test-env），脚本不再自己拿 JWT_SECRET，也就不存在「server 与脚本最终生效密钥不一致」要探活的问题
+//   （原来的候选密钥探活 + 用另一把密钥签 token 的反向探针整段删除）。保留「探针双向证明」纪律，改成：
+//   ① 正向探针：用 testEnv.signToken(合法 admin 行) 签的 token 打 /api/auth/me，必须 200（令牌 + 账号 + 服务三者都对得上）；
+//   ② 反向探针：取这枚**合法** token，只篡改签名段（第三段）的首字符（整段签名的 6 个比特全变，不是只改填充位），其余两段原样，必须被拒（非 200）——
+//      证明 /api/auth/me 真的在验签，而不是任何形态的 token 都放行，让 ① 的 200 有「确实是验过签」的证明力（不再用另一把密钥签）。
+//   探针 token 签的是**真实**查出来的 admin 行（adminRow.id 来自 `SELECT ... FROM users WHERE role='admin' AND status='active'`），避免把账号问题误诊成签名问题。
+async function probeValidTokenAccepted(adminRow) {
+    const tok = await testEnv.signToken(adminRow.id);
+    const res = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${tok}` } });
+    if (!res.ok) throw new Error(`合法 token 打 /api/auth/me 得到 HTTP ${res.status}——隔离实例是否在跑？admin 账号（id=${adminRow.id}）在实例库里是否 active？`);
+    return tok;
 }
-// [S13 收口 MED 追-2②] 反向探针（探针双向证明纪律）：只测"两个候选之一能通过"不够——万一 server
-// 端点本身从不校验签名（例如中间件被绕过/降级成只信 payload 不验签名），任何 token 都会 200，
-// 上面的正向探针会"碰巧"选出一个能用的 secret，却完全没证明 `/api/auth/me` 真的在验签。故意用一个
-// 明摆着错的 secret 签 token 打一次，断言**必须非 200**——只有这条负例成立，正向探针挑出来的 secret
-// 才有"确实是它、不是随便一个都行"的证明力。
-async function probeWrongSecretRejected(adminRow) {
-    const badTok = jwt.sign({ id: adminRow.id, username: adminRow.username, display_name: adminRow.display_name, role: adminRow.role }, '__definitely_wrong__', { expiresIn: '5m' });
-    const res = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${badTok}` } });
+async function probeTamperedSignatureRejected(validToken) {
+    const parts = String(validToken).split('.');
+    if (parts.length !== 3 || !parts[2]) throw new Error('合法 token 不是 header.payload.signature 三段形态，无法构造篡改探针');
+    const sig = parts[2];
+    const tamperedSig = (sig[0] === 'A' ? 'B' : 'A') + sig.slice(1);   // 首字符换成另一个 base64url 字符：签名字节必变，其余两段原样
+    const tampered = `${parts[0]}.${parts[1]}.${tamperedSig}`;
+    const res = await fetch(`${BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${tampered}` } });
     return res.status;
 }
 
@@ -123,7 +97,7 @@ async function loginPage(browser, token) {
     return page;
 }
 
-const RUN_TAG = Date.now();
+let RUN_TAG = null;   // [#106 S4d-3] ready() 之后赋值（顶层 Date.now() 会被守卫 R6 判红）
 const createdIssueIds = [];
 const FIXTURE_SYSTEM = 'BMS';
 
@@ -138,16 +112,21 @@ async function mkIssue(title, status, extra = {}) {
 }
 
 (async () => {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = Date.now();
     let browser;
     try {
+        db = await openInstanceDb(DB_PATH);
         const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!admin) throw new Error('库中无 active admin 用户，无法造 token');
-        const JWT_SECRET = await resolveWorkingJwtSecret([ENV_JWT_SECRET], admin);
-        // [S13 收口 MED 追-2②] 反向探针：明摆着错的 secret 必须被拒（非 200），证明 /api/auth/me 真的在
-        // 验签——不是随便什么 token 都放行，让上面挑出来的 JWT_SECRET 真正有"确实是它"的证明力。
-        const wrongSecretStatus = await probeWrongSecretRejected(admin);
-        must(wrongSecretStatus !== 200, `[前置] 错误 secret 签的 token 应被 /api/auth/me 拒绝（非 200），实得 HTTP ${wrongSecretStatus}——若这里是 200，说明该端点没有真的在验签，上面探针挑出的 JWT_SECRET 无法确认是"必须是它"还是"随便什么都行"`);
-        const adminTok = jwt.sign({ id: admin.id, username: admin.username, display_name: admin.display_name, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+        // [#106 S4d-3] 正向探针：testEnv.signToken 签的合法 token 必须被 /api/auth/me 接受（原：对候选 .env 密钥探活）
+        const adminTok = await probeValidTokenAccepted(admin);
+        // [S13 收口 MED 追-2②] 反向探针：取这枚合法 token 篡改签名段，必须被拒（非 200），证明 /api/auth/me 真的在验签
+        // ——不是随便什么 token 都放行，让上面正向探针的 200 有「确实验过签」的证明力。（[#106 S4d-3] 原：另一把密钥签的 token）
+        const tamperedStatus = await probeTamperedSignatureRejected(adminTok);
+        must(tamperedStatus !== 200, `[前置] 篡改了签名段的合法 token 应被 /api/auth/me 拒绝（非 200），实得 HTTP ${tamperedStatus}——若这里是 200，说明该端点没有真的在验签，上面正向探针的 200 无法确认是"验过签"还是"什么 token 都放行"`);
 
         // ── 夹具 B：超大族（root2 + 27 子单=28 行）——[T6] 独占页例。**先造**：默认块序=maxId 降序，
         //   先造的族 id 更小、maxId 更小，会排在后面（page 2+），把 id 更大（后造）的小族留在 page 1，
@@ -349,29 +328,44 @@ async function mkIssue(title, status, extra = {}) {
         fatalError = e;
         console.error('\n[异常] 套件中途抛出未捕获异常（完整堆栈，非仅 message）：\n', e && (e.stack || e));
     } finally {
-        const cleanupErrs = [];
+        // [#106 S4d-3] 浏览器关闭失败计失败且不跳过清理；5 条 DELETE 每个 id 各自 try，有失败 / 残留则整体再试一轮（共 2 轮，间隔 200ms）；回查失败也计失败
+        let cleanupErrs = [];
         if (browser) {
             try { await browser.close(); } catch (e) { cleanupErrs.push({ step: 'browser.close', message: e && e.message }); }
         }
         const safeDelete = async (sql, params, step) => {
             try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
         };
-        for (const id of createdIssueIds) {
-            await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], `dev_events#${id}`);
-            await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
-            await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
-            await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
-            await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+        let left = null;
+        if (db) {
+            const browserErrs = cleanupErrs.filter((x) => x.step === 'browser.close');   // 浏览器关闭失败不因重试清空而丢
+            for (let round = 0; round < 2; round++) {
+                if (round > 0) await new Promise((r) => setTimeout(r, 200));
+                cleanupErrs = browserErrs.slice();
+                for (const id of createdIssueIds) {
+                    await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], `dev_events#${id}`);
+                    await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
+                    await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
+                    await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
+                    await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+                }
+                try { left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`SDN-%-${RUN_TAG}`]); } catch (e) { cleanupErrs.push({ step: 'left-count', message: e && e.message }); left = null; }
+                if (cleanupErrs.length === browserErrs.length && left && left.c === 0) break;
+            }
+        } else if (createdIssueIds.length > 0) {
+            cleanupErrs.push({ step: 'db-not-open', message: '实例库未打开，夹具无法清理' });
         }
-        const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`SDN-%-${RUN_TAG}`]);
         console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条，应为 0，共造 ${createdIssueIds.length} 条）`);
         must(cleanupErrs.length === 0, `夹具清理 SQL 全部无错误，实得 errs=${JSON.stringify(cleanupErrs)}`);
         must(!!left && left.c === 0, `夹具清理后 sys_issues 残留应为 0，实得 ${left ? left.c : '(查询失败)'}`);
-        db.close();
-        console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈（此次结果不可信赖为"仅这些用例失败"）' : ''}`);
-        process.exit(failed === 0 && !fatalError ? 0 : 1);
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
     }
-})().catch(e => {
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈（此次结果不可信赖为"仅这些用例失败"）' : ''}`);
+    testEnv.finish(failed === 0 && !fatalError ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
     console.error('[顶层兜底] finally 段或未捕获 rejection：\n', e && (e.stack || e));
+    try { await closeDb(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

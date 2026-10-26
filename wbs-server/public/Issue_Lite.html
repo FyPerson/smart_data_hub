@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据开发 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* 数据开发·轻量协作台账页（issue_lite 换壳 v0.2·D5）· 页面专属
            复用共享 u- 组件层（筛选栏/按钮/表格/徽章/抽屉/弹窗/表单/空状态）；补 4 态徽章 + 详情网格 + 附件区。 */
@@ -280,11 +280,11 @@
 
     <input type="file" id="attachInput" style="display:none;" onchange="onAttachPicked()">
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
-    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
-         S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
+    <script src="assets/js/app.js?v=auto"></script>
+    <script src="assets/js/unify-helpers.js?v=auto"></script>
+    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。共享层 KIT_VERSION 与页面
+         *_KIT_EXPECTED 做接口握手；缓存串由服务端自动注入。 -->
+    <script src="assets/js/u-paste.js?v=auto"></script>
     <!-- A3：图片附件 lightbox（复刻 Data_Correction 范式；点 overlay/×/ESC 关，点大图/说明文字不关；
          codex 256 L-1 补齐 caption 排除） -->
     <div id="ilLightbox" class="il-lightbox" onclick="ilCloseLightbox(event)">
@@ -1250,7 +1250,7 @@
         //   （逻辑不变，仍是 S4 落地时的 MED-1 分析结论：顺序 await，busy 锁不会吞后续张）；
         //   'ilCreateAttachPreview' 走新 picker 的 collect + render。
         // ============================================================
-        const IL_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致
+        const IL_UPASTE_KIT_EXPECTED = 'upaste3';   // 与库内 KIT_VERSION 做接口握手；缓存串由服务端自动注入
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // ilInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
         // S3 新增：抽屉 / 建单弹窗互斥判定（对齐 Data_Correction corrPasteScopeResolver 的计数写法，

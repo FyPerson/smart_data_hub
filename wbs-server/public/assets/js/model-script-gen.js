@@ -13,7 +13,8 @@
     if (typeof module !== 'undefined' && module.exports) { module.exports = api; }
     if (root) { root.ModelScriptGen = api; }
 }(typeof window !== 'undefined' ? window : null, function () {
-    // 版本印记：改本文件 → 同时 bump Model_Center.html 引用处的 ?v=..._<KIT_VERSION> 后缀。
+    // 版本印记：KIT_VERSION 只是库的版本标识，随导出暴露；页面没有对它做运行时比对（Model_Center / Model_Workbench 都不读它），
+    //   页面引用的缓存串（?v=auto）由服务端按文件内容自动注入，无需手改。页面是否只消费库、解构的名字是否都在库里，由 scripts/verify-model-script-gen-single-source.js 静态核对。
     var KIT_VERSION = 'msg1';
 
     // 宿主全局 formatDateTimeUnified（app.js）：调用时才取，缺失时给出可读报错

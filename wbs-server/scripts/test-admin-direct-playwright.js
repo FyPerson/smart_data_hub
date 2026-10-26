@@ -2,7 +2,11 @@
  * v1.72.3 admin 直派模式 Playwright UI 测试
  *
  * 用法：node scripts/test-admin-direct-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无服务前置（[#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000 / 业务库 / .env）
+ *   造数：经页面建 1 张协作单（OA_PW_<时间戳>）；收尾直连实例库 DELETE（FK 级联）并回查，每次失败再试一轮（共 2 轮，间隔 200ms），遗留计失败。
+ *   原来 process.exit(0/1) 写在 try 里，finally 的清理从不执行（协作单恒残留）——现改为记录退出码、finally 之后统一 finish。
+ *   固定值：用户 id 1 admin / 8 导出人 / 7 publisher；db_connections id=2（快照库里须存在，首跑核对）。
+ *   已知既有红：当前首个失败点更早：:161 等待 #newModal.show 超时（页面 2026-07-10 前端统一后改为 .open，daf053ec）；越过后才会遇到 OA 规范化导致的 TypeError（服务端规范化 OA 号，OA_PW_<ts> 落库为 OA-_PW_<ts>，getCollabByOA 按原写法查不到，2026-06-28 起，ddbb88e0），主体在 created.assign_mode 处抛出；清理已按两种写法兜底。
  *
  * 测试链路：
  *   1. JWT 注入登录 admin
@@ -17,55 +21,100 @@
  */
 'use strict';
 
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
 
 const ADMIN_ID = 1;
 const EXPORTER_ID = 8;
 const PUBLISHER_ID = 7;
 const TARGET_DB_CONN_ID = 2;
 
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    return testEnv.signToken(userId);
 }
 
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+
+// [#106 S4d-2] 删协作单（FK 级联清子表）：失败一律 reject（原来 DELETE 的回调忽略错误、永远 resolve）；等 close 回调落定，关库错误不丢（语句错误优先）
 async function cleanupTestCollab(id) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.serialize(() => {
-            db.run('PRAGMA foreign_keys = ON');
-            db.run('DELETE FROM collab_requests WHERE id = ?', [id], () => {
-                db.close();
-                resolve();
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => {
+        db.run('PRAGMA foreign_keys = ON', (pe) => {
+            if (pe) { db.close(() => reject(pe)); return; }
+            db.run('DELETE FROM collab_requests WHERE id = ?', [id], (de) => {
+                db.close((ce) => { const err = de || ce; err ? reject(err) : resolve(); });
             });
         });
     });
 }
 
+// [#106 S4d-2] 查询失败 reject（原来出错 resolve(undefined)，调用方分不清「没查到」和「查询失败」）
 async function getCollabByOA(oa) {
-    return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_PATH);
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => {
         db.get('SELECT * FROM collab_requests WHERE oa_request_no = ?', [oa],
-            (err, row) => { db.close(); resolve(row); });
+            (err, row) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(row); }); });
     });
+}
+// [#106 S4d-2 修复批] 与 server.js canonicalizeCollabOa / oaCore 同义（null / undefined → 空核心值；核心值为空 → 返回 ''）：去掉 /^(test-)?oa-?/i 前缀再拼 OA-；只用于清理兜底，不改造数常量与业务断言
+function canonicalCollabOa(oa) {
+    const core = (oa === null || oa === undefined) ? '' : String(oa).trim().replace(/^(test-)?oa-?/i, '').trim();
+    return core ? 'OA-' + core : '';
+}
+async function findCollabIdsByOA(oa) {
+    const db = await openInstanceDb(DB_PATH);
+    const canon = canonicalCollabOa(oa);
+    const names = canon ? [oa, canon] : [oa];   // 规范化值为空时只按原写法查（避免 IN (?, '')）
+    return new Promise((resolve, reject) => {
+        db.all(`SELECT id FROM collab_requests WHERE oa_request_no IN (${names.map(() => '?').join(', ')})`, names,
+            (err, rows) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(rows || []); }); });
+    });
+}
+async function getCollabIdRow(id) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => {
+        db.get('SELECT id FROM collab_requests WHERE id = ?', [id],
+            (err, row) => { db.close((ce) => { const e = err || ce; e ? reject(e) : resolve(row); }); });
+    });
+}
+
+let testCollabId = null;
+let testOA = null;
+
+/**
+ * [#106 S4d-2] 清理造的协作单：先按 testOA 兜底查出「页面提交成功但脚本在登记 id 之前就失败」的单；DELETE 后回查行确已不在；
+ * 失败再试一轮（共 2 轮，间隔 200ms）；清掉才把 testCollabId 置空；返回 null = 已清，否则返回失败说明
+ */
+async function cleanupCollabChecked() {
+    let lastErr = null;
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        try {
+            // [#106 S4d-2 修复批] 按原写法与规范化写法两种 OA 都查，查到几行删几行（服务端建单会把 OA_PW_<ts> 落成 OA-_PW_<ts>，只按原写法查永远查不到、每跑一次漏一张单）
+            const ids = new Set();
+            if (testCollabId) ids.add(testCollabId);
+            if (testOA) { for (const r of await findCollabIdsByOA(testOA)) ids.add(r.id); }
+            if (ids.size === 0) return null;
+            for (const id of ids) await cleanupTestCollab(id);
+            const leftIds = [];
+            for (const id of ids) { if (await getCollabIdRow(id)) leftIds.push(id); }
+            const leftByOa = testOA ? await findCollabIdsByOA(testOA) : [];   // 删后回查：两种写法都要为空才算清掉
+            if (leftIds.length === 0 && leftByOa.length === 0) { console.log(`\n清理测试 fixture #${Array.from(ids).join(',#')}`); testCollabId = null; return null; }
+            lastErr = `删除后协作单行仍在（按 id 剩 ${leftIds.length} 行 / 按两种 OA 写法剩 ${leftByOa.length} 行）`;
+        } catch (e) { lastErr = (e && e.message) || String(e); }
+    }
+    return lastErr;
 }
 
 let assertCount = 0;
@@ -76,13 +125,16 @@ function expect(condition, message) {
 }
 
 (async () => {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
     console.log('=== v1.72.3 admin 直派模式 Playwright UI 测试 ===\n');
 
     const adminToken = await signAs(ADMIN_ID);
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
-    let testCollabId = null;
+    let exitCode = 0;   // [#106 S4d-2] 原 try 里的 process.exit(0/1) 会让 finally 的清理从不执行；改为记录退出码，清理与 teardown 之后统一 finish
 
     page.on('console', msg => {
         if (msg.type() === 'error') console.log(`  [browser-err] ${msg.text()}`);
@@ -116,7 +168,7 @@ function expect(condition, message) {
         // 步骤 3：勾选 admin 直派 + 填表 + 提交
         // ============================================================
         console.log('\n3. 填表（admin 直派模式）...');
-        const testOA = `OA_PW_${Date.now()}`;
+        testOA = `OA_PW_${Date.now()}`;
         await page.fill('#f_oa_no', testOA);
         await page.selectOption('#f_dept', { index: 1 });  // 选第一个非空部门
         await page.fill('#f_requester', 'Playwright 测试业务方');
@@ -260,16 +312,22 @@ function expect(condition, message) {
             `改派历史含时间戳或改派内容关键字 (got: ${historyContent ? historyContent.slice(0, 80).replace(/\s+/g, ' ') : 'null'})`);
 
         console.log(`\n=== ${assertCount} 个断言全部 PASS ===`);
-        process.exit(0);
     } catch (e) {
         console.error('\n❌ 测试失败:', e.message);
         console.error(e.stack);
-        process.exit(1);
+        exitCode = 1;
     } finally {
-        if (testCollabId) {
-            await cleanupTestCollab(testCollabId);
-            console.log(`\n清理测试 fixture #${testCollabId}`);
-        }
-        await browser.close();
+        // [#106 S4d-2] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过协作单清理；任一失败都计失败（退出码 1）
+        try { await browser.close(); } catch (e) { console.error(`❌ 浏览器关闭失败：${e && e.message}`); exitCode = 1; }
+        const cleanupErr = await cleanupCollabChecked();
+        if (cleanupErr) { console.error(`❌ 清理测试协作单 #${testCollabId} 失败（已重试 1 轮）：${cleanupErr}`); exitCode = 1; }
     }
-})();
+
+    try { await testEnv.teardown(); } catch (e) { console.error(`❌ teardown（收掉自起实例）失败：${e && e.message}`); exitCode = 1; }
+    testEnv.finish(exitCode);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('测试异常:', e && e.stack || e);
+    try { await cleanupCollabChecked(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

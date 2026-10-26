@@ -2,7 +2,8 @@
  * 数据协作·「数据模板」多文件**展示**回归（#68）
  *
  * 用法：node scripts/test-collab-template-display-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000 / 业务库 task_pool.db）
+ *   造数：createPendingFixture 造协作单（OA_FX_ 前缀）+ 直插 collab_attachments 行（file_name 形如 collab/test/tpl-*，只造 DB 行、不落盘）；清理失败计失败（退出码 2 = 功能全绿但清理失败）。
  *
  * ── 为什么单独立这个套件 ────────────────────────────────────────────────
  * #68 把数据模板 `example_xlsx` 从单文件放开到「单据 active 总数 ≤ 5」，写端（`<input multiple>`
@@ -46,13 +47,12 @@
  */
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// [#106 S4d-1] BASE_URL / DB_PATH：来自 test-env（ready() 之后赋值）；不再写死 localhost:3000 与业务库 task_pool.db
+let BASE_URL = null;
+let DB_PATH = null;
 
 let pass = 0, fail = 0;
 const cleanupFailures = [];
@@ -62,11 +62,40 @@ function must(cond, msg) {
     return cond;
 }
 
-function dbRun(sql, params = []) {
+// [#106 S4d-1] 开库用夹具导出的 fx.openInstanceDb（OPEN_READWRITE、不带 OPEN_CREATE：路径不存在就报错而不是悄悄建空库；带打开回调转 Promise）
+async function dbRun(sql, params = []) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((res, rej) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.run(sql, params, function (e) { db.close(); e ? rej(e) : res(this); });
+        db.run(sql, params, function (e) {
+            const ctx = { lastID: this && this.lastID, changes: this && this.changes };
+            // 等 close 回调再落定：关库错误不丢（语句错误优先）
+            db.close((cerr) => { const err = e || cerr; err ? rej(err) : res(ctx); });
+        });
     });
+}
+
+/**
+ * [#106 S4d-1] 清理造的协作单：每个编号单独 try / catch，一个失败不中断后续；只把清理成功的编号移出追踪（created 原地收缩）；
+ * 失败的编号再试一轮（共 2 轮，间隔 200ms）；仍遗留的写入 cleanupFailures（最终退出码 2）
+ */
+async function cleanupCreated(created) {
+    const lastErr = new Map();
+    for (let round = 0; round < 2 && created.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of created.slice()) {
+            try {
+                await fx.cleanup(id);
+                console.log(`  🧹 夹具已清理（collab #${id}）`);
+                const at = created.indexOf(id);
+                if (at >= 0) created.splice(at, 1);
+                lastErr.delete(id);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    for (const id of created) {
+        console.log(`  ❗ 夹具 #${id} 清理失败（已重试 1 轮），可能残留：${lastErr.get(id)}`);
+        cleanupFailures.push(`#${id}: ${lastErr.get(id)}`);
+    }
 }
 
 /**
@@ -134,6 +163,9 @@ async function openDetail(page, token, id) {
 }
 
 async function main() {
+    await fx.ready();   // 先于任何网络请求 / 写库 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
+    DB_PATH = fx.DB_PATH;
     const browser = await chromium.launch({ headless: true });
     const created = [];
     try {
@@ -318,29 +350,32 @@ async function main() {
     } finally {
         // codex 审 L-1：browser.close() 抛错不得阻断夹具清理 ⇒ 独立 try
         try { await browser.close(); }
-        catch (e) { console.log(`  ❗ 浏览器关闭异常（不影响下方清理）：${e && e.message}`); }
-        for (const id of created) {
-            try { await fx.cleanup(id); console.log(`  🧹 夹具已清理（collab #${id}）`); }
-            catch (e) {
-                console.log(`  ❗ 夹具 #${id} 清理失败，可能残留：${e && e.message}`);
-                cleanupFailures.push(`#${id}: ${e && e.message}`);
-            }
-        }
+        catch (e) { must(false, `浏览器关闭异常：${e && e.message}`); }   // [#106 S4d-1] 失败计失败（仍不阻断下方清理）
+        await cleanupCreated(created);   // [#106 S4d-1] 每个编号单独 try / catch + 再试一轮；遗留进 cleanupFailures
     }
+
+    // [#106 S4d-1] 实例收尾放在清理之后（清理要用实例）；teardown 失败计功能失败
+    try { await fx.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     // codex 审 L-1：清理失败不能被"全部通过"掩盖。退出码分层——功能失败 1（优先），
     //   功能全绿但夹具未清 2，供只读退出码的调用方区分。
+    let exitCode = 0;
     if (fail > 0) {
         console.log('  ❌ 数据模板多文件展示回归存在失败项');
         if (cleanupFailures.length) console.log(`  ❗ 另有 ${cleanupFailures.length} 个夹具清理失败`);
-        process.exit(1);
-    }
-    if (cleanupFailures.length) {
+        exitCode = 1;
+    } else if (cleanupFailures.length) {
         console.log(`  ❗❗ 功能断言全通过，但 ${cleanupFailures.length} 个夹具清理失败——退出码 2（勿当作完全成功）：\n     - ${cleanupFailures.join('\n     - ')}`);
-        process.exit(2);
+        exitCode = 2;
+    } else {
+        console.log('  🎉 数据模板多文件展示回归全部通过');
     }
-    console.log('  🎉 数据模板多文件展示回归全部通过');
+    fx.finish(exitCode);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('实测脚本异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -7,31 +7,23 @@
  *   viewer 打开编辑 / 注册 → 重定向回目录页并提示、打开只读 → 留在配置台只读；非负责人的 edit → 降为只读（地址栏同步 mode=view）；
  *   ?focus=<不存在> → toast；入口目标不是 DIM/DWD / 不存在 / 已删除 → 回目录页由目录页提示；两页零 console error。
  *
- * 跑法（wbs-server 目录下，脚本自己起隔离实例，不碰 3000）：node scripts/test-model-workbench-playwright.js
- * 隔离实例 / 库副本 / 账号夹具与 test-model-workbench-baseline-playwright.js 同款（下面「隔离实例」一段由 E:/tmp/mc77-c3/c3b/gen-wb-test.js 从该文件
- *   逐字生成，不手抄），库副本放 MC_WB_WORKDIR（默认 E:/tmp/mc77-c3/pw-wb-run），运行结束删除。
+ * 跑法（wbs-server 目录下，脚本经 test-env 起隔离实例，不碰 3000）：node scripts/test-model-workbench-playwright.js
+ * [#106 S4b2] 隔离实例由 scripts/lib/test-env.js 的 ready() 提供（本检出库快照 + 隔离模式 server.js，端口随机，数据根在系统临时目录，teardown 时整体删除）；
+ *   不再自起 wrapper、不再复制真实库、不再写死端口 / 读 .env / 用 MC_WB_WORKDIR / --port。账号 / 模型夹具与 test-model-workbench-baseline-playwright.js 同款：
+ *   ready() 之后在实例库里清掉与模型相关的表（含 system_configs / users）并按夹具重新造数（原来是起服务前在库副本上做，终态相同）。
  * 时序：全部用「等 URL / 等元素 / 等 toast 文本 / 等高亮记录」的信号，不用固定 sleep 当同步手段；落点取换页提交那一刻的 URL
  *   （目录页处理完 ?focus / ?notice 会 replaceState 清参，所以必须在清参前取）。
  */
 'use strict';
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
 const { chromium } = require('playwright');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3');
-const dotenv = require('dotenv');
+const testEnv = require('./lib/test-env');
 
-const ROOT = path.resolve(__dirname, '..');
-const FIX_DIR = path.join(__dirname, 'fixtures', 'model-workbench-baseline');
-const MODELS_FILE = path.join(FIX_DIR, 'models.json');
-const PORT_ARG = (process.argv.slice(2).find(a => a.startsWith('--port=')) || '').slice('--port='.length);   // C4b：可指定端口（默认 3377），主工作区的其他 agent 占用 3377 时用
-if (PORT_ARG && !/^\d{2,5}$/.test(PORT_ARG)) { console.error('--port 必须是数字：' + PORT_ARG); process.exit(2); }
-const PORT = PORT_ARG ? Number(PORT_ARG) : 3377;
-const BASE = `http://localhost:${PORT}`;
-const WORKDIR = process.env.MC_WB_WORKDIR || (fs.existsSync('E:/tmp') ? 'E:/tmp/mc77-c3/pw-wb-run' : path.join(os.tmpdir(), 'mc77-c3-pw-wb-run'));
+let MODELS_FILE = null;   // ready() 之后赋值（入口函数里）
+let BASE = null;          // ready() 之后赋值：testEnv.env().baseUrl
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------------------------
@@ -51,18 +43,11 @@ const loadModelRows = () => JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8')).row
 
 function dbRun(db, sql, params = []) { return new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); })); }
 function dbClose(db) { return new Promise((res, rej) => db.close(e => e ? rej(e) : res())); }
-const tryUnlink = (f) => { try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
-const removeDbFiles = (dbPath) => { for (const s of ['', '-wal', '-shm', '-journal']) tryUnlink(dbPath + s); };
 
+/** [#106 S4b2] 对实例库（ready() 已建好的隔离快照）清洗并按夹具造数。原来是起服务前在库副本上做，现在服务已在跑：只开一条 OPEN_READWRITE（不带 OPEN_CREATE）连接，关库等回调完成。
+ *  整表清场：批跑只能登记为 exclusive:true 或 needsService:false，不能做共享实例成员（会抹掉同一实例上其他成员的数据）。 */
 async function prepareDb(dbPath) {
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const realDb = path.join(ROOT, 'task_pool.db');
-  if (!fs.existsSync(realDb)) throw new Error('缺少 wbs-server/task_pool.db（包装器也要求它存在）');
-  const src = await new Promise((res, rej) => { const d = new sqlite3.Database(realDb, sqlite3.OPEN_READONLY, e => e ? rej(e) : res(d)); });
-  await dbRun(src, 'VACUUM INTO ?', [dbPath]);   // 一致性快照；VACUUM INTO 不写源库
-  await dbClose(src);
-  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => e ? rej(e) : res(d)); });
+  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => { if (e) return rej(e); d.configure('busyTimeout', 8000); res(d); }); });
   // 清外部副作用面：钉钉凭证 / 数仓连接 / 周期任务；清与模型关联的数据与账号
   for (const t of ['system_configs', 'db_connections', 'periodic_tasks', 'model_change_logs', 'model_test_records', 'task_pool', 'data_models', 'users', 'sys_domains', 'sys_source_systems']) {
     await dbRun(db, `DELETE FROM ${t}`);
@@ -91,46 +76,8 @@ async function prepareDb(dbPath) {
   await dbClose(db);
 }
 
-function portBusy() {
-  return new Promise((resolve) => {
-    const s = net.createConnection({ port: PORT, host: '127.0.0.1' });
-    s.once('connect', () => { s.destroy(); resolve(true); });
-    s.once('error', () => resolve(false));
-  });
-}
-
-let serverChild = null;
-let serverKillIssued = false;
-/** 只按自己 spawn 的 pid 停，同一 pid 只杀一次（exit 钩子与 finally 都可能调用） */
-function killServer() {
-  if (!serverChild || !serverChild.pid || serverKillIssued || serverChild.__dead) return;
-  serverKillIssued = true;
-  try { spawnSync('taskkill', ['/T', '/F', '/PID', String(serverChild.pid)], { stdio: 'ignore' }); } catch (_) { /* 下面等 exit 事件 */ }
-}
-async function stopServerAndCleanup(dbPath) {
-  killServer();
-  const t0 = Date.now();
-  while (serverChild && !serverChild.__dead && Date.now() - t0 < 10000) await sleep(100);
-  if (serverChild && !serverChild.__dead) { console.error('[cleanup] 隔离实例进程未在 10s 内退出，库副本未删除：' + dbPath); return; }
-  try { removeDbFiles(dbPath); } catch (e) { console.error('[cleanup] 删除库副本失败：' + e.message); }
-}
-async function startServer(dbPath) {
-  const logPath = path.join(WORKDIR, 'server.log');
-  const fd = fs.openSync(logPath, 'w');
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js')], {
-    cwd: ROOT, stdio: ['ignore', fd, fd],
-    env: { ...process.env, PORT: String(PORT), IA_TEST_DB_PATH: dbPath, SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' },
-  });
-  fs.closeSync(fd);
-  serverChild.on('exit', () => { serverChild.__dead = true; });
-  const t0 = Date.now();
-  for (;;) {
-    if (serverChild.__dead) throw new Error('隔离实例提前退出，见日志 ' + logPath + '：\n' + fs.readFileSync(logPath, 'utf8').slice(-1500));
-    if (/Task Pool Server running/.test(fs.readFileSync(logPath, 'utf8'))) return;
-    if (Date.now() - t0 > 60000) throw new Error('隔离实例 60s 内未就绪，见日志 ' + logPath);
-    await sleep(250);
-  }
-}
+// [#106 S4b2] 原 portBusy / killServer / stopServerAndCleanup / startServer（写死 3377、按 pid 杀 wrapper 进程、等日志就绪、删库副本）整段删除：实例由 test-env 起停。
+//   「服务就绪」的判定：原来靠日志 "Task Pool Server running"；改为 main() 开头一次真实请求——未带 token 访问 /api/models 必须 401（证明服务在应答本脚本要测的路由）。
 
 
 // ---------------------------------------------------------------------------------------------
@@ -155,12 +102,11 @@ const INIT_PROBE = () => {
   });
 };
 
-async function main(dbPath) {
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动（3000 是用户进程，不得占用或杀）。`); process.exit(2); }
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
-  if (!secret) throw new Error('wbs-server/.env 缺 JWT_SECRET');
-  await prepareDb(dbPath);
-  await startServer(dbPath);
+async function main() {
+  const secret = testEnv.env().jwtSecret;   // 实例密钥（与服务端同源）；不再读 .env
+  const probe = await fetch(`${BASE}/api/models`);
+  if (probe.status !== 401) throw new Error(`[就绪核对] 未带 token 访问 /api/models 应 401，实得 ${probe.status}（服务没有在应答本脚本要测的路由）`);
+  await prepareDb(testEnv.env().dbPath);
   const browser = await chromium.launch({ headless: true });
   const errors = [];   // { label, text, url, inAbortWindow, pageState }
   const pageStates = [];
@@ -893,17 +839,18 @@ const rowOfName55 = () => loadModelRows().find(r => r.id === 55).table_name;
 
 (async () => {
   let code = 1;
-  const dbPath = path.join(WORKDIR, 'wb.db');
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const cleanupSync = () => {
-    killServer();
-    for (let i = 0; i < 20; i++) { try { removeDbFiles(dbPath); return; } catch (_) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); } }
-  };
-  process.on('exit', cleanupSync);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { cleanupSync(); process.exit(130); });
-  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
-  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
-  try { code = await main(dbPath); } catch (e) { console.error(e && e.stack || e); code = 1; } finally { await stopServerAndCleanup(dbPath); }
-  process.exit(code);
-})();
+  // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句（选项是纯字面量）；之后才读 BASE / 路径、装进程级处理器。
+  //   SIGINT / SIGTERM 由 test-env 自己收实例（teardown 后以 130 / 143 退出），进程退出时的清理由它的 exit 钩子兜底。
+  await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' } });
+  BASE = testEnv.env().baseUrl;
+  MODELS_FILE = path.join(__dirname, 'fixtures', 'model-workbench-baseline', 'models.json');
+  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  try { code = await main(); } catch (e) { console.error(e && e.stack || e); code = 1; } finally { await testEnv.teardown(); }
+  // [#106 S4b2a] teardown 已在上面的 finally 里 await 落定；出口改 finish（只设退出码，不终止执行），它是入口函数的最后一条语句。入口 .catch 里的 process.exit(1) 不改。
+  testEnv.finish(code);
+})().catch(async (e) => {
+  console.error(e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+  process.exit(1);
+});

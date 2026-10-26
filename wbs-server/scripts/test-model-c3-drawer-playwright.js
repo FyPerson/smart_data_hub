@@ -2,7 +2,8 @@
  * 模型中心 C3 · 详情抽屉外壳 + 请求生命周期 + 焦点管理 Playwright 实测（2026-07-24）
  *
  * 用法：node scripts/test-model-c3-drawer-playwright.js
- * 前置：本地 server 已启动（默认 localhost:3000，TEST_BASE_URL 可覆盖）
+ * 前置：无（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）
+ *   依赖：隔离实例是本检出本地库的快照，Model_Center 列表至少要有 2 个模型条目（D5 前提断言会如实报告）。
  *
  * 规格：模型详情抽屉方案 v1.4 §5.3（双层 controller/门禁/abortReason）+ §5.5（焦点/inert/Esc）+ D2（button 点击区）
  * 覆盖：
@@ -26,9 +27,11 @@ function expect(cond, msg, detail) {
     else { console.log(`  ✗ ${msg}${detail !== undefined ? '  got=' + JSON.stringify(detail) : ''}`); fail++; }
 }
 
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
+let BASE = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 模型中心 C3 详情抽屉 Playwright 实测 ===\n');
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
@@ -183,9 +186,14 @@ const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
         console.error('测试异常:', e);
         fail++;
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);
-    process.exit(fail ? 1 : 0);
-})();
+    fx.finish(fail ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('C3 实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

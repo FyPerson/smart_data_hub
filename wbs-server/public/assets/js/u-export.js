@@ -7,9 +7,10 @@
    归一化逻辑走真实 attachExport 代码路径 + 同版 SheetJS 生成 buffer 回读断言），UMD 才能同时喂浏览器
    window 挂载和 Node module.exports。
 
-   版本印记：必须与各引用页面 `?v=..._<KIT_VERSION>` 后缀一致——checkVersion 范式逐字照抄 u-paste.js:30-42
-   （KIT_VERSION 常量 + 页面 src ?v= 尾缀比对 + console.error 文案风格），改本文件须同时 bump 这里与所有
-   引用页的缓存串 + 版本比对常量（对齐 model-detail-normalize.js KIT_VERSION 踩坑教训）。
+   版本印记：KIT_VERSION 与各引用页面里的 `*_KIT_EXPECTED` 常量做接口握手——checkVersion 范式逐字照抄 u-paste.js:30-42
+   （KIT_VERSION 常量 + 页面期望值比对 + console.error 文案风格），改本文件的接口须同时改这里与所有
+   引用页的版本比对常量；页面引用的缓存串（`?v=auto`）由服务端按文件内容自动注入，无需手改
+   （对齐 model-detail-normalize.js KIT_VERSION 踩坑教训）。
 
    依赖：浏览器场景下 attachExport 运行时依赖全局 XLSX（vendor/xlsx.mini.min.js，须先于本文件加载）；
    attachDateRangeFilter 依赖 DOM。两者仅在被调用时才触碰这些运行时依赖，本文件加载/解析阶段不依赖它们
@@ -44,8 +45,8 @@
     function checkVersion(expected, pageName) {
         if (KIT_VERSION !== expected) {
             console.error('[导出共享层] u-export.js 版本不匹配：期望 ' + expected + '，实际 ' + KIT_VERSION +
-                '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，检查 ' + (pageName || '本页') +
-                ' 里 u-export.js 的 ?v= 缓存串是否已 bump。');
+                '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，请确认 ' + (pageName || '本页') +
+                ' 是经服务端打开的（缓存串由服务端按文件内容自动注入），而非本地文件或旧缓存副本。');
             return false;
         }
         return true;

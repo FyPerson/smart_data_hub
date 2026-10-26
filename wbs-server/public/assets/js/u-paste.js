@@ -21,10 +21,10 @@
    改用各自如实的引导文案（不再共用一句"请先点击"却不生效判定的旧文案）。归属选择逻辑抽成纯函数
    chooseCandidate（见 exports），供 Node 静态断言直接覆盖矩阵，语义详见该函数上方注释。
 
-   版本印记：必须与各引用页面 `?v=..._<KIT_VERSION>` 后缀一致。改本文件 → 同时改这里和所有引用页的
-   缓存串 + 版本比对常量。页面启动时会比对，不一致直接在 console 报错（对齐 model-detail-normalize.js
-   KIT_VERSION 踩坑教训：改共享 JS 忘了 bump 缓存串，用户拿到旧版却不报错，界面表现"看起来正常但字段
-   缺失/行为不对"，比直接报错更难查）。
+   版本印记：KIT_VERSION 与各引用页面里的 `*_KIT_EXPECTED` 常量做接口握手。改本文件的接口 → 同时改这里和所有引用页的
+   版本比对常量；页面引用的缓存串（`?v=auto`）由服务端按文件内容自动注入，无需手改。页面启动时会比对，
+   不一致直接在 console 报错（对齐 model-detail-normalize.js KIT_VERSION 踩坑教训：用户拿到旧版却不报错，
+   界面表现"看起来正常但字段缺失/行为不对"，比直接报错更难查）。
 */
 ;(function (root, factory) {
     'use strict';
@@ -61,8 +61,8 @@
     function checkVersion(expected, pageName) {
         if (KIT_VERSION !== expected) {
             console.error('[贴图共享层] u-paste.js 版本不匹配：期望 ' + expected + '，实际 ' + KIT_VERSION +
-                '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，检查 ' + (pageName || '本页') +
-                ' 里 u-paste.js 的 ?v= 缓存串是否已 bump。');
+                '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；若是开发期，请确认 ' + (pageName || '本页') +
+                ' 是经服务端打开的（缓存串由服务端按文件内容自动注入），而非本地文件或旧缓存副本。');
             return false;
         }
         return true;

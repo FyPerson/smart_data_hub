@@ -15,7 +15,12 @@
  *   T4 降级历史显著提示：构造快照缺失的已发布上线单，详情页应出现红底提示 + 成员行「不可用」占位
  *   T5 排班维护只读预览（非对接人视角）：无写表单/无「操作」列 + 出现「只读预览」提示文案
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-release-c7-playwright.js
+ * 用法：node scripts/test-sys-release-c7-playwright.js
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   造数：经 API 建 2 张 feature 单（C7冒烟-归档重开A-<时间戳> / C7冒烟-降级B-<时间戳>）+ 2 个上线单（C7冒烟批A-<时间戳> / C7冒烟批B-降级-<时间戳>），标题均带时间戳后缀、每次运行唯一；
+ *   收尾直连实例库按「记下的 id + 标题模式」兜底查出来逐个清（每步各自 try，共 2 轮，间隔 200ms），清完回查，遗留计失败；入口 .catch 也会尽力清理（夹具搭建中途失败不再漏清）。
+ *   固定用户 id：1 admin / 13（受理人白名单）/ 8（执行人，role=user，非白名单，须 active，首跑核对）。
+ *   失败截图目录原为写死的另一次会话 scratchpad 绝对路径，改为 os.tmpdir() 下的 sys-playwright-shots（失败时才创建）。
  *
  * ⚠️ 钉钉安全边界（复核确认，同 c2b2 脚本头部说明）：
  *   - close/reopen 两动作的 notifyAfterCommit 标记（'notifyAssignedDeveloper'）走 dispatchSysNotify，
@@ -26,33 +31,102 @@
  */
 'use strict';
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 // 2026-08-02 用户裁定二：上线单管理/值班排班/上线日志/删除审计/流程说明五个入口从筛选栏平铺按钮
 // 收进「⚙️ 管理」下拉——点击/断言可见性前须先开菜单，抽公共 helper 避免每个用例各自复制粘贴。
 const { openSysHeadMenu, clickSysHeadMenuItem, sysHeadMenuItemLocator } = require('./_sys-head-menu-helper');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = 'C:\\Users\\FY\\AppData\\Local\\Temp\\claude\\E-------------\\a54adce7-08ae-486c-ad80-5602b9b49bf0\\scratchpad';
+let BASE_URL = null;        // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SCREENSHOT_DIR = null;  // [#106 S4d-3] ready() 之后赋值：os.tmpdir() 下本脚本的失败截图目录（顶层 path.join 会被守卫 R6 判红）
+let RUN_TAG = null;         // [#106 S4d-3] ready() 之后赋值：每次运行唯一的时间戳后缀
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;    // 示例对接人（受理人白名单·排班写权）
 const OTHER_ID = 8;       // 示例开发A（active·role=user·非白名单·非对接人，供只读预览视角）
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+const closeDb = () => new Promise((res, rej) => { if (!db) return res(); const d = db; db = null; d.close((e) => (e ? rej(e) : res())); });
 
+// [#106 S4d-3] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+
+// 夹具 id（模块级，供收尾与入口 .catch 共用）
+let issueA = null, issueDegraded = null, relA = null, relDeg = null;
+
+/**
+ * [#106 S4d-3] 清理夹具：已记下的 id + 按标题模式（带本次 RUN_TAG）兜底查出的遗留（夹具搭建中途失败时 id 可能没来得及记）；
+ * 释放快照 / timeline → 单据子表 + 单据 → 上线单，每一步各自 try，一个失败不中断后续；有失败整体再试一轮（共 2 轮，间隔 200ms）；
+ * 清完回查按标题模式是否还有残留；返回最后一轮仍未清掉的失败说明数组（调用方计失败）。原来 14 条 dbRun 裸 await，一条抛错整个 finally 中断（连 browser.close 都被跳过）
+ */
+async function cleanupFixtures() {
+    if (!db || !RUN_TAG) return [];
+    let errors = [];
+    // [#106 S4d-3 修复批] 两个 Set 在轮循环外、跨轮累加：第一轮兜底查询失败 / 第二轮查不到行时，仍保留前一轮已知的 id（原来每轮重建，丢状态）
+    const issueIds = new Set([issueA, issueDegraded].filter((x) => Number.isInteger(x)));
+    const relIds = new Set([relA, relDeg].filter((x) => Number.isInteger(x)));
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        try {
+            for (const r of await dbAll('SELECT id FROM sys_issues WHERE title LIKE ?', [`C7冒烟-%-${RUN_TAG}`])) issueIds.add(r.id);
+            for (const r of await dbAll('SELECT id FROM sys_releases WHERE title LIKE ?', [`C7冒烟批%-${RUN_TAG}`])) relIds.add(r.id);
+        } catch (e) { errors.push(`按标题模式兜底查询失败: ${e && e.message}`); }
+        // 本轮子表（快照 / timeline）删除失败的上线单：不删它的 sys_releases 行，留作下一轮 / 回查的定位依据
+        const relSubFailed = new Set();
+        for (const rid of relIds) {
+            try {
+                await dbRun(`DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?`, [rid]);
+                await dbRun(`DELETE FROM sys_issue_timeline WHERE ref_id=? AND event_type='scope_change'`, [rid]);
+            } catch (e) { relSubFailed.add(rid); errors.push(`上线单 #${rid} 快照 / timeline: ${e && e.message}`); }
+        }
+        for (const iid of issueIds) {
+            try {
+                await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [iid]);
+                await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [iid]);
+                await dbRun(`DELETE FROM sys_issues WHERE id=?`, [iid]);
+            } catch (e) { errors.push(`单据 #${iid}: ${e && e.message}`); }
+        }
+        for (const rid of relIds) {
+            if (relSubFailed.has(rid)) continue;   // 子表没清净，保留上线单行
+            try { await dbRun(`DELETE FROM sys_releases WHERE id=?`, [rid]); } catch (e) { errors.push(`上线单 #${rid}: ${e && e.message}`); }
+        }
+        try {
+            const leftI = await dbGet('SELECT COUNT(*) AS n FROM sys_issues WHERE title LIKE ?', [`C7冒烟-%-${RUN_TAG}`]);
+            const leftR = await dbGet('SELECT COUNT(*) AS n FROM sys_releases WHERE title LIKE ?', [`C7冒烟批%-${RUN_TAG}`]);
+            if (leftI.n !== 0 || leftR.n !== 0) errors.push(`清理后仍有残留：sys_issues ${leftI.n} 条 / sys_releases ${leftR.n} 条`);
+            // 子表回查（按累加的 id 集合；原来只查主表，子表删除失败而主行已删时看不出）
+            for (const rid of relIds) {
+                const leftSnap = await dbGet('SELECT COUNT(*) AS n FROM sys_issue_release_commit_snapshots WHERE release_id=?', [rid]);
+                const leftTl = await dbGet(`SELECT COUNT(*) AS n FROM sys_issue_timeline WHERE ref_id=? AND event_type='scope_change'`, [rid]);
+                if (leftSnap.n !== 0 || leftTl.n !== 0) errors.push(`清理后上线单 #${rid} 子表仍有残留：快照 ${leftSnap.n} 条 / scope_change timeline ${leftTl.n} 条`);
+            }
+            for (const iid of issueIds) {
+                const leftTl = await dbGet('SELECT COUNT(*) AS n FROM sys_issue_timeline WHERE issue_id=?', [iid]);
+                const leftDev = await dbGet('SELECT COUNT(*) AS n FROM sys_issue_dev_assignees WHERE issue_id=?', [iid]);
+                if (leftTl.n !== 0 || leftDev.n !== 0) errors.push(`清理后单据 #${iid} 子表仍有残留：timeline ${leftTl.n} 条 / dev_assignees ${leftDev.n} 条`);
+            }
+        } catch (e) { errors.push(`清理后回查失败: ${e && e.message}`); }
+        if (errors.length === 0) break;
+    }
+    return errors;
 }
 async function api(token, method, p, body) {
     const r = await fetch(`${BASE_URL}${p}`, {
@@ -68,7 +142,7 @@ function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } el
 async function shotOnFail(page, cond, name, msg) {
     if (!must(cond, msg)) {
         const p = path.join(SCREENSHOT_DIR, `c7-fail-${name}.png`);
-        try { await page.screenshot({ path: p }); console.log(`     📸 失败截图: ${p}`); } catch (_) { /* 截图本身失败不影响主流程 */ }
+        try { fs.mkdirSync(SCREENSHOT_DIR, { recursive: true }); await page.screenshot({ path: p }); console.log(`     📸 失败截图: ${p}`); } catch (_) { /* 截图本身失败不影响主流程 */ }
     }
 }
 async function loginPage(browser, token) {
@@ -93,6 +167,12 @@ function unexpectedConsoleErrors(errs) {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+    RUN_TAG = Date.now();
+    db = await openInstanceDb(DB_PATH);
     const adminTok = await signAs(ADMIN_ID);
     const otherTokForExec = await signAs(OTHER_ID);   // 执行人须非 admin/viewer（hasReleaseEligibility 排除两者）
     console.log('\n══════ 上线体统一重构 C7（前端收尾）Playwright 冒烟 ══════');
@@ -120,17 +200,17 @@ async function main() {
     // 标题带时间戳后缀防碰撞——若前次运行异常中断（在 try/finally 覆盖范围之外，如夹具搭建阶段本身
     // 失败），残留的旧夹具标题若与本次固定字面量相同，会让 Playwright 的 :has-text() 定位到多个元素
     // （strict mode violation，首次实测踩坑）。加时间戳后缀使每次运行标题唯一，比"依赖清理必然成功"更稳。
-    const RUN_TAG = Date.now();
-    const issueA = await mkIssue(`C7冒烟-归档重开A-${RUN_TAG}`);
-    const issueDegraded = await mkIssue(`C7冒烟-降级B-${RUN_TAG}`);
+    // [#106 S4d-3] RUN_TAG / 夹具 id 提到模块级（供 cleanupFixtures 与入口 .catch 共用）
+    issueA = await mkIssue(`C7冒烟-归档重开A-${RUN_TAG}`);
+    issueDegraded = await mkIssue(`C7冒烟-降级B-${RUN_TAG}`);
 
     const mkBatch = async (title) => {
         const r = await api(adminTok, 'POST', '/api/sys-releases', { title });
         if (r.status !== 201) throw new Error(`建上线单失败: ${JSON.stringify(r.body)}`);
         return r.body.id;
     };
-    const relA = await mkBatch(`C7冒烟批A-${RUN_TAG}`);
-    const relDeg = await mkBatch(`C7冒烟批B-降级-${RUN_TAG}`);
+    relA = await mkBatch(`C7冒烟批A-${RUN_TAG}`);
+    relDeg = await mkBatch(`C7冒烟批B-降级-${RUN_TAG}`);
     await api(adminTok, 'POST', `/api/sys-releases/${relA}/add-issues`, { issue_ids: [issueA] });
     await api(adminTok, 'POST', `/api/sys-releases/${relDeg}/add-issues`, { issue_ids: [issueDegraded] });
 
@@ -313,27 +393,25 @@ async function main() {
             await page.close();
         }
     } finally {
-        // 🧹 清理测试夹具
-        for (const rid of [relA, relDeg]) {
-            await dbRun(`DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?`, [rid]);
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE ref_id=? AND event_type='scope_change'`, [rid]);
-        }
-        for (const iid of [issueA, issueDegraded]) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [iid]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [iid]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [iid]);
-        }
-        for (const rid of [relA, relDeg]) {
-            await dbRun(`DELETE FROM sys_releases WHERE id=?`, [rid]);
-        }
-        console.log('\n  🧹 测试夹具已清理（issueA/issueDegraded、relA/relDeg）');
-        await browser.close();
-        db.close();
+        // 🧹 清理测试夹具（[#106 S4d-3] 浏览器先关且失败计失败；清理见 cleanupFixtures：各步独立 try / 2 轮 / 回查 / 遗留计失败）
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        const cleanupErrs = await cleanupFixtures();
+        if (cleanupErrs.length === 0) console.log('\n  🧹 测试夹具已清理（issueA/issueDegraded、relA/relDeg）');
+        else must(false, `测试夹具清理失败（已重试 1 轮）：${cleanupErrs.join(' | ')}`);
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ C7 Playwright 冒烟存在失败项'); process.exit(1); }
-    console.log('  🎉 C7 Playwright 冒烟全部通过');
+    if (fail > 0) console.log('  ❌ C7 Playwright 冒烟存在失败项');
+    else console.log('  🎉 C7 Playwright 冒烟全部通过');
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('实测脚本异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await cleanupFixtures(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await closeDb(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

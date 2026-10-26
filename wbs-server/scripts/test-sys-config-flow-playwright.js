@@ -84,15 +84,16 @@ const fs = require('fs');
 const net = require('net');
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const HTML_PATH = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#106 S4b1] 不再加载 .env / 不再自签 JWT / 不再写死 3000 / 不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）。
+//   下面这些在 ready() 之后才有值（模块顶层只允许纯声明，守卫硬规则）：被测地址、实例库路径、静态页路径、本轮标识、实例库连接。
+let BASE_URL = null;
+let HTML_PATH = null;
+let RUN_TAG = null;
+let RUN_TAG_MARKER = null;
+let db = null;
 
 const ADMIN_ID = 1;      // 平台管理员（username='admin'，siIsPlatformAdmin 白名单唯一成员）
 const LIAISON_ID = 13;   // 示例对接人（SI_INTAKE_LIAISON_IDS[13]）
@@ -101,22 +102,21 @@ const SECOND_DEV_ID = 9; // 示例开发B（补丁 AD·AD5 用：T13①"只改�
 // [补丁 AF·AF1·512-H1] Date.now() 不是跨进程唯一标识（同毫秒并发会撞）——改时间戳+随机后缀，
 // 跨进程碰撞概率降到可忽略（8 位 36 进制时间戳 + 8 位十六进制随机数，仅用于测试夹具所有权识别，
 // 非密码学场景，crypto.randomBytes 只是借用其随机源，不追求密码学强度）。
-const RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+//   RUN_TAG / RUN_TAG_MARKER 在 main() 里 ready() 之后赋值（见文件顶部的 let 声明；顶层不允许非纯初始值）：
+//   RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex')；
 // [补丁 AF·AF1] 唯一标识统一落在 description 字段（所有建单路径——API 直调 4 处 + T1 UI 路径——都把
 // 本标记写进 description；title 是否携带 RUN_TAG 不作为恢复登记的依据，只以 description 为准，
 // 消除"API 建单标题带标识、T1 描述带标识"两个字段各写各的不一致）。
-const RUN_TAG_MARKER = `[RT:${RUN_TAG}]`;
+//   RUN_TAG_MARKER = `[RT:${RUN_TAG}]`（同样在 main() 里赋值）。
 const TITLE_PREFIX = `[lt0907-s1c]`;   // 可识别标题前缀（spec 要求，便于观察数据清理）
 
-const db = new sqlite3.Database(DB_PATH);
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 
+// [#106 S4b1] 签名改经 test-env（从实例库只读取 users 行、用实例密钥签 1 小时 token）；保留函数名与签名，调用点不动
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -672,6 +672,14 @@ function staticCheckNoEffectedAlias() {
 }
 
 async function main() {
+    await testEnv.ready();   // 先于任何网络 / 库 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    HTML_PATH = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
+    RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+    RUN_TAG_MARKER = `[RT:${RUN_TAG}]`;
+    db = await new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(testEnv.env().dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
     await ensureServerListening();
     console.log('  \u2705 端口 Listen 探测通过（server 已就绪）');
     await ensureAppReadinessEndpoint();
@@ -1656,7 +1664,7 @@ async function main() {
             const originalDbGetMethod = db.get.bind(db);
             let injectedOnce = false;
             let capturedRealId = null;
-            // db 是 const 声明的连接对象，但其方法属性可临时替换（同 AH2/AI1 monkey-patch global.fetch
+            // db 是模块顶层 let 声明、main() 里 ready 之后赋值的实例库连接对象，其方法属性可临时替换（同 AH2/AI1 monkey-patch global.fetch
             // 同一手法，只是这次要拦的是数据库查询而非网络请求）；只拦第一次匹配到 claim 查询语句的调用，
             // 拿到真实响应 id（params[0]）后立即向回调抛异常模拟"查询本身异常"，其余调用一律走原实现。
             db.get = function (sql, params, cb) {
@@ -2638,18 +2646,29 @@ async function main() {
         // page.route 内存拦截，本文件全程不再 fs.writeFileSync 共享文件，快照比对连同"发现不一致
         // 就强制覆盖"的兜底一并整体删除。保留一条纯只读残留标记扫描作为最后防线（理论上不可能命
         // 中，命中即说明有代码路径意外写了盘，需要立即人工核实——但本身不做任何写入/覆盖动作）。
-        const finalSrc = fs.readFileSync(HTML_PATH, 'utf8');
-        if (finalSrc.includes('MUTATION-TEST-TEMP-REMOVE')) {
+        let finalSrc = null;
+        try { finalSrc = fs.readFileSync(HTML_PATH, 'utf8'); } catch (e) { fail++; console.error('⚠️ 残留标记扫描读不到源文件:', e && e.message || e); }   // 读失败只计失败，不阻断下面的关库与 teardown
+        if (finalSrc === null) {
+            // 已在上面计失败
+        } else if (finalSrc.includes('MUTATION-TEST-TEMP-REMOVE')) {
             fail++;
             console.error('⚠️ 源文件残留变异标记（MUTATION-TEST-TEMP-REMOVE）——本批变异已改用 page.route 内存拦截，理论上不会写盘，出现此信号需立即人工核实！');
         } else {
             console.log('  ✅ 源文件确认不含任何变异标记残留（本批变异全程未写磁盘，见 AF2）');
         }
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (failDetails.length) console.log('失败明细：\n  - ' + failDetails.join('\n  - '));
-        if (fail > 0) process.exit(1);
+        try { await new Promise((res, rej) => db.close((e) => (e ? rej(e) : res()))); } catch (e) { fail++; console.warn('实例库连接关闭失败:', e && e.message || e); }
+        // 收掉自起实例（teardown 失败计入失败）。finally 里只留关库、teardown、计失败；汇总打印与 finish 在整个 try/catch/finally 语句之后（见下）
+        try { await testEnv.teardown(); } catch (e) { fail++; console.error('⚠️ teardown（收掉自起实例）失败:', e && e.message || e); }
     }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    if (failDetails.length) console.log('失败明细：\n  - ' + failDetails.join('\n  - '));
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：入口函数体最后一条语句，teardown（上面 finally 里已 await）之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    // 实例库在最外层 try 之前就已打开：中间失败走到这里时先关库再 teardown，免得 Windows 上 sqlite 句柄钉住数据根删不掉（已在 finally 关过时 close 回调报错，忽略）
+    if (db) { try { await new Promise((res) => db.close(() => res())); } catch (_) { /* 已在报错路径 */ } }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

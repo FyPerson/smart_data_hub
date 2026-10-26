@@ -2,7 +2,10 @@
  * 系统迭代·组 A「预计完成时间自动生成 + 超时受理/超时指派强制填写」前端 Playwright 冒烟
  * （方案 §2·docs/local/系统迭代/预计完成时间与先行上线_方案_20260812_v1.3.md）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-eta-generation-playwright.js
+ * 用法：node scripts/test-sys-eta-generation-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   依赖隔离实例（本检出本地库的快照）里存在固定用户 id 1（admin）/ 8 / 9（active 非 viewer）与 id 13（受理人候选）——首跑核对。
+ *   失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * ⚠️ 为何新建独立文件而非扩展 test-sys-intake-liaison-playwright.js（方案允许"或按套件结构新建"）：
  *   实测发现该文件 T1「GET intake-liaisons 恰返回 1 个候选」的前提在当前真实生产库（task_pool.db）下
@@ -43,29 +46,42 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / SCREENSHOT_DIR：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let SCREENSHOT_DIR = null;
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;   // 示例对接人
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
+const dbAll = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.all(sql, params, (e, rows) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(rows); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -100,6 +116,10 @@ function fmtDatetimeLocalInput(dt) { return `${dt.getFullYear()}-${pad2(dt.getMo
 const FAR_PAST_CREATED = '2020-01-01 08:00:00';   // bug 类型：默认 SLA(2020-01-02 17:00) 早已过去，稳定判"已超"
 
 let seq = 0;
+// [#106 S4d-4 修复批] 夹具单编号登记：建单（201）拿到 id 后立即登记，后续把 created_at 改写成指定值（直连 SQL）失败时，收尾清理仍能清到这张单
+//   （原来 id 只在 mkBugViaApi 成功返回后才由调用方 push）。幂等（同 submit-withdraw 的 registerCreatedId 写法）
+const createdIds = [];
+function registerCreatedId(id) { if (Number.isInteger(id) && id > 0 && !createdIds.includes(id)) createdIds.push(id); }
 async function mkBugViaApi(adminTok, createdAt, extra = {}) {
     seq++;
     const r = await fetch(`${BASE_URL}/api/sys-issues`, {
@@ -112,15 +132,20 @@ async function mkBugViaApi(adminTok, createdAt, extra = {}) {
     const body = await r.json();
     if (r.status !== 201) throw new Error(`建单失败：${r.status} ${JSON.stringify(body)}`);
     const id = body.id;
+    registerCreatedId(id);   // 建单即登记
     if (createdAt) await dbRun(`UPDATE sys_issues SET created_at = ? WHERE id = ?`, [createdAt, id]);
     return id;
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
     const adminTok = await signAs(ADMIN_ID);
     console.log('\n══════ 系统迭代·组A 预计完成时间自动生成 前端 Playwright 冒烟 ══════');
 
-    const createdIds = [];
+    // createdIds / registerCreatedId 在模块级（mkBugViaApi 建单后立即登记，见上）
     const browser = await chromium.launch();
     try {
         // ═══════════════════════════════════════════════════════════════
@@ -176,7 +201,7 @@ async function main() {
         {
             console.log('\n── T1：受理弹窗必填流（SLA 已超 + ETA 为空）──');
             const id = await mkBugViaApi(adminTok, FAR_PAST_CREATED);
-            createdIds.push(id);
+            registerCreatedId(id);   // 幂等（helper 内已登记）
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id}`);
             await page.waitForLoadState('networkidle');
@@ -230,7 +255,7 @@ async function main() {
             const yesterday = addDays(new Date(), -1);
             const deadlineStr = `${yesterday.getFullYear()}-${pad2(yesterday.getMonth() + 1)}-${pad2(yesterday.getDate())}`;
             const id = await mkBugViaApi(adminTok, fmt(new Date()), { deadline: deadlineStr });
-            createdIds.push(id);
+            registerCreatedId(id);
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id}`);
             await page.waitForLoadState('networkidle');
@@ -272,7 +297,7 @@ async function main() {
         {
             console.log('\n── T3：★对照组·提示条不显示（SLA 未超 + 无 deadline）──');
             const id = await mkBugViaApi(adminTok, fmt(new Date()));   // 无 deadline
-            createdIds.push(id);
+            registerCreatedId(id);
             const page = await loginPage(browser, adminTok);
             await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id}`);
             await page.waitForLoadState('networkidle');
@@ -301,7 +326,7 @@ async function main() {
         {
             console.log('\n── T4：指派（改派）弹窗必填流（既有 ETA 已过期）──');
             const id = await mkBugViaApi(adminTok, fmt(new Date()));
-            createdIds.push(id);
+            registerCreatedId(id);
             // 受理 + 指派给示例开发A(8，本地真实 active 非 viewer 账号，同 test-sys-intake-liaison-playwright.js
             //   T6/A3 既有用例复用同一账号)，再直接把 ETA 改成过期值（跳过等待，聚焦本组要测的必填闸）。
             let r = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` }, body: '{}' });
@@ -372,7 +397,7 @@ async function main() {
         {
             console.log('\n── T5：改派弹窗常态流（既有 ETA 非空且未过期 → 字段隐藏，仅改成员仍可提交）──');
             const id = await mkBugViaApi(adminTok, fmt(new Date()));   // created_at=当前时刻 → SLA 未超
-            createdIds.push(id);
+            registerCreatedId(id);
             // 受理（自动生成，非过期）+ 指派给示例开发A(8)，此刻 dev_estimated_at 非空且未过期。
             let r = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` }, body: '{}' });
             if (r.status !== 200) throw new Error(`T5 前置：受理未 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
@@ -425,7 +450,7 @@ async function main() {
         {
             console.log('\n── T6：指派弹窗常态流（受理自动生成 ETA 非空且未过期 → 字段隐藏，仅选成员仍可提交）──');
             const id = await mkBugViaApi(adminTok, fmt(new Date()));   // created_at=当前时刻 → SLA 未超
-            createdIds.push(id);
+            registerCreatedId(id);
             let r = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` }, body: '{}' });
             if (r.status !== 200) throw new Error(`T6 前置：受理未 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
             const rowT6Before = await dbGet('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);
@@ -463,7 +488,7 @@ async function main() {
         {
             console.log('\n── T7：指派弹窗反向兜底（前端误判展示 + 服务端判未过期 → 字段收起，重提成功）──');
             const id = await mkBugViaApi(adminTok, fmt(new Date()));   // created_at=当前时刻 → SLA 未超
-            createdIds.push(id);
+            registerCreatedId(id);
             let r = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` }, body: '{}' });
             if (r.status !== 200) throw new Error(`T7 前置：受理未 200，实得 ${r.status} ${JSON.stringify(await r.json().catch(() => null))}`);
             const rowT7Before = await dbGet('SELECT dev_estimated_at FROM sys_issues WHERE id=?', [id]);
@@ -533,22 +558,39 @@ async function main() {
         console.error('实测脚本异常:', e && e.stack || e);
         fail++;
     } finally {
-        await browser.close();
+        // [#106 S4d-4] 浏览器关闭失败计失败
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
         // 夹具清理（issue 删除会级联相关子表，同既有 verify-sys-* 惯例）
-        for (const id of createdIds) {
-            try {
-                await dbRun('DELETE FROM sys_issue_timeline WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issue_dev_events WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
-            } catch (e) { console.warn(`夹具清理失败 issue #${id}: ${e.message}`); }
+        // [#106 S4d-4] 清理失败计失败：每个编号单独 try，清掉才移出追踪，有失败再试一轮（共 2 轮，间隔 200ms）；遗留的计失败；删后回查残留行数（非 0 也计失败）
+        const lastErr = new Map();
+        const pending = createdIds.slice();
+        for (let round = 0; round < 2 && pending.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            for (const id of pending.slice()) {
+                try {
+                    await dbRun('DELETE FROM sys_issue_timeline WHERE issue_id=?', [id]);
+                    await dbRun('DELETE FROM sys_issue_dev_events WHERE issue_id=?', [id]);
+                    await dbRun('DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [id]);
+                    await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
+                    pending.splice(pending.indexOf(id), 1);
+                    lastErr.delete(id);
+                } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+            }
         }
-        const remain = await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${createdIds.map(() => '?').join(',') || 'NULL'})`, createdIds);
-        console.log(`  🧹 夹具已清理（残留 ${remain ? remain.c : 0} 条，应为 0）`);
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) process.exit(1);
+        for (const id of pending) must(false, `夹具清理失败 issue #${id}（已重试 1 轮）：${lastErr.get(id)}`);
+        try {
+            const remain = await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${createdIds.map(() => '?').join(',') || 'NULL'})`, createdIds);
+            console.log(`  🧹 夹具已清理（残留 ${remain ? remain.c : 0} 条，应为 0）`);
+            if (remain && remain.c !== 0) must(false, `夹具清理回查：仍有 ${remain.c} 条残留`);
+        } catch (e) { must(false, `夹具清理回查失败：${e && e.message}`); }
     }
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

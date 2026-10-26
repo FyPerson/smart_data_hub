@@ -2,7 +2,8 @@
  * 数据协作·多文件上传 M3 前端 Playwright UI 实测
  *
  * 用法：node scripts/test-collab-multifile-m3-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无服务前置（[#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000 / 业务库 / .env）
+ *   不写库：提交请求全部 route 拦截伪造；临时测试文件在 os.tmpdir() 下的 m3-pw-* 目录，收尾用 removeTreeChecked 删并确认，失败计失败。
  *
  * 覆盖（纯客户端，无需 warehouse）：
  *   T1 建单·数据范围多选 3 文件 → 预览 3 项
@@ -20,44 +21,59 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
 const ADMIN_ID = 1;
 
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库（本脚本不再直接开库）
 async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
 
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
+
 // 造测试文件
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'm3-pw-'));
+// [#106 S4d-2] 顶层只放纯声明（守卫 R5 / R6）：临时目录与各测试文件在入口 ready() 之后、try 内创建（见 main 里的 makeTestFiles）
+let tmp = null;
+let ds1, ds2, ds3, ds4, ds5, ds6, bad, tp1, tp2, tp3, tp4, tp5, tp6, sc1, sc2, da1, da2;
 function mk(name, content = 'x') { const p = path.join(tmp, name); fs.writeFileSync(p, content); return p; }
-const ds1 = mk('ds1.txt'), ds2 = mk('ds2.xlsx'), ds3 = mk('ds3.xls'), ds4 = mk('ds4.txt'), ds5 = mk('ds5.txt'), ds6 = mk('ds6.txt');
-const bad = mk('bad.pdf');
-const tp1 = mk('tp1.xlsx'), tp2 = mk('tp2.xls'), tp3 = mk('tp3.xlsx'), tp4 = mk('tp4.xlsx'), tp5 = mk('tp5.xlsx'), tp6 = mk('tp6.xlsx');
-const sc1 = mk('s1.sql'), sc2 = mk('s2.txt');
-const da1 = mk('d1.xlsx'), da2 = mk('d2.xls');
+function makeTestFiles() {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'm3-pw-'));
+    ds1 = mk('ds1.txt'); ds2 = mk('ds2.xlsx'); ds3 = mk('ds3.xls'); ds4 = mk('ds4.txt'); ds5 = mk('ds5.txt'); ds6 = mk('ds6.txt');
+    bad = mk('bad.pdf');
+    tp1 = mk('tp1.xlsx'); tp2 = mk('tp2.xls'); tp3 = mk('tp3.xlsx'); tp4 = mk('tp4.xlsx'); tp5 = mk('tp5.xlsx'); tp6 = mk('tp6.xlsx');
+    sc1 = mk('s1.sql'); sc2 = mk('s2.txt');
+    da1 = mk('d1.xlsx'); da2 = mk('d2.xls');
+}
 
 async function previewCount(page, wrapId) {
     return await page.$$eval(`#${wrapId} .file-item`, els => els.length);
 }
 
 (async () => {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
     console.log('=== M3 前端多文件 Playwright UI 实测 ===\n');
     const token = await signAs(ADMIN_ID);
     const browser = await chromium.launch({ headless: true });
@@ -73,6 +89,7 @@ async function previewCount(page, wrapId) {
     page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
     try {
+        makeTestFiles();   // [#106 S4d-2] 挪进 try：创建临时目录之后的任何失败都由 finally 删它
         await page.goto(`${BASE_URL}/login.html`);
         await page.evaluate(t => localStorage.setItem('token', t), token);
         await page.goto(`${BASE_URL}/Data_Collab.html`);
@@ -282,9 +299,16 @@ async function previewCount(page, wrapId) {
         console.error('\n!! 运行异常：', e.message);
         fail++;
     } finally {
-        await browser.close();
-        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { }
-        console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-        process.exit(fail === 0 ? 0 : 1);
+        // [#106 S4d-2] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过临时目录清理；任一失败都计失败（原来 fs.rmSync 失败被 catch(_) 吞掉）
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
+        if (tmp) { try { removeTreeChecked(tmp); } catch (e) { expect(false, `清理临时文件目录失败 ${tmp}：${e && e.message}`); } }
     }
-})();
+
+    try { await testEnv.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('M3 实测异常：', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

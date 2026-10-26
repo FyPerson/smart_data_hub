@@ -7,6 +7,7 @@
  *
  * 用法：
  *   const fx = require('./_test-fixture');
+ *   await fx.ready();   // [#106 S3b] 先于任何写库 / 网络请求（自起隔离实例或核对 TEST_* 变量组）；之后才能读 fx.BASE / fx.DB_PATH
  *   const ctx = await fx.createPendingFixture();
  *   // ctx = { id, oaNo, adminToken, contactToken, dev1Token }
  *   // 测试结束后：
@@ -21,15 +22,36 @@
  */
 'use strict';
 
-const path = require('path');
+// [#106 S3b] 本 fixture 基于 scripts/lib/test-env.js：被测服务 / 实例库 / 实例密钥都来自 test-env（TEST_* 变量组，或自起的临时隔离实例），
+// 不再有写死的 localhost:3000、真实 task_pool.db 路径，也不再加载真实 .env。
+//   用法：先 `await fx.ready()`（等价 testEnv.ready()），再读 fx.BASE / fx.DB_PATH / fx.JWT_SECRET 或调用异步助手；
+//   BASE / DB_PATH / JWT_SECRET 是 getter：ready() 完成之前读取立即抛错（fail-closed，不会悄悄打到 3000），也不可赋值。
+//   **异步助手（signAs / apiCall / createPendingFixture / setCollabState / cleanup）要求已 ready，不隐式 ready**（S3b 修复批 1，预筛 HIGH-1）：ready() 尚未完成就抛 FX_NOT_READY（「先 await fx.ready()」），
+//   不发请求、不开库、不起实例。显式 fx.ready() / testEnv.ready() 是唯一的启动入口。理由：隐式自起的实例库经 VACUUM INTO 连 sqlite_sequence 一起复制，拿到的单号恰是真实库的下一个号，
+//   未迁移脚本再拿这个号用自己写死的真实库路径插子表（外键不生效）、删除又走 3000（实例密钥签的令牌 → 401），孤儿行就永久留在真实本地库里。
+//   未迁移脚本（还在顶层读 fx.BASE / fx.DB_PATH，或不先 ready() 就调用助手）因此一律 fail-closed，全部留给 S4 迁移。
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+function readyOnly(name, pick) {
+    try {
+        return pick(testEnv.env());
+    } catch (e) {
+        if (e && e.code === 'TE_NOT_READY') {
+            const err = new Error(`_test-fixture 的 ${name} 在 ready() 完成之前不可用：先 await fx.ready()（${e.message}）`);
+            err.code = 'FX_NOT_READY';
+            throw err;
+        }
+        throw e;
+    }
+}
+/** 异步助手的入口闸：已就绪 → 返回 test-env 的解析结果；否则抛 FX_NOT_READY。绝不调用 ready()（隐式自起是 S3b 预筛 HIGH-1 的根因） */
+function requireReady(name) {
+    return readyOnly(name, (e) => e);
+}
+function readOnlyProp(name) {
+    return () => { throw new Error(`_test-fixture 的 ${name} 是只读的（来自 test-env）：要换被测服务请设 TEST_INSTANCE / TEST_BASE_URL / TEST_DB_PATH / TEST_JWT_SECRET，不要改写 fixture`); };
+}
 
 const ADMIN_ID = 1;
 const CONTACT_ID = 3;
@@ -40,27 +62,34 @@ const VIEWER_ID = 2;    // v1.72.5 admin 直派给 viewer e2e 用（示例客服
 const VIEWER2_ID = 4;   // v1.72.5 跨单越权测试用（示例客服B，另一个 viewer）
 const TARGET_DB_CONN_ID = 2;
 
-async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
+/** 等价 testEnv.ready()：必须在任何写库 / 网络请求之前 await；幂等 */
+function ready(options) {
+    return testEnv.ready(options);
+}
+
+/**
+ * 打开实例库做写入：只读写已存在的实例库（不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库）。
+ * 带打开回调并转成 Promise：不带回调时 node-sqlite3 把打开失败当成未监听的 'error' 事件抛成未捕获异常（进程直接崩），助手拿不到可处理的拒绝（S3b 修复批 2a 探针实测）。
+ */
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
     });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+}
+
+async function signAs(userId) {
+    requireReady('signAs');
+    return testEnv.signToken(userId);
 }
 
 async function apiCall(method, urlPath, token, body) {
+    const e = requireReady('apiCall');
     const opts = { method, headers: { Authorization: `Bearer ${token}` } };
     if (body) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
     }
-    const r = await fetch(`${BASE}${urlPath}`, opts);
+    const r = await fetch(`${e.baseUrl}${urlPath}`, opts);
     let j = null;
     try { j = await r.json(); } catch (_) { }
     return { status: r.status, body: j };
@@ -74,6 +103,7 @@ async function apiCall(method, urlPath, token, body) {
  * 返回 { id, oaNo, adminToken, contactToken, dev1Token }
  */
 async function createPendingFixture() {
+    requireReady('createPendingFixture');
     const adminToken = await signAs(ADMIN_ID);
     const contactToken = await signAs(CONTACT_ID);
     const dev1Token = await signAs(DEV1_ID);
@@ -93,9 +123,26 @@ async function createPendingFixture() {
     }
     const id = createRes.body.id;
 
-    const assignRes = await apiCall('POST', `/api/collab/requests/${id}/assign`, contactToken, { developer_id: DEV1_ID });
-    if (assignRes.status !== 200) {
-        throw new Error(`fixture 指派失败: ${assignRes.status} ${JSON.stringify(assignRes.body)}`);
+    // [#106 S4d-1 修复批 2] 建单已成功、指派失败（非 200 或请求抛错）：调用方拿不到 id（还没返回），make-dc 的 seed 回滚也清不到——
+    // 所以在抛出前用本文件的 cleanup(id) 删掉刚建的单；抛出的错误带 fixtureCreatedId = id；cleanup 自己失败再带 cleanupErrors = [说明]
+    // （与 make-dc-ui-fixtures.js 的 e.cleanupErrors 同名同形），调用方据此逐条计失败。成功路径与返回值形状不变。
+    let assignFailure = null;
+    try {
+        const assignRes = await apiCall('POST', `/api/collab/requests/${id}/assign`, contactToken, { developer_id: DEV1_ID });
+        if (assignRes.status !== 200) {
+            assignFailure = new Error(`fixture 指派失败: ${assignRes.status} ${JSON.stringify(assignRes.body)}`);
+        }
+    } catch (e) {
+        assignFailure = (e instanceof Error) ? e : new Error(`fixture 指派请求抛错: ${String(e)}`);
+    }
+    if (assignFailure) {
+        assignFailure.fixtureCreatedId = id;
+        try {
+            await cleanup(id);
+        } catch (ce) {
+            assignFailure.cleanupErrors = [`夹具单 #${id} 指派失败后的回收清理失败: ${ce && ce.message}`];
+        }
+        throw assignFailure;
     }
 
     return { id, oaNo, adminToken, contactToken, dev1Token };
@@ -141,14 +188,15 @@ async function setCollabState(id, patch) {
             params.push(patch[f]);
         }
     }
+    requireReady('setCollabState');   // 空补丁也要求已 ready（行为不随补丁内容变化）
     if (sets.length === 0) return;
     params.push(id);
 
+    const db = await openInstanceDb(testEnv.env().dbPath);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(`UPDATE collab_requests SET ${sets.join(', ')} WHERE id=?`, params, (err) => {
-            db.close();
-            err ? reject(err) : resolve();
+            // 等 close 回调再落定（S4-x）：关库错误不再丢失；resolve 时库句柄已经关闭。UPDATE 的错误优先，其次才是关库的错误（语句出错时也关库）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(); });
         });
     });
 }
@@ -157,22 +205,23 @@ async function setCollabState(id, patch) {
  * 删除测试协作单 + 级联清子表（FK CASCADE）
  */
 async function cleanup(id) {
+    requireReady('cleanup');
+    const db = await openInstanceDb(testEnv.env().dbPath);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.serialize(() => {
             db.run('PRAGMA foreign_keys = ON');
             db.run('DELETE FROM collab_requests WHERE id = ?', [id], (err) => {
-                db.close();
-                err ? reject(err) : resolve();
+                // 等 close 回调再落定（S4-x，同 setCollabState）：关库错误不再丢失；resolve 时库句柄已经关闭。DELETE 的错误优先，其次才是关库的错误（语句出错时也关库）
+                db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(); });
             });
         });
     });
 }
 
 module.exports = {
-    BASE,
-    DB_PATH,
-    JWT_SECRET,
+    ready,
+    teardown: () => testEnv.teardown(),
+    finish: (code) => testEnv.finish(code),   // S4-x：teardown 之后的收尾（设退出码 + 不阻止退出的兜底计时器），见 lib/test-env.js finish
     ADMIN_ID,
     CONTACT_ID,
     DEV1_ID,
@@ -186,4 +235,10 @@ module.exports = {
     createPendingFixture,
     setCollabState,
     cleanup,
+    openInstanceDb,   // [#106 S4c 收口] 导出给脚本里的 db 助手：带打开回调、不带 OPEN_CREATE（不建空库），打开失败变 Promise 拒绝
 };
+
+// BASE / DB_PATH / JWT_SECRET：getter（ready() 完成之前读取抛 FX_NOT_READY）+ 抛错的 setter（旧脚本运行期改写 fixture 的 BASE 会立即失败，而不是静默无效）
+for (const [name, pick] of [['BASE', (e) => e.baseUrl], ['DB_PATH', (e) => e.dbPath], ['JWT_SECRET', (e) => e.jwtSecret]]) {
+    Object.defineProperty(module.exports, name, { enumerable: true, get: () => readyOnly(name, pick), set: readOnlyProp(name) });
+}

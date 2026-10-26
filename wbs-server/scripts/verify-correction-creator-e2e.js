@@ -1,28 +1,26 @@
 // verify-correction-creator-e2e.js — 细优② K4 creator 端点四件套 e2e（真实 server + seed FIXED 单）
-//   验 notify-creator：① FIXED 单有效 created_by → 落库（本地无钉钉配置多为 failed；有配置+phone 可能 sent）
+//   验 notify-creator：① FIXED 单有效 created_by → 落库（隔离实例里钉钉走替身，状态由替身决定，不强求 sent / failed）
 //                       ② created_by 指向不存在用户 → not_found 落库（R-M4 脏数据兜底）
 //                       ③ 详情响应含 creator 5 字段（R-M3 返回面完整）
-//   本地无钉钉配置 → 真发 sent / already_sent / read-status creator 留部署后生产实测。
+//   隔离实例里没有真实钉钉 → 真发 sent / already_sent / read-status creator 留部署后生产实测。
 //   seed：直接 INSERT 2 个 FIXED 单（绕过流转，只测 notify-creator 落库分支）；测后按 location_info 清理。
+// [#106 S3b] 被测服务不再自 spawn 在 3000、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例（来源 = 本检出本地库快照），
+//   也可由 TEST_* 变量组指向已起好的隔离实例；服务日志取实例数据根里的 server.log（非自起实例没有日志，该项显式 SKIP 并计入汇总）。
 'use strict';
-const { spawn } = require('child_process');
 const http = require('http');
-const path = require('path');
-const jwt = require('jsonwebtoken');
+const fs = require('fs');
 const sqlite3 = require('sqlite3');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const T_ADMIN = jwt.sign({ id: 1, username: 'admin', role: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
-
-const db = new sqlite3.Database(path.join(__dirname, '..', 'task_pool.db'));
+let db = null;
 const get = (s, p = []) => new Promise((res, rej) => db.get(s, p, (e, r) => e ? rej(e) : res(r)));
 const run = (s, p = []) => new Promise((res, rej) => db.run(s, p, function (e) { e ? rej(e) : res(this); }));
 
 function req(token, method, p, body) {
   return new Promise((resolve) => {
     const data = body ? JSON.stringify(body) : null;
-    const r = http.request({ host: 'localhost', port: 3000, method, path: p,
+    // [#106 S3b 修复批 2a] 传完整 URL 对象：IPv6 回环 http://[::1]:端口 也能连（原先把 u.hostname 当 host 传，hostname 带方括号，Node 当成域名去解析）
+    const r = http.request(new URL(p, testEnv.env().baseUrl), { method,
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}) } },
       (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d })); });
     r.on('error', e => resolve({ status: 0, error: e.message }));
@@ -31,10 +29,10 @@ function req(token, method, p, body) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const jparse = (b) => { try { return JSON.parse(b || '{}'); } catch (_) { return {}; } };
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
 const check = (cond, label, detail) => { if (cond) { console.log('  OK ' + label); pass++; } else { console.log('  FAIL ' + label + ' — ' + (detail || '')); fail++; } };
 
-let server = null, idValid = null, idGhost = null;
+let idValid = null, idGhost = null;
 async function seed() {
   const r1 = await run(`INSERT INTO correction_requests (source_system, location_info, requester_name, status, correction_type, created_by, created_by_name) VALUES ('BMS','E2Ecreator 有效 created_by','E2E','FIXED','single',1,'admin')`);
   idValid = r1.lastID;
@@ -50,14 +48,18 @@ async function cleanup() {
     } catch (_) { await sleep(300); }
   }
 }
+async function closeAll() {
+  if (db) { await new Promise((r) => db.close(() => r())); db = null; }
+  try { await testEnv.teardown(); } catch (e) { console.error('teardown 失败：' + e.message); fail++; }
+}
 
 (async () => {
+  await testEnv.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；入口函数里第一条有副作用的语句（静态守卫硬规则）
   console.log('=== 细优② K4 creator 端点四件套 e2e（seed FIXED 单）===\n');
+  const E = testEnv.env();
+  db = new sqlite3.Database(E.dbPath, sqlite3.OPEN_READWRITE);
+  const T_ADMIN = await testEnv.signToken(1);
   await seed();
-  server = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..') });
-  let log = ''; server.stdout.on('data', d => log += d); server.stderr.on('data', d => log += d);
-  for (let i = 0; i < 40; i++) { const v = await req(T_ADMIN, 'GET', '/api/version'); if (v.status === 200) break; await sleep(250); }
-  await sleep(1000);
 
   try {
     // T1: 有效 created_by → notify-creator → 端点+权限+闸门通过 + 四件套落库
@@ -65,7 +67,7 @@ async function cleanup() {
     check(n1.status !== 500 && n1.status !== 403 && n1.status !== 409, `notify-creator FIXED 有效 created_by 非 500/403/409（端点+权限+FIXED 闸门通过）`, `status=${n1.status} ${(n1.body || '').slice(0, 120)}`);
     const row1 = await get('SELECT creator_notify_status, creator_notified_at FROM correction_requests WHERE id=?', [idValid]);
     check(row1 && row1.creator_notify_status && row1.creator_notify_status !== 'not_sent' && !!row1.creator_notified_at,
-      `四件套落库：creator_notify_status 已落（${row1 && row1.creator_notify_status}，本地无钉钉配置多为 failed）+ notified_at 写入`, JSON.stringify(row1));
+      `四件套落库：creator_notify_status 已落（${row1 && row1.creator_notify_status}，隔离实例里钉钉走替身）+ notified_at 写入`, JSON.stringify(row1));
 
     // T2: created_by 指向不存在用户 → not_found 落库（R-M4）
     const n2 = await req(T_ADMIN, 'POST', '/api/corrections/' + idGhost + '/notify-creator', {});
@@ -84,14 +86,20 @@ async function cleanup() {
     const rs = await req(T_ADMIN, 'GET', '/api/corrections/' + idValid + '/notify-read-status?recipient=creator');
     check(rs.status !== 500 && rs.status !== 403, `read-status?recipient=creator 非 500/403（READ_FIELD_MAP.creator + 权限映射通过）`, `status=${rs.status} ${(rs.body || '').slice(0, 100)}`);
 
-    const crashed = /ReferenceError|is not defined|is not a function|TypeError/.test(log);
-    check(!crashed, '服务日志无 ReferenceError/TypeError', crashed ? log.slice(-300) : '');
+    // T5: 服务日志无 ReferenceError/TypeError（日志 = 自起实例数据根里的 server.log；非自起实例没有日志，显式 SKIP）
+    if (E.logFile) {
+      const log = fs.readFileSync(E.logFile, 'utf8');
+      const crashed = /ReferenceError|is not defined|is not a function|TypeError/.test(log);
+      check(!crashed, '服务日志无 ReferenceError/TypeError', crashed ? log.slice(-300) : '');
+    } else {
+      skipped++;
+      console.log('  SKIP 服务日志无 ReferenceError/TypeError（非自起实例：没有可读的服务日志）');
+    }
   } finally {
-    if (server) server.kill('SIGKILL');
-    await sleep(800);
+    await sleep(300);
     await cleanup();
-    db.close();
+    await closeAll();
   }
-  console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} creator e2e：${pass} 通过 / ${fail} 失败`);
-  process.exit(fail === 0 ? 0 : 1);
-})().catch(async (e) => { console.error('e2e 异常：', e.message); if (server) server.kill('SIGKILL'); await sleep(800); try { await cleanup(); } catch (_) {} db.close(); process.exit(1); });
+  console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'} creator e2e：${pass} 通过 / ${fail} 失败${skipped ? ` / ${skipped} 跳过` : ''}`);
+  testEnv.finish(fail === 0 ? 0 : 1);   // 成功路径：finally 里 closeAll 已 await teardown；只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
+})().catch(async (e) => { console.error('e2e 异常：', e.message); try { await cleanup(); } catch (_) {} await closeAll(); process.exit(1); });

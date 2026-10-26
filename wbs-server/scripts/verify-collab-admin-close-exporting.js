@@ -50,19 +50,17 @@
  *   变异「WHERE 换回旧三态集合」只能证明该分支活着，证明不了"逐状态 vs 合并两 pending"的差别——
  *   无交错时两种写法行为完全相同。
  *
- * 前置：dev 服务器需在 BASE 运行（直改本地 dev 库，测完 cleanup）。
+ * 前置：无需手动起服务——入口 `await fx.ready()` 自起隔离实例（或核对 TEST_* 变量组），直改实例库造数，测完 cleanup。
  * 运行：node scripts/verify-collab-admin-close-exporting.js
  */
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = fx.BASE;
-const DB_PATH = fx.DB_PATH;
+// [#106 S4c-A2] 被测服务 / 实例库来自 test-env：fixture 的 BASE / DB_PATH 在 ready() 之前读会抛 FX_NOT_READY，
+//   不能在模块顶层取；改为 ready() 之后在入口里赋值。
+let BASE = null;
+let DB_PATH = null;
 const EXPORTER_ID = fx.EXPORTER_ID;
 const ADMIN_ID = fx.ADMIN_ID;
 
@@ -74,22 +72,26 @@ function ok(name, cond, detail) {
     if (cond) { pass++; console.log(`  ✓ ${name}`); }
     else { fail++; fails.push(name); console.log(`  ✗ ${name}  ${detail || ''}`); }
 }
-function dbGet(sql, params) {
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        // [#106 S4c-A2] 以下三个 helper：等 close 回调再落定，关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+        db.get(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); });
     });
 }
-function dbAll(sql, params) {
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.all(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.all(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); });
     });
 }
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.run(sql, params, function (e) { db.close(); e ? reject(e) : resolve(this); });
+        db.run(sql, params, function (e) {
+            const stmt = this;   // sqlite3 的 Statement（lastID / changes），须在回调里同步取走
+            db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(stmt); });
+        });
     });
 }
 
@@ -150,20 +152,14 @@ async function dbNowLocal() {
 }
 
 // admin-submit-on-behalf：multipart（reason + 可选 result_data/result_script）
-let tmpDir = null;
-function mkFile(name, content) {
-    if (!tmpDir) tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'admincl-'));
-    const p = path.join(tmpDir, name);
-    fs.writeFileSync(p, content);
-    return p;
-}
+//   [#106 S4c-A2] 原 mkFile / tmpDir / fs.rmSync：把内容写进系统临时目录再读回来塞进 Blob；内容与文件名都不变，
+//   改为直接用内存 Buffer 构造 Blob，不落临时文件，因此不再有 rmSync 和临时目录要清（fs / path / os 在本文件内只被它们使用）。
 async function adminSubmit(id, adminToken, { reason, withData = false, expectedStatus = null } = {}) {
     const form = new FormData();
     form.append('reason', reason);
     if (expectedStatus !== null) form.append('expected_status', expectedStatus);   // codex 08 HIGH-1：乐观前置（可选）
     if (withData) {
-        const p = mkFile('admin_result.xlsx', 'PK\x03\x04 fake');
-        form.append('result_data', new Blob([fs.readFileSync(p)]), 'admin_result.xlsx');
+        form.append('result_data', new Blob([Buffer.from('PK\x03\x04 fake')]), 'admin_result.xlsx');
     }
     const r = await fetch(`${BASE}/api/collab/requests/${id}/admin-submit-on-behalf`, {
         method: 'POST',
@@ -174,9 +170,9 @@ async function adminSubmit(id, adminToken, { reason, withData = false, expectedS
     return { status: r.status, body: j };
 }
 
+// 返回失败项数（不在 helper 里 process.exit：由入口在 teardown 之后 finish）
 async function main() {
-    try { await fetch(`${BASE}/`, { method: 'GET' }); }
-    catch (e) { console.error(`\n✗ 服务器不可达 ${BASE}，请先起 dev 服务\n`); process.exit(2); }
+    // [#106 S4c-A2] 原「fetch(BASE/) 探活失败 → process.exit(2)」已删：入口 ready() 返回后实例必然在；探活失败会在首个请求处直接抛错落到入口 catch。
 
     const adminToken = await fx.signAs(ADMIN_ID);
     const REASON = '直派单十几G大文件已线下移交业务方，走内网共享盘，admin 代为行政闭环';
@@ -687,12 +683,40 @@ async function main() {
     }
 
     console.log('\n=== 清理测试单 ===');
-    for (const id of created) { try { await fx.cleanup(id); } catch (e) { console.log(`  清理 #${id} 失败: ${e.message}`); } }
-    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {} }
+    // [#106 S4c 收口] 只移除清理成功的编号；失败的留在 created 里，由入口 finally 再试一次，仍失败才计失败（code = 1）
+    for (const id of created.slice()) {
+        try { await fx.cleanup(id); created.splice(created.indexOf(id), 1); } catch (e) { console.log(`  清理 #${id} 失败（保留在追踪数组，入口再试一次）: ${e.message}`); }
+    }
 
     console.log(`\n========== 结果：${pass} 通过 / ${fail} 失败 ==========`);
-    if (fail > 0) { console.log('失败项：', fails.join(' | ')); process.exit(1); }
-    console.log('✓ Commit B 全部通过\n');
+    if (fail > 0) console.log('失败项：', fails.join(' | '));
+    // 「全部通过」挪到入口最后一次清理重试之后、按最终 code 打印（[#106 S4c 送审前小修]）
+    return fail;
 }
 
-main().catch(e => { console.error('脚本异常:', e); process.exit(1); });
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        BASE = fx.BASE;
+        DB_PATH = fx.DB_PATH;
+        const nFailed = await main();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('脚本异常:', e);
+    } finally {
+        // [#106 S4c 收口] 剩余编号再试一次（main() 中途抛错尚未清理，或 main 内清理失败时留在 created 里）：逐个 try/catch，仍失败计失败（code = 1），不跳过 teardown
+        if (created.length > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 与 main 内第一次清理之间等 200ms（防事务外异步回写偶发 SQLITE_BUSY）
+        for (const id of created.slice()) {
+            try { await fx.cleanup(id); created.splice(created.indexOf(id), 1); } catch (e) { console.error(`清理 #${id} 最终失败：${e.message}`); code = 1; }
+        }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    if (code === 0) console.log('✓ Commit B 全部通过\n');   // 按最终 code（含清理重试与 teardown）打印
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('admin-close-exporting verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

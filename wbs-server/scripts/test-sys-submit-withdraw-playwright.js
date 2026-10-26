@@ -49,7 +49,11 @@
  *   T5 理由长度码点边界（W1 遗留 LOW）——中文+emoji 混合串（非 ASCII）测 300/301，证明按码点计数而非
  *      UTF-16 长度：300 码点提交成功（真实撤回），301 码点被前端拦截（settle 后确认零请求）
  *
- * 用法：node scripts/test-sys-submit-withdraw-playwright.js（需先启动 node server.js，端口 3000）
+ * 用法：node scripts/test-sys-submit-withdraw-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   依赖隔离实例（本检出本地库的快照）里存在固定用户 id 1（admin）/ 8（本人开发）/ 9（另一开发）与 id 13（受理人）——首跑核对。
+ *   夹具标题 / 标记带 RUN_TAG（时间戳 + 随机串，唯一）；OA 号走 set-oa-number 端点（无唯一性校验）、脚本不按 OA 号查询，固定数字起点不会撞车。
+ *   失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  */
 'use strict';
 const path = require('path');
@@ -57,32 +61,42 @@ const os = require('os');
 const fs = require('fs');
 const net = require('net');
 const crypto = require('crypto');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+// [#106 S4d-4] BASE_URL / DB_PATH / RUN_TAG / RUN_TAG_MARKER：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let RUN_TAG = null;
+let RUN_TAG_MARKER = null;
 
 const ADMIN_ID = 1;
 const DEV_ID = 8;         // 示例开发A——本文件的「本人」开发账号（登录人）
 const SECOND_DEV_ID = 9;  // 示例开发B——"交付属于另一开发"场景的实际提交者
 
-const RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-const RUN_TAG_MARKER = `RT-WITHDRAW-${RUN_TAG}`;
 const TITLE_PREFIX = '[pw-submit-withdraw]';
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 function jsonHeaders(tok) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` }; }
 function futureEstStr(days) {
@@ -147,7 +161,7 @@ function ensureServerListening(timeoutMs = 3000) {
         const sock = net.createConnection({ port, host });
         const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时`)); }, timeoutMs);
         sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js`)); });
+        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——ready() 之后被测实例应已在监听，请查隔离实例的启动日志`)); });
     });
 }
 // 未标记 toast 聚合读取——同 test-sys-submit-amend-playwright.js 范式：先标记现存 toast，动作后取未标记的。
@@ -320,6 +334,11 @@ async function mkFixtureViewableButRemovedFromRoster(adminTok, secondDevTok) {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+    RUN_TAG_MARKER = `RT-WITHDRAW-${RUN_TAG}`;
     await ensureServerListening();
     const adminTok = await signAs(ADMIN_ID);
     const devTok = await signAs(DEV_ID);
@@ -734,11 +753,38 @@ async function main() {
         console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
         if (fail > 0) { console.log('失败项：'); failDetails.forEach(m => console.log('  - ' + m)); }
     } finally {
-        await browser.close();
-        for (const id of createdIds) { try { await deleteIssueFully(id); } catch (e) { console.error(`清理 issue=${id} 失败：${e.message}`); } }
-        db.close();
+        // [#106 S4d-4] 浏览器关闭失败计失败
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        // [#106 S4d-4] 清理失败计失败：每个编号单独 try，清掉才移出追踪，有失败再试一轮（共 2 轮，间隔 200ms，删除语句幂等）；
+        //   遗留的编号逐个计失败；删后按编号回查残留（非 0 也计失败）。原来 catch 只 console.error，退出码不受影响
+        const allIds = createdIds.slice();
+        const lastErr = new Map();
+        for (let round = 0; round < 2 && createdIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            for (const id of createdIds.slice()) {
+                try {
+                    await deleteIssueFully(id);
+                    createdIds.splice(createdIds.indexOf(id), 1);
+                    lastErr.delete(id);
+                } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+            }
+        }
+        for (const id of createdIds) must(false, `清理 issue=${id} 失败（已重试 1 轮）：${lastErr.get(id)}`);
+        try {
+            if (allIds.length) {
+                const r = await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${allIds.map(() => '?').join(',')})`, allIds);
+                if (r && r.c !== 0) must(false, `夹具清理回查：仍有 ${r.c} 条 issue 残留`);
+            }
+        } catch (e) { must(false, `夹具清理回查失败：${e && e.message}`); }
     }
-    process.exit(fail > 0 ? 1 : 0);
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n=== 汇总：${pass} 通过 / ${fail} 失败 ===`);
+    if (fail > 0) { console.log('失败项：'); failDetails.forEach(m => console.log('  - ' + m)); }
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('测试运行异常：', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('测试运行异常：', e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

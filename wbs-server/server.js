@@ -51,9 +51,8 @@ const { findDownstreamCandidates } = createModelRelations;
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
-const DB_FILE = path.join(__dirname, 'task_pool.db');
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const ARCHIVE_DIR = path.join(__dirname, 'archive');
+// [#106 S1a] DB_FILE / UPLOAD_DIR / ARCHIVE_DIR 的定义挪到下方 dotenv 加载之后（取自运行模式判定结果，见「运行模式判定」段）；
+//   PORT 仍在 dotenv 之前读取、不改读取顺序（.env 里的 PORT 从未生效，改了会让生产 .env 的 PORT 突然生效）。
 
 // 环境配置
 // [#82 2026-09-16] 显式指定 .env 路径，不再依赖 process.cwd()。原写法 `config()` 按 cwd 解析：
@@ -64,6 +63,47 @@ const ARCHIVE_DIR = path.join(__dirname, 'archive');
 //   与 scripts/ 下全部脚本的既有范式一致（它们一直写 `{ path: path.join(__dirname, '..', '.env') }`）。
 //   生产不受影响：PM2 的 pm_cwd 已是 E:\Task_Pool\wbs-server（2026-09-16 `pm2 jlist` 实测）。
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+
+// ==================== 运行模式判定（#106 S1a · W1 隔离实例运行契约）====================
+// 必须在 dotenv 之后（SDH_* 可以来自 .env）、任何模块读取解密键 / 打开库 / 注册周期任务之前完成。
+//   正常模式（无 .sdh-instance、不设 SDH_*）：下面各常量取值与改造前逐字相同。
+//   隔离模式：库路径 / 数据根 / 外发 / 周期任务按判定结果；启动前先以只读方式核对库内身份（_sdh_instance），通过后才往下走。
+const instanceMode = require('./utils/instance-mode');
+const INSTANCE_CONFIG = instanceMode.getInstanceConfig();
+const externalGate = require('./utils/external-gate');   // [#106 S1b] 外部调用闸：外部库创建点在隔离模式抛 EXTERNAL_DISABLED（钉钉在 dingtalk-notify 内部走同一闸）
+if (INSTANCE_CONFIG.refuse) {
+    console.error(`[FATAL] 运行模式判定失败（${INSTANCE_CONFIG.code}）：${INSTANCE_CONFIG.message}`);
+    console.error('        拒绝启动。判定规则见 docs/local/多线并行/多线并行改造_方案_20261015_v1.3.md W1。');
+    process.exit(1);
+}
+// 已接受的残余（登记）：下面的核对是启动前一次性的只读核对；核对与主库连接打开（下方 new sqlite3.Database）之间库文件被替换、
+//   或 hot journal 回退（immutable 读）读到的是未回滚前的身份表，都不再二次拦截——为保持隔离实例的启动顺序与生产一致，
+//   不在主库打开回调里加复核。事后发现手段（W3 测试助手交付后生效）：其 ready() 的第 2 项在服务就绪后再只读读一次 _sdh_instance 核对——
+//   它是「事后发现」，不阻止启动期的写入（listen 回调里排队的写操作、initTable 在被换的库上可能已经执行）；
+//   且只覆盖经 W3 助手起的测试实例，W2 线服务（line start）没有这层事后核对。
+if (INSTANCE_CONFIG.mode === 'isolated') {
+    const identityCheck = require('./utils/instance-db').checkInstanceIdentitySync(INSTANCE_CONFIG.dbFile, {
+        expectedInstance: INSTANCE_CONFIG.instance,
+        expectedParent: INSTANCE_CONFIG.parentIdentity,
+    });
+    if (!identityCheck.ok) {
+        console.error(`[FATAL] 隔离实例库内身份核对失败（${identityCheck.code}）：${identityCheck.message}`);
+        console.error(`        实例=${INSTANCE_CONFIG.instance} 库=${INSTANCE_CONFIG.dbFile}`);
+        console.error('        拒绝启动：线的服务不能打开主工作区或其他线的库。');
+        process.exit(1);
+    }
+}
+const DB_FILE = INSTANCE_CONFIG.dbFile;
+const UPLOAD_DIR = INSTANCE_CONFIG.uploadDir;
+const ARCHIVE_DIR = INSTANCE_CONFIG.archiveDir;
+// 部署提交号：启动时读取一次，供 /api/version 展示；失败（无 git / 超时 / 非 git 目录）为 null，不阻塞、不拒绝启动。
+let DEPLOY_COMMIT = null;
+try {
+    const head = require('child_process').execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: __dirname, encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (/^[0-9a-f]{40}$/.test(head)) DEPLOY_COMMIT = head;
+} catch (_) { /* null */ }
 
 // ==================== 日志级别控制 ====================
 const LOG_LEVELS = { ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3 };
@@ -354,6 +394,35 @@ function requireCollabQualityDualCheckSchemaReady(req, res, next) {
         });
     }
     next();
+}
+
+// [#106 S3a] 主表初始化状态（只供 GET /api/health/ready 的 core 项读取，不被任何中间件使用）。语义：
+//   - 失败汇入：initTable 里「失败后只记日志 / 静默忽略然后继续运行」的语句，失败时调 recordCoreInitFailure(err)（打开主库的回调不动：verify-instance-mode 钉死它与生产写法一致，
+//     主库打不开时 initTable 不会执行，core 停在 NOT_READY）：
+//     记下**首个**错误（原错误对象，对外只经 utils/health-ready 的 codeOfError 折成 SQLITE_* 之类的稳定 code，原文不出）并立刻 ready=false。
+//     ALTER TABLE ... ADD COLUMN 的幂等失败（duplicate column name）是正常情况，经 coreAlterDone 过滤掉，不算失败。
+//     这些语句失败后的行为（继续运行、原有日志）一律不变——只多记一笔状态；没有回调的语句失败仍走未捕获异常 → 进程退出，不在此列。
+//     汇入 core 的范围：① initTable 里需求跟踪段到数据协作段之间以外的所有带回调语句（含 coreAlterDone）；② safeAlterAddColumn 的失败分支——**包括数据开发台账段里 issue_lite 的四个 safeAlterAddColumn
+//     调用**（它们经 safeAlterAddColumn 内部汇入 core）；③ verifyV2CollabSchema（启动后结构巡检）：三个 PRAGMA table_info 的查询错误与缺列、system_configs 存在性查询的错误与缺表、assign_mode 巡检的查询错误、
+//     collab_return_record 存在性（与 collab_quality_record 同一条查询）的错误与缺表——缺列 / 缺表用 code = CORE_SCHEMA_INCOMPLETE 的 Error（消息只含表名与缺失列名）。
+//     **不汇入 core**：a) 需求跟踪（ISSUE_*）与零星事项台账两段的失败汇入各自的模块就绪标志；b) 数据开发台账段里 issue_lite 自己的建表 / 迁移失败汇入 ISSUE_LITE_SCHEMA_STATE；
+//     c) 取数质量双校验的表存在性（collab_quality_record）与 7 列清单：runCollabQualityDualCheckMigration 的就绪校验（PRAGMA table_info(collab_quality_record) + 缺列检查）已经覆盖，归 collab_dualcheck 模块，避免跨模块重复归因；
+//     d) 数据巡检：assign_mode 非法值、reason_type 非法值只记日志——那是数据内容不是结构，纳入就绪条件的话任何带这类数据的来源库派生出的实例都永远起不来。
+//   - 完成：initTable 末尾那条排在 db.serialize 队列最后的 `SELECT 1` 回调触发时，若此前没有累计错误才置 ready=true；
+//     它**不代表**队列之外的异步分支（建表回调里的种子数据、迁移）都已完成——这些分支各自失败时同样调 recordCoreInitFailure，
+//     晚到的失败会把 ready 翻回 false（只增不减：一旦有错误就不再置回 true）。
+const CORE_INIT_STATE = { ready: false, error: null };
+function recordCoreInitFailure(err) {
+    if (CORE_INIT_STATE.error === null) CORE_INIT_STATE.error = err instanceof Error ? err : new Error(String(err));
+    CORE_INIT_STATE.ready = false;
+}
+/** ALTER TABLE ... ADD COLUMN / 迁移语句的回调：列已存在（duplicate column name）是幂等的正常情况，其余失败汇入 core */
+function coreAlterDone(err) {
+    if (err && !(err.message && err.message.includes('duplicate column name'))) recordCoreInitFailure(err);
+}
+/** 启动后结构巡检（verifyV2CollabSchema）发现缺列 / 缺表：汇入 core，code 固定 CORE_SCHEMA_INCOMPLETE；消息只含表名与缺失列名（对外只出 code，原文不出） */
+function recordCoreSchemaIncomplete(detail) {
+    recordCoreInitFailure(Object.assign(new Error(`core 结构不完整：${detail}`), { code: 'CORE_SCHEMA_INCOMPLETE' }));
 }
 
 
@@ -890,13 +959,47 @@ implBodyGate.use(IMPL_OBJECT_BODY_PATHS, bodyParser.json({ limit: '2.5mb' }));
 app.use('/api', implBodyGate);
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+// [#106 W4 / S6a] HTML 缓存串自动注入：页面里本地 JS/CSS 引用写 `X?v=auto`，由本中间件替换成 X 的内容指纹（sha256 前 12 位），
+//   并按最终响应体算强 ETag。**必须挂在下面的 express.static(public) 之前**，且只挂这一次：凡是 static 会以 HTML 文件字节作答的请求
+//   （含大小写 / `::$DATA` / `%5C` / 目录默认页等 Windows 别名，以及 URL 里带 `#` / 空白 / NBSP 时 parseurl 改走 url.parse 的那类写法）
+//   都由它注入后作答或拒绝，不会落到 static 吐未注入的原文。路径口径 = parseurl fastparse + send 0.19，自检有逐 URL 对拍用例。
+//   不碰 /api、/uploads、/archive（这些请求解析不到 public 里的 HTML，原样 next）。逻辑与自检见 utils/html-asset-fingerprint.js、
+//   scripts/verify-html-asset-fingerprint.js。
+const { createHtmlAssetInjector } = require('./utils/html-asset-fingerprint');
+app.use(createHtmlAssetInjector({ publicDir: path.join(__dirname, 'public'), log: logger, startupStamp: String(Date.now()) }));
 app.use(express.static(path.join(__dirname, 'public'), {
     maxAge: '7d', // 静态资源默认缓存7天（JS/CSS/图片等）
     setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.html')) {
-            // HTML 文件用协商缓存（ETag），而非完全禁止缓存
+        if (/\.html?$/i.test(filePath)) {
+            // HTML 文件用协商缓存（ETag），而非完全禁止缓存；扩展名不分大小写（Windows 上 P.HTML 与 p.html 是同一个文件），.htm 同理
             res.setHeader('Cache-Control', 'no-cache'); // 每次验证ETag，命中则304
             res.removeHeader('Pragma');
+        }
+        // 带 ?v=auto 的资源请求（页面未经注入就发出时才会出现）不给 7 天强缓存，否则浏览器会把 `?v=auto` 这个固定串缓存 7 天
+        //   解析**原始查询串**，不读 req.query（qs 会把 `?v[x]=1&v=auto` 合并成对象，精确的 v=auto 就看不见了）。
+        //   只用 JS 内置：verify-it-reconcile-r4-cases.js 在只含 app / express / path / fs 的 vm 沙箱里执行这段原文。
+        const rawUrl = (res.req && (res.req.url || res.req.originalUrl)) || '';
+        const qMark = rawUrl.indexOf('?');
+        if (qMark >= 0) {
+            let query = rawUrl.slice(qMark + 1);
+            const hashAt = query.indexOf('#');
+            if (hashAt >= 0) query = query.slice(0, hashAt);
+            const pairs = query.split('&');
+            for (let i = 0; i < pairs.length; i++) {
+                const eq = pairs[i].indexOf('=');
+                let key = eq < 0 ? pairs[i] : pairs[i].slice(0, eq);
+                let val = eq < 0 ? '' : pairs[i].slice(eq + 1);
+                try {
+                    key = decodeURIComponent(key.replace(/\+/g, ' '));
+                    val = decodeURIComponent(val.replace(/\+/g, ' '));
+                } catch (e) {
+                    continue; // 解码失败的段跳过
+                }
+                if (key === 'v' && val === 'auto') {
+                    res.setHeader('Cache-Control', 'no-cache');
+                    break;
+                }
+            }
         }
     }
 }));
@@ -1021,49 +1124,49 @@ function initTable() {
         created_by INTEGER,
         claimed_at DATETIME,
         done_at DATETIME
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 迁移:添加新字段(如果不存在)
-            db.run("ALTER TABLE task_pool ADD COLUMN owner_id INTEGER", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN created_by INTEGER", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN category TEXT DEFAULT 'DWD_DEV'", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN hold_reason TEXT", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN hold_by TEXT", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN priority TEXT DEFAULT 'P2'", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN linked_model_id INTEGER", () => { });
-            db.run("ALTER TABLE task_pool ADD COLUMN linked_model_name TEXT", () => { });
+            db.run("ALTER TABLE task_pool ADD COLUMN owner_id INTEGER", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN created_by INTEGER", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN category TEXT DEFAULT 'DWD_DEV'", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN hold_reason TEXT", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN hold_by TEXT", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN priority TEXT DEFAULT 'P2'", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN linked_model_id INTEGER", coreAlterDone);
+            db.run("ALTER TABLE task_pool ADD COLUMN linked_model_name TEXT", coreAlterDone);
             // ========== 新增字段: 工时管理 ==========
-            db.run("ALTER TABLE task_pool ADD COLUMN estimated_hours REAL DEFAULT 0", () => { });  // 预估工时(发布者填写)
-            db.run("ALTER TABLE task_pool ADD COLUMN deadline DATETIME", () => { });               // 截止时间(可选)
-            db.run("ALTER TABLE task_pool ADD COLUMN actual_hours REAL DEFAULT 0", () => { });     // 实际工时(系统自动计算)
-            db.run("ALTER TABLE task_pool ADD COLUMN dev_notes TEXT DEFAULT ''", () => { });       // 开发笔记(可选功能)
+            db.run("ALTER TABLE task_pool ADD COLUMN estimated_hours REAL DEFAULT 0", coreAlterDone);  // 预估工时(发布者填写)
+            db.run("ALTER TABLE task_pool ADD COLUMN deadline DATETIME", coreAlterDone);               // 截止时间(可选)
+            db.run("ALTER TABLE task_pool ADD COLUMN actual_hours REAL DEFAULT 0", coreAlterDone);     // 实际工时(系统自动计算)
+            db.run("ALTER TABLE task_pool ADD COLUMN dev_notes TEXT DEFAULT ''", coreAlterDone);       // 开发笔记(可选功能)
             // ========== 新增字段: 操作备注 ==========
-            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_reason TEXT", () => { });            // 放弃领取原因
-            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_at DATETIME", () => { });            // 放弃时间
-            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_by TEXT", () => { });                // 放弃操作人
-            db.run("ALTER TABLE task_pool ADD COLUMN reopen_reason TEXT", () => { });             // 退回原因
-            db.run("ALTER TABLE task_pool ADD COLUMN reopen_reason_type TEXT", () => { });       // 退回原因类型
-            db.run("ALTER TABLE task_pool ADD COLUMN reopen_at DATETIME", () => { });             // 退回时间
-            db.run("ALTER TABLE task_pool ADD COLUMN reopen_by TEXT", () => { });                 // 退回操作人
+            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_reason TEXT", coreAlterDone);            // 放弃领取原因
+            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_at DATETIME", coreAlterDone);            // 放弃时间
+            db.run("ALTER TABLE task_pool ADD COLUMN unclaim_by TEXT", coreAlterDone);                // 放弃操作人
+            db.run("ALTER TABLE task_pool ADD COLUMN reopen_reason TEXT", coreAlterDone);             // 退回原因
+            db.run("ALTER TABLE task_pool ADD COLUMN reopen_reason_type TEXT", coreAlterDone);       // 退回原因类型
+            db.run("ALTER TABLE task_pool ADD COLUMN reopen_at DATETIME", coreAlterDone);             // 退回时间
+            db.run("ALTER TABLE task_pool ADD COLUMN reopen_by TEXT", coreAlterDone);                 // 退回操作人
 
             // ========== 新增字段: 验收流程改造 ==========
-            db.run("ALTER TABLE task_pool ADD COLUMN script_source TEXT", () => { });            // 'auto' | 'manual' 脚本来源
-            db.run("ALTER TABLE task_pool ADD COLUMN reviewer_id INTEGER", () => { });           // 验收人ID
-            db.run("ALTER TABLE task_pool ADD COLUMN reviewer_name TEXT", () => { });            // 验收人姓名
-            db.run("ALTER TABLE task_pool ADD COLUMN review_time DATETIME", () => { });          // 验收时间
-            db.run("ALTER TABLE task_pool ADD COLUMN review_note TEXT", () => { });              // 验收备注
-            db.run("ALTER TABLE task_pool ADD COLUMN review_checklist TEXT", () => { });         // 验收勾选项 JSON
-            db.run("ALTER TABLE task_pool ADD COLUMN script_snapshot TEXT", () => { });          // 归档时脚本快照 JSON
+            db.run("ALTER TABLE task_pool ADD COLUMN script_source TEXT", coreAlterDone);            // 'auto' | 'manual' 脚本来源
+            db.run("ALTER TABLE task_pool ADD COLUMN reviewer_id INTEGER", coreAlterDone);           // 验收人ID
+            db.run("ALTER TABLE task_pool ADD COLUMN reviewer_name TEXT", coreAlterDone);            // 验收人姓名
+            db.run("ALTER TABLE task_pool ADD COLUMN review_time DATETIME", coreAlterDone);          // 验收时间
+            db.run("ALTER TABLE task_pool ADD COLUMN review_note TEXT", coreAlterDone);              // 验收备注
+            db.run("ALTER TABLE task_pool ADD COLUMN review_checklist TEXT", coreAlterDone);         // 验收勾选项 JSON
+            db.run("ALTER TABLE task_pool ADD COLUMN script_snapshot TEXT", coreAlterDone);          // 归档时脚本快照 JSON
 
             // ========== 性能优化：添加索引 ==========
-            db.run("CREATE INDEX IF NOT EXISTS idx_task_linked_model_status ON task_pool(linked_model_id, status)", () => { });
-            db.run("CREATE INDEX IF NOT EXISTS idx_task_status ON task_pool(status)", () => { });
+            db.run("CREATE INDEX IF NOT EXISTS idx_task_linked_model_status ON task_pool(linked_model_id, status)", coreAlterDone);
+            db.run("CREATE INDEX IF NOT EXISTS idx_task_status ON task_pool(status)", coreAlterDone);
 
             // ========== 数据完整性：同模型只能有一个未归档任务 ==========
             // 应用层 assertNoActiveTaskForModel 做友好提示，数据库层 partial unique index 兜底防并发
             db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_pool_one_active_per_model
                     ON task_pool(linked_model_id)
-                    WHERE linked_model_id IS NOT NULL AND status != 'ARCHIVED'`, (err) => {
+                    WHERE linked_model_id IS NOT NULL AND status != 'ARCHIVED'`, (err) => { if (err) recordCoreInitFailure(err);
                 if (err) logger.error('Failed to create partial unique index idx_task_pool_one_active_per_model:', err.message);
             });
         }
@@ -1078,22 +1181,23 @@ function initTable() {
         role TEXT DEFAULT 'user',
         status TEXT DEFAULT 'active',
         created_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 检查是否存在管理员账户,不存在则创建默认管理员
-            db.get("SELECT id FROM users WHERE username = 'admin'", [], async (err, row) => {
+            db.get("SELECT id FROM users WHERE username = 'admin'", [], async (err, row) => { if (err) recordCoreInitFailure(err);
                 if (!row) {
                     try {
                         const hashedPassword = await bcrypt.hash('change_me_on_first_login', 10);
                         db.run(
                             "INSERT INTO users (username, password, display_name, role, created_at) VALUES (?, ?, ?, ?, datetime('now', 'localtime'))",
                             ['admin', hashedPassword, '管理员', 'admin'],
-                            (err) => {
+                            (err) => { if (err) recordCoreInitFailure(err);
                                 if (!err) logger.info('默认管理员账户已创建: admin/change_me_on_first_login');
                             }
                         );
                     } catch (e) {
                         console.error('创建默认管理员失败:', e);
+                        recordCoreInitFailure(e);
                     }
                 }
             });
@@ -1116,7 +1220,7 @@ function initTable() {
     )`);
 
     // 为 task_transfers 表添加 reason 字段（如果不存在）
-    db.run(`ALTER TABLE task_transfers ADD COLUMN reason TEXT`, (err) => {
+    db.run(`ALTER TABLE task_transfers ADD COLUMN reason TEXT`, (err) => { coreAlterDone(err);
         // 忽略列已存在的错误
     });
 
@@ -1140,10 +1244,10 @@ function initTable() {
         original_name TEXT NOT NULL,
         created_at DATETIME DEFAULT (datetime('now', 'localtime')),
         FOREIGN KEY (task_id) REFERENCES task_pool(id)
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // ==================== 数据迁移: 旧版单文件 -> 新版多附件 ====================
-            db.all("SELECT id, file_path FROM task_pool WHERE file_path IS NOT NULL AND file_path != ''", (err, rows) => {
+            db.all("SELECT id, file_path FROM task_pool WHERE file_path IS NOT NULL AND file_path != ''", (err, rows) => { if (err) recordCoreInitFailure(err);
                 if (err) return console.error("[Migration] Error checking legacy files:", err);
 
                 if (rows.length > 0) {
@@ -1192,41 +1296,41 @@ function initTable() {
         status TEXT DEFAULT 'ONLINE', -- 状态: CREATED, DEVELOPING, REVIEWING, ONLINE, OFFLINE
         created_at DATETIME DEFAULT (datetime('now', 'localtime')),
         updated_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 迁移: 添加源系统相关字段(如果不存在)
-            db.run("ALTER TABLE data_models ADD COLUMN source_system TEXT", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN source_table TEXT", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN model_type TEXT DEFAULT 'TABLE'", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN source_system TEXT", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN source_table TEXT", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN model_type TEXT DEFAULT 'TABLE'", coreAlterDone);
             // 迁移: 添加创建者ID字段(用于权限控制)
-            db.run("ALTER TABLE data_models ADD COLUMN created_by_id INTEGER", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN created_by_id INTEGER", coreAlterDone);
             // 迁移: 添加资产分类字段 (core: 核心资产, general: 一般资产)
-            db.run("ALTER TABLE data_models ADD COLUMN category TEXT DEFAULT 'general'", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN category TEXT DEFAULT 'general'", coreAlterDone);
             // 迁移: 添加DIM层配置字段 (JSON格式，存储SCD配置、源表、字段等)
-            db.run("ALTER TABLE data_models ADD COLUMN dim_config TEXT", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN dim_config TEXT", coreAlterDone);
             // 迁移: 添加软删除字段
-            db.run("ALTER TABLE data_models ADD COLUMN is_deleted INTEGER DEFAULT 0", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN deleted_at DATETIME", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN deleted_by INTEGER", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN delete_reason TEXT", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN is_deleted INTEGER DEFAULT 0", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN deleted_at DATETIME", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN deleted_by INTEGER", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN delete_reason TEXT", coreAlterDone);
             // 迁移: 添加脚本保存相关字段
-            db.run("ALTER TABLE data_models ADD COLUMN script_path TEXT", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN script_saved_at DATETIME", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN script_saved_by TEXT", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN script_path TEXT", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN script_saved_at DATETIME", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN script_saved_by TEXT", coreAlterDone);
             // 迁移: 添加脚本人工编辑标记字段
-            db.run("ALTER TABLE data_models ADD COLUMN script_modified INTEGER DEFAULT 0", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN script_modified_by TEXT", () => { });
-            db.run("ALTER TABLE data_models ADD COLUMN script_modified_at DATETIME", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN script_modified INTEGER DEFAULT 0", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN script_modified_by TEXT", coreAlterDone);
+            db.run("ALTER TABLE data_models ADD COLUMN script_modified_at DATETIME", coreAlterDone);
             // 迁移: 添加配置模式字段（standard=标准配置, custom=自定义脚本）
-            db.run("ALTER TABLE data_models ADD COLUMN config_mode TEXT DEFAULT 'standard'", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN config_mode TEXT DEFAULT 'standard'", coreAlterDone);
             // 迁移: 添加设计备注字段（记录模型设计决策的原因）
-            db.run("ALTER TABLE data_models ADD COLUMN design_notes TEXT", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN design_notes TEXT", coreAlterDone);
             // 迁移: 添加伴生表从属字段（指向主表 model id，NULL 表示非伴生表）
-            db.run("ALTER TABLE data_models ADD COLUMN companion_of INTEGER", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN companion_of INTEGER", coreAlterDone);
             // 迁移 (#77 C1a): 配置版本号——会改变模型产出的写入 +1（方案 v0.9 §4.1.1）；回填由 scripts/migrate-model-config-rev.js 负责
-            db.run("ALTER TABLE data_models ADD COLUMN config_rev INTEGER NOT NULL DEFAULT 1", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN config_rev INTEGER NOT NULL DEFAULT 1", coreAlterDone);
             // 迁移 (#77 C2a): 实现说明（B 类字段：现在怎么跑；不触发 config_rev 递增，方案 v0.9 §4.1.1 / §4.2）
-            db.run("ALTER TABLE data_models ADD COLUMN impl_note TEXT", () => { });
+            db.run("ALTER TABLE data_models ADD COLUMN impl_note TEXT", coreAlterDone);
         }
     });
 
@@ -1262,18 +1366,18 @@ function initTable() {
         prod_hash TEXT, prod_missing INTEGER DEFAULT 0, verified_at TEXT,
         last_attempt_at TEXT, last_error TEXT,
         is_deleted INTEGER DEFAULT 0, created_at TEXT, updated_at TEXT, created_by TEXT, updated_by TEXT
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (err) return logger.error('创建 model_impl_objects 失败:', err.message);
         db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_impl_obj_identity
             ON model_impl_objects(obj_type, IFNULL(db_connection_id,0), IFNULL(schema_name,'') COLLATE NOCASE, obj_name COLLATE NOCASE) WHERE is_deleted = 0`,
-            (idxErr) => { if (idxErr) logger.error('创建 idx_impl_obj_identity 失败:', idxErr.message); });
+            (idxErr) => { if (idxErr) recordCoreInitFailure(idxErr); if (idxErr) logger.error('创建 idx_impl_obj_identity 失败:', idxErr.message); });
     });
     db.run(`CREATE TABLE IF NOT EXISTS model_impl_links (
         model_id INTEGER NOT NULL, object_id INTEGER NOT NULL,
         role TEXT NOT NULL,               -- 对该模型的职责，如「A/B 切换发布」
         sort_no INTEGER NOT NULL DEFAULT 0, created_at TEXT, created_by TEXT,
         PRIMARY KEY (model_id, object_id)
-    )`, (err) => { if (err) logger.error('创建 model_impl_links 失败:', err.message); });
+    )`, (err) => { if (err) recordCoreInitFailure(err); if (err) logger.error('创建 model_impl_links 失败:', err.message); });
 
     // 创建源系统字典表
     db.run(`CREATE TABLE IF NOT EXISTS sys_source_systems (
@@ -1282,10 +1386,10 @@ function initTable() {
         name TEXT NOT NULL,           -- 系统名称: 业务管理系统
         description TEXT,
         created_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 初始化默认源系统
-            db.get("SELECT count(*) as count FROM sys_source_systems", [], (err, row) => {
+            db.get("SELECT count(*) as count FROM sys_source_systems", [], (err, row) => { if (err) recordCoreInitFailure(err);
                 if (!err && row.count === 0) {
                     const stmt = db.prepare("INSERT INTO sys_source_systems (code, name, description) VALUES (?, ?, ?)");
                     stmt.run("BMS", "业务管理系统", "Business Management System - 业务管理核心系统");
@@ -1310,12 +1414,12 @@ function initTable() {
         description TEXT,
         status TEXT DEFAULT 'active', -- 状态: active/deprecated
         created_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 添加 status 字段 (兼容旧表)
-            db.run("ALTER TABLE sys_domains ADD COLUMN status TEXT DEFAULT 'active'", () => { });
+            db.run("ALTER TABLE sys_domains ADD COLUMN status TEXT DEFAULT 'active'", coreAlterDone);
             // 初始化默认域
-            db.get("SELECT count(*) as count FROM sys_domains", [], (err, row) => {
+            db.get("SELECT count(*) as count FROM sys_domains", [], (err, row) => { if (err) recordCoreInitFailure(err);
                 if (!err && row.count === 0) {
                     const stmt = db.prepare("INSERT INTO sys_domains (code, name, description, status) VALUES (?, ?, ?, 'active')");
                     stmt.run("contract", "合同域", "合同管理相关业务");
@@ -1337,10 +1441,10 @@ function initTable() {
         enabled INTEGER DEFAULT 1,        -- 是否启用: 1启用, 0禁用
         sort_order INTEGER DEFAULT 0,     -- 排序
         updated_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 初始化默认提示配置
-            db.get("SELECT count(*) as count FROM task_tips", [], (err, row) => {
+            db.get("SELECT count(*) as count FROM task_tips", [], (err, row) => { if (err) recordCoreInitFailure(err);
                 if (!err && row.count === 0) {
                     const defaultTips = [
                         {
@@ -1434,12 +1538,12 @@ function initTable() {
         source_system_code TEXT,          -- 源系统代码（如 BMS），用于关联模型的 source_system 字段
         created_at DATETIME DEFAULT (datetime('now', 'localtime')),
         updated_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table db_connections created or already exists");
             // 迁移：添加新字段
-            db.run("ALTER TABLE db_connections ADD COLUMN connection_type TEXT DEFAULT 'warehouse'", () => { });
-            db.run("ALTER TABLE db_connections ADD COLUMN source_system_code TEXT", () => { });
+            db.run("ALTER TABLE db_connections ADD COLUMN connection_type TEXT DEFAULT 'warehouse'", coreAlterDone);
+            db.run("ALTER TABLE db_connections ADD COLUMN source_system_code TEXT", coreAlterDone);
         }
     });
 
@@ -1450,10 +1554,10 @@ function initTable() {
         config_value TEXT NOT NULL,       -- 配置值
         description TEXT,                 -- 说明
         updated_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             // 初始化默认验收配置
-            db.get("SELECT count(*) as count FROM validation_config", [], (err, row) => {
+            db.get("SELECT count(*) as count FROM validation_config", [], (err, row) => { if (err) recordCoreInitFailure(err);
                 if (!err && row.count === 0) {
                     const defaultConfigs = [
                         { key: 'null_rate_threshold', value: '5', desc: '空值率阈值（百分比）' },
@@ -1485,13 +1589,13 @@ function initTable() {
         created_at DATETIME DEFAULT (datetime('now', 'localtime')),
         FOREIGN KEY (model_id) REFERENCES data_models(id),
         FOREIGN KEY (db_connection_id) REFERENCES db_connections(id)
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table model_test_records created or already exists");
             // 迁移: 添加 invalidated 字段（withdraw 时标记旧验收记录失效）
-            db.run("ALTER TABLE model_test_records ADD COLUMN invalidated INTEGER DEFAULT 0", () => { });
+            db.run("ALTER TABLE model_test_records ADD COLUMN invalidated INTEGER DEFAULT 0", coreAlterDone);
             // 迁移 (#77 C1a): 验收记录抄录验收开始时的模型 config_rev（可空；NULL = 不属于当前版本，保守按需复验）
-            db.run("ALTER TABLE model_test_records ADD COLUMN config_rev INTEGER", () => { });
+            db.run("ALTER TABLE model_test_records ADD COLUMN config_rev INTEGER", coreAlterDone);
         }
     });
 
@@ -1519,21 +1623,21 @@ function initTable() {
         FOREIGN KEY (owner_id) REFERENCES users(id),
         FOREIGN KEY (parent_metric_id) REFERENCES metrics(id),
         FOREIGN KEY (linked_model_id) REFERENCES data_models(id)
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table metrics created or already exists");
             // 迁移：为已有数据库补充新字段
-            db.run(`ALTER TABLE metrics ADD COLUMN formula TEXT`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN parent_metric_id INTEGER REFERENCES metrics(id)`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN sort_order INTEGER DEFAULT 0`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN dax_def TEXT`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN source_table TEXT`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN metric_category TEXT DEFAULT 'basic'`, () => {
+            db.run(`ALTER TABLE metrics ADD COLUMN formula TEXT`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN parent_metric_id INTEGER REFERENCES metrics(id)`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN sort_order INTEGER DEFAULT 0`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN dax_def TEXT`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN source_table TEXT`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN metric_category TEXT DEFAULT 'basic'`, (coreStmtErr) => { coreAlterDone(coreStmtErr);
                 // 将 assess_ 前缀的指标标记为 assessment
-                db.run(`UPDATE metrics SET metric_category = 'assessment' WHERE metric_code LIKE 'assess_%' AND (metric_category IS NULL OR metric_category = 'basic')`, () => {});
+                db.run(`UPDATE metrics SET metric_category = 'assessment' WHERE metric_code LIKE 'assess_%' AND (metric_category IS NULL OR metric_category = 'basic')`, coreAlterDone);
             });
-            db.run(`ALTER TABLE metrics ADD COLUMN assess_dept TEXT`, () => {});
-            db.run(`ALTER TABLE metrics ADD COLUMN assess_note TEXT`, () => {});
+            db.run(`ALTER TABLE metrics ADD COLUMN assess_dept TEXT`, coreAlterDone);
+            db.run(`ALTER TABLE metrics ADD COLUMN assess_note TEXT`, coreAlterDone);
         }
     });
 
@@ -1551,7 +1655,7 @@ function initTable() {
         updated_at DATETIME DEFAULT (datetime('now', 'localtime')),
         FOREIGN KEY (metric_id) REFERENCES metrics(id),
         FOREIGN KEY (updated_by) REFERENCES users(id)
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table metrics_history created or already exists");
         }
@@ -1563,7 +1667,7 @@ function initTable() {
         tag_name TEXT UNIQUE NOT NULL,        -- 标签名，如"核心指标"
         color TEXT DEFAULT '#d97706',         -- 标签颜色
         created_at DATETIME DEFAULT (datetime('now', 'localtime'))
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table metrics_tags created or already exists");
             // 插入默认标签
@@ -1587,7 +1691,7 @@ function initTable() {
         PRIMARY KEY (metric_id, tag_id),
         FOREIGN KEY (metric_id) REFERENCES metrics(id) ON DELETE CASCADE,
         FOREIGN KEY (tag_id) REFERENCES metrics_tags(id) ON DELETE CASCADE
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table metrics_tag_rel created or already exists");
         }
@@ -1601,7 +1705,7 @@ function initTable() {
         PRIMARY KEY (metric_id, depends_on_metric_id),
         FOREIGN KEY (metric_id) REFERENCES metrics(id) ON DELETE CASCADE,
         FOREIGN KEY (depends_on_metric_id) REFERENCES metrics(id) ON DELETE CASCADE
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table metrics_dependencies created or already exists");
         }
@@ -1621,7 +1725,7 @@ function initTable() {
         admin_reply_at DATETIME,
         created_at DATETIME DEFAULT (datetime('now', 'localtime')),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )`, (err) => {
+    )`, (err) => { if (err) recordCoreInitFailure(err);
         if (!err) {
             logger.info("Table doc_comments created or already exists");
         }
@@ -2419,7 +2523,7 @@ function initTable() {
         //   方案 §3：仅 1 个 assign_mode 字段，枚举值 ['normal', 'admin_direct']
         //   - 历史行（v1.72.2 前）自动填默认值 'normal' 兼容
         //   - 应用层守卫枚举值（SQLite ALTER 不支持 CHECK 约束）
-        //   - verify-assign-mode-history.js 巡检：SELECT COUNT(*) FROM collab_requests WHERE assign_mode IS NULL = 0
+        //   - probe-assign-mode-history.js 巡检：SELECT COUNT(*) FROM collab_requests WHERE assign_mode IS NULL = 0
         //
         //   ⚠️ 重要语义（codex 32 审 M-2 采纳）：
         //   assign_mode 是「来源/历史标识」而非「当前流程模式」。一旦创建为 admin_direct，
@@ -2564,7 +2668,11 @@ function initTable() {
         //   把触发放进 serialize 块内最后一个 db.run 的 callback——保证它一定在 7 个 ALTER 排队消耗完之后执行。
         //   v1.75.0 runIssueV1750Migration 是同步 await 在 IIFE 内调，本范式是 serialize 队列内 callback 触发，
         //   两套范式都解时序竞态，但路径不同：v1.75.0 因为 PRAGMA 检查表存在性后才跑 migration（不与 serialize 并发）。
-        db.run('SELECT 1', () => {
+        db.run('SELECT 1', (coreErr) => {
+            // [#106 S3a] 主表初始化完成标志（见 CORE_INIT_STATE 注释）；只记状态，下面的迁移触发照旧执行。
+            //   队列收尾时此前没有累计错误才置 ready=true（前序语句的失败已由各自回调经 recordCoreInitFailure 记入）；本条自己失败也记为错误。
+            if (coreErr) recordCoreInitFailure(coreErr);
+            else if (CORE_INIT_STATE.error === null) CORE_INIT_STATE.ready = true;
             runCollabQualityDualCheckMigration().catch((e) => {
                 COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.ready = false;
                 COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error = `取数质量双校验迁移异常：${e && e.message}`;
@@ -2806,12 +2914,14 @@ function verifyV2CollabSchema() {
     db.all("PRAGMA table_info(collab_requests)", [], (err, rows) => {
         if (err) {
             logger.error('v2.0 schema 健康检查失败（无法读取 collab_requests 表结构）:', err.message);
+            recordCoreInitFailure(err);   // [#106 S3a] 汇入 core（行为不变：仍只记日志后返回）
             return;
         }
         const actualCols = rows.map(r => r.name);
         const missing = expectedCollabRequest.filter(c => !actualCols.includes(c));
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_requests 缺失字段: ${missing.join(', ')}`);
+            recordCoreSchemaIncomplete(`collab_requests 缺列 ${missing.join(',')}`);
         } else {
             logger.info(`v2.0 schema 健康检查通过：collab_requests ${expectedCollabRequest.length} 个新增字段齐全（含 D3 attachment_dir + v3 二级转派 5 字段 + v1.66.1 对接人钉钉已读跟踪 3 字段 + v1.66.2 软删除 3 字段 + v1.67.1 归档锁定 3 字段 + v1.69.0 钉钉沟通群 5 字段 + v1.70.4 requester_phone + v1.71.0 三级转发 5 字段 + v1.72.3 assign_mode + 导出通知业务方 done_* 3 字段）`);
         }
@@ -2826,9 +2936,12 @@ function verifyV2CollabSchema() {
         (err, rows) => {
             if (err) {
                 logger.warn(`v1.72.3 assign_mode 巡检查询失败: ${err.message}`);
+                recordCoreInitFailure(err);   // [#106 S3a] 查询失败汇入 core（语句没执行成功，不是数据问题）
                 return;
             }
             if (rows && rows.length > 0) {
+                // [#106 S3a] 非法值是数据巡检，**不汇入 core**：就绪条件是「初始化语句全部成功 + 结构齐全」，不含数据内容——
+                //   否则任何带这类数据的来源库派生出的测试实例都永远起不来。原样只记日志。
                 logger.error(`v1.72.3 assign_mode 异常巡检：发现 ${rows.length}+ 行非法 assign_mode（前 5 个 id=${rows.map(r => r.id).join(',')}）。需要人工修复为 normal 或 admin_direct。`);
             } else {
                 logger.info('v1.72.3 assign_mode 巡检通过：所有协作单 assign_mode 合法（normal / admin_direct）');
@@ -2836,27 +2949,32 @@ function verifyV2CollabSchema() {
         }
     );
     db.all("PRAGMA table_info(collab_attachments)", [], (err, rows) => {
-        if (err) return;
+        if (err) { recordCoreInitFailure(err); return; }   // [#106 S3a] 原来是静默 return，现汇入 core
         const actualCols = rows.map(r => r.name);
         // v1.70.0 加 3 字段：failed_at / failed_reason / failed_attempt_seq（方案 §1.2 撞墙附件保留）
         const missing = ['submission_version', 'status', 'superseded_at',
                          'failed_at', 'failed_reason', 'failed_attempt_seq'].filter(c => !actualCols.includes(c));
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，collab_attachments 缺失字段: ${missing.join(', ')}`);
+            recordCoreSchemaIncomplete(`collab_attachments 缺列 ${missing.join(',')}`);
         }
     });
     db.all("PRAGMA table_info(users)", [], (err, rows) => {
-        if (err) return;
+        if (err) { recordCoreInitFailure(err); return; }   // [#106 S3a] 原来是静默 return，现汇入 core
         const actualCols = rows.map(r => r.name);
         const missing = ['phone', 'dingtalk_user_id', 'remark'].filter(c => !actualCols.includes(c));
         if (missing.length > 0) {
             logger.error(`v2.0 schema 迁移不完整，users 缺失字段: ${missing.join(', ')}`);
+            recordCoreSchemaIncomplete(`users 缺列 ${missing.join(',')}`);
         }
     });
     db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='system_configs'", [], (err, row) => {
-        if (err) return;
+        if (err) { recordCoreInitFailure(err); return; }   // [#106 S3a] 原来是静默 return，现汇入 core
         if (!row) {
-            logger.error('v2.0 schema 迁移不完整，system_configs 表未创建');
+            // 同一句话既写日志又作 core 错误的消息（表名只此一份字面量：verify-instance-config-keys 按字面量指纹登记本站点）；对外只出 code
+            const incompleteMsg = 'v2.0 schema 迁移不完整，system_configs 表未创建';
+            logger.error(incompleteMsg);
+            recordCoreSchemaIncomplete(incompleteMsg);
         }
     });
 
@@ -2869,12 +2987,15 @@ function verifyV2CollabSchema() {
         "(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='collab_return_record') AS r",
         [],
         (err, row) => {
-            if (err) return;
+            if (err) { recordCoreInitFailure(err); return; }   // [#106 S3a] 原来是静默 return，现汇入 core（这条查询同时覆盖 collab_return_record，后者没有别的就绪校验）
             const missing = [];
             if (!row || !row.q) missing.push('collab_quality_record');
             if (!row || !row.r) missing.push('collab_return_record');
             if (missing.length > 0) {
                 logger.error(`取数质量 v3.0 schema 迁移不完整，未创建：${missing.join(' + ')}`);
+                // [#106 S3a] 只有 collab_return_record 缺失才汇入 core：collab_quality_record 的存在性已被 runCollabQualityDualCheckMigration 的就绪校验覆盖
+                //   （PRAGMA table_info 查不到列 → 缺 7 列 → COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error），归 collab_dualcheck 模块，不跨模块重复归因
+                if (!row || !row.r) recordCoreSchemaIncomplete('collab_return_record 表未创建');
             } else {
                 logger.info('取数质量 v3.0 schema 健康检查通过：collab_quality_record + collab_return_record 就绪');
             }
@@ -2886,6 +3007,8 @@ function verifyV2CollabSchema() {
     //   ⚠️ 分层兼容警告（codex Commit A 审 medium-2）：旧库 ALTER ADD COLUMN 不能加 CHECK 约束 →
     //     excel_is_columns_complete IN(0,1) / record_kind IN('passed','failed') CHECK 仅在新库 CREATE TABLE 生效。
     //     旧库依赖业务层 Commit B builder（recordQualityForDeveloperSubmit）归一化兜底 + 迁移函数抽样验证 detectIllegalDualCheckValues 防误写脏数据。
+    //   [#106 S3a] 本段**不汇入 core**：7 列清单与 runCollabQualityDualCheckMigration 的就绪校验同一份（COLLAB_QUALITY_DUALCHECK_COLS，那里 PRAGMA 失败 / 缺列都会记入
+    //   COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE.error → collab_dualcheck 模块未就绪），归该模块，不跨模块重复归因。
     db.all('PRAGMA table_info(collab_quality_record)', [], (err, rows) => {
         if (err) return;
         const actualCols = rows.map(r => r.name);
@@ -2901,6 +3024,7 @@ function verifyV2CollabSchema() {
         "SELECT id, collab_request_id, reason_type FROM collab_return_record WHERE reason_type NOT IN ('DEV_QUALITY','REQ_CHANGE','ENV_ISSUE','BIZ_ADJUST') LIMIT 5",
         [],
         (err, rows) => {
+            // [#106 S3a] 本段不汇入 core：非法值是数据巡检（同 assign_mode 非法值）；表缺失由上面的存在性检查汇入；这条查询自身的错误（瞬时 BUSY 等）仍静默——它是数据巡检不是就绪条件（残余，见交付报告）
             if (err) return;  // 表尚未建好时静默（建表 db.run 在同 serialize 块更早执行，正常不会触发）
             if (rows && rows.length > 0) {
                 logger.error(`取数质量 v3.0 reason_type 异常巡检：发现 ${rows.length}+ 行非法 reason_type（前 5 个 id=${rows.map(r => r.id).join(',')}）`);
@@ -2920,6 +3044,7 @@ function safeAlterAddColumn(table, column, type) {
             return; // 幂等：列已存在
         }
         logger.error(`ALTER TABLE ${table} ADD COLUMN ${column} 失败:`, err.message);
+        recordCoreInitFailure(err);   // [#106 S3a] 只记日志后继续的失败，同时汇入 core 就绪状态（行为不变）
     });
 }
 
@@ -2931,31 +3056,22 @@ function safeAlterAddColumn(table, column, type) {
 // 教训：回退值一旦存在，"忘记配置"就会静默降级成"没有加密"，且不会有任何告警。
 // 同一密钥的消费面不止一处（db_connections.password 与 system_configs.config_value_encrypted），
 // 轮转时必须按 encryptPassword/decryptPassword 的全部调用点扫一遍，不能只改先发现的那张表。
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
+// [#106 S1a · 偏差 B1] 隔离模式用固定的隔离专用键（代码常量），从不读进程的 DB_ENCRYPTION_KEY，隔离库里只有用它加密的虚拟凭证；
+//   正常模式（含下面的 fail-closed）与改造前原样。AES 算法抽成可传键的纯函数 utils/aes-password.js（逐字节同口径）。
+const aesPassword = require('./utils/aes-password');
+const ENCRYPTION_KEY = INSTANCE_CONFIG.mode === 'isolated' ? aesPassword.ISOLATED_ENCRYPTION_KEY : process.env.DB_ENCRYPTION_KEY;
 if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
     console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
     console.error('        生成方式: openssl rand -base64 32 | cut -c1-32');
     console.error('        写入 wbs-server/.env 后重启。拒绝以弱加密启动。');
     process.exit(1);
 }
-const IV_LENGTH = 16;
-
 function encryptPassword(password) {
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);
-    let encrypted = cipher.update(password, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
+    return aesPassword.encryptWithKey(ENCRYPTION_KEY, password);
 }
 
 function decryptPassword(encryptedPassword) {
-    const parts = encryptedPassword.split(':');
-    const iv = Buffer.from(parts[0], 'hex');
-    const encrypted = parts[1];
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    return aesPassword.decryptWithKey(ENCRYPTION_KEY, encryptedPassword);
 }
 
 // ==================== SQL Server 连接管理 ====================
@@ -2968,6 +3084,7 @@ const mssqlPools = new Map();
  * @returns {Promise<sql.ConnectionPool>}
  */
 async function getMssqlPool(connConfig) {
+    externalGate.assertExternalDbAllowed('sqlserver');   // [#106 S1b] 隔离实例在建连前抛 EXTERNAL_DISABLED；正常模式无副作用
     const poolKey = `${connConfig.host}:${connConfig.port}:${connConfig.database}`;
 
     if (mssqlPools.has(poolKey)) {
@@ -3033,6 +3150,7 @@ const mysqlPools = new Map();
  * @returns {Promise<mysql.Pool>}
  */
 async function getMysqlPool(connConfig) {
+    externalGate.assertExternalDbAllowed('mysql');   // [#106 S1b] 同 getMssqlPool
     const poolKey = `${connConfig.host}:${connConfig.port}:${connConfig.database}`;
     if (mysqlPools.has(poolKey)) {
         return mysqlPools.get(poolKey);
@@ -4554,8 +4672,42 @@ app.get('/api/version', (req, res) => {
     res.json({
         version: packageJson.version,
         name: '智数协同平台',
-        nameEn: 'Smart Data Hub'
+        nameEn: 'Smart Data Hub',
+        // [#106 S1a] 有效运行模式（只读，原有字段不变）：W10 部署后核对、W3 测试启动器等 /api/version.instance 握手
+        mode: INSTANCE_CONFIG.mode,
+        instance: INSTANCE_CONFIG.instance,
+        external: INSTANCE_CONFIG.external,
+        background: INSTANCE_CONFIG.background,
+        commit: DEPLOY_COMMIT
     });
+});
+
+// [#106 S3a] 汇总就绪接口（无需认证、只读、不写库、不触发任何初始化）：W3 临时实例启动器据此等「测试所需模块全部就绪」，W10 部署后核对复用。
+//   模块名（稳定小写短名）：core / issue / issue_v1750 / issue_lite / quick_log / collab_dualcheck / correction / sys_iteration / periodic / legacy_archive / it_ledger。
+//   每项 { ready, code }：就绪 code=null；未就绪 code 只取错误对象上形态合法的 code，否则 INIT_FAILED（状态对象里的 error 多为中文长句，原文不出）/ 无错误则 NOT_READY；
+//   it_ledger 沿用 LEDGER_DRAINING / LEDGER_UNAVAILABLE / LEDGER_NOT_READY。全部就绪 200，否则 503（同样带 JSON 体）。
+//   各模块的访问函数是只读折算（utils/health-ready.js），不改它们现有的中间件与 503 行为。
+const healthReady = require('./utils/health-ready');
+app.get('/api/health/ready', (req, res) => {
+    const report = healthReady.buildReport({
+        instance: INSTANCE_CONFIG.instance,
+        mode: INSTANCE_CONFIG.mode,
+        sources: {
+            core: () => healthReady.summarizeState(CORE_INIT_STATE),
+            issue: () => healthReady.summarizeState(ISSUE_SCHEMA_STATE),
+            issue_v1750: () => healthReady.summarizeState(ISSUE_V1750_SCHEMA_STATE),
+            issue_lite: () => healthReady.summarizeState(ISSUE_LITE_SCHEMA_STATE),
+            quick_log: () => healthReady.summarizeState(QUICK_LOG_SCHEMA_STATE),
+            collab_dualcheck: () => healthReady.summarizeState(COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE),
+            correction: () => correctionModule.getReadiness(),
+            sys_iteration: () => sysIterModule.getReadiness(),
+            periodic: () => periodicFetchModule.getReadiness(),
+            legacy_archive: () => legacyArchiveModule.getReadiness(),
+            it_ledger: () => itLedgerModule.getReadiness(),
+        },
+    });
+    res.set('Cache-Control', 'no-store');
+    res.status(report.status).json(report.body);
 });
 
 // 获取当前用户信息
@@ -6968,6 +7120,10 @@ app.get('/api/docs/:filename', (req, res) => {
 
 // 发布新版本（归档旧版本）
 app.post('/api/docs/publish', authenticateToken, requirePublisherOrAdmin, async (req, res) => {
+    // [#106 S1b · S0 A2] 本接口会把文档改名移入 <仓库>/docs/archive（写所在检出的 docs/）：隔离实例一律拒绝，在任何文件操作之前返回；读接口不受影响。
+    if (INSTANCE_CONFIG.mode === 'isolated') {
+        return res.status(409).json({ error: '隔离实例的文档目录只读，不能发布 / 归档文档', code: 'ISOLATED_DOCS_READONLY' });
+    }
     const { old_filename, new_filename, change_log } = req.body;
 
     if (!old_filename || !new_filename) {
@@ -8981,6 +9137,7 @@ app.post('/api/db-connections/test-new', authenticateToken, requireAdmin, async 
     try {
         if (dialect === 'mysql') {
             // mysql2 一次性连接（不入池，避免污染 mysqlPools 缓存）
+            externalGate.assertExternalDbAllowed('mysql');   // [#106 S1b] 隔离实例在建连前抛 EXTERNAL_DISABLED
             const conn = await mysql.createConnection({
                 host,
                 port: port || 3306,
@@ -9009,6 +9166,7 @@ app.post('/api/db-connections/test-new', authenticateToken, requireAdmin, async 
                     requestTimeout: 10000
                 }
             };
+            externalGate.assertExternalDbAllowed('sqlserver');   // [#106 S1b] 同上
             const pool = new sql.ConnectionPool(config);
             await pool.connect();
             await pool.request().query('SELECT 1 as test');
@@ -9018,7 +9176,8 @@ app.post('/api/db-connections/test-new', authenticateToken, requireAdmin, async 
         res.json({ success: true, message: '连接测试成功' });
     } catch (err) {
         logger.error(`Test new db connection error (dialect=${dialect}):`, err.message);
-        res.status(500).json({ success: false, error: '连接失败: ' + err.message });
+        // [#106 S1b] 隔离实例的拒绝带 code，前端 / 测试可据此区分；其他错误响应与改造前逐字相同
+        res.status(500).json({ success: false, error: '连接失败: ' + err.message, ...(err && err.code === 'EXTERNAL_DISABLED' ? { code: 'EXTERNAL_DISABLED' } : {}) });
     }
 });
 
@@ -21979,7 +22138,7 @@ app.use((err, req, res, next) => {
 //      - 其他状态（PENDING_ASSIGN/PENDING/SUBMITTED）：owner 闸门已强制，无额外限制
 //
 //    历史 mismatch 注意：v1.70.5 ADMIN_SUBMIT_ON_BEHALF 兜底产生的 result_* 由 admin 上传，
-//      原 developer 在 v1.71.0 后无法自助修改，需找 admin 重传（见 scripts/verify-result-attachment-owner-consistency.js）
+//      原 developer 在 v1.71.0 后无法自助修改，需找 admin 重传（见 scripts/probe-result-attachment-owner-consistency.js）
 app.delete('/api/collab/attachments/:attId', authenticateToken, requireNonViewer, async (req, res) => {
     const { attId } = req.params;
     const userId = req.user.id;
@@ -22125,6 +22284,9 @@ const sysIterModule = require('./routes/sys-iteration')({
   //   忘配 env 的失败方向=禁用（对"暂不上线"诉求 fail-closed）。两步化上线时生产 .env 置 1 开启。
   fastlaneAuthorizeEnabled: process.env.SYS_FASTLANE_ENABLE === '1',
   expirySweepEnabled: true, // #73: schema ready starts catch-up and daily 08:00 expiry, even if new authorization is disabled.
+  // [#106 S1a] 隔离实例默认关闭周期任务（SDH_BACKGROUND_JOBS=on 才开）。正常模式展开空对象，上面的 true 原样生效；
+  //   刻意不改写上一行的字面量 true（verify-sys-expiry-sweep-lifecycle 静态解析它）。
+  ...(INSTANCE_CONFIG.background === 'on' ? {} : { expirySweepEnabled: false }),
 });
 app.use('/api', sysIterModule.router);
 
@@ -22190,6 +22352,9 @@ const implObjectsModule = require('./routes/model-center/impl-objects')({
   db, logger, authenticateToken, requireAdmin, requireNonViewer, canEditModel,
   verifyEnabled: true,   // C2b-2：三端核验显式开关（仿 expirySweepEnabled，只有严格等于 true 才启用）；本地副本想关闭就改成 false 或删掉本行
   getMssqlPool, decryptPassword,   // C2b-2 三端核验：读生产定义（参数化）与连接解密，沿用平台既有函数，不新增依赖
+  // [#106 S1a] 隔离实例默认关闭三端核验（会连外部库；SDH_BACKGROUND_JOBS=on 才开）。正常模式展开空对象，上面的 true 原样生效；
+  //   刻意不改写 verifyEnabled: true 那一行（verify-model-impl-verify L-e 静态解析它、V-29 变异按整行文本删除它）。
+  ...(INSTANCE_CONFIG.background === 'on' ? {} : { verifyEnabled: false }),
 });
 app.use('/api', implObjectsModule.router);
 
@@ -22204,6 +22369,14 @@ app.use('/api', modelRelationsModule.router);
 // ============================================================
 const itLedgerModule = require('./routes/it-ledger')({
   logger, DB_FILE, authenticateToken, requireAdmin,
+  // [#106 S1a · 偏差 A3] 隔离模式把对账附件 / 巡检单附件目录落到数据根下；正常模式不传（展开空对象），保持模块自带的默认路径。
+  //   注意注入键名是 reconcileStorageDir（routes/it-ledger/index.js:3405 传给 reconciles 的 storageDir），不是 storageDir。
+  ...(INSTANCE_CONFIG.mode === 'isolated' ? {
+    reconcileStorageDir: INSTANCE_CONFIG.itReconcileDir,
+    inspectionSheetStorageDir: INSTANCE_CONFIG.itInspectionSheetDir,
+    // [#106 S1b] 设备巡检采集（PowerShell）在隔离实例拒绝执行，且不读巡检配置文件（见 inspection-collector.js createCollector）
+    inspectionExternalDisabled: true,
+  } : {}),
 });
 app.use('/api', itLedgerModule.router);
 
@@ -22634,7 +22807,16 @@ process.on('uncaughtException', (err) => {
     }, 1000);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', function onListening() {
+    // [#106 S1a] 有效运行模式 + 实际监听端口自检（端口只经进程环境变量传入；不一致只告警，不影响启动）。
+    //   用 function 而非箭头，是为了拿到 this（= http.Server）读实际端口，同时保持本行零缩进的 `app.listen(` 形态
+    //   （verify-collab-validation-status-coverage / verify-db-connections-writers 的作用域锚点认它）；回调体内其余代码不使用 this。
+    const listenAddress = this.address();
+    const actualPort = listenAddress && typeof listenAddress === 'object' ? listenAddress.port : null;
+    console.log(`[instance] mode=${INSTANCE_CONFIG.mode} instance=${INSTANCE_CONFIG.instance || '-'} external=${INSTANCE_CONFIG.external} background=${INSTANCE_CONFIG.background} port=${actualPort}`);
+    if (PORT !== 0 && actualPort !== PORT) {
+        logger.warn(`[instance] 实际监听端口 ${actualPort} 与期望端口 ${PORT} 不一致`);
+    }
     logger.info(`Task Pool Server running at http://localhost:${PORT}`);
     logger.info(`Local access: http://localhost:${PORT}/Task_Pool.html`);
     logger.info(`Remote access: http://192.168.1.100:${PORT}/Task_Pool.html`);

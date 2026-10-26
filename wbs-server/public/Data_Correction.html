@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>数据修正 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* ===== 页面专属残留（共享组件层已迁移至 assets/css/components.css；style污染根治 B 方案
            20260709 v1.1 后共享根类均带 u- 前缀，不再依赖 .unified-page 作用域门控，仅作迁移标记/覆盖钩子）===== */
@@ -699,16 +699,16 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
-    <script src="assets/js/unify-helpers.js?v=v1.141.0_badge1"></script>
-    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。文件本体未改，沿用
-         S3 抽取时的缓存串；改共享层本体时须同步 bump 这里 + 所有引用页。 -->
-    <script src="assets/js/u-paste.js?v=v1.134.0_upaste3"></script>
+    <script src="assets/js/app.js?v=auto"></script>
+    <script src="assets/js/unify-helpers.js?v=auto"></script>
+    <!-- S4（前端统一 贴图粘贴扩展方案 20260801_v0.1）：Ctrl+V 贴图共享层接入。共享层 KIT_VERSION 与页面
+         *_KIT_EXPECTED 做接口握手；缓存串由服务端自动注入。 -->
+    <script src="assets/js/u-paste.js?v=auto"></script>
     <!-- S5（暂缓与列表导出方案 v1.1 §3.1）：列表导出（Excel）+ 创建日期范围筛选共享层接入。
          xlsx vendor 先于 u-export.js 加载（attachExport 运行时依赖全局 XLSX）。
          [Codex R5] vendor内容不变；helper升uexport2，旧页面仍走缺省写出路径（verify-export-columns断言4）。 -->
-    <script src="assets/vendor/xlsx.mini.min.js?v=v1.157.0_uexport1"></script>
-    <script src="assets/js/u-export.js?v=v1.160.0_uexport2"></script>
+    <script src="assets/vendor/xlsx.mini.min.js?v=auto"></script>
+    <script src="assets/js/u-export.js?v=auto"></script>
     <!-- U2：图片附件 lightbox（复刻数据协作范式；点 overlay/×/ESC 关，点图本身不关） -->
     <div id="imgLightbox" class="img-lightbox" onclick="closeLightbox(event)">
         <span class="img-lightbox-close" onclick="closeLightbox(event)" title="关闭">×</span>
@@ -2764,7 +2764,7 @@
         //   共享层回落 document（codex S5 复审 L2 统一表述）——届时 7 个目标容器全部深藏在 display:none
         //   的弹窗内，isVisible() 天然过滤掉，候选恒为 0。
         // ============================================================
-        const DC_UPASTE_KIT_EXPECTED = 'upaste3';   // 须与 <script src="...u-paste.js?v=..._upaste3"> 缓存串尾部一致
+        const DC_UPASTE_KIT_EXPECTED = 'upaste3';   // 与库内 KIT_VERSION 做接口握手；缓存串由服务端自动注入
         // codex S4 复审 LOW-2 采纳（S5 落地）：版本比对逻辑下沉共享层 UPaste.checkVersion()（见
         // corrInitUPaste 内调用），页面只留 expected 常量 + "未加载"前置判断。
         // codex S4 复审 LOW-1 采纳：原实现"逐个查、第一个命中就返回"在理论异常态（两个弹窗同时带 open
@@ -2810,7 +2810,7 @@
         //   版本守卫照 corrInitUPaste 同款范式；columns 抽成页面常量 CORR_EXPORT_COLUMNS 再传标识符
         //   （u-export.js 解析器已支持该形态，预筛 C4c H3）。
         // ============================================================
-        const DC_UEXPORT_KIT_EXPECTED = 'uexport2';   // 须与 <script src="...u-export.js?v=..._uexport2"> 缓存串尾部一致
+        const DC_UEXPORT_KIT_EXPECTED = 'uexport2';   // 与库内 KIT_VERSION 做接口握手；缓存串由服务端自动注入
 
         // 导出时刻（§3.3）：now 通道已收口进共享层（C5 主会话裁定改 u-export.js）——attachExport 每次点击
         //   现取一次 exportNow 并绑定进 ctx.overdueRule，本页 value() 写 ctx.overdueRule(r) 即得同基准判定，

@@ -9,9 +9,13 @@
  *   并反向断言**旧 direct 色不再命中**（防"看似接入实际无效"）。
  *
  * 用法：
- *   PORT=3000 node scripts/test-badge-computed-playwright.js
- *     （默认 3000；server 需**先手动起好**——本脚本有意不自己 spawn server，
- *       避免与主会话/生产端口纪律打架。探测不到监听直接退出并提示。）
+ *   node scripts/test-badge-computed-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / PORT / BADGE_DB_PATH / 业务库 task_pool.db / .env。
+ *   原「server 需先手动起好、探测不到直接退出」的约定作废：服务由 testEnv.ready() 起并核对身份，起不来时 ready() 抛错、入口 .catch 非零退出。
+ *   两种运行形态都成立：① 单独运行（本脚本自起实例，结束 teardown）；② 被 run-badge-computed-with-pf-fixture.js 以子进程调用（父进程把 TEST_* 变量组经 testEnv.childEnv() 传下来，
+ *   本进程按变量组形态核对后使用同一个实例；teardown 对变量组形态是空操作，不会停掉父进程的实例）。
+ *   批跑建议：needsService:true；exclusive（读列表页徽章，实例上其它脚本同时写 sys_issues / 周期任务等会改变抽样；Periodic_Fetch 的 EMPTY_TABLE / NO_BADGE_LEGIT 登记依赖实例里 periodic_tasks 的状态）；不需要服务端开关。
+ *   首跑核对点：实例库是从来源库副本隔离化来的，各列表页是否有数据（Periodic_Fetch 表为空时记已登记 SKIP，非空时必须真抽到徽章）；Model_Center 的 openFn 需要实例里至少一个模型（否则记 EMPTY_TABLE → 未登记即判红）。
  *
  * ⚠️ 只读浏览：只 goto 列表页读 computed style，不点任何按钮、不提交表单、不写库。
  * ⚠️ 依赖库内有数据：某页列表若一条徽章都没有，该页记 SKIP 而不是 FAIL
@@ -20,18 +24,13 @@
  */
 'use strict';
 
-const path = require('path');
-const http = require('http');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT = process.env.PORT || '3000';
-const BASE_URL = `http://localhost:${PORT}`;
-const JWT_SECRET = process.env.JWT_SECRET;
-const DB_PATH = process.env.BADGE_DB_PATH || path.join(__dirname, '..', 'task_pool.db');
+let BASE_URL = null;   // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库，只读用于取 admin 用户）
+let browser = null;    // [#106 S4d-5] 提到模块级：入口 .catch 里要尽力关浏览器
 
 // ── 14 层语义色板期望值（与 components.css :root 同源；改色值需同步这里）──────────
 // rgb() 形态用于与 getComputedStyle 返回值直接比对（浏览器统一把 hex 归一化成 rgb()）。
@@ -341,7 +340,8 @@ const PAGES = [
 // B-M10 结构化：pageKey → 允许的**原因码集合**。只有 'EMPTY_TABLE'（表体真的一行都没有）
 //   算数据依赖，可以登记豁免；其余原因码（有行却抽不到徽章 / 抽到的徽章全是未登记类）都是
 //   选择器写错或页面变了，必须红。**有意留空**——当前六页全部真跑。
-const SKIP_ALLOWED = Object.freeze({
+// [#106 S4d-5] 去掉 Object.freeze 包装：顶层 Object.freeze(...) 调用被守卫 R6 判为非纯声明；纯对象 / 数组字面量即可，登记表只读不写（本文件内没有任何写它的语句）。
+const SKIP_ALLOWED = {
     // 理由：本机 task_pool.db 里 periodic_tasks / periodic_task_runs **两表均为 0 行**（已直连库核实），
     //   页面只渲染"暂无周期任务"空态卡，没有任何徽章可测。这是纯数据依赖，不是接线问题——
     //   静态守卫（verify-badge-alias.js 的 sem 模式断言）已覆盖 PF 的 map/gate/旧类残留，
@@ -355,11 +355,11 @@ const SKIP_ALLOWED = Object.freeze({
     //       这条收紧针对的正是"渲染坏 / 选择器写错 / 类被误删"——它们同样表现为零徽章，
     //       但四证据必然不齐（要么没有空态文案、要么伴随失败请求），从而被红灯拦住。
     Periodic_Fetch: ['EMPTY_TABLE', 'NO_BADGE_LEGIT'],
-});
+};
 //   NO_BADGE_LEGIT：容器打开了但零徽章，且该状态在业务上合法（PF：任务从未运行且未禁用 ⇒
 //   「上次运行」区显示"尚未跑过"、无历史行、也没有已禁用标）。与 EMPTY_TABLE 分开是为了让报告
 //   能区分"库里没对象"和"有对象但没产生过可显示状态"——两者的补测路径不同。
-const SKIP_REASON_ALLOWED_CODES = Object.freeze(['EMPTY_TABLE', 'NO_BADGE_LEGIT']);
+const SKIP_REASON_ALLOWED_CODES = ['EMPTY_TABLE', 'NO_BADGE_LEGIT'];   // [#106 S4d-5] 同上，去掉 Object.freeze
 
 let pass = 0;
 let fail = 0;
@@ -380,14 +380,12 @@ function hexToRgb(hex) {
     return `rgb(${parseInt(h.substr(0, 2), 16)}, ${parseInt(h.substr(2, 2), 16)}, ${parseInt(h.substr(4, 2), 16)})`;
 }
 
-function probeServer() {
-    return new Promise((resolve) => {
-        const req = http.get({ host: 'localhost', port: PORT, path: '/login.html', timeout: 3000 }, (res) => {
-            res.resume();
-            resolve(true);
-        });
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
+// [#106 S4d-5] 原 probeServer（http.get 探测 localhost:PORT/login.html）已删：隔离实例由 testEnv.ready() 起并核对身份（/api/version 的 instance 与 mode）。
+
+// 带打开回调、只读（OPEN_READONLY）打开实例库；与 _test-fixture.js 的 openInstanceDb 同源思路（本处只读，故不带 READWRITE）
+function openInstanceDbReadonly(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => (err ? reject(err) : resolve(d)));
     });
 }
 
@@ -395,39 +393,35 @@ function dbGet(db, sql) {
     return new Promise((resolve, reject) => db.get(sql, (e, r) => (e ? reject(e) : resolve(r))));
 }
 
+// [#106 S4d-5] 取实例库里 id 最小的 admin，令牌由 test-env 用实例密钥签（原来自读 .env 的 JWT_SECRET 签 2h；test-env 签 1h，本脚本全程远小于 1h）
+// [#106 S4d-5 修复批 L2] 关库错误不再吞：closeDbChecked 在 close 回调带错时 reject（原来 `db.close(() => resolve())` 吞掉）；
+//   signAsAdmin 返回 { token, closeError }，关库错误不丢令牌（令牌已取到），由调用处 main 计一条失败
+function closeDbChecked(db) {
+    return new Promise((resolve, reject) => db.close((e) => (e ? reject(e) : resolve())));
+}
 async function signAsAdmin() {
-    const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY);
+    const db = await openInstanceDbReadonly(DB_PATH);
+    let user;
+    let closeError = null;
     try {
-        const user = await dbGet(db, "SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1");
-        if (!user) throw new Error(`${DB_PATH} 里找不到 admin 用户，无法签发 JWT`);
-        return jwt.sign(
-            { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-            JWT_SECRET,
-            { expiresIn: '2h' }
-        );
+        user = await dbGet(db, "SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1");
     } finally {
-        db.close();
+        try { await closeDbChecked(db); } catch (e) { closeError = e; }
     }
+    if (!user) throw new Error(`${DB_PATH} 里找不到 admin 用户，无法签发 JWT`);
+    return { token: await testEnv.signToken(user.id), closeError };
 }
 
-(async function main() {
+async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组——被编排器以子进程调用时走这一条）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
     console.log('=== 状态徽章统一 S2 · computed style 抽样验收 ===\n');
+    console.log(`1. 隔离实例就绪（${BASE_URL}）`);
 
-    if (!JWT_SECRET) {
-        console.log('FAIL：.env 里没有 JWT_SECRET，无法签发 token。');
-        process.exit(1);
-    }
-    const up = await probeServer();
-    if (!up) {
-        console.log(`未探测到 ${BASE_URL} 上的 server。`);
-        console.log('本脚本有意不自行 spawn server（端口纪律）——请先手动起好再跑：');
-        console.log(`  cd wbs-server && PORT=${PORT} node server.js`);
-        process.exit(2);
-    }
-    console.log(`1. server 探测到（${BASE_URL}）`);
-
-    const token = await signAsAdmin();
-    const browser = await chromium.launch();
+    const { token, closeError } = await signAsAdmin();
+    check(!closeError, '取 admin 后关闭实例库', closeError ? (closeError && closeError.message) : undefined);   // 关库错误计失败（原来被吞）
+    browser = await chromium.launch();
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     const consoleErrors = [];
@@ -806,15 +800,22 @@ async function signAsAdmin() {
     check(consoleErrors.length === 0, `${PAGES.length} 页浏览全程无 console error`,
         consoleErrors.length ? `${consoleErrors.length} 条：${consoleErrors.slice(0, 3).join(' | ')}` : '');
 
-    await browser.close();
+    // [#106 S4d-5] 浏览器关闭失败 / teardown 失败计失败（原 `await browser.close()` 裸 await）；先于汇总行，让汇总数字包含这两项
+    try { await browser.close(); browser = null; } catch (e) { check(false, '浏览器关闭', e && e.message); }
+    try { await testEnv.teardown(); } catch (e) { check(false, 'teardown（收掉自起实例；变量组形态为空操作）', e && e.message); }
 
     console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 / ${skips.length} 项跳过（其中未登记 ${unregistered.length}）===`);
     if (fail > 0) {
         console.log('\n失败明细：');
         failures.forEach((f, i) => console.log(`  ${i + 1}. ${f.label}${f.detail ? ' — ' + f.detail : ''}`));
     }
-    process.exit(fail === 0 ? 0 : 1);
-})().catch((e) => {
+    // [#106 S4d-5] 原为 process.exit(...)：改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言；编排器按本进程退出码判定）
+    testEnv.finish(fail === 0 ? 0 : 1);
+}
+
+main().catch(async (e) => {
     console.error('脚本异常：', e);
+    try { if (browser) await browser.close(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

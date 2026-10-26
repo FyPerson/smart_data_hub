@@ -12,9 +12,9 @@
 }(typeof window !== 'undefined' ? window : null, function () {
     'use strict';
 
-    // 版本印记：必须与 Model_Center.html 引用本文件的 ?v=..._<KIT_VERSION> 后缀一致。
-    // 改本文件 → 同时改这里和 HTML 缓存串。页面启动时会比对，不一致直接在 console 报错，
-    // 把「改了共享 JS 却忘了 bump 缓存串、用户拿到旧版」从静默失败变成看得见的错误。
+    // 版本印记：KIT_VERSION 与 Model_Center.html 里的 MDC_KIT_EXPECTED 做接口握手；页面引用的缓存串
+    // （?v=auto）由服务端按文件内容自动注入，无需手改。改本文件的接口 → 同时改这里和页面的期望值。
+    // 页面启动时会比对，不一致直接在 console 报错，把「用户拿到旧版」从静默失败变成看得见的错误。
     // （2026-07-24 实际踩坑：C6/C8 改了本文件未 bump，用户界面来源系统/源表/行数全显示「—」）
     var KIT_VERSION = 'mdc4';
 

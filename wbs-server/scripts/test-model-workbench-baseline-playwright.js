@@ -17,14 +17,14 @@
  *        未登记的键仍须等于基线；登记键变成「既不是基线值也不满足期望」的第三个值照样判红
  *
  * 隔离实例（不碰 3000）：
- *   - 端口固定 3377，被占则报错退出（不自动换端口）；3000 是用户的进程，任何时候不占用、不杀。
- *   - 服务经 scripts/_test-it-asset-ledger-server-wrapper.js 起子进程，库 = 本地 task_pool.db 的 VACUUM INTO 副本
- *     （放 MC_BASELINE_WORKDIR，默认 E:/tmp/mc77-c3/pw-baseline-run）；副本里清钉钉凭证 / db_connections / 周期任务 / 任务池 / 用户，
+ *   - [#106 S4b2] 不再自起 wrapper / 写死端口 3377 / 复制真实库 / 读 .env：入口第一条 `await testEnv.ready(…)`（scripts/lib/test-env.js）起隔离实例
+ *     （本检出库快照 + 隔离模式 server.js，端口随机，数据根在系统临时目录，teardown 时整体删除）；`--port` / MC_BASELINE_WORKDIR 随之删除。
+ *     自测模式（--self-test-*）不需要服务，但按「ready 是入口第一条有副作用语句」的规则也会先起实例（裁定 D5）。
+ *   - ready() 之后在实例库里清钉钉凭证 / db_connections / 周期任务 / 任务池 / 用户（终态与原来在库副本上清洗相同），
  *     删除全部模型后按脱敏夹具（fixtures/model-workbench-baseline/models.json）以固定 id 插入，另补 25 条填充 ODS 行
  *     （让列表跨页）与 4 个测试账号（admin / viewer / 技术负责人 user / 非负责人 user）。其余业务表（验收配置、迁移标记等）
- *     仍是本机库的副本内容——本基线的测量面不读它们，但「不依赖本机库」只对模型 / 账号 / 字典这几张表成立。
- *   - 运行结束停服后删除库副本（含 -wal / -shm / -journal）；停服只按自己 spawn 的 pid 精确停（taskkill /T /F /PID，同一 pid 只杀一次）。
- *   - JWT_SECRET 取 wbs-server/.env（与服务端同源），DB_ENCRYPTION_KEY 由服务端自己读 .env。
+ *     仍是本机库快照的内容——本基线的测量面不读它们，但「不依赖本机库」只对模型 / 账号 / 字典这几张表成立。
+ *   - JWT 秘钥取 testEnv.env().jwtSecret（实例随机密钥，与服务端同源）。
  *   - 浏览器侧会写共享 uploads 目录的请求（POST /api/models/:id/save-scripts）在 context 层一律 fulfill 拦截，不落盘。
  *
  * 冻结环境：每个 browser context 固定 timezoneId=Asia/Shanghai + clock.setFixedTime(2026-01-15T04:05:06Z)（与 golden 同一时刻）；
@@ -52,34 +52,39 @@
  */
 'use strict';
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, spawnSync } = require('child_process');
+const testEnv = require('./lib/test-env');
 
-const ROOT = path.resolve(__dirname, '..');
-const FIX_DIR = path.join(__dirname, 'fixtures', 'model-workbench-baseline');
-const MODELS_FILE = path.join(FIX_DIR, 'models.json');
-const BASELINE_FILE = path.join(FIX_DIR, 'baseline.json');
-const MC_HTML = path.join(ROOT, 'public', 'Model_Center.html');
-const PORT_ARG = (process.argv.slice(2).find(a => a.startsWith('--port=')) || '').slice('--port='.length);   // C4b：可指定端口（默认 3377），主工作区的其他 agent 占用 3377 时用
-if (PORT_ARG && !/^\d{2,5}$/.test(PORT_ARG)) { console.error('--port 必须是数字：' + PORT_ARG); process.exit(2); }
-const PORT = PORT_ARG ? Number(PORT_ARG) : 3377;
-const BASE = `http://localhost:${PORT}`;
-const WORKDIR = process.env.MC_BASELINE_WORKDIR || (fs.existsSync('E:/tmp') ? 'E:/tmp/mc77-c3/pw-baseline-run' : path.join(os.tmpdir(), 'mc77-c3-pw-baseline-run'));
+// [#106 S4b2] 顶层只有纯声明：下面这些路径 / 参数在入口函数里 `await testEnv.ready()` 之后由 initRuntime() 赋值。
+let ROOT = null;
+let MODELS_FILE = null;
+let BASELINE_FILE = null;
+let MC_HTML = null;
+let BASE = null;          // testEnv.env().baseUrl
+let ARGS = [];
+let RECORD = false;
+let ALLOW_CHANGES = false;
+let FORCE_RECORD = false;
+function initRuntime() {
+  ROOT = path.resolve(__dirname, '..');
+  const FIX_DIR = path.join(__dirname, 'fixtures', 'model-workbench-baseline');
+  MODELS_FILE = path.join(FIX_DIR, 'models.json');
+  BASELINE_FILE = path.join(FIX_DIR, 'baseline.json');
+  MC_HTML = path.join(ROOT, 'public', 'Model_Center.html');
+  BASE = testEnv.env().baseUrl;
+  ARGS = process.argv.slice(2);
+  RECORD = ARGS.includes('--record');
+  ALLOW_CHANGES = ARGS.includes('--allow-changes');
+  FORCE_RECORD = ARGS.includes('--force-record');
+}
 const SETTLE_LIMIT_MS = 10000;
 const FIXED_ISO = '2026-01-15T04:05:06.000Z';
 const TIMEZONE = 'Asia/Shanghai';
-const ARGS = process.argv.slice(2);
-const RECORD = ARGS.includes('--record');
-const ALLOW_CHANGES = ARGS.includes('--allow-changes');
-const FORCE_RECORD = ARGS.includes('--force-record');
 
 const { chromium } = require('playwright');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3');
-const dotenv = require('dotenv');
 
 const h = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 12);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -100,18 +105,11 @@ const loadModelRows = () => JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8')).row
 
 function dbRun(db, sql, params = []) { return new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); })); }
 function dbClose(db) { return new Promise((res, rej) => db.close(e => e ? rej(e) : res())); }
-const tryUnlink = (f) => { try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
-const removeDbFiles = (dbPath) => { for (const s of ['', '-wal', '-shm', '-journal']) tryUnlink(dbPath + s); };
 
+/** [#106 S4b2] 对实例库（ready() 已建好的隔离快照）清洗并按夹具造数。原来是起服务前在库副本上做，现在服务已在跑：只开一条 OPEN_READWRITE（不带 OPEN_CREATE）连接，关库等回调完成。
+ *  整表清场：批跑只能登记为 exclusive:true 或 needsService:false，不能做共享实例成员（会抹掉同一实例上其他成员的数据）。 */
 async function prepareDb(dbPath) {
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const realDb = path.join(ROOT, 'task_pool.db');
-  if (!fs.existsSync(realDb)) throw new Error('缺少 wbs-server/task_pool.db（包装器也要求它存在）');
-  const src = await new Promise((res, rej) => { const d = new sqlite3.Database(realDb, sqlite3.OPEN_READONLY, e => e ? rej(e) : res(d)); });
-  await dbRun(src, 'VACUUM INTO ?', [dbPath]);   // 一致性快照；VACUUM INTO 不写源库
-  await dbClose(src);
-  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => e ? rej(e) : res(d)); });
+  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => { if (e) return rej(e); d.configure('busyTimeout', 8000); res(d); }); });
   // 清外部副作用面：钉钉凭证 / 数仓连接 / 周期任务；清与模型关联的数据与账号
   for (const t of ['system_configs', 'db_connections', 'periodic_tasks', 'model_change_logs', 'model_test_records', 'task_pool', 'data_models', 'users', 'sys_domains', 'sys_source_systems']) {
     await dbRun(db, `DELETE FROM ${t}`);
@@ -121,7 +119,12 @@ async function prepareDb(dbPath) {
   for (const u of USERS) await dbRun(db, 'INSERT INTO users (id, username, password, display_name, role, status) VALUES (?, ?, ?, ?, ?, ?)', [u.id, u.username, 'not-used-jwt-only', u.display_name, u.role, 'active']);
   for (const [code, name] of [['dom_a', '域甲'], ['dom_b', '域乙'], ['dom_c', '域丙']]) await dbRun(db, "INSERT INTO sys_domains (code, name, description, status) VALUES (?, ?, '', 'active')", [code, name]);
   for (const [code, name] of [['SYS_A', '来源系统甲'], ['SYS_B', '来源系统乙']]) await dbRun(db, "INSERT INTO sys_source_systems (code, name, description) VALUES (?, ?, '')", [code, name]);
-  const COLS = ['id', 'layer', 'domain', 'table_name', 'table_comment', 'tech_owner', 'biz_owner', 'update_cycle', 'status', 'created_at', 'updated_at', 'source_table', 'source_system', 'model_type', 'created_by_id', 'category', 'dim_config', 'is_deleted', 'config_mode', 'design_notes', 'companion_of'];
+  // [#106 S4b2a] 与原驱动「起服务前清场」等价：原来清场在服务启动之前，服务启动时 server.js:1371 的幂等写入
+  //   `INSERT OR IGNORE ... ('HRD', ...)` 会在清场之后补回 HRD，页面「来源系统」下拉（GET /api/source-systems，server.js:11702 ORDER BY code）
+  //   于是是 HRD / SYS_A / SYS_B 三项，P3 注册 ODS 取 options[1] = HRD（baseline.json p3.ods.fieldHashes.source_system = e1f1dc20073a = h(JSON.stringify('HRD'))，见 hashFields）。
+  //   现在清场在服务启动之后，那次启动写入被一并清掉，下拉只剩 SYS_A / SYS_B，options[1] 变成 SYS_A。这里用同一条幂等写入补回 HRD（字面量与 server.js:1371 一致）。
+  await dbRun(db, "INSERT OR IGNORE INTO sys_source_systems (code, name, description) VALUES ('HRD', '人力资源系统', 'HRD 人力资源系统 - MySQL 源')");
+  const COLS =['id', 'layer', 'domain', 'table_name', 'table_comment', 'tech_owner', 'biz_owner', 'update_cycle', 'status', 'created_at', 'updated_at', 'source_table', 'source_system', 'model_type', 'created_by_id', 'category', 'dim_config', 'is_deleted', 'config_mode', 'design_notes', 'companion_of'];
   const ins = (row) => dbRun(db, `INSERT INTO data_models (${COLS.join(',')}) VALUES (${COLS.map(() => '?').join(',')})`, COLS.map(c => (c === 'dim_config' ? (row.dim_config == null ? null : JSON.stringify(row.dim_config)) : (row[c] === undefined ? null : row[c]))));
   const rows = loadModelRows();
   for (const r of rows) await ins(r);
@@ -136,46 +139,8 @@ async function prepareDb(dbPath) {
   await dbClose(db);
 }
 
-function portBusy() {
-  return new Promise((resolve) => {
-    const s = net.createConnection({ port: PORT, host: '127.0.0.1' });
-    s.once('connect', () => { s.destroy(); resolve(true); });
-    s.once('error', () => resolve(false));
-  });
-}
-
-let serverChild = null;
-let serverKillIssued = false;
-/** 只按自己 spawn 的 pid 停，同一 pid 只杀一次（exit 钩子与 finally 都可能调用） */
-function killServer() {
-  if (!serverChild || !serverChild.pid || serverKillIssued || serverChild.__dead) return;
-  serverKillIssued = true;
-  try { spawnSync('taskkill', ['/T', '/F', '/PID', String(serverChild.pid)], { stdio: 'ignore' }); } catch (_) { /* 下面等 exit 事件 */ }
-}
-async function stopServerAndCleanup(dbPath) {
-  killServer();
-  const t0 = Date.now();
-  while (serverChild && !serverChild.__dead && Date.now() - t0 < 10000) await sleep(100);
-  if (serverChild && !serverChild.__dead) { console.error('[cleanup] 隔离实例进程未在 10s 内退出，库副本未删除：' + dbPath); return; }
-  try { removeDbFiles(dbPath); } catch (e) { console.error('[cleanup] 删除库副本失败：' + e.message); }
-}
-async function startServer(dbPath) {
-  const logPath = path.join(WORKDIR, 'server.log');
-  const fd = fs.openSync(logPath, 'w');
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js')], {
-    cwd: ROOT, stdio: ['ignore', fd, fd],
-    env: { ...process.env, PORT: String(PORT), IA_TEST_DB_PATH: dbPath, SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' },
-  });
-  fs.closeSync(fd);
-  serverChild.on('exit', () => { serverChild.__dead = true; });
-  const t0 = Date.now();
-  for (;;) {
-    if (serverChild.__dead) throw new Error('隔离实例提前退出，见日志 ' + logPath + '：\n' + fs.readFileSync(logPath, 'utf8').slice(-1500));
-    if (/Task Pool Server running/.test(fs.readFileSync(logPath, 'utf8'))) return;
-    if (Date.now() - t0 > 60000) throw new Error('隔离实例 60s 内未就绪，见日志 ' + logPath);
-    await sleep(250);
-  }
-}
+// [#106 S4b2] 原 portBusy / killServer / stopServerAndCleanup / startServer（写死 3377、按 pid 杀 wrapper 进程、等日志就绪、删库副本）整段删除：实例由 test-env 起停。
+//   「服务就绪」的判定：原来靠日志 "Task Pool Server running"；改为 main() 里一次真实请求——未带 token 访问 /api/models 必须 401。
 
 // ---------------------------------------------------------------------------------------------
 // 页面取样基础设施
@@ -739,17 +704,15 @@ function checkRecordGuard() {
   }
 }
 
-async function main(dbPath) {
+async function main() {
   checkRecordGuard();
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动（不自动换端口；3000 是用户进程，不得占用或杀）。`); process.exit(2); }
-  const envParsed = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env')));
-  const secret = envParsed.JWT_SECRET;
-  if (!secret) throw new Error('wbs-server/.env 缺 JWT_SECRET');
+  const secret = testEnv.env().jwtSecret;   // 实例随机密钥（与服务端同源）；不再读 .env
   const rows = loadModelRows();
   const cfgOf = (id) => rows.find(r => r.id === id).dim_config;
   const rowOf = (id) => rows.find(r => r.id === id);
-  await prepareDb(dbPath);
-  await startServer(dbPath);
+  const probe = await fetch(`${BASE}/api/models`);
+  if (probe.status !== 401) throw new Error(`[就绪核对] 未带 token 访问 /api/models 应 401，实得 ${probe.status}（服务没有在应答本脚本要测的路由）`);
+  await prepareDb(testEnv.env().dbPath);
   const browser = await chromium.launch({ headless: true });
   const out = {};
   try {
@@ -1124,7 +1087,7 @@ async function main(dbPath) {
       { model: 52, kind: 'dwd', what: 'changeTracking.companionModelId 不回读（HEAD 自身的有损往返）', evidence: 'p1.dwd52.diffNames', count: out.p1.dwd52.diffCount },
       { model: 55, kind: 'dim', what: 'U7：往返差异清单（桩按 trackFields 顺序给字段后仍有的差异），全量名称见 evidence', evidence: 'p1.dim55.diffNames', count: out.p1.dim55.diffCount },
     ];
-    out.meta = { schema: 2, port: PORT, fillerRows: FILLER_COUNT, frozenInstant: FIXED_ISO, timezoneId: TIMEZONE, modelCenterSha256: sha256File(MC_HTML), note: '基线只存哈希 / 计数 / 键集合 / 布尔 / 枚举 / 差异项名称（结构路径）；夹具已脱敏，映射表不入库；modelCenterSha256 是录制时工作区 Model_Center.html 的字节哈希（工作区为 CRLF，与 git show 的 LF 规范化哈希不同）' };
+    out.meta = { schema: 2, port: Number(new URL(BASE).port), fillerRows: FILLER_COUNT, frozenInstant: FIXED_ISO, timezoneId: TIMEZONE, modelCenterSha256: sha256File(MC_HTML), note: '基线只存哈希 / 计数 / 键集合 / 布尔 / 枚举 / 差异项名称（结构路径）；夹具已脱敏，映射表不入库；modelCenterSha256 是录制时工作区 Model_Center.html 的字节哈希（工作区为 CRLF，与 git show 的 LF 规范化哈希不同）' };
   } finally {
     await browser.close();
   }
@@ -1132,24 +1095,17 @@ async function main(dbPath) {
 }
 
 (async () => {
-  if (ARGS.includes('--self-test-compare')) process.exit(selfTestCompare());
-  if (ARGS.includes('--self-test-settle')) process.exit(await selfTestSettle());
   let code = 1;
-  const dbPath = path.join(WORKDIR, 'baseline.db');
-  // 28 号审 M2：开始前先删上次遗留的库副本（只删本脚本约定路径 WORKDIR/baseline.db 及其 -wal/-shm/-journal）；
-  // 任何退出路径（正常 / 异常 / 信号）都停服并删副本。同步重试删除（Windows 上进程刚被杀时文件句柄可能还没释放）。
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const cleanupSync = () => {
-    killServer();
-    for (let i = 0; i < 20; i++) { try { removeDbFiles(dbPath); return; } catch (_) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); } }
-  };
-  process.on('exit', cleanupSync);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { cleanupSync(); process.exit(130); });
-  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
-  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
+  // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句（选项是纯字面量）。自测模式（--self-test-*）本不需要服务，但按硬规则也先起实例（裁定 D5）。
+  //   SIGINT / SIGTERM 由 test-env 自己收实例（teardown 后以 130 / 143 退出），进程退出时的清理由它的 exit 钩子兜底。
+  await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' } });
+  initRuntime();
+  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  if (ARGS.includes('--self-test-compare')) { const c = selfTestCompare(); await testEnv.teardown(); testEnv.finish(c); return; }
+  if (ARGS.includes('--self-test-settle')) { const c = await selfTestSettle(); await testEnv.teardown(); testEnv.finish(c); return; }
   try {
-    const cur = await main(dbPath);
+    const cur = await main();
     if (process.env.MC_DUMP) fs.writeFileSync(process.env.MC_DUMP, JSON.stringify(cur, null, 1));   // 调试：落盘本次实测（不入库）
     if (RECORD) {
       fs.writeFileSync(BASELINE_FILE, JSON.stringify(cur, null, 1) + '\n');
@@ -1186,7 +1142,12 @@ async function main(dbPath) {
     console.error(e && e.stack || e);
     code = 1;
   } finally {
-    await stopServerAndCleanup(dbPath);
+    await testEnv.teardown();
   }
-  process.exit(code);
-})();
+  // [#106 S4b2a] teardown 已在上面的 finally 里 await 落定；成功 / 失败出口改 finish（只设退出码，不终止执行），所以这是入口函数的最后一条语句。入口 .catch 里的 process.exit(1) 不改。
+  testEnv.finish(code);
+})().catch(async (e) => {
+  console.error(e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+  process.exit(1);
+});

@@ -20,17 +20,123 @@
 //     其余(§6.2 J)、发送成功/invalidStaffIdList部分失败→failed、钉钉凭证缺失(no_config)整体502不落库、
 //     push留痕(recipient_name_snapshot=录入姓名)+push必须绑定run_id；H-1 userid 硬 gate；requireAdmin 401。
 'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// ── [#106 S4b1 修复批 3 · 17a H2] 结果文件目录：不写检出里的真实 periodic-results ──
+//   routes/periodic-fetch/runner.js:32-36 在**模块加载时**取 getInstanceConfig().periodicResultsDir 定死结果目录（正常检出 = <wbs-server>/periodic-results，真实目录）。
+//   本脚本在 require 任何可能连带加载 runner.js 的模块之前，用 require.cache 替身把 utils/instance-mode 的 getInstanceConfig 换成「真实配置 + periodicResultsDir 指向脚本专属临时目录」，
+//   其余导出成员原样复制。runner.js 的全部落盘 / 读取 / 删除（writeResultFile :76、ensurePeriodicResultsDir :39-40、resolveSafeResultPath :88、deleteResultFileGuarded :95）
+//   都经模块级常量 PERIODIC_RESULTS_DIR（:34-36），所以只要加载时取到替身配置，就全落在临时目录里。
+//   四道硬门（①② 与加载后的 ③ 不满足 → 打印原因、清理临时目录、退出码 1，不跑后续断言；写盘时的 ③ 抛错经 main().catch 收尾判失败；④ 在跑后比对，问题计失败）：
+//     ① 装替身时 require.cache 里还没有 runner.js 的条目（否则 runner 已经按真实配置定死目录，替身管不到）；
+//     ② 真实配置 refuse 为假（refuse 为真时 runner.js:34-35 改用检出目录，替身管不到）；
+//     ③ runner 加载后 PERIODIC_RESULTS_DIR 在临时目录之下，且 seedRun 每次 writeResultFile 返回的文件路径（raw 与 realpath 两个口径）都在临时目录之下（按 path.relative 判，不按字符串前缀）；
+//     ④ 跑前、跑后各列一次真实 <wbs-server>/periodic-results（只读：文件名 + 大小 + mtime；目录不存在记为空），跑后多出任何条目（含目录本身被创建）即判失败。
+const REAL_RESULTS_DIR = path.join(__dirname, '..', 'periodic-results');   // 检出里的真实结果目录（只读监视，不写、不删）
+function listRealResultsDir() {
+  let names;
+  try { names = fs.readdirSync(REAL_RESULTS_DIR); } catch (e) {
+    if (e && e.code === 'ENOENT') return { exists: false, entries: new Map() };
+    throw e;
+  }
+  const entries = new Map();
+  for (const n of names) {
+    let st;
+    try { st = fs.lstatSync(path.join(REAL_RESULTS_DIR, n)); } catch (e) { if (e && e.code === 'ENOENT') continue; throw e; }   // readdir 与 lstat 之间被删掉的条目跳过
+    entries.set(n, { size: st.size, mtimeMs: st.mtimeMs });
+  }
+  return { exists: true, entries };
+}
+// 跑后与跑前对比：返回问题清单（多出的条目 / 目录本身新建 = 失败；已有条目被改动或消失只作提示，不计失败）。
+//   新增条目一律判红是有意的 fail-closed：本脚本运行期间真实目录不该出现新文件，代价是有别的进程同时往里写时误报红（批跑器对不需服务的成员串行跑，批跑本身撞不上）。
+//   已有条目被改动或消失只提示：runner 写的是随机新名，不会改写已有文件；能删真实目录文件的前提是替身失效，而那会先被加载后的 ③ 拦住。
+function diffRealResultsDir(before) {
+  const after = listRealResultsDir();
+  const problems = [];
+  const notes = [];
+  if (!before.exists && after.exists) problems.push(`真实结果目录 ${REAL_RESULTS_DIR} 跑前不存在、跑后被创建`);
+  for (const [n, v] of after.entries) {
+    if (!before.entries.has(n)) problems.push(`真实结果目录多出条目：${n}（${v.size} 字节）`);
+    else {
+      const b = before.entries.get(n);
+      if (b.size !== v.size || b.mtimeMs !== v.mtimeMs) notes.push(`已有条目被改动：${n}（${b.size}→${v.size} 字节）`);
+    }
+  }
+  for (const n of before.entries.keys()) if (!after.entries.has(n)) notes.push(`已有条目消失：${n}`);
+  return { problems, notes };
+}
+const REAL_DIR_BEFORE = listRealResultsDir();   // 硬门④ 的「跑前」列表
+
+// path.relative 判「严格在 baseDir 之下」：相对路径非空、不是 ..、不以 ..<sep> 开头、不是绝对路径（跨盘符时 relative 返回绝对路径）
+function isStrictlyUnder(baseDir, target) {
+  const rel = path.relative(baseDir, target);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+// 只删本脚本自己建的临时目录：lstat 确认不是符号链接；逐个 unlinkSync / rmdirSync（不用 fs.rmSync：Node v24 对含中文路径静默不删）；返回失败清单（空 = 已删净）
+function removeOwnTempDir(dir) {
+  const failed = [];
+  const walk = (d) => {
+    let st;
+    try { st = fs.lstatSync(d); } catch (e) { if (e && e.code === 'ENOENT') return; failed.push(`${d}（lstat ${e && e.code}）`); return; }
+    if (st.isSymbolicLink()) { try { fs.unlinkSync(d); } catch (e) { failed.push(`${d}（unlink 符号链接 ${e && e.code}）`); } return; }
+    if (!st.isDirectory()) { try { fs.unlinkSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') failed.push(`${d}（unlink ${e && e.code}）`); } return; }
+    let names = [];
+    try { names = fs.readdirSync(d); } catch (e) { failed.push(`${d}（readdir ${e && e.code}）`); return; }
+    for (const n of names) walk(path.join(d, n));
+    try { fs.rmdirSync(d); } catch (e) { if (!e || e.code !== 'ENOENT') failed.push(`${d}（rmdir ${e && e.code}）`); }
+  };
+  walk(dir);
+  return failed;
+}
+
+let PUSH_TMP_DIR = null;        // 脚本专属临时结果目录（替身配置的 periodicResultsDir）
+let PUSH_TMP_DIR_REAL = null;   // 它的 realpath
+function hardGateFail(name, msg) {
+  console.error(`\n[硬门失败 · ${name}] ${msg}`);
+  if (PUSH_TMP_DIR) {
+    const left = removeOwnTempDir(PUSH_TMP_DIR);
+    if (left.length > 0) console.error(`[清理] 临时目录残留：${left.join('；')}`);
+  }
+  const d = diffRealResultsDir(REAL_DIR_BEFORE);
+  if (d.problems.length > 0) console.error(`[硬门④] ${d.problems.join('；')}`);
+  process.exit(1);
+}
+{
+  const instanceModePath = require.resolve('../utils/instance-mode');
+  const realInstanceMode = require('../utils/instance-mode');
+  const runnerPath = require.resolve('../routes/periodic-fetch/runner');   // 只解析路径，不加载
+  // 硬门①：装替身时 runner.js 还没被加载
+  if (require.cache[runnerPath] !== undefined) hardGateFail('①', `装替身时 require.cache 里已有 routes/periodic-fetch/runner.js 的条目（${runnerPath}）：runner 已按真实配置定死结果目录，替身管不到`);
+  const realConfig = realInstanceMode.getInstanceConfig();
+  // 硬门②：真实配置没被拒绝
+  if (!realConfig || realConfig.refuse) hardGateFail('②', `真实运行模式配置被拒绝（${realConfig && realConfig.code}）：runner.js 会改用检出目录 wbs-server/periodic-results，替身管不到`);
+  PUSH_TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sdh-periodic-push-'));
+  // 17-R L1：建目录之后到 main() 之前的顶层初始化（require、替换导出）若同步抛错，既不经 hardGateFail 也不经 main().catch，靠这个同步兜底删临时目录。
+  //   幂等：正常收尾或硬门已删净时 lstat 得 ENOENT 直接返回；退出路径只尽力而为，不改退出码。
+  process.on('exit', () => { try { removeOwnTempDir(PUSH_TMP_DIR); } catch (_) { /* 退出路径尽力而为 */ } });
+  PUSH_TMP_DIR_REAL = fs.realpathSync(PUSH_TMP_DIR);
+  const stubConfig = Object.freeze({ ...realConfig, periodicResultsDir: PUSH_TMP_DIR });
+  // 复制真实导出的全部成员（含不可枚举成员的描述符），只把 getInstanceConfig 换成返回替身配置的函数
+  const stubExports = Object.defineProperties({}, Object.getOwnPropertyDescriptors(realInstanceMode));
+  stubExports.getInstanceConfig = () => stubConfig;
+  require.cache[instanceModePath].exports = stubExports;
+}
+
 const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const http = require('http');
-const path = require('path');
-const fs = require('fs');
 const express = require('express');
 const sqlite3 = require('sqlite3');
 const jwt = require('jsonwebtoken');
 
 const recipients = require('../routes/periodic-fetch/recipients');
 const runner = require('../routes/periodic-fetch/runner');
+// 硬门③（加载后）：runner 的结果目录常量就是临时目录（或其子目录）。每次 writeResultFile 返回的文件路径另在 seedRun 里逐个核（见 assertWrittenUnderTemp）
+if (path.relative(PUSH_TMP_DIR, runner.PERIODIC_RESULTS_DIR) !== '' && !isStrictlyUnder(PUSH_TMP_DIR, runner.PERIODIC_RESULTS_DIR)) {
+  hardGateFail('③', `runner.PERIODIC_RESULTS_DIR=${runner.PERIODIC_RESULTS_DIR} 不在临时目录 ${PUSH_TMP_DIR} 之下：替身没有生效`);
+}
 
 // ── mock 钉钉（require.cache 劫持，对齐 verify-correction-rework-notify.js 既有范式）──
 const SENT_CALLS = []; // { userIds, mediaId, fileName }
@@ -242,11 +348,20 @@ async function seedTask() {
     VALUES ('T-push-fixture', NULL, 1, 'SELECT 1', 1, 'active', 1, datetime('now','localtime'))`);
   return r.lastID;
 }
+// 硬门③（写入后）：writeResultFile 返回的文件路径在临时目录之下——raw 路径与 realpath 两个口径都按 path.relative 判（不按字符串前缀）
+function assertWrittenUnderTemp(filePath) {
+  let real = null;
+  try { real = fs.realpathSync(filePath); } catch (e) { throw new Error(`[硬门③] writeResultFile 返回的路径 ${filePath} 无法 realpath（${e && e.code}）`); }
+  if (!isStrictlyUnder(PUSH_TMP_DIR, filePath) || !isStrictlyUnder(PUSH_TMP_DIR_REAL, real)) {
+    throw new Error(`[硬门③] writeResultFile 写到了临时目录之外：返回路径=${filePath}，realpath=${real}，临时目录=${PUSH_TMP_DIR}（realpath ${PUSH_TMP_DIR_REAL}）`);
+  }
+}
 async function seedRun(taskId, { status, fileStatus, withFile }) {
   let resultFilePath = null;
   if (withFile) {
     const buf = runner.buildResultXlsxBuffer(['a'], [{ a: 1 }]);
     resultFilePath = runner.writeResultFile(buf);
+    assertWrittenUnderTemp(resultFilePath);   // 硬门③：每次 writeResultFile 返回的路径都必须在临时目录之下，否则抛错（不再继续往真实目录写）
   }
   const r = await run(
     `INSERT INTO periodic_task_runs
@@ -629,13 +744,18 @@ async function endpointTests() {
   ok(`发送链路证据：uploadMedia 调用 ${UPLOAD_CALLS.length} 次，sendFileToUser 调用 ${SENT_CALLS.length} 次（非空转）`);
 }
 
-function cleanupResultsDir() {
-  try {
-    const dir = runner.PERIODIC_RESULTS_DIR;
-    for (const f of fs.readdirSync(dir)) {
-      try { fs.unlinkSync(path.join(dir, f)); } catch (e) { /* best-effort */ }
-    }
-  } catch (e) { /* ignore */ }
+// [#106 S4b1] 原实现删 runner.PERIODIC_RESULTS_DIR 下的全部文件；该目录在正常模式检出里就是 <wbs-server>/periodic-results（真实结果目录），会连别人的结果文件一起删。
+//   [修复批 3] 结果文件现在全写在本脚本专属临时目录里（文件头替身），不再按 WRITTEN_RESULT_FILES 逐个删：整个临时目录是本脚本自己建的，
+//   removeOwnTempDir 只删它（逐个 unlinkSync + rmdirSync，lstat 确认不是符号链接）；删不掉的（被占用 / 权限）= 残留，返回失败清单，调用方计失败。
+//   另在这里做硬门④ 的「跑后」对比：真实结果目录多出任何条目 = 失败。
+function cleanupAndCheck() {
+  const problems = [];
+  const left = removeOwnTempDir(PUSH_TMP_DIR);
+  if (left.length > 0) problems.push(`临时结果目录清理失败，残留：${left.join('；')}`);
+  const d = diffRealResultsDir(REAL_DIR_BEFORE);
+  for (const p of d.problems) problems.push(`[硬门④] ${p}`);
+  for (const n of d.notes) console.log(`  [硬门④ 提示] ${n}`);
+  return problems;
 }
 
 async function main() {
@@ -652,19 +772,23 @@ async function main() {
   await unitTests();
   await endpointTests();
 
+  // 结果文件清理 + 硬门④ 跑后对比：临时目录删不掉 / 真实结果目录多出条目 = 失败，先于「全部通过」判定
+  const cleanupProblems = cleanupAndCheck();
+  if (cleanupProblems.length > 0) throw new Error(`结果目录收尾失败（${cleanupProblems.length} 项）：${cleanupProblems.join('；')}`);
+
   console.log(`\n[全部通过] ${passed} ✓ 周期取数推送 ④钉钉推送 验证通过`);
   console.log('  覆盖：resolvePushRecipient(phone→userid 无姓名/在职·getUserDetail 已删) + H-new evaluatePushIdempotency单元(含⑤c NEEDS_RECONCILE区分) + compareRecipientSnapshot/normalizeForCompare 已删断言 + 可推送前置(5态) + 预览(录入姓名透传+入参校验+无副作用)+M-1去重 + 确认发送(H-1快照必带/userid硬gate MISMATCH/姓名录入不做drift/H-3两阶段/H-3幂等ALREADY_PUSHED+force/H-new并发pending PUSH_IN_PROGRESS+ROLLBACK/M-new回写失败write_failures+warning+保持pending/⑤c M-2 force supersede/⑤c M-1 reapStalePendingPushes+三守卫+幂等/发送异常不卡pending/M-1双去重/invalid_staff failed/no_config 502/绑定run_id) + 参数校验 + requireAdmin + 记录列表 + recipient_name_snapshot=录入姓名');
   server.close();
-  db.close();
+  await new Promise((res) => db.close(() => res()));   // 等关库回调（关库未完成就退出会触发 libuv 断言）
   global.fetch = originalFetch;
-  cleanupResultsDir();
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error('\n[失败]', e.message, e.stack);
   if (server) server.close();
-  db.close();
+  await new Promise((res) => db.close(() => res()));   // 等关库回调再 exit(1)
   global.fetch = originalFetch;
-  cleanupResultsDir();
+  const cleanupProblems = cleanupAndCheck();   // 失败路径也清理自己的临时目录并做硬门④ 对比；收尾本身的问题只补报，退出码本来就是 1
+  if (cleanupProblems.length > 0) console.error(`[清理] 结果目录收尾问题 ${cleanupProblems.length} 项：${cleanupProblems.join('；')}`);
   process.exit(1);
 });

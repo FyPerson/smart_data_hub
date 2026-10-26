@@ -27,12 +27,12 @@
  */
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// [#106 S4c-A2] 被测服务 / 实例库来自 test-env：在 ready() 之后才赋值，不再写死 3000 与业务库路径。
+//   批跑须 exclusive：T19 临时把 id=PUBLISHER_ID 的用户置 disabled（finally 还原），同实例上并行的其他脚本会读到停用态。
+let BASE = null;
+let DB_PATH = null;
 
 const createdFixtureIds = [];
 
@@ -74,32 +74,31 @@ async function apiCall(method, urlPath, token, body) {
     return { status: r.status, body: j };
 }
 
-function dbRun(sql, params) {
+// 以下三个 helper：等 close 回调再落定，关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((res, rej) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(sql, params, function (err) {
-            db.close();
-            err ? rej(err) : res({ lastID: this.lastID, changes: this.changes });
+            const out = err ? null : { lastID: this.lastID, changes: this.changes };
+            db.close((cerr) => { const e = err || cerr; e ? rej(e) : res(out); });
         });
     });
 }
 
-function dbGet(sql, params) {
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((res, rej) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.get(sql, params, (err, row) => {
-            db.close();
-            err ? rej(err) : res(row);
+            db.close((cerr) => { const e = err || cerr; e ? rej(e) : res(row); });
         });
     });
 }
 
-function dbAll(sql, params) {
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((res, rej) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.all(sql, params, (err, rows) => {
-            db.close();
-            err ? rej(err) : res(rows);
+            db.close((cerr) => { const e = err || cerr; e ? rej(e) : res(rows); });
         });
     });
 }
@@ -448,24 +447,48 @@ async function runTests() {
             assert(res.body && res.body.code === 'CONTACT_USERS_INACTIVE', `T19 code=CONTACT_USERS_INACTIVE, got ${res.body && res.body.code}`);
         } finally {
             // 还原状态（无论测试成功失败都要还原，避免污染其他 e2e）
-            await dbRun(`UPDATE users SET status=? WHERE id=?`, [before.status, targetUid]);
+            // [#106 S4c 收口] 有限重试 3 次（间隔 200ms）；最终仍失败计失败（共享实例里该用户会一直停用），且不抛出以免盖住上面的断言错误
+            let statusRestored = false;
+            for (let i = 0; i < 3 && !statusRestored; i++) {
+                try { await dbRun(`UPDATE users SET status=? WHERE id=?`, [before.status, targetUid]); statusRestored = true; } catch (e) { console.error(`还原 users.status 失败 (第 ${i + 1} 次): ${e.message}`); if (i < 2) await new Promise((r) => setTimeout(r, 200)); }
+            }
+            if (!statusRestored) { console.error(`还原 users.status 最终失败：共享实例用户 id=${targetUid} 仍为 disabled`); failed++; }
         }
     }
 }
 
 (async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     try {
+        BASE = fx.BASE;
+        DB_PATH = fx.DB_PATH;
         await runTests();
     } catch (e) {
         console.error('\n!! e2e 运行异常：', e.message, e.stack);
         failed++;
     } finally {
-        for (const id of createdFixtureIds) {
-            try { await fx.cleanup(id); } catch (e) { console.error('cleanup failed:', e.message); }
+        // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+        for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of createdFixtureIds.slice()) {
+                try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+            }
         }
+        if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
         // codex 36 审 L-2 修复：按 user id 精确恢复 EXPORTER 原始 dingtalk_user_id
-        try { await restoreExporterDingUid(); } catch (e) { console.error('restore EXPORTER ding uid failed:', e.message); }
-        console.log(`\n== Summary: ${passed} pass / ${failed} fail ==`);
-        process.exit(failed === 0 ? 0 : 1);
+        // [#106 S4c 收口] 恢复共享 users.dingtalk_user_id：teardown 之前有限重试 3 次（间隔 200ms），最终仍失败计失败
+        let dingRestored = false;
+        for (let i = 0; i < 3 && !dingRestored; i++) {
+            try { await restoreExporterDingUid(); dingRestored = true; } catch (e) { console.error(`restore EXPORTER ding uid failed (第 ${i + 1} 次): ${e.message}`); if (i < 2) await new Promise((r) => setTimeout(r, 200)); }
+        }
+        if (!dingRestored) { console.error('恢复 EXPORTER 钉钉标识最终失败：共享实例 users 行留有 __fake_ding_uid_for_e2e__'); failed++; }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); failed++; }
     }
-})();
+    console.log(`\n== Summary: ${passed} pass / ${failed} fail ==`);
+    fx.finish(failed === 0 ? 0 : 1);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('three-level-forward e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

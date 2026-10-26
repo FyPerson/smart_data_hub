@@ -12,7 +12,7 @@
 //   断言 2：敏感黑名单（phone/dingtalk/notify/message_key/read_at）恒不出现在任何页 key/deps；
 //           对照组：临时注入 requester_phone 列断言守卫判红
 //   断言 3：三页配置结构一致（key/label 必有、value 有则 deps 有、key 配置内唯一）；按钮文案含「Excel」
-//   断言 4：vendor 文件存在 + 三页引用带 ?v= 缓存串 + u-export.js 的 ?v= 尾缀与 KIT_VERSION 一致
+//   断言 4：vendor 文件存在 + 引用 u-export.js 的页面其 src 恰为 ?v=auto（W4 起缓存串由服务端注入，不再与 KIT_VERSION 同步）+ 页面 *_UEXPORT_KIT_EXPECTED = 库内 KIT_VERSION（接口握手）
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -837,9 +837,9 @@ console.log('— 断言 3 对照组：按钮文案判据（H2，真实提取函�
 console.log('');
 
 // ============================================================
-// 断言 4：vendor 文件存在 + 三页引用带 ?v= 缓存串 + u-export.js 版本一致
+// 断言 4：vendor 文件存在 + 引用页 u-export.js 恰为 ?v=auto + u-export.js 版本握手常量一致
 // ============================================================
-console.log('— 断言 4：vendor 文件存在 + 引用页缓存串与 KIT_VERSION 一致 —');
+console.log('— 断言 4：vendor 文件存在 + 引用页 u-export.js 恰为 ?v=auto 且版本比对常量与 KIT_VERSION 一致 —');
 const VENDOR_PATH = path.join(PUBLIC_DIR, 'assets', 'vendor', 'xlsx.mini.min.js');
 must(fs.existsSync(VENDOR_PATH), `vendor 文件存在：assets/vendor/xlsx.mini.min.js`);
 if (fs.existsSync(VENDOR_PATH)) {
@@ -882,12 +882,23 @@ must(/root\.UnifyHelpers\.UEXPORT_KIT_VERSION\s*=/.test(UEXPORT_SRC), 'u-export.
 // `<script src=".../u-export.js?v=...">` 引用形态 → 判红，不能静默漏检；已走标准引用的页面，
 // 额外断言含 UnifyHelpers.uexportCheckVersion(...) 调用（H1：光挂 script 标签不调用版本比对等于没接）。
 {
-  const htmlFiles = fs.readdirSync(PUBLIC_DIR).filter((f) => f.toLowerCase().endsWith('.html'));
+  // 默认读 public；--public-dir=<目录> 仅供变异自证（在临时副本上改页面，不动工作区页面），只影响本块的页面扫描
+  const pdArg = process.argv.find((a) => a.startsWith('--public-dir='));
+  const PAGES_DIR = pdArg ? path.resolve(pdArg.slice('--public-dir='.length)) : PUBLIC_DIR;
+  // 与静态守卫同口径解析 <script src>：守卫导出的 scanHtml / attrOf（两种引号、无引号、属性名大小写、注释与脚本正文跳过）
+  const guard = require('./verify-shared-css-cache-bust');
+  const scriptSrcs = (html, re) => guard.scanHtml(html)
+    .filter((t) => t.name === 'script')
+    .map((t) => guard.attrOf(t, 'src'))
+    .filter((v) => v !== undefined && re.test(v.trim().split(/[?#]/)[0]));
+  const UEXPORT_SRC_RE = /(^|\/)u-export\.js$/i;
+  const htmlFiles = fs.readdirSync(PAGES_DIR).filter((f) => f.toLowerCase().endsWith('.html'));
   const referencing = [];
   const wiredButNotReferencing = [];
   for (const f of htmlFiles) {
-    const html = fs.readFileSync(path.join(PUBLIC_DIR, f), 'utf8');
-    if (/u-export\.js\?v=/.test(html)) referencing.push({ file: f, html });
+    const html = fs.readFileSync(path.join(PAGES_DIR, f), 'utf8');
+    // 按资源路径（<script src> 的路径部分以 u-export.js 结尾，不管有没有 ?v=、用哪种引号）挑引用页；缺 ?v=auto 的引用由下面的断言判红
+    if (scriptSrcs(html, UEXPORT_SRC_RE).length > 0) referencing.push({ file: f, html });
     else if (hasWiringSignal(html)) wiredButNotReferencing.push(f);
   }
   for (const f of wiredButNotReferencing) {
@@ -897,11 +908,10 @@ must(/root\.UnifyHelpers\.UEXPORT_KIT_VERSION\s*=/.test(UEXPORT_SRC), 'u-export.
     ok(`u-export.js 引用扫描：0 个页面引用（预期，S4 阶段共享层未接入任何页，S5/S6 接入后自动纳入下方版本一致性检查）`);
   } else {
     for (const { file, html } of referencing) {
-      const srcMatch = /u-export\.js\?v=v[\d.]+_([a-zA-Z0-9]+)"/.exec(html);
-      must(!!srcMatch, `${file}：含 u-export.js?v=..._<tag> 引用`);
-      if (srcMatch && KIT_VERSION) {
-        must(srcMatch[1] === KIT_VERSION, `${file}：<script src> 缓存串尾部 tag 与 KIT_VERSION 一致（实得="${srcMatch[1]}"，期望="${KIT_VERSION}"）`);
-      }
+      // #106 W4 / S6b：缓存串不再与 KIT_VERSION 同步（页面引用一律 ?v=auto，由服务端按文件内容注入指纹）——
+      //   原“引用带 ?v=..._<tag> + 串尾 tag = KIT_VERSION”改为“引用恰为 ?v=auto”，下面 *_UEXPORT_KIT_EXPECTED = KIT_VERSION 的接口握手断言保留。
+      const srcTags = scriptSrcs(html, UEXPORT_SRC_RE);
+      must(srcTags.length === 1 && srcTags[0] === 'assets/js/u-export.js?v=auto', `${file}：恰有 1 处 u-export.js 引用且 <script src> 原始值恰为 assets/js/u-export.js?v=auto`);
       const expectMatch = /[A-Z0-9_]*_UEXPORT_KIT_EXPECTED\s*=\s*'([^']+)'/.exec(html);
       must(!!expectMatch, `${file}：含 *_UEXPORT_KIT_EXPECTED 版本比对常量`);
       if (expectMatch && KIT_VERSION) {

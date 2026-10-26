@@ -117,7 +117,6 @@ const T2 = '2026-09-30 10:05:00';
 const XSS_NAME = `x'<img src=x onerror=alert(1)>&#39;"`;
 
 async function main() {
-  if (!process.env.JWT_SECRET || !process.env.DB_ENCRYPTION_KEY) { console.log('FAIL 缺少 JWT_SECRET / DB_ENCRYPTION_KEY（读自 wbs-server/.env）'); process.exit(1); }
   let pass = 0, fail = 0;
   const check = (name, cond, detail) => { if (cond) pass++; else { fail++; console.log(`FAIL ${name}${detail === undefined ? '' : NL + '  ' + detail}`); } };
   const J = (v) => JSON.stringify(v);

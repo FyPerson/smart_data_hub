@@ -6,8 +6,9 @@
  *   validateCollabAttachmentRule 原型键守）。
  *
  * ⚠️ 数据协作模块仍在单体 server.js 内（非 routes/ 工厂函数），没有 in-process mock 通道——本文件照抄既有
- *   scripts/verify-collab-multifile-datascope.js 的活体 e2e 范式（真实 fetch + _test-fixture.js 真实
- *   task_pool.db + JWT），**前置要求本地 server 已启动**（localhost:3000，PORT 环境变量对齐 .env）。
+ *   scripts/verify-collab-multifile-datascope.js 的活体 e2e 范式（真实 fetch + _test-fixture.js + JWT）。
+ *   [#106 S3b] 被测服务 / 实例库 / 上传目录都来自 test-env：默认自起临时隔离实例（来源 = 本检出本地库快照，数据根为空目录，上传落在实例数据根的 uploads/），
+ *   也可由 TEST_* 变量组指向已起好的隔离实例；不再打 3000、不再写真实库与真实 uploads/。
  * 用法：node scripts/verify-collab-attach-archive.js
  */
 'use strict';
@@ -17,12 +18,14 @@ const path = require('path');
 const { tmpdir } = require('os');
 const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');
 
-const BASE = fx.BASE;
-const DB_PATH = fx.DB_PATH;
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-const COLLAB_PENDING = path.join(UPLOAD_DIR, 'collab', '_pending');
-const ISSUE_PENDING = path.join(UPLOAD_DIR, 'issues', '_pending');
+// 顶层不读 fx.BASE / fx.DB_PATH（ready() 之前读取会抛错）：main() 里 await fx.ready() 之后再赋值
+let BASE = null;
+let DB_PATH = null;
+let UPLOAD_DIR = null;
+let COLLAB_PENDING = null;
+let ISSUE_PENDING = null;
 
 const createdCollabIds = [];
 const createdIssueIds = [];
@@ -125,7 +128,16 @@ function assert(cond, label) {
 }
 
 async function main() {
-  console.log('=== 数据协作 附件压缩包支持 verify（依赖本地 localhost:3000 活体 server）===\n');
+  await fx.ready();   // 先于任何写库 / 网络请求；入口函数里第一条有副作用的语句（静态守卫硬规则）
+  console.log('=== 数据协作 附件压缩包支持 verify（经 test-env 自起的临时隔离实例）===\n');
+
+  const E = testEnv.env();
+  if (!E.dataDir) throw new Error('test-env 没有给出实例数据根（dataDir）：本脚本要核对落盘文件，必须能定位实例的 uploads/');
+  BASE = fx.BASE;
+  DB_PATH = fx.DB_PATH;
+  UPLOAD_DIR = path.join(E.dataDir, 'uploads');
+  COLLAB_PENDING = path.join(UPLOAD_DIR, 'collab', '_pending');
+  ISSUE_PENDING = path.join(UPLOAD_DIR, 'issues', '_pending');
 
   const ctx = await fx.createPendingFixture();
   createdCollabIds.push(ctx.id);
@@ -279,4 +291,6 @@ main().catch(async (e) => {
   for (const id of createdCollabIds) { try { await cleanupCollabDisk(id); await fx.cleanup(id); } catch (_) {} }
   for (const id of createdIssueIds) { try { await cleanupIssueDisk(id); await dbRun('DELETE FROM issues WHERE id=?', [id]); } catch (_) {} }
   if (testTmpDir) { try { fs.rmSync(testTmpDir, { recursive: true, force: true }); } catch (_) {} }
+  // 收掉自起的实例（不收尾的后果是退出码 70）
+  try { await fx.teardown(); } catch (e) { console.error('teardown 失败：' + e.message); process.exitCode = 1; }
 });

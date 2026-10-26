@@ -11,7 +11,7 @@
  *   package.json 只显式列了 acorn / eslint 两个 devDependencies）。不再用正则剥注释（字符串里含 `/*` 会让正则失明），也不用正则找定义。
  *
  * 判据（对 Model_Center.html）：
- *   ① 引用了 assets/js/model-script-gen.js（先剔除 HTML 注释 <!-- -->，被注释掉的 <script src> 不算），?v= 缓存串以 _<库内 KIT_VERSION> 结尾，
+ *   ① 引用了 assets/js/model-script-gen.js（先剔除 HTML 注释 <!-- -->，被注释掉的 <script src> 不算），查询串恰为 ?v=auto（W4 起不再与库内 KIT_VERSION 同步），
  *      且位于解构该库的内联脚本之前；
  *   ② 页面任何内联脚本里都不得再定义库导出名（任意作用域的 function 声明 / const|let|var / 隐式全局赋值 / window.名 = …）；
  *      唯一放行：形如 `const { 名, 名 } = window.ModelScriptGen;` 的那一条解构声明（按语句里的名字精确放行）；
@@ -19,7 +19,7 @@
  *   ④ 全局作用域里「未声明的引用」（eslint-scope globalScope.through）凡是库导出名（或 C3a 已删的三个死代码函数名）、
  *      却不在页面解构里的，判红（给出名字与内联脚本序号）——页面用了库函数但没解构，运行时才会 ReferenceError。
  *   另：库导出的每个名字（KIT_VERSION 除外）必须是函数。
- *   缓存串与库内容指纹（改库内容必须 bump ?v=）由 verify-shared-css-cache-bust.js 登记（见该文件 ASSETS 里的 model-script-gen.js 条目）。
+ *   缓存串由服务端按文件内容自动注入（#106 W4）；本地引用全为 ?v=auto 由 verify-shared-css-cache-bust.js 的 S1 在全部页面上守。
  *
  * 用法：
  *   node scripts/verify-model-script-gen-single-source.js              校验真实页面
@@ -50,6 +50,7 @@ const ECMA = 2022;
 function readLibExports() {
   const api = require(LIB);
   const names = Object.keys(api).filter(k => k !== 'KIT_VERSION');
+  // kit 字段：W4 起已无人读取（原 ① 的“串尾 = KIT_VERSION”判据已换成“恰为 ?v=auto”），保留仅作信息，不改逻辑
   return { names, kit: api.KIT_VERSION, bad: names.filter(n => typeof api[n] !== 'function') };
 }
 
@@ -106,7 +107,8 @@ function check(html, lib) {
   if (!libTag) probs.push(`① 页面没有引用 ${LIB_REL}（被 HTML 注释掉的不算）`);
   else {
     const q = libTag.src.includes('?') ? libTag.src.slice(libTag.src.indexOf('?')) : '';
-    if (!new RegExp('_' + lib.kit + '$').test(q.replace(/^\?v=/, ''))) probs.push(`① 引用的缓存串 ${JSON.stringify(q)} 不以 _${lib.kit}（库内 KIT_VERSION）结尾`);
+    // #106 W4 / S6b：缓存串不再与库内 KIT_VERSION 同步（引用一律 ?v=auto，由服务端按文件内容注入指纹）；KIT_VERSION 只是库的版本标识（页面没有运行时比对）
+    if (q !== '?v=auto') probs.push(`① 引用的查询串 ${JSON.stringify(q)} 不是 ?v=auto`);
   }
   // 解析每个内联脚本
   const analyzed = [];
@@ -212,6 +214,19 @@ function selfTest(html, lib) {
     ['页面在函数内 const 定义 KIT_VERSION（29T-R ②）', (h) => afterDestruct(h, 'function __k() { const KIT_VERSION = 1; return KIT_VERSION; }'), '②'],
     ['页面顶层 function 定义 KIT_VERSION（29T-R ②）', (h) => afterDestruct(h, 'function KIT_VERSION() {}'), '②'],
     ['页面引用 KIT_VERSION 但没解构（29T M1）', (h) => afterDestruct(h, 'void KIT_VERSION;'), '④'],
+    // #106 S6b：① 的判据由“串尾 = KIT_VERSION”换成“恰为 ?v=auto”，下面两个变异证明新判据不是恒真（手写串 / 缺查询串都判红）
+    ['库引用写回手写缓存串（W4 后须是 ?v=auto）', (h) => {
+      if (!libTagRe.test(h)) throw new Error('找不到 script 引用');
+      const out = h.replace(libTagRe, (t) => t.replace('?v=auto', '?v=v1.0.0_hand'));
+      if (out === h) throw new Error('页面里库引用不是 ?v=auto，变异没改到');
+      return out;
+    }, '①'],
+    ['库引用缺查询串', (h) => {
+      if (!libTagRe.test(h)) throw new Error('找不到 script 引用');
+      const out = h.replace(libTagRe, (t) => t.replace('?v=auto', ''));
+      if (out === h) throw new Error('页面里库引用不是 ?v=auto，变异没改到');
+      return out;
+    }, '①'],
     ['库引用被 HTML 注释掉', (h) => {
       const m = libTagRe.exec(h); if (!m) throw new Error('找不到 script 引用');
       return h.replace(libTagRe, '<!-- ' + m[0].trim() + ' -->\n');

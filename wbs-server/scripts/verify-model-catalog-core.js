@@ -12,7 +12,7 @@
  *   六 排序：10 个排序键 × desc / asc 的手写期望序列（含空值、未知状态、日期并列与不同分隔符），不使用被测的 sortByField 生成期望；另验证显式稳定次序（不稳定排序引擎下仍按输入序）。
  *   七 搬入件逐字：核心里的 SORT_FIELD_TYPES / STATUS_SORT_ORDER / parseSqliteTs / sortByField 与 model-catalog.js 里同名声明 token 序列逐个相等（V:*）。
  *   （一节只证明加载 / 导出路径一致，不作语义判据；语义由三至六节的手写期望承担。）
- *   九 接线（静态，#77 C4b-2）：目录页核心标签的 ?v= 后缀 = 核心源码里的 CORE_VERSION；model-catalog.js 不再声明已搬进核心的四个名字；
+ *   九 接线（静态，#77 C4b-2）：目录页核心标签的查询串恰为 ?v=auto（W4 起不再与 CORE_VERSION 同步；CORE_VERSION 与 model-catalog.js 期望值的接口握手由 W:corever 断言）；model-catalog.js 不再声明已搬进核心的四个名字；
  *     renderModelsPage / goToPage / highlightModel / getSortedModels / getCatalogView / loadModels 经 ModelCatalogCore 计算；loadModels 不带 keyword；
  *     pageSize 声明为 20；model-catalog.js 代码里不出现按行算页的写法（W:*）。七节的对照源改为 git show 931397fa 的 model-catalog.js（git 不可用即判红）。
  *     C4c-2 起另有：renderModelsPage 的视图只来自参数或 catalogViewRaw()（W:core-calls，不再用「函数体出现 ModelCatalogCore.」这种会被 acceptanceView 调用蒙混的判据）；
@@ -1149,15 +1149,16 @@ section('九 接线静态', () => {
   const html = fs.readFileSync(PAGE_FILE, 'utf8').replace(/\r\n/g, '\n');
   const cat = fs.readFileSync(CAT_FILE, 'utf8').replace(/\r\n/g, '\n');
   const coreSrc = fs.readFileSync(CORE_FILE, 'utf8').replace(/\r\n/g, '\n');
-  // 版本握手：页面核心标签的 ?v= 后缀 = _<核心源码里的 CORE_VERSION>（不写死）
+  // 版本握手（#106 W4 / S6b 改口径）：原先证明“页面核心标签的 ?v= 后缀 = _<核心源码里的 CORE_VERSION>”（缓存串与版本号同步）；
+  //   W4 起缓存串由服务端按内容注入，页面一律 ?v=auto，所以这里改为证明核心标签的查询串恰为 ?v=auto；
+  //   接口握手（model-catalog.js 里 catalogCheckCoreVersion 的期望字面量 = 核心源码 CORE_VERSION）本来就由下面的 W:corever 断言守着，不重复。
   const ver = /var CORE_VERSION = '([^']+)'/.exec(coreSrc);
   check('W:ver', '能从核心源码读出 CORE_VERSION', !!ver);
   const tags = []; { const re = /<!--[\s\S]*?-->|<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi; let m; while ((m = re.exec(html))) { if (m[0].startsWith('<!--')) continue; const sm = /\ssrc\s*=\s*"([^"]*)"/.exec(m[1] || ''); if (sm) tags.push(sm[1]); } }
   const coreTags = tags.filter(t => /model-catalog-core\.js/.test(t));
   check('W:ver', '目录页恰有 1 个核心 <script src>', coreTags.length === 1, J(coreTags));
-  if (ver && coreTags.length === 1) {
-    const q = /\?v=([^"&#]+)/.exec(coreTags[0]);
-    check('W:ver', '核心标签的 ?v= 以 _' + ver[1] + ' 结尾（口径同 model-script-gen 单源守卫；与 CORE_VERSION 一致，不写死）', !!q && q[1].endsWith('_' + ver[1]), coreTags[0]);
+  if (coreTags.length === 1) {
+    check('W:ver', '核心标签的查询串恰为 ?v=auto（缓存串由服务端按内容注入，不再与 CORE_VERSION 同步）', /^assets\/js\/model-catalog-core\.js\?v=auto$/.test(coreTags[0]), coreTags[0]);
   }
   // 代码文本（剥注释）与函数体
   const comments = []; const ast = acorn.parse(cat, { ecmaVersion: 2022, sourceType: 'script', onComment: comments });

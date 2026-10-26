@@ -31,7 +31,10 @@ module.exports = async function startFixture(options = {}) {
     while(!mod._internals.SYS_SCHEMA_STATE.ready){if(mod._internals.SYS_SCHEMA_STATE.error||Date.now()>deadline)throw Error(mod._internals.SYS_SCHEMA_STATE.error||'schema timeout');await new Promise(resolve=>setTimeout(resolve,10));}
     const app=express();app.use(express.json());app.use((req,res,next)=>{if(hooks.onRequest)hooks.onRequest(req);next();});app.use('/api',mod.router);
     app.get('/api/auth/me',auth,(req,res)=>res.json(user));
-    app.use(express.static(path.resolve(__dirname,'../../public'),{etag:false,maxAge:0}));
+    // #106 W4 / S6b：与 server.js 同参数（同一份注入中间件挂在 express.static(public) 之前），夹具里的页面与生产同形；日志不进 logs（测试按 logs 断言业务日志）
+    const publicDir=path.resolve(__dirname,'../../public');
+    app.use(require('../../utils/html-asset-fingerprint').createHtmlAssetInjector({publicDir,log:{error(){}},startupStamp:String(Date.now())}));
+    app.use(express.static(publicDir,{etag:false,maxAge:0}));
     server=await listenOnSafePort(app); // #95: shared safe-port helper (20000-49999, bind retry on EADDRINUSE/EACCES only)
     const base='http://127.0.0.1:'+server.address().port;
     const api=async(method,url,body)=>{const r=await fetch(base+'/api'+url,{method,headers:{Authorization:'Bearer fixture-admin','Content-Type':'application/json',Connection:'close'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});return {status:r.status,body:await r.json()};};

@@ -19,7 +19,7 @@
        关系数据按不可变对待（核心只保存引用、不深拷贝，页面不得修改）。
      · 排序键只能取 SORT_KEYS 的子集（SORT_KEYS = 核心接受的排序键全集；页面排序按钮恰为 DOM 契约 §B.3 第 12 条的 8 个键，不得由 SORT_KEYS 生成，测试驱动也不得读它定期望）；筛选键只能取 FILTER_PREDICATES 的键；左栏计数只能用 railCounts，不得在页面里自行统计。
      · 列表请求失败调用 listFailed({ token })（保留旧数据，把等不到响应的展开项置为可重试）；显示文案经 firstSentence / acceptanceView / IMPL_BADGE_* 映射。
-   改本文件须同时改目录页引用处的 ?v=..._<CORE_VERSION> 与 scripts/verify-shared-css-cache-bust.js 里的登记。
+   页面引用的缓存串（?v=auto）由服务端按文件内容自动注入，改本文件无需手改页面；CORE_VERSION 与目录页做接口握手。
 */
 ;(function (root, factory) {
     var api = factory(root);
@@ -28,7 +28,7 @@
 }(typeof window !== 'undefined' ? window : null, function (root) {
     'use strict';
 
-    // 版本印记：必须与 Model_Center.html 引用本文件的 ?v=..._<CORE_VERSION> 后缀一致。
+    // 版本印记：CORE_VERSION 与 model-catalog.js 里的期望值做接口握手；页面引用的缓存串（?v=auto）由服务端自动注入。
     var CORE_VERSION = 'mcc3';
 
     // 每页固定 20 组（方案 §3.4）：computeView / 全部事件只接受这个值，页面层须传 ModelCatalogCore.PAGE_SIZE

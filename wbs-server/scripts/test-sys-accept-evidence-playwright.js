@@ -4,11 +4,15 @@
  *  2026-09-07 Opus 预筛回卷 1H/3M/5L：H1 uploadedIds 累加+总量闸+可见状态行+失效自愈、
  *  M1 软约束状态复位、M2/L1-L4 见下方 T6/T7 与各段详注）
  *
- * 用法：本地 server（3000，PID 20360，已含 S2a/S2b 后端+前端改动）已就绪后：
- *   node scripts/test-sys-accept-evidence-playwright.js
+ * 用法：node scripts/test-sys-accept-evidence-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   依赖隔离实例（本检出本地库的快照）里存在固定用户 id 1（admin）/ 8（开发）/ 13（受理人）——首跑核对。
+ *   验收凭证的物理上传文件在 <实例数据根>/uploads 下（env().dataDir，未知即抛），清理时按附件行精确 unlink（非 ENOENT 的失败计失败）；
+ *   临时 png / exe 文件放 os.tmpdir() 下本脚本独有的 sys-accept-evi-* 子目录，收尾用 removeTreeChecked 删并确认（失败计失败）。
+ *   失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * 骨架抄 test-sys-post-release-accept-fail-note-playwright.js（登录/夹具/直查库/console error 断言范式）。
- * 前端改动是静态文件即时生效，不需重启本地 server（本文件只读/只走真实 HTTP+DB，不重启/不 kill 任何进程）。
+ * 前端改动是静态文件即时生效（本文件只走真实 HTTP+DB，不 kill 任何进程；实例由 test-env 起停）。
  * 夹具走真实 API 造「待验证」态：improvement 单 ×6（T1/T2/T3/T5/T6/T7，submit mode=commits 避免触发 C9
  * 无 commit 直翻，保证落「待上线」非「已上线」，便于断言）+ bug 单 ×1（T4，return 目标态=处理中）。
  *
@@ -42,33 +46,65 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const net = require('net');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / SCREENSHOT_DIR / UPLOAD_ROOT / TMP_DIR / RUN_TAG / TITLE_PREFIX：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let SCREENSHOT_DIR = null;
+let UPLOAD_ROOT = null;   // [codex 500 M·磁盘清理] <实例数据根>/uploads（隔离实例的 UPLOAD_DIR 在数据根里）
+let TMP_DIR = null;       // 本脚本独有的临时文件目录（os.tmpdir() 下 sys-accept-evi-*），收尾 removeTreeChecked
+let RUN_TAG = null;
+let TITLE_PREFIX = null;
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;   // 示例对接人
 const DEV_ID = 8;        // 示例开发A（本地真实 active 非 viewer 账号，同既有多个 sys Playwright 脚本复用账号）
-const RUN_TAG = Date.now();
-const TITLE_PREFIX = `PW-验收凭证-${RUN_TAG}`;
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
-const UPLOAD_ROOT = path.join(__dirname, '..', 'uploads');   // [codex 500 M·磁盘清理] 与 server.js UPLOAD_DIR 同源（path.join(__dirname,'uploads')）
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
+const dbAll = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.all(sql, params, (e, rows) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(rows); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
 }
 
 let pass = 0, fail = 0;
@@ -101,7 +137,7 @@ function futureEstStr() {
 async function siPreviewCount(page, key) {
     return await page.$$eval(`#siPreview_${key} .si-file-item`, els => els.length).catch(() => 0);
 }
-const PNG_BYTES = Buffer.from('89504e470d0a1a0a', 'hex');   // 同 verify-sys-attachments.js 既有范式：内容不重要，只测扩展名/流程闸
+let PNG_BYTES = null;   // 同 verify-sys-attachments.js 既有范式：内容不重要，只测扩展名/流程闸（Buffer.from(…) 调用不是纯声明，入口 ready() 之后赋值）
 
 // [L3·2026-09-07 主会话裁定] T1-T5(-T7) 共用同一套 console error 过滤口径——既有惯例只放行
 // "Failed to load resource...40[049]"（4xx 探针场景既有噪音，各 T 段此前各写一份同款正则）；
@@ -123,6 +159,7 @@ function filterExpectedConsoleErrors(errors, extraPattern) {
 //   action_code==='accept' 之类窄化判据，本断言先红。
 // ═══════════════════════════════════════════════════════════════
 function staticCheckTimelineAttachmentBlockNotNarrowed() {
+    // 读的是本检出的 public/Sys_Iteration.html（隔离实例由本检出的 server 起，静态页同源）
     const htmlPath = path.join(__dirname, '..', 'public', 'Sys_Iteration.html');
     const src = fs.readFileSync(htmlPath, 'utf8');
     const startMarker = 'if (e.payload_json) {';
@@ -143,6 +180,10 @@ function staticCheckTimelineAttachmentBlockNotNarrowed() {
 
 let seq = 0;
 let oaSeq = 20260906100;
+// [#106 S4d-4 修复批] 夹具单编号登记：建单（201）拿到 id 后立即登记，后续「受理 / 指派 / 估时 / 提交」任一步抛错时，收尾清理仍能清到这张单
+//   （原来 id 只在 helper 全部成功返回后才由调用方 push，多步推进中途失败的单会漏清）。幂等（同 submit-withdraw 的 registerCreatedId 写法）
+const createdIds = [];
+function registerCreatedId(id) { if (Number.isInteger(id) && id > 0 && !createdIds.includes(id)) createdIds.push(id); }
 async function mkImprovementToVerify(adminTok, devTok, suffix) {
     seq++;
     const r = await fetch(`${BASE_URL}/api/sys-issues`, {
@@ -155,6 +196,7 @@ async function mkImprovementToVerify(adminTok, devTok, suffix) {
     const body = await r.json();
     if (r.status !== 201) throw new Error(`[夹具-建单] 应 201，实得 ${r.status} ${JSON.stringify(body)}`);
     const id = body.id;
+    registerCreatedId(id);   // 建单即登记
     let resp = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ risk_level: '二级' }) });
     if (resp.status !== 200) throw new Error(`[夹具-受理] 应 200，实得 ${resp.status} ${JSON.stringify(await resp.json().catch(() => null))}`);
     resp = await fetch(`${BASE_URL}/api/sys-issues/${id}/set-oa-number`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ oa_number: String(oaSeq++) }) });
@@ -184,6 +226,7 @@ async function mkBugToVerify(adminTok, devTok, suffix) {
     const body = await r.json();
     if (r.status !== 201) throw new Error(`[夹具-建单] 应 201，实得 ${r.status} ${JSON.stringify(body)}`);
     const id = body.id;
+    registerCreatedId(id);   // 建单即登记
     let resp = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: jsonHeaders(adminTok), body: '{}' });
     if (resp.status !== 200) throw new Error(`[夹具-受理] 应 200，实得 ${resp.status} ${JSON.stringify(await resp.json().catch(() => null))}`);
     resp = await fetch(`${BASE_URL}/api/sys-issues/${id}/assign`, { method: 'POST', headers: jsonHeaders(adminTok), body: JSON.stringify({ assigned_to: DEV_ID }) });
@@ -210,7 +253,7 @@ function ensureServerListening(timeoutMs = 3000) {
         const sock = net.createConnection({ port, host });
         const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
         sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件`)); });
+        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——ready() 之后被测实例应已在监听，请查隔离实例的启动日志`)); });
     });
 }
 async function ensureAppReadinessEndpoint() {
@@ -223,6 +266,17 @@ async function ensureAppReadinessEndpoint() {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    const dataDir = testEnv.env().dataDir;
+    if (!dataDir) throw new Error('实例数据根（env().dataDir）未知：无法定位 uploads 目录——变量组形态下 TEST_DB_PATH 所在目录没有与 TEST_INSTANCE 匹配的 sdh-instance.json');
+    UPLOAD_ROOT = path.join(dataDir, 'uploads');
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+    RUN_TAG = Date.now();
+    TITLE_PREFIX = `PW-验收凭证-${RUN_TAG}`;
+    TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sys-accept-evi-'));
+    PNG_BYTES = Buffer.from('89504e470d0a1a0a', 'hex');
     await ensureServerListening();
     console.log('  ✅ 端口 Listen 探测通过（server 已就绪）');
     await ensureAppReadinessEndpoint();
@@ -235,8 +289,7 @@ async function main() {
     const adminTok = await signAs(ADMIN_ID);
     const devTok = await signAs(DEV_ID);
 
-    const createdIds = [];
-    const tmpFiles = [];
+    const tmpFiles = [];   // createdIds / registerCreatedId 在模块级（helper 建单后立即登记，见上）
     const browser = await chromium.launch();
     try {
         // ═══════════════════════════════════════════════════════════════
@@ -244,7 +297,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T1：accept 弹层字段存在性 ──');
         const id1 = await mkImprovementToVerify(adminTok, devTok, 'T1');
-        createdIds.push(id1);
+        registerCreatedId(id1);   // 幂等（helper 内已登记）
         const page1 = await loginPage(browser, adminTok);
         await page1.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id1}`);
         await page1.waitForLoadState('networkidle');
@@ -266,7 +319,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T2：软约束 ──');
         const id2 = await mkImprovementToVerify(adminTok, devTok, 'T2');
-        createdIds.push(id2);
+        registerCreatedId(id2);
         const page2 = await loginPage(browser, adminTok);
         await page2.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id2}`);
         await page2.waitForLoadState('networkidle');
@@ -306,7 +359,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T3：说明+附件真实链路 ──');
         const id3 = await mkImprovementToVerify(adminTok, devTok, 'T3');
-        createdIds.push(id3);
+        registerCreatedId(id3);
         const page3 = await loginPage(browser, adminTok);
         await page3.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id3}`);
         await page3.waitForLoadState('networkidle');
@@ -317,7 +370,7 @@ async function main() {
 
         const t3Note = 'Playwright T3 前端探针：验收通过，功能符合预期';
         await page3.fill('#f_note', t3Note);
-        const pngPath3 = path.join(os.tmpdir(), `sys-accept-evi-t3-${RUN_TAG}.png`);
+        const pngPath3 = path.join(TMP_DIR, `sys-accept-evi-t3-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath3, PNG_BYTES);
         tmpFiles.push(pngPath3);
         await page3.setInputFiles('#siPickerInput_accept-evidence', pngPath3);
@@ -360,7 +413,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T4：return 附件链路（bug 单） ──');
         const id4 = await mkBugToVerify(adminTok, devTok, 'T4');
-        createdIds.push(id4);
+        registerCreatedId(id4);
         const page4 = await loginPage(browser, adminTok);
         await page4.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id4}`);
         await page4.waitForLoadState('networkidle');
@@ -371,7 +424,7 @@ async function main() {
 
         const t4Reason = 'Playwright T4 前端探针：问题复现，请修复';
         await page4.fill('#f_reason', t4Reason);
-        const pngPath4 = path.join(os.tmpdir(), `sys-accept-evi-t4-${RUN_TAG}.png`);
+        const pngPath4 = path.join(TMP_DIR, `sys-accept-evi-t4-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath4, PNG_BYTES);
         tmpFiles.push(pngPath4);
         await page4.setInputFiles('#siPickerInput_return-evidence', pngPath4);
@@ -415,7 +468,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T5：上传失败中止流转 ──');
         const id5 = await mkImprovementToVerify(adminTok, devTok, 'T5');
-        createdIds.push(id5);
+        registerCreatedId(id5);
         const page5 = await loginPage(browser, adminTok);
         await page5.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5}`);
         await page5.waitForLoadState('networkidle');
@@ -425,7 +478,7 @@ async function main() {
         await page5.waitForTimeout(200);
 
         // ── T5a：.exe 假文件 → picker collect 拒收（不进 files），视同无附件路径 ──
-        const exePath = path.join(os.tmpdir(), `sys-accept-evi-t5-${RUN_TAG}.exe`);
+        const exePath = path.join(TMP_DIR, `sys-accept-evi-t5-${RUN_TAG}.exe`);
         fs.writeFileSync(exePath, Buffer.from([0x4d, 0x5a]));   // MZ 头，内容不重要，只测扩展名闸
         tmpFiles.push(exePath);
         await page5.setInputFiles('#siPickerInput_accept-evidence', exePath);
@@ -442,7 +495,7 @@ async function main() {
         //   「待验证」（accept 的合法前置态），upload 失败与"能否流转"两件事解耦，若活体变异①让
         //   流程带着空 attachment_ids 继续调 accept，accept 会真的 200 成功、状态真的滑到「待上线」——
         //   这才是能被断言直接抓到的可观测差异。
-        const pngPath5 = path.join(os.tmpdir(), `sys-accept-evi-t5-${RUN_TAG}.png`);
+        const pngPath5 = path.join(TMP_DIR, `sys-accept-evi-t5-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath5, PNG_BYTES);
         tmpFiles.push(pngPath5);
         await page5.setInputFiles('#siPickerInput_accept-evidence', pngPath5);
@@ -489,7 +542,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T8：上传响应 200 但 attachments 为空 → 前端 fail-closed 中止 ──');
         const id8 = await mkImprovementToVerify(adminTok, devTok, 'T8');
-        createdIds.push(id8);
+        registerCreatedId(id8);
         const page8 = await loginPage(browser, adminTok);
         await page8.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id8}`);
         await page8.waitForLoadState('networkidle');
@@ -497,7 +550,7 @@ async function main() {
         await page8.click('#siDActions button:has-text("验收通过")');
         await page8.waitForSelector('#siModalOverlay.open', { timeout: 5000 });
         await page8.waitForTimeout(200);
-        const pngPath8 = path.join(os.tmpdir(), `sys-accept-evi-t8-${RUN_TAG}.png`);
+        const pngPath8 = path.join(TMP_DIR, `sys-accept-evi-t8-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath8, PNG_BYTES);
         tmpFiles.push(pngPath8);
         await page8.setInputFiles('#siPickerInput_accept-evidence', pngPath8);
@@ -531,7 +584,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T6：H1 修复钉子（uploadedIds 累加，非覆盖） ──');
         const id6 = await mkImprovementToVerify(adminTok, devTok, 'T6');
-        createdIds.push(id6);
+        registerCreatedId(id6);
         const page6 = await loginPage(browser, adminTok);
         await page6.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id6}`);
         await page6.waitForLoadState('networkidle');
@@ -542,7 +595,7 @@ async function main() {
 
         const t6Note = 'Playwright T6 前端探针：验收通过（H1 重试累加）';
         await page6.fill('#f_note', t6Note);
-        const pngPath6a = path.join(os.tmpdir(), `sys-accept-evi-t6a-${RUN_TAG}.png`);
+        const pngPath6a = path.join(TMP_DIR, `sys-accept-evi-t6a-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath6a, PNG_BYTES);
         tmpFiles.push(pngPath6a);
         await page6.setInputFiles('#siPickerInput_accept-evidence', pngPath6a);
@@ -573,7 +626,7 @@ async function main() {
 
         // 再选第二张图（不同物理文件，首张 picker 已在上传成功后 reset）——H1 修复要求新写法在 uploadedIds
         // 已非空时仍能继续上传新文件（旧写法 `&&!uploadedIds` 会让本次选择被静默跳过）。
-        const pngPath6b = path.join(os.tmpdir(), `sys-accept-evi-t6b-${RUN_TAG}.png`);
+        const pngPath6b = path.join(TMP_DIR, `sys-accept-evi-t6b-${RUN_TAG}.png`);
         fs.writeFileSync(pngPath6b, PNG_BYTES);
         tmpFiles.push(pngPath6b);
         await page6.setInputFiles('#siPickerInput_accept-evidence', pngPath6b);
@@ -609,7 +662,7 @@ async function main() {
         // 抓到的可观测差异。
         console.log('\n── T7：M1 修复钉子（softConfirmed 随非空路径复位） ──');
         const id7 = await mkImprovementToVerify(adminTok, devTok, 'T7');
-        createdIds.push(id7);
+        registerCreatedId(id7);
         const page7 = await loginPage(browser, adminTok);
         await page7.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id7}`);
         await page7.waitForLoadState('networkidle');
@@ -667,7 +720,8 @@ async function main() {
         fail++;
     } finally {
         try { await browser.close(); } catch (e) { fail++; console.warn('浏览器关闭失败:', e && e.message || e); }
-        for (const f of tmpFiles) { try { fs.unlinkSync(f); } catch (_) { /* best-effort */ } }
+        // [#106 S4d-4] 临时 png / exe 文件在本脚本独有的 TMP_DIR 里：removeTreeChecked 删并确认，失败计失败（原来逐个 unlink 且吞错）
+        try { removeTreeChecked(TMP_DIR); } catch (e) { fail++; console.warn(`临时目录清理失败 ${TMP_DIR}：${e && e.message}`); }
 
         // 夹具清理——五子表 + 主表逐条 DELETE（本项目 SQLite 未开 FK 级联，需显式清各表，同
         // test-sys-post-release-accept-fail-note-playwright.js 既有范式）。
@@ -677,39 +731,64 @@ async function main() {
         const CHILD_TABLES = ['sys_issue_dev_commits', 'sys_issue_attachments', 'sys_issue_timeline', 'sys_issue_dev_events', 'sys_issue_dev_assignees'];
         let cleanupErrorCount = 0;
         let unlinkedFiles = 0;
-        for (const id of createdIds) {
-            try {
-                const attRows = await dbAll('SELECT file_name FROM sys_issue_attachments WHERE issue_id=?', [id]);
-                for (const a of attRows) {
-                    if (!a || !a.file_name) continue;
-                    const abs = path.resolve(UPLOAD_ROOT, a.file_name);
-                    if (!abs.startsWith(path.resolve(UPLOAD_ROOT) + path.sep)) continue;   // 越界不删
-                    try { fs.unlinkSync(abs); unlinkedFiles++; } catch (_) { /* 已不存在或被占用：best-effort */ }
-                }
-                for (const t of CHILD_TABLES) await dbRun(`DELETE FROM ${t} WHERE issue_id=?`, [id]);
-                await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
-            } catch (e) { cleanupErrorCount++; console.warn(`夹具清理失败 issue #${id}: ${e.message}`); }
+        // [#106 S4d-4] 清理失败计失败：每个编号单独 try（先 unlink 该单名下附件物理文件、再按序删子表与主表），失败再试一轮（共 2 轮，间隔 200ms，
+        //   删除与 unlink 幂等：ENOENT 视为已清）；两轮后仍失败的编号计清理异常；物理文件除 ENOENT 外的 unlink 失败同样计清理异常（原来吞掉）
+        const pendingIds = createdIds.slice();
+        const lastErr = new Map();
+        for (let round = 0; round < 2 && pendingIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            for (const id of pendingIds.slice()) {
+                try {
+                    const attRows = await dbAll('SELECT file_name FROM sys_issue_attachments WHERE issue_id=?', [id]);
+                    const outOfBounds = [];
+                    for (const a of attRows) {
+                        if (!a || !a.file_name) continue;
+                        const abs = path.resolve(UPLOAD_ROOT, a.file_name);
+                        if (!abs.startsWith(path.resolve(UPLOAD_ROOT) + path.sep)) { outOfBounds.push(`file_name="${a.file_name}" → ${abs}`); continue; }   // 越界不删文件
+                        try { fs.unlinkSync(abs); unlinkedFiles++; } catch (e) { if (!(e && e.code === 'ENOENT')) throw e; }
+                    }
+                    // [#106 S4d-4 修复批 L1] 越界路径计错误（原来 continue 静默跳过）：抛出使本编号的子表 / 主表行保留（下一轮、清理异常计数与残留回查都会看到），
+                    //   其余合法路径已在上面照常 unlink
+                    if (outOfBounds.length) throw new Error(`本轮夹具单附件路径越界（file_name 不在 uploads 内），疑似服务端落盘路径异常，越界文件未删: ${outOfBounds.join(' | ')}`);
+                    for (const t of CHILD_TABLES) await dbRun(`DELETE FROM ${t} WHERE issue_id=?`, [id]);
+                    await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
+                    pendingIds.splice(pendingIds.indexOf(id), 1);
+                    lastErr.delete(id);
+                } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+            }
         }
+        for (const id of pendingIds) { cleanupErrorCount++; console.warn(`夹具清理失败 issue #${id}（已重试 1 轮）: ${lastErr.get(id)}`); }
         const idList = createdIds.length ? createdIds : [-1];
         const placeholders = idList.map(() => '?').join(',');
         let totalResidual = 0;
         const residualDetail = {};
-        for (const t of [...CHILD_TABLES, 'sys_issues']) {
-            const col = t === 'sys_issues' ? 'id' : 'issue_id';
-            const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
-            const c = r ? r.c : 0;
-            residualDetail[t] = c;
-            totalResidual += c;
+        // 回查本身失败也计失败（原来无 try：库不可读时会抛出并吞掉后面的汇总与退出码）
+        try {
+            for (const t of [...CHILD_TABLES, 'sys_issues']) {
+                const col = t === 'sys_issues' ? 'id' : 'issue_id';
+                const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
+                const c = r ? r.c : 0;
+                residualDetail[t] = c;
+                totalResidual += c;
+            }
+        } catch (e) {
+            cleanupErrorCount++;
+            console.warn(`夹具清理回查失败: ${e && e.message}`);
         }
         console.log(`  🧹 夹具清理完成（共创建 ${createdIds.length} 条，清理异常 ${cleanupErrorCount} 次，物理文件 unlink ${unlinkedFiles} 个，逐表残留=${JSON.stringify(residualDetail)}，合计残留 ${totalResidual} 行，均应为 0）`);
         if (cleanupErrorCount > 0 || totalResidual > 0) {
             fail++;
-            console.warn(`夹具清理不干净：清理异常 ${cleanupErrorCount} 次 / 逐表残留 ${JSON.stringify(residualDetail)}（合计 ${totalResidual} 行）——本地库已被本次测试运行污染，需人工核实`);
+            console.warn(`夹具清理不干净：清理异常 ${cleanupErrorCount} 次 / 逐表残留 ${JSON.stringify(residualDetail)}（合计 ${totalResidual} 行）——实例库已被本次测试运行污染，需人工核实`);
         }
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) process.exit(1);
     }
+    try { await testEnv.teardown(); } catch (e) { fail++; console.warn('teardown（收掉自起实例）失败:', e && e.message || e); }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    try { if (TMP_DIR) removeTreeChecked(TMP_DIR); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

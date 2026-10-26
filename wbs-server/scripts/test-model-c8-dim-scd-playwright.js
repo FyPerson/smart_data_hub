@@ -2,7 +2,8 @@
  * 模型中心 C8 · 高级 SQL 分段修复 + DIM SCD 策略段 Playwright 实测（2026-07-24）
  *
  * 用法：node scripts/test-model-c8-dim-scd-playwright.js
- * 前置：本地 server 已启动；依赖生产同构数据 #55 dim_org（type=CTE）/ #50 dim_official_customer（APPLY+CTE）
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）；
+ *       依赖生产同构数据 #55 dim_org（type=CTE）/ #50 dim_official_customer（APPLY+CTE）——隔离实例是本检出本地库的快照，这些模型须在快照里存在（首跑核对，缺失时对应断言如实报红）
  * 背景：旧实现 mdcRenderLogicSection 只读 advancedSql.applyContent —— dim_org(type=CTE) 的 432 字符递归 CTE
  *       整段不显示，dim_official_customer 也丢了 cteContent 段。这是用户报「DIM 表似乎没什么信息展示」的直接原因之一。
  * 覆盖：
@@ -25,7 +26,7 @@ function expect(cond, msg, detail) {
     if (cond) { console.log(`  ✓ ${msg}`); pass++; }
     else { console.log(`  ✗ ${msg}${detail !== undefined ? '  got=' + JSON.stringify(detail) : ''}`); fail++; }
 }
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
+let BASE = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
 
 async function openDrawerById(page, id) {
     await page.evaluate(i => openModelDrawer(i), id);
@@ -58,6 +59,8 @@ const sqlPartLabels = (page) => inLogicSec(page, '.sql-part-label');
 const sqlBlocks = (page) => inLogicSec(page, '.sql-block');
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 模型中心 C8 高级 SQL 分段 + DIM SCD 策略 实测 ===\n');
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
@@ -196,9 +199,14 @@ const sqlBlocks = (page) => inLogicSec(page, '.sql-block');
         console.error('\n脚本异常:', e.message);
         fail++;
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);
-    process.exit(fail ? 1 : 0);
-})();
+    fx.finish(fail ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('C8 实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

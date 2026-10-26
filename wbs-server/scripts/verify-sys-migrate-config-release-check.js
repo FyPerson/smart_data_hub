@@ -28,6 +28,7 @@ const { listenOnSafePort } = require('./lib/listen-safe-port');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const sqlite3 = require('sqlite3');
 // [补丁 AG] 以下三个仅供 [MIGRATED-LIVE] 组用——本文件此前是纯 DDL/迁移脚本测试，无 HTTP 业务层依赖；
 //   本组需要真实跑通 add-issues/execute 等业务端点，故引入最小 Express 直连口径（同
@@ -44,7 +45,21 @@ const { SYS_INTAKE_GATE_TRIGGERS_SQL } = require('../routes/sys-iteration/intake
 let passed = 0;
 const ok = (m) => { passed++; console.log('  ✓ ' + m); };
 
-const TMP_DIR = 'E:/tmp';
+// 临时文件（夹具库 / 报告 / 探针 / 链接）一律放进本进程私有目录：fs.mkdtempSync(os.tmpdir()/sdh-s1b-mig-*)，每个进程唯一。
+// 不再写死共享目录 E:/tmp：两份 FAMILY 并跑（两条线各一份）时，旧写法的文件名只靠 Date.now() 毫秒 + 序号区分，
+// 两进程在同一毫秒取到同一路径就会同时 CREATE TABLE（S10 复演：drill-b 的 [COMMIT-FAIL] 用例 table sys_releases already exists）。
+// 成功结束时逐项清理（line-common.deleteTreeNoFollow：不用 fs.rmSync，中文路径安全，链接只拆链接本身），清理失败会让本套件退出码非 0；失败结束时保留现场。
+const lineCommon = require('../../scripts/lines/line-common.js');
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sdh-s1b-mig-'));
+function cleanupTmpDir() {
+  try {
+    lineCommon.deleteTreeNoFollow(fs.realpathSync.native(TMP_DIR), []);
+    fs.rmdirSync(TMP_DIR);
+  } catch (e) {
+    console.error('❌ 清理私有临时目录失败：' + TMP_DIR + ' :: ' + ((e && e.message) || e));
+    process.exitCode = 1;
+  }
+}
 let fixtureSeq = 0;
 function freshDbPath(label) {
   fixtureSeq++;
@@ -473,8 +488,6 @@ async function agMakeApp(dbPath) {
 }
 
 async function main() {
-  try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch (_e) { /* 已存在 */ }
-
   // ═══ [FORM] 三形态：首跑迁移 / 幂等再跑退出0 / dry-run 回滚后 CHECK 仍在 ═══
   {
     const dbPath = freshDbPath('form');
@@ -778,7 +791,7 @@ async function main() {
     const afterGuardDryRun = await snapshotState(guardDbPath2);
     assert.strictEqual(afterGuardDryRun.hasCheck, true, '[GUARD-4] dry-run 后 CHECK 仍在（已回滚，未提交，dry-run 免确认）');
 
-    ok('[GUARD] basename=task_pool.db 守卫：apply 无旗标抛错列缺项+库不变／--confirm-db 路径不等抛错+库不变／双旗标齐全 apply 成功／dry-run 免确认且回滚');
+    ok('[GUARD] basename=开发库文件名 守卫：apply 无旗标抛错列缺项+库不变／--confirm-db 路径不等抛错+库不变／双旗标齐全 apply 成功／dry-run 免确认且回滚');
 
     rmSafe(guardDbPath);
     rmSafe(guardDbPath2);
@@ -788,7 +801,7 @@ async function main() {
 
   // ═══ [Z5-GUARD][AA4/508-M3] Windows 大小写别名绕过双旗标——大小写敏感文件系统上语义不同，显式按平台分支 ═══
   if (process.platform !== 'win32') {
-    console.log(`  ⏭ [Z5-GUARD] 跳过：当前平台非 win32（${process.platform}），basename 大小写别名守卫在大小写敏感文件系统上语义不同（TASK_POOL.DB 与 task_pool.db 是两个不同文件，双旗标不会因 basename 相同而触发）——不得伪通过，改用下方 [AA4-UNIT] 平台无关单测覆盖 lowerIfWin32/normalizeForCompare 归一化逻辑本身`);
+    console.log(`  ⏭ [Z5-GUARD] 跳过：当前平台非 win32（${process.platform}），basename 大小写别名守卫在大小写敏感文件系统上语义不同（TASK_POOL.DB 与其小写形式（开发库文件名）是两个不同文件，双旗标不会因 basename 相同而触发）——不得伪通过，改用下方 [AA4-UNIT] 平台无关单测覆盖 lowerIfWin32/normalizeForCompare 归一化逻辑本身`);
   } else {
     const guardDir3 = path.join(TMP_DIR, `lt0907-s1b-guard3-${Date.now()}`);
     fs.mkdirSync(guardDir3, { recursive: true });
@@ -799,7 +812,7 @@ async function main() {
       /apply 需要双旗标确认/,
       '[Z5-GUARD-1] --db 用大写别名 TASK_POOL.DB → apply 无旗标同样被拒'
     );
-    const confirmDbDifferentCase = path.join(guardDir3, 'task_pool.db'); // 小写形式，Windows 下指向同一物理文件
+    const confirmDbDifferentCase = path.join(guardDir3, DEV_DB_BASENAME); // 小写形式，Windows 下指向同一物理文件
     const r = await runMigration({
       dbPath: upperDbPath, apply: true, stopWindowAck: true,
       confirmDb: confirmDbDifferentCase,
@@ -1806,4 +1819,8 @@ async function main() {
   console.log(`\n✅ verify-sys-migrate-config-release-check 全部通过（${passed} 组·S1b sys_issues 受控重建迁移脚本·补丁Y/Z已并入·补丁AG新增[MIGRATED-LIVE]）`);
 }
 
-main().catch((e) => { console.error('❌ 验证失败:', (e && e.stack) || e); process.exit(1); });
+main().then(
+  () => { cleanupTmpDir(); },
+  // 失败分支不清理：私有目录里的夹具库 / 报告就是取证现场（S10 的撞名靠留下的文件才查清），只打印路径
+  (e) => { console.error('❌ 验证失败:', (e && e.stack) || e); console.error('保留现场：' + TMP_DIR); process.exit(1); },
+);

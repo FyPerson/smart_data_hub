@@ -170,28 +170,23 @@
  * 追加（C5 codex 44 收口批，四轮 0 HIGH / 7 MED / 3 LOW；缓存串仍 mcat17；产品代码只改 mdcNormTime：整串严格解析 + 日期 / 时分秒范围校验，后缀仍不换算）：
  *   W106 补非法时间（日志侧与验收侧）/ 闰年 / 验收侧 T·小数秒·Z·偏移量 / CASES 前提读同一次快照的「最近验收」；W102·W103 的 c5Read / c5AccOk 读状态文字·徽标·reason 各自的可见性、期望无徽标时徽标节点必须不存在；W104 补非空说明首尾空白原样保留；
  *   W107 补 c / d（响应头已到、res.json() 被扣住时切换，页内包 Response.prototype.json）、b 改正向信号顺序，eq107-guards-only-off 撤回等价并改名 w107-guards-only-off；页内变异 54 → 60：新增 w102-recheck-hidden / w102-reason-hidden / w104-prose-trimmed / w106-normtime-prefix-only / w106-normtime-no-range / w106-normtime-convert-zone，改名 1 个。
- * 隔离实例 / 库副本 / 账号夹具：自 test-model-workbench-playwright.js 逐字复制（复制日期 2026-10-07，由 E:/tmp/mc77-c4/c4b2/gen_catalog_test.js 生成，不手抄），
- *   夹具裁成 C3a-0 的 36 行（去掉配置台套件追加的 #70 / #71）；库副本放 MC_CAT_WORKDIR（默认 E:/tmp/mc77-c4/c4b2/pw-cat-run），运行结束删除。
+ * 账号夹具：自 test-model-workbench-playwright.js 逐字复制（复制日期 2026-10-07，由 E:/tmp/mc77-c4/c4b2/gen_catalog_test.js 生成，不手抄），
+ *   夹具裁成 C3a-0 的 36 行（去掉配置台套件追加的 #70 / #71）。
+ * [#106 S4b2] 隔离实例由 scripts/lib/test-env.js 的 ready() 提供（本检出库快照 + 隔离模式 server.js，端口随机，数据根在系统临时目录，teardown 时整体删除）；
+ *   不再自起 wrapper、不再复制真实库、不再写死端口 / 读 .env / 用 MC_CAT_WORKDIR / --port。ready() 之后在实例库里清掉与模型相关的表（含 system_configs / users）
+ *   并按夹具重新造数（原来是起服务前在库副本上做，终态相同）。
  */
 'use strict';
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
 const { chromium } = require('playwright');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3');
-const dotenv = require('dotenv');
+const testEnv = require('./lib/test-env');
 
-const ROOT = path.resolve(__dirname, '..');
-const FIX_DIR = path.join(__dirname, 'fixtures', 'model-workbench-baseline');
-const MODELS_FILE = path.join(FIX_DIR, 'models.json');
-const PORT_ARG = (process.argv.slice(2).find(a => a.startsWith('--port=')) || '').slice('--port='.length);   // C4b：可指定端口（默认 3377），主工作区的其他 agent 占用 3377 时用
-if (PORT_ARG && !/^\d{2,5}$/.test(PORT_ARG)) { console.error('--port 必须是数字：' + PORT_ARG); process.exit(2); }
-const PORT = PORT_ARG ? Number(PORT_ARG) : 3377;
-const BASE = `http://localhost:${PORT}`;
-const WORKDIR = process.env.MC_CAT_WORKDIR || (fs.existsSync('E:/tmp') ? 'E:/tmp/mc77-c4/c4b2/pw-cat-run' : path.join(os.tmpdir(), 'mc77-c4b2-pw-cat-run'));
+let ROOT = null;          // 入口函数里 ready() 之后赋值（顶层只有纯声明）
+let MODELS_FILE = null;
+let BASE = null;          // testEnv.env().baseUrl
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------------------------
@@ -209,18 +204,11 @@ const loadModelRows = () => JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8')).row
 
 function dbRun(db, sql, params = []) { return new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); })); }
 function dbClose(db) { return new Promise((res, rej) => db.close(e => e ? rej(e) : res())); }
-const tryUnlink = (f) => { try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
-const removeDbFiles = (dbPath) => { for (const s of ['', '-wal', '-shm', '-journal']) tryUnlink(dbPath + s); };
 
+/** [#106 S4b2] 对实例库（ready() 已建好的隔离快照）清洗并按夹具造数。原来是起服务前在库副本上做，现在服务已在跑：只开一条 OPEN_READWRITE（不带 OPEN_CREATE）连接，关库等回调完成。
+ *  整表清场：批跑只能登记为 exclusive:true 或 needsService:false，不能做共享实例成员（会抹掉同一实例上其他成员的数据）。 */
 async function prepareDb(dbPath) {
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const realDb = path.join(ROOT, 'task_pool.db');
-  if (!fs.existsSync(realDb)) throw new Error('缺少 wbs-server/task_pool.db（包装器也要求它存在）');
-  const src = await new Promise((res, rej) => { const d = new sqlite3.Database(realDb, sqlite3.OPEN_READONLY, e => e ? rej(e) : res(d)); });
-  await dbRun(src, 'VACUUM INTO ?', [dbPath]);   // 一致性快照；VACUUM INTO 不写源库
-  await dbClose(src);
-  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => e ? rej(e) : res(d)); });
+  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => { if (e) return rej(e); d.configure('busyTimeout', 8000); res(d); }); });
   // 清外部副作用面：钉钉凭证 / 数仓连接 / 周期任务；清与模型关联的数据与账号
   for (const t of ['system_configs', 'db_connections', 'periodic_tasks', 'model_change_logs', 'model_test_records', 'task_pool', 'data_models', 'users', 'sys_domains', 'sys_source_systems']) {
     await dbRun(db, `DELETE FROM ${t}`);
@@ -246,47 +234,8 @@ async function prepareDb(dbPath) {
   await dbClose(db);
 }
 
-function portBusy() {
-  return new Promise((resolve) => {
-    const s = net.createConnection({ port: PORT, host: '127.0.0.1' });
-    s.once('connect', () => { s.destroy(); resolve(true); });
-    s.once('error', () => resolve(false));
-  });
-}
-
-let serverChild = null;
-let serverKillIssued = false;
-/** 只按自己 spawn 的 pid 停，同一 pid 只杀一次（exit 钩子与 finally 都可能调用） */
-function killServer() {
-  if (!serverChild || !serverChild.pid || serverKillIssued || serverChild.__dead) return;
-  serverKillIssued = true;
-  try { spawnSync('taskkill', ['/T', '/F', '/PID', String(serverChild.pid)], { stdio: 'ignore' }); } catch (_) { /* 下面等 exit 事件 */ }
-}
-async function stopServerAndCleanup(dbPath) {
-  killServer();
-  const t0 = Date.now();
-  while (serverChild && !serverChild.__dead && Date.now() - t0 < 10000) await sleep(100);
-  if (serverChild && !serverChild.__dead) { console.error('[cleanup] 隔离实例进程未在 10s 内退出，库副本未删除：' + dbPath); return; }
-  try { removeDbFiles(dbPath); } catch (e) { console.error('[cleanup] 删除库副本失败：' + e.message); }
-}
-async function startServer(dbPath) {
-  const logPath = path.join(WORKDIR, 'server.log');
-  const fd = fs.openSync(logPath, 'w');
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js')], {
-    cwd: ROOT, stdio: ['ignore', fd, fd],
-    env: { ...process.env, PORT: String(PORT), IA_TEST_DB_PATH: dbPath, SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' },
-  });
-  fs.closeSync(fd);
-  serverChild.on('exit', () => { serverChild.__dead = true; });
-  const t0 = Date.now();
-  for (;;) {
-    if (serverChild.__dead) throw new Error('隔离实例提前退出，见日志 ' + logPath + '：\n' + fs.readFileSync(logPath, 'utf8').slice(-1500));
-    if (/Task Pool Server running/.test(fs.readFileSync(logPath, 'utf8'))) return;
-    if (Date.now() - t0 > 60000) throw new Error('隔离实例 60s 内未就绪，见日志 ' + logPath);
-    await sleep(250);
-  }
-}
-
+// [#106 S4b2] 原 portBusy / killServer / stopServerAndCleanup / startServer（写死 3377、按 pid 杀 wrapper 进程、等日志就绪、删库副本）整段删除：实例由 test-env 起停。
+//   「服务就绪」的判定：原来靠日志 "Task Pool Server running"；改为 main() 开头一次真实请求——未带 token 访问 /api/models 必须 401。
 
 // ---------------------------------------------------------------------------------------------
 // 用例（C4b 新增；C4c 在本文件上扩展）。夹具 = C3a-0：11 行共享夹具 + #66 软删除 + 25 填充 ODS ⇒ 列表 36 行 / 35 组（唯一伴生 #53 随 #52）。
@@ -823,18 +772,23 @@ const CAT_MUTS = {
   "p57-post-current-id": {"file":"Model_Center.html","edits":[["const url = `/api/models/${modelIdAtStart}/save-scripts`;","const url = `/api/models/${currentValidationModelId}/save-scripts`;"]],"probe":"autoSaveOdsScripts.toString().includes('${currentValidationModelId}/save-scripts')"},
   // —— C5 变异块结束
 };
-if (MUT && !OLD_MUTS.includes(MUT) && !CAT_MUTS[MUT]) { console.error('未知的 MC_MUT：' + MUT + '（已知：' + OLD_MUTS.concat(Object.keys(CAT_MUTS)).join(' / ') + '）'); process.exit(2); }
-const catMutFile = (CAT_MUTS[MUT] && CAT_MUTS[MUT].file) || 'model-catalog.js';   // B2：变异也可以改核心文件 model-catalog-core.js
-const catMutSrc = (() => {
-  if (!CAT_MUTS[MUT]) return null;
-  let src = fs.readFileSync(catMutFile.endsWith('.html') ? path.join(ROOT, 'public', catMutFile) : path.join(ROOT, 'public', 'assets', 'js', catMutFile), 'utf8').replace(/\r\n/g, '\n');
-  for (const [anchor, repl] of CAT_MUTS[MUT].edits) {
-    const n = src.split(anchor).length - 1;
-    if (n !== 1) { console.error('页内变异 ' + MUT + '：锚点在 model-catalog.js 里出现 ' + n + ' 次（必须恰好 1 次）：' + anchor); process.exit(2); }
-    src = src.split(anchor).join(repl);
-  }
-  return src;
-})();
+// [#106 S4b2] 变异校验与页内变异源码的读取（要读 ROOT 下的页面文件）挪进 initMutation()，在入口函数 `await testEnv.ready()` 之后调用（顶层只有纯声明）。
+let catMutFile = 'model-catalog.js';
+let catMutSrc = null;
+function initMutation() {
+  if (MUT && !OLD_MUTS.includes(MUT) && !CAT_MUTS[MUT]) { console.error('未知的 MC_MUT：' + MUT + '（已知：' + OLD_MUTS.concat(Object.keys(CAT_MUTS)).join(' / ') + '）'); process.exit(2); }
+  catMutFile = (CAT_MUTS[MUT] && CAT_MUTS[MUT].file) || 'model-catalog.js';   // B2：变异也可以改核心文件 model-catalog-core.js
+  catMutSrc = (() => {
+    if (!CAT_MUTS[MUT]) return null;
+    let src = fs.readFileSync(catMutFile.endsWith('.html') ? path.join(ROOT, 'public', catMutFile) : path.join(ROOT, 'public', 'assets', 'js', catMutFile), 'utf8').replace(/\r\n/g, '\n');
+    for (const [anchor, repl] of CAT_MUTS[MUT].edits) {
+      const n = src.split(anchor).length - 1;
+      if (n !== 1) { console.error('页内变异 ' + MUT + '：锚点在 model-catalog.js 里出现 ' + n + ' 次（必须恰好 1 次）：' + anchor); process.exit(2); }
+      src = src.split(anchor).join(repl);
+    }
+    return src;
+  })();
+}
 let nPass = 0, nFail = 0;
 const check = (name, cond, detail) => {
   if (cond) { nPass++; console.log('  PASS ' + name); } else { nFail++; console.log('  FAIL ' + name + (detail === undefined ? '' : '\n    ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)))); }
@@ -842,7 +796,7 @@ const check = (name, cond, detail) => {
 const J = (v) => JSON.stringify(v);
 const tokenFor = (secret, u) => jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, secret, { expiresIn: '2h' });
 const ALL36 = [60, 50, 55, 58, 62, 65, 52, 53, 59, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 6, 8];
-const PAGE1_21 = ALL36.slice(0, 21);   // 第 1 页：20 组 21 行（#53 紧跟 #52）
+const PAGE1_21 = [60, 50, 55, 58, 62, 65, 52, 53, 59, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112];   // 第 1 页：20 组 21 行（#53 紧跟 #52）= ALL36 的前 21 个（原为 ALL36.slice(0, 21)，顶层调用改成字面量）
 
 // 每页的探针：列表行数时间线（首屏是否先出现过未过滤的列表）
 const INIT_PROBE = () => {
@@ -854,11 +808,10 @@ const INIT_PROBE = () => {
 };
 
 async function main(dbPath) {
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动（3000 是用户进程，不得占用或杀）。`); process.exit(2); }
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
-  if (!secret) throw new Error('wbs-server/.env 缺 JWT_SECRET');
+  const secret = testEnv.env().jwtSecret;   // 实例随机密钥（与服务端同源）；不再读 .env
+  const probe = await fetch(`${BASE}/api/models`);
+  if (probe.status !== 401) throw new Error(`[就绪核对] 未带 token 访问 /api/models 应 401，实得 ${probe.status}（服务没有在应答本脚本要测的路由）`);
   await prepareDb(dbPath);
-  await startServer(dbPath);
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   const errUrl = (m) => { try { return (m.location() && m.location().url) || ''; } catch (_) { return ''; } };   // codex 41Ta-M1：浏览器自己记的「Failed to load resource」消息的 location().url 就是失败的那个请求地址
@@ -2593,7 +2546,7 @@ async function main(dbPath) {
       // 深链用例与前一个用例从同一个起点开始（互相独立）：把 #53 的 config_mode / config_rev 写回第一个用例之前的值。
       //   正常实现下它们本来就相等（no-op）；companion-sends-mode 变异下第一个用例已把 #53 改成 standard，不写回的话深链用例会在被污染的状态上跑，它自己的红就证明不了什么。
       { const rdb = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (e) => (e ? rej(e) : res(d))); });
-        try { rdb.configure('busyTimeout', 5000); await dbRun(rdb, 'UPDATE data_models SET config_mode = ?, config_rev = ? WHERE id = 53', [before53.mode, before53.rev]); } finally { rdb.close(); } }
+        try { rdb.configure('busyTimeout', 5000); await dbRun(rdb, 'UPDATE data_models SET config_mode = ?, config_rev = ? WHERE id = 53', [before53.mode, before53.rev]); } finally { await new Promise((r) => rdb.close(() => r())); } }   // S4 迁移约定：关库等回调完成
       const before53d = await dbState(53);
       check('W31 深链起点：#53 回到第一个用例之前的状态（config_mode=companion、config_rev 同前）', before53d.mode === 'companion' && before53d.rev === before53.rev, { before53, before53d });
       const dl = (await open(adminN, 'W31 深链', '?id=53&edit=1')).page;
@@ -2620,7 +2573,7 @@ async function main(dbPath) {
       console.log('W32 / W33 伴生保存：列表行或弹窗副本过期');
       const resetCo53 = async () => {   // 每个用例同一起点：#53 的 config_mode / config_rev 写回第一个用例之前的值（正常实现下是 no-op，变异下前一个用例可能已把它改成 standard）
         const rdb = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (e) => (e ? rej(e) : res(d))); });
-        try { rdb.configure('busyTimeout', 5000); await dbRun(rdb, 'UPDATE data_models SET config_mode = ?, config_rev = ? WHERE id = 53', [before53.mode, before53.rev]); } finally { rdb.close(); }
+        try { rdb.configure('busyTimeout', 5000); await dbRun(rdb, 'UPDATE data_models SET config_mode = ?, config_rev = ? WHERE id = 53', [before53.mode, before53.rev]); } finally { await new Promise((r) => rdb.close(() => r())); }   // S4 迁移约定：关库等回调完成
       };
       const staleCase = async (tag, mk) => {
         await resetCo53();
@@ -6267,7 +6220,7 @@ async function main(dbPath) {
     //   时间线：acceptance 的 state ∈ {pass, warn, fail, partial, stale} 且 at 可解析时，created_at 严格晚于 at 的行加「验收后」标签（同一秒不标；两边都规范化成 YYYY-MM-DD HH:MM:SS 再比），title 只说事实。
     //   判别力：每条「某状态下的样式 / 内容」断言都同时断言状态前提（抽屉属于目标模型、kv 顺序、类名 / 可见）并与值一起读（codex 43 教训）。
     // ====================================================================================================================
-    const c5Rwdb = async (fn) => { const rdb = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (e) => (e ? rej(e) : res(d))); }); try { rdb.configure('busyTimeout', 5000); await fn(rdb); } finally { rdb.close(); } };
+    const c5Rwdb = async (fn) => { const rdb = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (e) => (e ? rej(e) : res(d))); }); try { rdb.configure('busyTimeout', 5000); await fn(rdb); } finally { await new Promise((r) => rdb.close(() => r())); } };   // S4 迁移约定：关库等回调完成
     const c5Wait = async (fn, ms = WAIT) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn()) return true; await sleep(50); } return false; };
     /** 抽屉两个请求的受控替身：详情（GET /api/models/:id）按 ctl.detail[id] 补丁（函数 = 返回整对象；对象 = 合并）、变更日志（GET …/change-logs）按 ctl.logs[id] 整体替换；
      *  gateD / gateL[id] = gate()：请求到达后扣住，放行后才响应；nD / nL = 到达次数，doneD / doneL = 路由替身把响应交给页面的次数（只表示路由侧完成：页面此刻未必读完正文、更未必处理完；页面放弃请求时 fulfill 会抛错，吞掉并照样记完成） */
@@ -7418,21 +7371,27 @@ async function main(dbPath) {
 }
 
 (async () => {
-  const dbPath = path.join(WORKDIR, 'catalog-pw.db');
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const cleanupSync = () => { killServer(); try { removeDbFiles(dbPath); } catch (_) { /* 库副本被占用时留给下次启动清理 */ } };
-  process.on('exit', cleanupSync);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { cleanupSync(); process.exit(130); });
   let code = 1;
+  // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句（选项是纯字面量）；之后才读 BASE / 路径。
+  //   SIGINT / SIGTERM 由 test-env 自己收实例（teardown 后以 130 / 143 退出），进程退出时的清理由它的 exit 钩子兜底。
+  await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' } });
+  BASE = testEnv.env().baseUrl;
+  ROOT = path.resolve(__dirname, '..');
+  MODELS_FILE = path.join(__dirname, 'fixtures', 'model-workbench-baseline', 'models.json');
+  initMutation();
   try {
-    await main(dbPath);
+    await main(testEnv.env().dbPath);
     console.log(`\n结果：${nPass} PASS / ${nFail} FAIL${MUT ? '（变异 ' + MUT + '）' : ''}`);
     code = nFail ? 1 : 0;
   } catch (e) {
     console.error(e && e.stack || e);
   } finally {
-    await stopServerAndCleanup(dbPath);
+    await testEnv.teardown();
   }
-  process.exit(code);
-})();
+  // [#106 S4b2a] teardown 已在上面的 finally 里 await 落定；出口改 finish（只设退出码，不终止执行），它是入口函数的最后一条语句。入口 .catch 里的 process.exit(1) 不改。
+  testEnv.finish(code);
+})().catch(async (e) => {
+  console.error(e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+  process.exit(1);
+});

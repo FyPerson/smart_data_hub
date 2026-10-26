@@ -6,7 +6,8 @@
  * 修复=条件补 `status !== '已归档'`。
  *
  * 用法：node scripts/verify-issue-lite-archive-keeps-completion.js
- * 前置：本地 server 已启动（默认 localhost:3000，可用 TEST_BASE_URL 覆盖，如 http://localhost:3100）
+ * 前置：无。[#106 S3b] 经 test-env 自起临时隔离实例（来源 = 本检出本地库快照）；也可由批跑器设 TEST_INSTANCE / TEST_BASE_URL / TEST_DB_PATH / TEST_JWT_SECRET 指向已起好的隔离实例。
+ *   不再打 3000、不再写真实库。
  *
  * 覆盖：
  *   1. 标记完成 → completed_at/complete_note 写入（既有行为回归锚）
@@ -18,12 +19,12 @@
  */
 'use strict';
 
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// BASE / DB_PATH 来自 test-env（fx.ready() 完成后才可读；之前读取会抛 FX_NOT_READY）
+let BASE = null;
+let DB_PATH = null;
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
@@ -42,8 +43,11 @@ async function api(method, urlPath, token, body) {
 }
 
 (async () => {
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     console.log('=== issue_lite 归档保留完成痕迹 fix 验证 ===\n');
-    const db = new sqlite3.Database(DB_PATH);
+    BASE = fx.BASE;
+    DB_PATH = fx.DB_PATH;
+    const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READWRITE);
     const created = [];
     try {
         const adminToken = await fx.signAs(fx.ADMIN_ID);
@@ -96,5 +100,10 @@ async function api(method, urlPath, token, body) {
         db.close();
     }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    await fx.teardown().catch((e) => { console.error('teardown 失败：' + e.message); fail++; });
+    fx.finish(fail > 0 ? 1 : 0);   // 成功路径：teardown 之后只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    console.error('执行异常：', e && e.stack || e);
+    await fx.teardown().catch(() => {});
+    process.exit(1);
+});

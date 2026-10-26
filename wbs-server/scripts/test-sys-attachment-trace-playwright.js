@@ -17,16 +17,11 @@
  * 骨架抄 test-sys-perdev-done-playwright.js（JWT 注入登录 + API 夹具直调 + registerCreatedId 精确清理）
  * 与 test-sys-release-panel-c2b2-playwright.js（dbRun 直写测试专属边界数据的既有先例）。
  *
- * ⚠️ [运行面·2026-09-17 改稿] 不连 3000（本地观察环境，进程陈旧但禁止重启/杀进程）。改走本仓既有隔离
- * 范式——`_test-it-asset-ledger-server-wrapper.js` patch `sqlite3.Database` 唯一建库点，把 server.js
- * 硬编码的 `task_pool.db` 重定向到临时副本，自起独立端口（3107）跑当前 HEAD 代码，db 零污染；用法/
- * 清理写法照抄 `scripts/test-collab-external-source-playwright.js`（同一 wrapper 的既有消费者）。区别于
- * 该文件「全新空库+起 schema」：本文件直接**复制真实 task_pool.db**（含既有 users/sys_issues 等表与
- * admin/dev 账号），跳过播种，夹具建单逻辑与之前直连 3000 版本完全不变。
- * uploads/sys-iteration 物理目录与真实环境共用同一棵磁盘树（server.js 硬编码，不因 db 副本而异）——
- * 附件物理文件的清理已由既有 API（DELETE 单附件 / DELETE 单级联）里的 `safeDeleteFileSync` 覆盖，本
- * 文件收尾另按精确 issue_id 清单尝试删除遗留的空目录（不做通配/整目录清理）。
- * [LOW-6 既有纪律] 本文件与其它任何写 task_pool.db 的 Playwright 套件禁止同时并发跑。
+ * [#106 S4b2] 运行面：不再自起 wrapper、不再复制真实库、不再写死端口 3107、不再读真实 .env。经 scripts/lib/test-env 的 ready() 拿到
+ * 隔离实例（本检出库快照 + 隔离模式 server.js，uploads 在实例数据根里，teardown 时整目录删除）；token 用 testEnv.signToken 签；
+ * 夹具建单逻辑与之前完全一致（用户 id=1 admin / id=8 开发取自快照）。原 doShutdown 里清理真实 ROOT/uploads/sys-iteration 的步骤
+ * 与删临时库的步骤随之删除（实例数据根整体删除），HTTP 官方清理保留。
+ * [LOW-6 既有纪律] 共享实例下夹具名一律带 RUN_TAG（唯一名字），清理只按本次登记的 id 清单。
  *
  * 用法：node scripts/test-sys-attachment-trace-playwright.js（自包含，不依赖任何已启动的外部服务）
  */
@@ -35,73 +30,32 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
-const { spawn, execSync, exec } = require('child_process');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const ROOT = path.join(__dirname, '..');
-const TEST_PORT = 3107;
-const BASE_URL = `http://localhost:${TEST_PORT}`;
-const REAL_DB = path.join(ROOT, 'task_pool.db');
-const SCRATCH_DIR = 'C:/Users/FY/AppData/Local/Temp/claude/E-------------/03d60ffc-959a-46e1-a293-837587676c8a/scratchpad/s3';
-const TEMP_DB = path.join(SCRATCH_DIR, `attach-trace-pw-${process.pid}.db`);
-const WRAPPER_PATH = path.join(__dirname, '_test-it-asset-ledger-server-wrapper.js'); // 通用重定向 wrapper，非 IT 资产专属
-const JWT_SECRET = process.env.JWT_SECRET;
+let BASE_URL = null;   // ready() 之后赋值（testEnv.env().baseUrl）
 
 const ADMIN_ID = 1;
 const DEV_ID = 8; // 示例开发A——同既有套件既有夹具账号
 
-const RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
-const RUN_TAG_MARKER = `RT-ATTTR-${RUN_TAG}`;
+let RUN_TAG = null;          // ready() 之后赋值
+let RUN_TAG_MARKER = null;
 const TITLE_PREFIX = '[pw-attach-trace]';
 
-// 只读连接：signAs 查 users 表 + 收尾零残留核对。写操作一律走 HTTP API，唯一例外是下面 dbRun（畸形/
-// null/XSS 三个真实 API 无法自然产出的边界态行，精确写自己新建的 issue_id，见文件头注释）。均指向
-// TEMP_DB（真实 db 的临时副本），不碰 REAL_DB。
-let dbRO, dbRW, dbGet, dbAll, dbRun;
-function initTempDbHandles() {
-    dbRO = new sqlite3.Database(TEMP_DB, sqlite3.OPEN_READONLY);
-    dbRW = new sqlite3.Database(TEMP_DB);
-    dbGet = (sql, params = []) => new Promise((res, rej) => dbRO.get(sql, params, (e, row) => e ? rej(e) : res(row)));
+// 只读连接：收尾零残留核对与附件清单。写操作一律走 HTTP API，唯一例外是下面 dbRun（畸形/
+// null/XSS 三个真实 API 无法自然产出的边界态行，精确写自己新建的 issue_id，见文件头注释）。均指向实例库。
+let dbRO, dbRW, dbAll, dbRun;
+async function initTempDbHandles(dbPath) {
+    const open = (mode) => new Promise((resolve, reject) => { const d = new sqlite3.Database(dbPath, mode, (e) => (e ? reject(e) : resolve(d))); });
+    dbRO = await open(sqlite3.OPEN_READONLY);
+    dbRW = await open(sqlite3.OPEN_READWRITE);
     dbAll = (sql, params = []) => new Promise((res, rej) => dbRO.all(sql, params, (e, rows) => e ? rej(e) : res(rows || [])));
     dbRun = (sql, params = []) => new Promise((res, rej) => dbRW.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 }
 
-function killChildTree(c) {
-    if (!c || !c.pid) return;
-    try { execSync(`taskkill /T /F /PID ${c.pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore：可能已退出 */ }
-}
-// L6：删不掉（句柄未释放）不再只打 ⚠️ 静默过，计入 fail——外部调用方仍可先 await closeDb() 等回调
-// 完成再调本函数，把"删不掉"压到几乎不会发生（同 G3 closeTdb 范式）。
-// 中断路径活体验证发现：taskkill 终止 wrapper 进程返回后，OS 释放它持有的 TEMP_DB 文件锁并非与
-// taskkill 返回严格同步，紧跟着立刻 unlink 偶发瞬时失败（更像是刚被大量写入的 25MB 文件被 Windows
-// 实时扫描短暂锁住，而非某个句柄真没关——单次手动 rm 隔 1-2s 重试通常就能成功）。加小退避重试
-// （10×300ms，累计最多 3s），比单次硬等一个固定延时更稳。
-async function cleanupTempDbFiles() {
-    for (const suffix of ['', '-journal', '-wal', '-shm']) {
-        const p = TEMP_DB + suffix;
-        let lastErr = null;
-        for (let attempt = 1; attempt <= 10; attempt++) {
-            try {
-                if (!fs.existsSync(p)) { lastErr = null; break; }
-                fs.unlinkSync(p);
-                lastErr = null;
-                break;
-            } catch (e) {
-                lastErr = e;
-                await new Promise((r) => setTimeout(r, 300));
-            }
-        }
-        if (lastErr) {
-            console.log(`  ⚠️ 临时库文件删除失败（句柄未释放，已重试 10 次）：${p}（${lastErr.message}）`);
-            fail++; failDetails.push(`临时库文件删除失败（句柄未释放，已重试 10 次）：${p}（${lastErr.message}）`);
-        }
-    }
-}
-// L6：等 sqlite 回调真的完成再返回，不在句柄仍占用时就去 unlink（同 G3 closeTdb 范式）。
+// [#106 S4b2] 原 killChildTree / cleanupTempDbFiles（杀 wrapper 进程树、删临时库副本）随自起服务一并删除：实例由 test-env 起停，数据根整体删除。
+// L6：等 sqlite 回调真的完成再返回（S4 迁移约定：close 必须等回调完成，共享实例下 teardown 立刻返回，紧接着 process.exit 不能撞上关库进行中）。
 // M3（596CR3 处置）：db.close 回调若带 err 参数需真正拒绝——原版无条件 resolve，closeDb 失败会被
 // 静默吞掉，doShutdown 里也就无法把它计入 fail / 独立记录（见下方 doShutdown ⑤ 的嵌套 try/finally）。
 function closeDb(db) {
@@ -122,118 +76,11 @@ async function withCleanupAbort(fn, timeoutMs = 8000) {
         if (currentCleanupAbort === ac) currentCleanupAbort = null;
     }
 }
-// H2（codex 596C）：原版按"命令行含 WRAPPER_PATH"判断端口占用者是否为本套件自己的孤儿进程、是则杀掉——
-// 但 WRAPPER_PATH（_test-it-asset-ledger-server-wrapper.js）是多个 Playwright 套件共用的通用重定向
-// wrapper（文件头注释已明写），占用 3107 的**其它套件的正常实例**同样会命中这条命令行子串，被误杀。
-// 改为：端口被占用 → 无论占用者是谁，一律直接失败退出，只打印 PID + 命令行供人工核对处理；本文件全程
-// 唯一允许 kill 的对象是 killChildTree(wrapperChild)——只针对本次 spawn 返回的 pid 及其子树，不再有
-// 任何"按命令行/路径子串猜测归属"的杀进程逻辑。
-function getProcessCommandLine(pid) {
-    try {
-        const out = execSync(
-            `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine"`,
-            { encoding: 'utf8', shell: 'cmd.exe' }
-        );
-        return out.trim();
-    } catch (_) { return ''; }
-}
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach((line) => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        if (pids.size > 0) {
-            const detail = [...pids].map((pid) => `PID ${pid}: ${getProcessCommandLine(pid) || '(命令行获取失败)'}`).join('\n    ');
-            console.error(`[attach-trace-pw] 端口 ${port} 已被占用，拒绝启动（本文件不再猜测归属并强杀，只报告供人工处理）：\n    ${detail}`);
-            process.exit(1);
-        }
-    } catch (_) { /* netstat/CimInstance 本身失败不阻断启动，留给 startWrapperServer 自然暴露端口冲突 */ }
-}
-// M1（codex 596C）：原版 fs.copyFileSync 直接复制真库主文件，真实服务仍在跑时不保证一致快照
-// （WAL 里尚未 checkpoint 的数据可能被漏掉；复制期间主文件若发生写入，副本也可能中途撕裂）。改用
-// SQLite 官方一致性备份机制 `VACUUM INTO '<path>'`——对源库开一个只读连接执行，SQLite 内部保证读到的
-// 是一个自一致的快照（不要求源库处于关闭态，是 sqlite3 ≥3.27 起专为"给一个运行中的库拍快照"设计的
-// 语句）；完成后再开一个连接校验副本确实可打开且含 sys_issues 表，校验失败直接抛错不进入 startWrapperServer
-// 后续步骤（不带着一个可能损坏的副本硬起服务）。
-function sqliteQuote(p) { return `'${String(p).replace(/'/g, "''")}'`; }
-async function snapshotRealDbToTemp() {
-    fs.mkdirSync(SCRATCH_DIR, { recursive: true });
-    const roSrc = new sqlite3.Database(REAL_DB, sqlite3.OPEN_READONLY);
-    try {
-        await new Promise((resolve, reject) => {
-            roSrc.run(`VACUUM INTO ${sqliteQuote(TEMP_DB)}`, (err) => (err ? reject(err) : resolve()));
-        });
-    } finally {
-        await closeDb(roSrc);
-    }
-    const checkDb = new sqlite3.Database(TEMP_DB, sqlite3.OPEN_READONLY);
-    let hasTable = false;
-    try {
-        hasTable = await new Promise((resolve, reject) => {
-            checkDb.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='sys_issues'`, [], (err, row) => (err ? reject(err) : resolve(!!row)));
-        });
-    } finally {
-        await closeDb(checkDb);
-    }
-    if (!hasTable) throw new Error(`[M1] 临时库副本 VACUUM INTO 后缺少 sys_issues 表，快照校验失败：${TEMP_DB}`);
-}
-// 冷启动：patch 后的 server 进程把 REAL_DB 重定向到 TEMP_DB（wrapper 自身的三层 fail-closed 校验防误连
-// 真库）——本文件负责先用一致性快照把真库内容落到 TEMP_DB（wrapper 不做拷贝，只做路径重定向）。
-async function startWrapperServer() {
-    await snapshotRealDbToTemp();
-    let log = '';
-    const c = spawn(process.execPath, [WRAPPER_PATH], {
-        cwd: ROOT,
-        env: { ...process.env, PORT: String(TEST_PORT), IA_TEST_DB_PATH: TEMP_DB, LOG_LEVEL: 'INFO' },
-    });
-    // M2（codex 596C）：spawn 后立即登记模块级 wrapperChild，不等 startWrapperServer() 整体 resolve 才赋值
-    // ——否则中断信号刚好落在下面的"等就绪"轮询期间时，handleTermSignal 看到的 wrapperChild 仍是 null，
-    // killChildTree 无法找到这个已经真实存在的子进程，留下 3107 孤儿监听。
-    wrapperChild = c;
-    let exited = false;
-    // L（codex 596C）：spawn 失败（如 ENOENT）会在 child_process 上触发 'error' 事件；未监听时该事件
-    // 属未处理事件，绕开下面的轮询/超时逻辑与调用方 catch，也就绕开了 main() 的统一 shutdown 收尾，留下
-    // 已生成的 db 副本。这里立即登记，交给下面的判定逻辑当"启动失败"统一抛出。
-    let spawnError = null;
-    c.on('error', (e) => { spawnError = e; exited = true; });
-    c.on('exit', () => { exited = true; });
-    c.stdout.on('data', (d) => { log += d.toString(); });
-    c.stderr.on('data', (d) => { log += d.toString(); });
-    const deadline = Date.now() + 20000;
-    let listening = false;
-    while (Date.now() < deadline) {
-        if (cancelRequested || spawnError) break;
-        if (/Task Pool Server running/.test(log)) { listening = true; break; }
-        if (exited) break;
-        await new Promise((r) => setTimeout(r, 300));
-    }
-    // 稳定观察窗（同 G3 既有范式）：起服务后紧接着的短暂窗口内若崩溃，比后面某个具体请求超时更好定位。
-    const stabilizeDeadline = Date.now() + 2000;
-    while (Date.now() < stabilizeDeadline && !exited && !cancelRequested && !spawnError) { await new Promise((r) => setTimeout(r, 200)); }
-    if (cancelRequested) throw new Error('已取消（收到中断信号）');
-    if (spawnError) {
-        console.error(`[attach-trace-pw] wrapper server 进程 spawn 失败：${spawnError.message}`);
-        killChildTree(c);
-        throw spawnError;
-    }
-    if (!listening || exited) {
-        console.error(`[attach-trace-pw] wrapper server 未能就绪（listening=${listening} exited=${exited}），日志尾部：\n${log.slice(-1500)}`);
-        killChildTree(c);
-        throw new Error('wrapper server 启动失败');
-    }
-    return c;
-}
-
+// [#106 S4b2] 原 killPort / snapshotRealDbToTemp / startWrapperServer 随自起服务删除：
+//   - 「库快照可打开且含 sys_issues 表」的前置核对由 ready() 内的启动器（VACUUM INTO + 隔离化 + 模块就绪等待）承担；
+//   - 「服务已就绪」的判定改为 main() 里一次真实请求的结果断言（未带 token 访问 /api/sys-issues/intake-liaisons 必须 401，证明服务在应答本脚本要测的路由族）。
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 function jsonHeaders(tok) { return { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` }; }
 // L2：端点子串 + 预期状态码组合匹配（不再单靠 URL 子串），避免同端点真出 500 时被一并吞掉——
@@ -491,7 +338,6 @@ async function mkMixedIssue(adminTok, devTok) {
 }
 
 let adminTok, devTok;
-let wrapperChild = null;
 let browser = null;
 let cancelRequested = false;
 // M2（596CR1 二次处置）：main() 当前阶段最外层的 Promise——shutdown() 收尾时据此有界等待在途操作
@@ -504,26 +350,7 @@ function checkCancelled(stageName) {
     }
     return false;
 }
-// 杀自有子进程树并等待其真的退出（不是 taskkill 命令本身返回就算数——活体验证发现 OS 释放文件锁
-// 与 taskkill 返回并非严格同步，见 cleanupTempDbFiles 头注释）；用异步 exec()（不阻塞事件循环）发
-// taskkill，'exit' 事件等不到（进程已经不在了/边界情况）时用 timeoutMs 兜底，不无限等。
-// M3（596CR3 处置）：原版把"超时"与"真的退出"一样当作完成，且吞掉 taskkill 本身的错误——调用方
-// 无法区分"确认已杀死"与"没确认但也没报错就往下走了"。改为返回明确结果对象供调用方判定：
-// {status:'no-op'}（无子进程可杀）/{status:'exited'}（'exit' 事件确认退出）/
-// {status:'timeout'|'taskkill-error', taskkillErr?}（超时兜底触发，taskkill 回调若报错一并带出）。
-function killChildTreeAndWait(c, timeoutMs = 3000) {
-    return new Promise((resolve) => {
-        if (!c || !c.pid) return resolve({ status: 'no-op' });
-        let done = false;
-        let taskkillErr = null;
-        const finish = (status) => { if (!done) { done = true; resolve({ status, taskkillErr }); } };
-        c.once('exit', () => finish('exited'));
-        try {
-            exec(`taskkill /T /F /PID ${c.pid}`, { shell: 'cmd.exe' }, (err) => { if (err) taskkillErr = err; });
-        } catch (e) { taskkillErr = e; }
-        setTimeout(() => finish(taskkillErr ? 'taskkill-error' : 'timeout'), timeoutMs);
-    });
-}
+// [#106 S4b2] 原 killChildTreeAndWait（按 PID 树杀自起的 wrapper 进程并等其退出）删除：服务由 test-env 起停，收尾走 testEnv.teardown()。
 // M2（596CR1 二次处置）：signal 处理器与 main() 的 finally 不再各自并发跑一套清理（原版竞态：main()
 // 自己的 finally 会抢先 closeDb/查询，把信号路径的清理挤成"该删的没删掉"，H1 的精确清单兜底也可能因
 // db 连接被并发关闭而查空）——两者现在都只调用同一个幂等 shutdown(reason)，靠一个 Promise 单例保证
@@ -553,10 +380,10 @@ function shutdown(reason) {
 //   端点清理（release 移单/删单/删批次，走 safeDeleteFileSync 清掉物理文件；每个清理请求带 8s 可取消
 //   期限，M4） ③b 停止写入后再读一次并与保存清单取并集（M2：官方删除会把行级联清空，若只在此刻才读
 //   一次会拿到空清单，误把"物理删除失败的残留"漏判） ④关浏览器（有界 3s） ⑤关本进程所有 db 句柄
-//   （独立错误记录，M3） ⑥杀自有子进程树并等退出（返回明确结果，超时/taskkill 报错计 fail，M3）
-//   ⑦按并集清单逐文件 unlink（越界跳过并记 fail）+ 只 rmdir 空目录 ⑧删临时库及 -wal/-shm/-journal
-//   （⑤⑥⑦⑧用嵌套 try/finally 保证任一步异常不跳过后续步骤，M3）⑨输出最终汇总（抽成 printSummary，
-//   与 shutdown() 兜底 catch 共用）⑩ process.exit（退出码统一按 cancelRequested 决定，M4：正常收尾
+//   （独立错误记录，M3） ⑥[S4b2] await testEnv.teardown()（收实例；原「杀 wrapper 进程树 / 清真实 uploads / 删临时库」三步随自起服务删除，
+//   附件物理文件在实例数据根里，teardown 整体删除，所以附件清单（uploadsManifest）改为只用来核对「官方 API 清理后清单内文件是否还在」；
+//   teardown 之前另核每个自建 issue 的 uploads/sys-iteration/<id>/ 目录存在且为空，并且拿不到实例数据根时计失败）
+//   ⑨输出最终汇总（抽成 printSummary，与 shutdown() 兜底 catch 共用）⑩ process.exit（退出码统一按 cancelRequested 决定，M4：正常收尾
 //   途中又收到一次信号也能拿到 130，不再只看入参 reason）。
 async function doShutdown(reason) {
     console.log(`\n[attach-trace-pw] shutdown 开始（reason=${reason}）`);
@@ -638,71 +465,80 @@ async function doShutdown(reason) {
         catch (e) { console.error(`browser.close() 失败（不阻断后续清理）：${e.message}`); }
     }
 
-    // ⑤-⑧（M3）：嵌套 try/finally——closeDb 拒绝/killChildTreeAndWait 未确认退出都只记独立错误，
-    // 保证后续步骤（杀服务、文件清理、删临时库）仍被尝试，不会因前一步异常被整体跳过。
+    // ⑤-⑥（M3）：嵌套 try/finally——closeDb 拒绝只记独立错误，保证后续的附件核对与 teardown 仍被尝试。
     try {
-        // ⑤关闭本进程所有 db 句柄并 await 回调，各自独立 try/catch（L6：等回调真完成才进入下一步）。
+        // ⑤关闭本进程所有 db 句柄并 await 回调，各自独立 try/catch（L6：等回调真完成才进入下一步；S4 迁移约定：close 等回调完成再 teardown / exit）。
         try { await closeDb(dbRO); } catch (e) { console.error(`closeDb(dbRO) 失败：${e.message}`); fail++; failDetails.push(`closeDb(dbRO) 失败：${e.message}`); }
         try { await closeDb(dbRW); } catch (e) { console.error(`closeDb(dbRW) 失败：${e.message}`); fail++; failDetails.push(`closeDb(dbRW) 失败：${e.message}`); }
     } finally {
-        // ⑥杀自有子进程树并等退出——killChildTreeAndWait 返回明确结果，非 exited/no-op（即
-        // timeout/taskkill-error）计 fail，不能证明服务已退出的情形不再被静默当作"完成"。
-        let killResult = { status: 'no-op' };
-        try { killResult = await killChildTreeAndWait(wrapperChild); }
-        catch (e) { killResult = { status: 'error', taskkillErr: e }; }
-        if (killResult.status !== 'exited' && killResult.status !== 'no-op') {
-            console.error(`杀自有子进程树未确认退出（status=${killResult.status}${killResult.taskkillErr ? '：' + killResult.taskkillErr.message : ''}）`);
-            fail++; failDetails.push(`杀自有子进程树未确认退出：status=${killResult.status}`);
-        }
+        // [S4b2] 原步骤⑦（清理真实 ROOT/uploads/sys-iteration）改为只读核对：官方 API 清理（reason==='normal'）之后，清单内的附件物理文件
+        // 在实例数据根的 uploads 下必须都已不存在（safeDeleteFileSync 失败的残留在这里判红）。不再 unlink / rmdir——实例目录由 teardown 整体删除。
+        // 数据根拿不到（变量组形态下清单对不上）→ 计失败：这项核对是原「清单内残留」断言的替代，不能静默跳过（codex 18 H1）。
         try {
-            // ⑦按并集清单逐文件 unlink（删除前校验落在 uploads/sys-iteration/<本次夹具 issue id>/ 内，
-            // 越界跳过并记 fail）+ 只 rmdir 空目录。M3：残留判据按「清单内文件删除后是否还在」计
-            // fail，不再仅凭目录非空判定——共享 uploads 树可能含真实业务文件或其它套件的正常文件，
-            // 目录非空本身不代表本套件残留。
-            let dirAttempted = 0;
-            for (const iid of uploadTouchedIssueIds) {
-                const dir = path.join(ROOT, 'uploads', 'sys-iteration', String(iid));
-                const dirResolved = path.resolve(dir);
-                const manifest = uploadsManifest.get(iid) || [];
-                let manifestResidual = 0;
-                for (const relName of manifest) {
-                    const abs = path.resolve(ROOT, 'uploads', relName);
-                    const withinDir = abs === dirResolved || abs.startsWith(dirResolved + path.sep);
-                    if (!withinDir) {
-                        console.log(`  ⚠️ [收尾] 清单项越界（不在 uploads/sys-iteration/${iid}/ 内），跳过删除：${relName}`);
-                        fail++; failDetails.push(`清单项越界未删除：${relName}`);
-                        continue;
-                    }
-                    try { if (fs.existsSync(abs)) fs.unlinkSync(abs); } catch (_) { /* best-effort，下面按文件是否还在判残留 */ }
-                    if (fs.existsSync(abs)) manifestResidual++;
-                }
-                if (manifestResidual > 0) {
-                    console.log(`  ⚠️ uploads/sys-iteration/${iid} 本次清单内 ${manifestResidual} 个文件删除后仍存在`);
-                    fail++; failDetails.push(`uploads/sys-iteration/${iid} 清单内文件残留 ${manifestResidual} 个`);
-                }
-                if (!fs.existsSync(dir)) continue;
-                dirAttempted++;
-                let leftover = [];
-                try { leftover = fs.readdirSync(dir); } catch (_) { leftover = ['(readdir失败)']; }
-                if (leftover.length === 0) {
-                    try { fs.rmdirSync(dir); } catch (e) { console.log(`  ⚠️ 删空目录失败：${dir}（${e.message}）`); }
+            if (reason === 'normal') {
+                const dataDir = testEnv.env().dataDir;
+                if (!dataDir) {
+                    console.log('  ⚠️ [收尾] 实例数据根未知（变量组形态下 sdh-instance.json 对不上），附件物理文件残留无法核对');
+                    fail++; failDetails.push('实例数据根未知，附件物理文件残留无法核对');
                 } else {
-                    console.log(`  ⚠️ uploads/sys-iteration/${iid} 目录非空（含清单外文件，不强删，人工核对）：${JSON.stringify(leftover)}`);
+                    const uploadsRoot = path.join(dataDir, 'uploads');
+                    for (const iid of uploadTouchedIssueIds) {
+                        const dirResolved = path.resolve(uploadsRoot, 'sys-iteration', String(iid));
+                        let manifestResidual = 0;
+                        for (const relName of (uploadsManifest.get(iid) || [])) {
+                            const abs = path.resolve(uploadsRoot, relName);
+                            const withinDir = abs === dirResolved || abs.startsWith(dirResolved + path.sep);
+                            if (!withinDir) {
+                                console.log(`  ⚠️ [收尾] 清单项越界（不在 uploads/sys-iteration/${iid}/ 内），跳过核对：${relName}`);
+                                fail++; failDetails.push(`清单项越界未核对：${relName}`);
+                                continue;
+                            }
+                            if (fs.existsSync(abs)) manifestResidual++;
+                        }
+                        if (manifestResidual > 0) {
+                            console.log(`  ⚠️ uploads/sys-iteration/${iid} 官方清理后清单内仍有 ${manifestResidual} 个文件存在`);
+                            fail++; failDetails.push(`uploads/sys-iteration/${iid} 官方清理后清单内文件残留 ${manifestResidual} 个`);
+                        }
+                        // 实例 uploads 只属于本实例，目录按本脚本自建的 issue_id 命名；服务端只 unlink 附件文件、从不删 sys-iteration/<id>/ 目录。
+                        //   所以官方清理后目录必须**存在且为空**：「存在」是路径正确的正向锚（脚本算出的目录 = 服务端实际写入的目录，否则上面的清单核对与这里都会空转）；
+                        //   「为空」在清单为空（元数据丢失 / file_name 为空）时仍然成立，堵住「清单空跑」（codex 18-R M1、预筛 L1）。迁移前共用真实 uploads 树，做不到这一条。
+                        //   同一个残留文件会同时计入上面的「清单内残留」和这里的「目录非空」，失败数偏大，不影响判红。
+                        if (!fs.existsSync(dirResolved)) {
+                            console.log(`  ⚠️ uploads/sys-iteration/${iid} 目录不存在（脚本算出的路径与服务端写入目录不一致？）`);
+                            fail++; failDetails.push(`uploads/sys-iteration/${iid} 目录不存在，无法确认附件残留核对的路径`);
+                        } else {
+                            let leftover = null;
+                            try { leftover = fs.readdirSync(dirResolved); } catch (e) {
+                                console.log(`  ⚠️ uploads/sys-iteration/${iid} 目录 readdir 失败：${e.message}`);
+                                fail++; failDetails.push(`uploads/sys-iteration/${iid} 目录 readdir 失败：${e.message}`);
+                            }
+                            if (leftover && leftover.length > 0) {
+                                console.log(`  ⚠️ uploads/sys-iteration/${iid} 官方清理后目录内仍有 ${leftover.length} 项：${JSON.stringify(leftover)}`);
+                                fail++; failDetails.push(`uploads/sys-iteration/${iid} 官方清理后目录非空 ${leftover.length} 项`);
+                            }
+                        }
+                    }
                 }
             }
-            if (dirAttempted > 0) console.log(`uploads 目录收尾：尝试 ${dirAttempted} 个`);
-        } finally {
-            // ⑧删临时库及 -wal/-shm/-journal——即便上面文件清理抛出未预期异常，临时库仍要尝试删除。
-            await cleanupTempDbFiles();
+        } catch (e) {
+            console.log(`  ⚠️ 附件物理文件残留核对异常：${e.message}`);
+            fail++; failDetails.push(`附件物理文件残留核对异常：${e.message}`);
         }
+        // ⑥收实例：teardown 失败只记 fail，不阻断汇总与退出。
+        try { await testEnv.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); fail++; failDetails.push(`teardown 失败：${e.message}`); }
     }
 
     // ⑨输出最终汇总（抽成 printSummary，与 shutdown() 兜底 catch 共用同一份，M3）。
     printSummary(reason);
+    // 退出（finish / process.exit）之前再确认一次 teardown 已完成（幂等；上面 ⑥ 已调用过，这里让「收尾 → 退出」在本函数内显式成对；finish 也要求 teardown 已落定）。
+    try { await testEnv.teardown(); } catch (_) { /* 已在 ⑥ 记过 fail */ }
 
-    // ⑩ process.exit：退出码统一按 cancelRequested 决定（M4）——不再只看入参 reason，正常收尾途中
-    // 若又收到一次信号，cancelRequested 会被置真，这里同样返回 130。
-    process.exit(cancelRequested ? 130 : (fail > 0 ? 1 : 0));
+    // ⑩ 退出：退出码统一按 cancelRequested 决定（M4）——不再只看入参 reason，正常收尾途中
+    // 若又收到一次信号，cancelRequested 会被置真，这里同样返回 130（process.exit(130)）；否则 finish(0 / 1)。
+    // [#106 S4b2a] 信号路径（cancelRequested）保持 process.exit(130)：此时 main() 可能还卡在某个 await 上，必须立刻终止进程，不能让它在实例拆掉之后继续往下跑。
+    //   正常路径改 finish（teardown 已在上面 await 落定）：只设退出码，不终止执行；doShutdown 靠 shutdownPromise 单例保证只执行一次，finish 是本函数的最后一条语句，调用方 main() 的 finally 之后没有语句。
+    if (cancelRequested) process.exit(130);
+    testEnv.finish(fail > 0 ? 1 : 0);
 }
 function handleTermSignal(sig) {
     return () => {
@@ -718,20 +554,22 @@ function handleTermSignal(sig) {
         shutdown('signal');
     };
 }
-process.on('SIGINT', handleTermSignal('SIGINT'));
-process.on('SIGTERM', handleTermSignal('SIGTERM'));
-
 async function main() {
-    // L1：开跑前置——先杀掉上次可能残留的、本套件自己 spawn 的孤儿 wrapper 进程 + 清掉临时库文件，
-    // 与 G3 起服务前的既有范式对齐（同 M2 叠加时，"上次被打断"不会变成"这次起不来"）。
-    killPort(TEST_PORT);
-    await cleanupTempDbFiles();
-    // M1：启动序列（起服务/开库/签发 token/起浏览器）整段挪进 try——任一步失败都要走同一份 finally
-    // 清理（wrapperChild 未 kill=3107 孤儿监听、TEMP_DB 已落盘=真库完整副本留在 scratchpad），不再让
-    // 失败路径绕开清理（同 G3 `try { serverInfo = await startServer(); ... }` 范式）。
+    // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句：拿到隔离实例（本检出库快照 + 隔离模式 server.js）；失败 → 入口 .catch 非零退出。
+    //   之后的一切（信号处理器、RUN_TAG、开库、签 token、起浏览器）都在 ready 之后。
+    await testEnv.ready();
+    BASE_URL = testEnv.env().baseUrl;
+    RUN_TAG = Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+    RUN_TAG_MARKER = `RT-ATTTR-${RUN_TAG}`;
+    // 信号处理器放在 ready 之后（test-env 自己的 SIGINT / SIGTERM 清理监听器同样此时才装）；本文件的处理器走 shutdown → doShutdown（含 teardown）。
+    process.on('SIGINT', handleTermSignal('SIGINT'));
+    process.on('SIGTERM', handleTermSignal('SIGTERM'));
+    // M1：启动序列（开库/签发 token/起浏览器）整段挪进 try——任一步失败都要走同一份 finally 清理。
     try {
-        wrapperChild = await startWrapperServer();
-        initTempDbHandles();
+        await initTempDbHandles(testEnv.env().dbPath);
+        // 「服务就绪」的判定：原来靠日志里的 "Task Pool Server running"；改为一次真实请求——未带 token 访问本脚本要测的路由必须 401。
+        const probe = await fetch(`${BASE_URL}/api/sys-issues/intake-liaisons`);
+        if (probe.status !== 401) throw new Error(`[就绪核对] 未带 token 访问 /api/sys-issues/intake-liaisons 应 401，实得 ${probe.status}（服务没有在应答本脚本要测的路由）`);
         adminTok = await signAs(ADMIN_ID);
         devTok = await signAs(DEV_ID);
         browser = await chromium.launch();
@@ -956,10 +794,15 @@ async function main() {
         fail++; failDetails.push(`main 主流程异常：${e.message}`);
     } finally {
         // M2：main() 的 finally 与信号处理器现在都只调用同一个幂等 shutdown()——不再各自维护一套清理
-        // 逻辑（原版两处并发跑，见 doShutdown 头注释）。process.exit 在 doShutdown 内部完成，本行之后
-        // 不会再有代码执行。
+        // 逻辑（原版两处并发跑，见 doShutdown 头注释）。[#106 S4b2a] 退出在 doShutdown 内部：信号路径 process.exit(130) 立刻终止；
+        // 正常路径是 testEnv.finish(code)（只设退出码、不终止执行），doShutdown 返回后本 finally 即 main() 的最后一段，本行之后没有任何语句，
+        // main() 随即结束，进程在事件循环排空后以该退出码结束（finish 自带 10 秒 unref 兜底）。
         await shutdown('normal');
     }
 }
 
-main().catch((e) => { console.error('测试运行异常：', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('测试运行异常：', e);
+    try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+    process.exit(1);
+});

@@ -1,7 +1,11 @@
 /**
  * v1.74.0 C6b — 录入弹窗新增字段 Playwright UI 实测
  *
- * 用法：本地 server 已启动后 node scripts/test-issue-c6b-playwright.js
+ * 用法：node scripts/test-issue-c6b-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   造数：OA 单号常量原为固定的 OA-C6B-001，共享实例上会与残留 / 并行运行撞号，改为 `OA-C6B-<时间戳>`（OA_NO，每次运行唯一，按新值查库）；
+ *   经 API / 页面建的需求单收尾按状态码清理（200 / 404 算清掉，每个编号单独 try，共 2 轮），崩溃遗留的按 OA_NO 兜底查出来一并清，遗留计失败。
+ *   收口批：API 建的夹具标题带运行标记 RUN_TAG（[c6b-<pid>-<时间戳>]），清理再按标记补查；建单助手校验 HTTP 200 与正整数编号，不满足即抛错退 1。页面表单建的那张由 OA_NO 唯一号兜底（标题不带标记）。
  *
  * 验证：
  *   B1 admin 新建弹窗：原始诉求双框显示 + 指派给显示（M-4/H-1）
@@ -16,29 +20,46 @@
  *   B10 控制台无 JS 报错
  */
 'use strict';
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let OA_NO = null;      // [#106 S4d-2] ready() 之后赋值：OA-C6B-<时间戳>，每次运行唯一（原固定值 OA-C6B-001）
+let RUN_TAG = null;    // [#106 S4d-2 收口批] ready() 之后赋值：[c6b-<pid>-<时间戳>]，API 建的夹具标题带它；建单后客户端没拿到编号时，清理按标记补查
 const ADMIN_ID = 1, VIEWER_ID = 2;
 
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId], (e, r) => { db.close(); e ? reject(e) : resolve(r); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
-function dbGet(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, p, (e, r) => { db.close(); e ? rej(e) : res(r); }); }); }
-function dbAll(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.all(sql, p, (e, r) => { db.close(); e ? rej(e) : res(r); }); }); }
-async function apiDelete(token, id) { await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); }
-async function apiCreate(token, body) { const r = await fetch(`${BASE_URL}/api/issues`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return (await r.json()).id; }
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGet(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.get(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+async function dbAll(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.all(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+// [#106 S4d-2] 返回状态码（原来丢弃，删除失败看不见）
+async function apiDelete(token, id) { const r = await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); return r.status; }
+// [#106 S4d-2 收口批] 建单助手校验状态码与正整数编号，不满足即抛错（原来 undefined 编号被清理过滤器静默忽略）；服务端已落库而这里没拿到编号的，由 cleanupCreated 按 RUN_TAG 补查
+async function apiCreate(token, body) {
+    const r = await fetch(`${BASE_URL}/api/issues`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let j = null; try { j = await r.json(); } catch (_) { j = null; }
+    const id = j && j.id;
+    if (r.status !== 200 || !Number.isInteger(id) || id <= 0) throw new Error(`建单失败：HTTP ${r.status}，编号=${JSON.stringify(id)}，响应=${JSON.stringify(j).slice(0, 160)}`);
+    return id;
+}
 
 let pass = 0, fail = 0;
 function must(c, m) { if (c) { console.log('  ✅ ' + m); pass++; } else { console.log('  ❌ ' + m); fail++; } }
@@ -59,7 +80,43 @@ async function gotoAs(browser, token) {
 const isVisible = (page, sel) => page.evaluate(s => { const e = document.querySelector(s); return e && getComputedStyle(e).display !== 'none'; }, sel);
 
 const created = [];
+
+/**
+ * [#106 S4d-2] 清理造的需求单：先按 OA_NO 兜底查出页面提交后、脚本崩溃前未登记的单；再每个编号单独 try / catch，一个失败不中断后续；
+ * 看状态码（200 / 404 算清掉），只把清理成功的编号移出追踪；失败的编号再试一轮（共 2 轮，间隔 200ms）；遗留逐个计失败。
+ * 原来 `for (...) await apiDelete(...)` 不看状态码，一个抛错还会中断后面的清理
+ */
+async function cleanupCreated(adminToken) {
+    try {
+        const left = await dbAll('SELECT id FROM issues WHERE oa_number=?', [OA_NO]);
+        for (const r of left) if (!created.includes(r.id)) created.push(r.id);
+    } catch (e) { must(false, `清理前按 OA 单号兜底查询失败：${e && e.message}`); }
+    try {   // [#106 S4d-2 收口批] 再按运行标记补查：建单请求服务端已落库、客户端读响应 / 解析失败而没登记编号的单
+        const tagged = RUN_TAG ? await dbAll(`SELECT id FROM issues WHERE title LIKE '%' || ? || '%'`, [RUN_TAG]) : [];
+        for (const r of tagged) if (!created.includes(r.id)) created.push(r.id);
+    } catch (e) { must(false, `清理前按运行标记补查失败：${e && e.message}`); }
+    const lastErr = new Map();
+    for (let round = 0; round < 2; round++) {
+        const pending = created.filter((id) => Number.isInteger(id));
+        if (pending.length === 0) break;
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of pending) {
+            try {
+                const st = await apiDelete(adminToken, id);
+                if (st === 200 || st === 404) { created.splice(created.indexOf(id), 1); lastErr.delete(id); }
+                else lastErr.set(id, `HTTP ${st}`);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    for (const id of created.filter((x) => Number.isInteger(x))) must(false, `清理测试需求单 #${id} 失败（已重试 1 轮）：${lastErr.get(id)}`);
+}
+
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    OA_NO = 'OA-C6B-' + Date.now();
+    RUN_TAG = `[c6b-${process.pid}-${Date.now()}]`;
     const adminToken = await signAs(ADMIN_ID);
     const viewerToken = await signAs(VIEWER_ID);
     console.log('\n══════ v1.74.0 C6b 录入弹窗 Playwright 实测 ══════');
@@ -92,12 +149,12 @@ async function main() {
         await ap.fill('#formRequesterName', '测试业务方');
         await ap.fill('#formRawRequirement', '业务方原话：想要个销售看板');
         await ap.fill('#formDescription', '梳理后：PBI 销售看板按月');
-        await ap.fill('#formOaNumber', 'OA-C6B-001');
+        await ap.fill('#formOaNumber', OA_NO);
         // 附件：用 setInputFiles 传一个内存文件
         await ap.setInputFiles('#formAttachments', { name: 'C6b示例.xlsx', mimeType: 'application/vnd.ms-excel', buffer: Buffer.from('a,b\n1,2') });
         await ap.click('.modal-footer button.btn-primary:has-text("提交")');
         await ap.waitForTimeout(1200); // 等 POST + 附件上传
-        const newIssue = await dbGet("SELECT id, raw_requirement, oa_number, requester_dept FROM issues WHERE oa_number='OA-C6B-001'");
+        const newIssue = await dbGet("SELECT id, raw_requirement, oa_number, requester_dept FROM issues WHERE oa_number=?", [OA_NO]);
         must(newIssue && newIssue.raw_requirement.includes('销售看板'), 'B6 完整录入落库（raw_requirement/oa/部门）');
         if (newIssue) {
             created.push(newIssue.id);
@@ -111,7 +168,7 @@ async function main() {
             await ap.waitForTimeout(700);
             const rawVal = await ap.$eval('#formRawRequirement', e => e.value);
             const oaVal = await ap.$eval('#formOaNumber', e => e.value);
-            must(rawVal.includes('销售看板') && oaVal === 'OA-C6B-001', 'B7 编辑回填 raw_requirement/oa');
+            must(rawVal.includes('销售看板') && oaVal === OA_NO, 'B7 编辑回填 raw_requirement/oa');
             // B11 codex M-3：编辑模式隐藏指派下拉（PUT 不处理 assigned_to，显示会误导）
             must(!(await isVisible(ap, '#assignedToGroup')), 'B11 admin 编辑模式：指派下拉隐藏（M-3，PUT 不处理 assigned_to）');
             // 不动 raw_requirement，改标题后提交 → 验 raw_requirement 不被清空
@@ -135,7 +192,7 @@ async function main() {
         await vp.close();
 
         // ---- B9 reason modal（admin 造单 → 转已暂缓）----
-        const susId = await apiCreate(adminToken, { title: 'C6b暂缓测试', type: '数据质量', requester_dept: '市场营销部', requester_name: 'x', description: 'y' });
+        const susId = await apiCreate(adminToken, { title: 'C6b暂缓测试' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: 'x', description: 'y' });
         created.push(susId);
         const rp = await gotoAs(browser, adminToken);
         await rp.evaluate(id => openDrawer(id), susId);
@@ -162,12 +219,17 @@ async function main() {
         must(allErrs.length === 0, `B10 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
 
     } finally {
-        await browser.close();
-        for (const id of created) await apiDelete(adminToken, id);
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        await cleanupCreated(adminToken);
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 C6b 录入弹窗实测全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('实测脚本异常:', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

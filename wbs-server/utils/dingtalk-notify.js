@@ -24,6 +24,8 @@
 
 'use strict';
 
+const externalGate = require('./external-gate');   // [#106 S1b] 外部调用闸（正常模式零影响，见 fetchWithTimeout）
+
 const GETTOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
 const GET_BY_MOBILE_URL = 'https://oapi.dingtalk.com/user/get_by_mobile';
 const BATCH_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -49,6 +51,10 @@ let tokenRefreshPromise = null;  // 并发刷新去重(v2.0 codex 六审 M-4)
  * 主动 AbortController 防止挂死。
  */
 async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_MS) {
+    // [#106 S1b] 外部调用闸：隔离实例（运行模式 external=stub）不发真实请求，交给钉钉替身并记录到 <数据根>/external-calls.jsonl；
+    //   正常模式 dingtalkFetchOverride() 返回 null，下面的原逻辑一字未动。
+    const fetchOverride = externalGate.dingtalkFetchOverride();
+    if (fetchOverride) return fetchOverride(url, options);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {

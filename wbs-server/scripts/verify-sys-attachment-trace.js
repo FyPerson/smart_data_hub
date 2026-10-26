@@ -23,6 +23,7 @@ const jwt = require('jsonwebtoken');
 // `_sys-attach-test-deps.js` 的 `os.tmpdir()/sys-verify-uploads` 目录（那是共享目录，`feedback_shared_dir_
 // test_cleanup_precise_list`：整目录清理只对"独占目录"安全，对共享目录清理面必须精确到自己的清单，否则
 // 任何手工并行/未来 family 并行化会互相删对方正在跑的文件）。启动/收尾清理只动 MY_UPLOAD_DIR 自己。
+// 〔2026-10-25 #106 S10 修复批 3〕助手已改为每进程私有目录，上面「共享目录」的说法已过时；本脚本保留自己的 MY_UPLOAD_DIR 是历史原因。
 // 复刻 `_sys-attach-test-deps.js` 的 normalizeAttachmentExt/safeDeleteFileSync 真实语义（同该文件头部
 // "stub 偏离真实语义会致假绿/假红"纪律），但作用域收窄到本脚本自己的 ALLOWED_FILE_DIRS。
 const MY_UPLOAD_DIR = path.join(os.tmpdir(), `sys-verify-uploads-attach-trace-${process.pid}`);

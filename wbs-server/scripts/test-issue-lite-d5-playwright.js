@@ -5,41 +5,46 @@
  * 验证（纯 UI；后端逻辑由 D2/D3/D4 + void/search/completed verify 覆盖）：建单全字段→列表两列→状态流转→
  *   完成弹窗→附件→【Commit E 扩展】拆列/文案统一/完成时间列表=详情/组合搜索+重置/请求竞态拦截(旧成功+旧失败)/
  *   重开清空+再次完成/作废弹窗全流程/admin 含已作废只读详情(无写按钮)/重置连清含已作废→无 console error→viewer。
- * ⚠️ 不点通知/拉群按钮（避免真钉钉）。自启 PORT=3399·跑完按端口精确杀 + 清理测试单/附件。
+ * ⚠️ 不点通知/拉群按钮（避免真钉钉）。
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身），也可由 TEST_* 变量组指向已起好的隔离实例；浏览器在 ready 之后才启动，页面地址由 ready 之后的 BASE 拼出；跑完清理测试单/附件。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
 const path = require('path');
 const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const ROOT = path.join(__dirname, '..');
-const DB_FILE = path.join(ROOT, 'task_pool.db');
-const SHOT = path.join(process.env.TEMP || '/tmp', 'issue-lite-d5.png');
+let BASE = null;       // ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值（实例库）
+let SHOT = null;       // 截图路径，ready() 之后赋值
 const TITLE_PREFIX = '[D5UI]';
 
 let pass = 0, fail = 0;
 function ok(n, c, d) { if (c) { pass++; console.log(`  ✓ ${n}`); } else { fail++; console.log(`  ✗ ${n}  ${d || ''}`); } }
-// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupRows() {
-    return new Promise((res) => { const db = new sqlite3.Database(DB_FILE); db.serialize(() => { db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], () => {}); db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); res(); }); }); });
+    return new Promise((res) => {
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return res(`打开实例库失败：${oe.message}`);   // 返回错误描述（null = 成功）；调用方计失败，不吞
+            let attErr = null;
+            db.serialize(() => {
+                db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], (e1) => { if (e1) attErr = e1; });
+                db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], (e2) => {
+                    db.close(() => res(attErr ? `DELETE 附件失败：${attErr.message}` : (e2 ? `DELETE 失败：${e2.message}` : null)));
+                });
+            });
+        });
+    });
+}
+// 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+async function issueLiteServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
 }
 async function loginAs(ctx, token) {
     const page = await ctx.newPage();
@@ -50,13 +55,14 @@ async function loginAs(ctx, token) {
 }
 
 (async () => {
-    killPort(TEST_PORT); await cleanupRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); }); child.stderr.on('data', d => { log += d.toString(); });
-    const deadline = Date.now() + 12000; let ready = false;
-    while (Date.now() < deadline) { if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(log)) { try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) { ready = true; break; } } catch (_) {} } await new Promise(r => setTimeout(r, 400)); }
-    ok('服务就绪', ready);
+    await fx.ready();   // 先于任何写库 / 网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
+    BASE = fx.BASE;
+    DB_FILE = fx.DB_PATH;
+    SHOT = path.join(process.env.TEMP || '/tmp', 'issue-lite-d5.png');
+    const ce0 = await cleanupRows();
+    if (ce0) ok('清理历史测试单', false, ce0);
+    const ready = await issueLiteServiceReady();
+    ok('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
 
     const browser = await chromium.launch();
     try {
@@ -278,8 +284,16 @@ async function loginAs(ctx, token) {
         ok('viewer 建单按钮隐藏', !(await page2.locator('#btnNew').isVisible()));
         await ctx2.close();
     } catch (e) { ok('UI 冒烟执行', false, e.message); }
-    finally { await browser.close(); try { child.kill('SIGKILL'); } catch (_) {} killPort(TEST_PORT); await cleanupRows(); }
+    finally {
+        try { await browser.close(); } catch (_) { /* 浏览器已关闭 */ }
+        { const ce = await cleanupRows(); if (ce) ok('清理测试单', false, ce); }
+        try { await fx.teardown(); } catch (e) { ok('teardown（收掉自起实例）', false, e.message); }
+    }
 
     console.log(`\n总判定：${fail === 0 ? '✅ D5 UI PASS' : '❌ D5 UI FAIL'}（${pass} 通过 / ${fail} 失败）·截图 ${SHOT}`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('D5 UI 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

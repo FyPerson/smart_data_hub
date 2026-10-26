@@ -14,31 +14,29 @@
  */
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
+// [#106 S4c-A1] 实例库来自 test-env：在 ready() 之后才赋值，不再写死业务库路径（本脚本的请求全走 fx.apiCall，不再需要 BASE）
+let DB_PATH = null;
 
 const createdFixtureIds = [];
 
-function dbGet(sql, params) {
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.get(sql, params, (err, row) => {
-            db.close();
-            err ? reject(err) : resolve(row);
+            // 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); });
         });
     });
 }
 
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(sql, params, function (err) {
-            db.close();
-            err ? reject(err) : resolve({ lastID: this.lastID, changes: this.changes });
+            const out = err ? null : { lastID: this.lastID, changes: this.changes };
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(out); });
         });
     });
 }
@@ -155,16 +153,29 @@ async function runTests() {
 }
 
 (async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     try {
+        DB_PATH = fx.DB_PATH;
         await runTests();
     } catch (e) {
         console.error('\n[FATAL]', e);
         failed++;
     } finally {
-        for (const id of createdFixtureIds) {
-            try { await fx.cleanup(id); } catch (e) { console.warn(`cleanup ${id} failed: ${e.message}`); }
+        // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+        for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of createdFixtureIds.slice()) {
+                try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+            }
         }
-        console.log(`\n=== 总计: ${passed} passed, ${failed} failed ===`);
-        process.exit(failed > 0 ? 1 : 0);
+        if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); failed++; }
     }
-})();
+    console.log(`\n=== 总计: ${passed} passed, ${failed} failed ===`);
+    fx.finish(failed > 0 ? 1 : 0);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('create-chat e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

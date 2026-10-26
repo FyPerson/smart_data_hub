@@ -1,7 +1,12 @@
 /**
  * C2b/C2c（交互体验优化·变更流通知全手动 + 按钮共存修）— Playwright 浏览器冒烟
  *
- * 用法：本地 server(3000) 已启动后 node scripts/test-issue-c2b-change-notify-playwright.js
+ * 用法：node scripts/test-issue-c2b-change-notify-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   ⚠️ 已知既有红：建单缺 intake_contract_version（本脚本两处建 sys-issues 单都没带，服务端返回 400 CLIENT_CONTRACT_OUTDATED，见 routes/sys-iteration/index.js:7354-7361；
+ *   第一处建单失败即抛错、退出码非零），登记 PROJECT_STATUS，契约修复另起小提交；本次迁移只改环境层，不修业务契约。
+ *   造数（建单修好之后）：经 API 建 2 张 sys-issues 单（C2b冒烟测试单 / C回归bug单）并直连实例库改状态与通知列；收尾各自 DELETE 看状态码（200 / 404 算清掉，2 轮间隔 200ms），遗留计失败。
+ *   收口批：两个夹具标题都带运行标记 RUN_TAG（[c2b-<pid>-<时间戳>]），清理先按标记补查；建单助手同时校验状态码与正整数编号，红的表现 = 「建单失败」抛错退 1（第一处建单）。
  *
  * 测点：
  *   B1（C2c 按钮共存修）：变更流「已排期」态详情页操作区 → 只有「指派」无「改派」按钮（reassign.from 去 D_PRE）
@@ -13,23 +18,38 @@
  * ⚠️ finally 删测试单，清残留。不真发钉钉（只验渲染，不点发送按钮）。
  */
 'use strict';
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let RUN_TAG = null;    // [#106 S4d-2 收口批] ready() 之后赋值：[c2b-<pid>-<时间戳>]，两个夹具标题都带它；建单后客户端没拿到编号时，清理按标记补查
 const ADMIN_ID = 1, DEV_B = 19;   // admin 自己 + 另一开发（id 19 有 phone，c6d 范式同款）
 
-function dbGet(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, p, (e, r) => { db.close(); e ? rej(e) : res(r); }); }); }
-function dbRun(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.run(sql, p, function (e) { db.close(); e ? rej(e) : res(this); }); }); }
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGet(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.get(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+async function dbRun(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.run(sql, p, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; db.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+}
+async function dbAll(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.all(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(uid) {
-    const u = await dbGet('SELECT id,username,display_name,role FROM users WHERE id=?', [uid]);
-    if (!u) throw new Error(`user ${uid} not found`);
-    return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(uid);
 }
 async function api(token, method, url, body) {
     const r = await fetch(`${BASE_URL}${url}`, {
@@ -39,6 +59,13 @@ async function api(token, method, url, body) {
     const txt = await r.text();
     let json; try { json = JSON.parse(txt); } catch { json = { _raw: txt }; }
     return { status: r.status, json };
+}
+// [#106 S4d-2 收口批] 建单助手：状态码须为 200 / 201 且编号为正整数，不满足即抛错（原来编号 undefined 会被后面静默忽略）；服务端已落库而这里没拿到编号的，由 cleanupIssues 按 RUN_TAG 补查
+async function createSysIssue(token, body) {
+    const c = await api(token, 'POST', '/api/sys-issues', body);
+    const id = c.json && c.json.id;
+    if ((c.status !== 200 && c.status !== 201) || !Number.isInteger(id) || id <= 0) throw new Error(`建单失败 ${c.status} ${JSON.stringify(c.json)}`);
+    return id;
 }
 
 let pass = 0, fail = 0;
@@ -69,16 +96,66 @@ async function openDrawerText(page, id) {
 }
 
 let createdId = null, cBugId = null;
+let adminTokenG = null;   // [#106 S4d-2] 提到模块级，供入口 .catch 里尽力清理用
+
+/**
+ * [#106 S4d-2] 删一张 sys-issues 单：DELETE 看状态码（200 / 404 算清掉），失败再试一轮（共 2 轮，间隔 200ms）；返回 null = 已清，否则返回失败说明
+ */
+async function deleteIssueChecked(id, label) {
+    let lastErr = null;
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        try {
+            const d = await api(adminTokenG, 'DELETE', `/api/sys-issues/${id}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' });
+            console.log(`  · 清理${label} #${id}（${d.status}）`);
+            // 成功 200（routes/sys-iteration/index.js:14080 `res.json({ ok: true, id })`）/ 不存在 404（:13953）；其余（400 / 409 / 503 / 500）一律算失败
+            if (d.status === 200 || d.status === 404) return null;
+            lastErr = `HTTP ${d.status} ${JSON.stringify(d.json).slice(0, 120)}`;
+        } catch (e) { lastErr = (e && e.message) || String(e); }
+    }
+    return lastErr;
+}
+/**
+ * [#106 S4d-2] 清理两张造的单：各自独立（一张失败不影响另一张）；清掉才把对应编号置空（入口 .catch 里再调一次是幂等的）；返回失败说明数组。
+ * 原来两个 DELETE 顺序执行、不看状态码，第一个抛错会跳过第二个
+ */
+async function cleanupIssues() {
+    const errs = [];
+    // [#106 S4d-2 收口批] 先按运行标记补查：建单请求服务端已落库而客户端没拿到编号的单（已登记的编号不重复清）
+    const extra = [];
+    if (RUN_TAG) {
+        try { for (const r of await dbAll(`SELECT id FROM sys_issues WHERE title LIKE '%' || ? || '%'`, [RUN_TAG])) { if (r.id !== createdId && r.id !== cBugId) extra.push(r.id); } }
+        catch (e) { errs.push(`按运行标记补查失败：${(e && e.message) || e}`); }
+    }
+    for (const id of extra) {
+        const e = await deleteIssueChecked(id, ' 按标记补查到的单');
+        if (e) errs.push(`补查到的单 #${id}: ${e}`);
+    }
+    if (createdId) {
+        const e = await deleteIssueChecked(createdId, '测试单');
+        if (e) errs.push(`测试单 #${createdId}: ${e}`); else createdId = null;
+    }
+    if (cBugId) {
+        const e = await deleteIssueChecked(cBugId, ' C 回归 bug 单');
+        if (e) errs.push(`C 回归 bug 单 #${cBugId}: ${e}`); else cBugId = null;
+    }
+    return errs;
+}
+
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = `[c2b-${process.pid}-${Date.now()}]`;
     const adminToken = await signAs(ADMIN_ID);
+    adminTokenG = adminToken;
     console.log('\n══════ C2b/C2c 变更流通知全手动 + 按钮共存修 浏览器冒烟 ══════');
 
     // 造数：建变更流(feature)单 → schedule
-    const c = await api(adminToken, 'POST', '/api/sys-issues', {
-        type: 'feature', title: 'C2b冒烟测试单', system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13,
+    // [#106 S4d-2] 原 process.exit(1) 改 throw：入口 .catch 里 teardown 后以 1 退出（既有红：建单缺 intake_contract_version，原样保留）
+    createdId = await createSysIssue(adminToken, {
+        type: 'feature', title: 'C2b冒烟测试单' + RUN_TAG, system_name: 'BMS', source: '内部', description: 'x', intake_liaison_id: 13,
     });
-    if (c.status !== 200 && c.status !== 201) { console.error('建单失败', c.status, c.json); process.exit(1); }
-    createdId = c.json.id;
     console.log(`  · 建变更流单 #${createdId}（待评估）`);
 
     const browser = await chromium.launch();
@@ -170,11 +247,13 @@ async function main() {
 
         // ===== C 回归（对抗审 MED）：bug 主开发（非 admin 非对接人）通知区无「建单人发送」+ 无「查已读」按钮 =====
         // 造 bug 单 → assign user19(主开发·role=user·非白名单) → SQL 直推「待验证」(creator sendable 态·绕 submit 闸门造渲染态)
-        const cBug = await api(adminToken, 'POST', '/api/sys-issues', {
-            type: 'bug', title: 'C回归bug单', system_name: 'BMS', source: '生产故障', description: 'x', intake_liaison_id: 13,
-        });
-        if (cBug.status === 200 || cBug.status === 201) {
-            cBugId = cBug.json.id;
+        let cBugCreateErr = null;
+        try {
+            cBugId = await createSysIssue(adminToken, {
+                type: 'bug', title: 'C回归bug单' + RUN_TAG, system_name: 'BMS', source: '生产故障', description: 'x', intake_liaison_id: 13,
+            });
+        } catch (e) { cBugCreateErr = (e && e.message) || String(e); }
+        if (cBugCreateErr === null) {
             await api(adminToken, 'POST', `/api/sys-issues/${cBugId}/assign`, { assigned_to: DEV_B });   // 待处理→处理中·DEV_B 成主开发代表
             // SQL 直推待验证 + dev_status=code_submitted（仅为渲染 creator sendable 行·不走状态机·测试库）
             await dbRun(`UPDATE sys_issues SET status='待验证' WHERE id=?`, [cBugId]);
@@ -210,18 +289,24 @@ async function main() {
             allErrs = allErrs.concat(p6._errs);
             await p6.close();
         } else {
-            must(false, `C 回归造 bug 单失败（${cBug.status}）`);
+            must(false, `C 回归造 bug 单失败（${cBugCreateErr}）`);
         }
 
         must(allErrs.length === 0, `B4 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
     } finally {
-        await browser.close();
-        if (createdId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${createdId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理测试单 #${createdId}（${d.status}）`); }
-        if (cBugId) { const d = await api(adminToken, 'DELETE', `/api/sys-issues/${cBugId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' }); console.log(`  · 清理 C 回归 bug 单 #${cBugId}（${d.status}）`); }
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        const cleanupErrs = await cleanupIssues();
+        for (const m of cleanupErrs) must(false, `清理失败（已重试 1 轮）：${m}`);
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 C2b/C2c 浏览器冒烟全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('C2b 冒烟异常:', e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('C2b 冒烟异常:', e);
+    try { await cleanupIssues(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

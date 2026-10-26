@@ -2,7 +2,12 @@
  * 建单优化批 C1/C2 前端 Playwright 冒烟——对接人下拉 + title 派生 + intake 通知按钮三态
  * （方案 v1.2 §3.6/§4.8/§6b.1，对齐 test-sys-release-c7-playwright.js 套件范式）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-intake-liaison-playwright.js
+ * 用法：node scripts/test-sys-intake-liaison-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   下方「钉钉安全边界」是迁移前对本地业务库副本的实测描述（保留作历史）：隔离实例里的钉钉凭证是虚拟值，本脚本仍不点击真实「发送通知」按钮，三态靠 SQL 模拟。
+ *   造数：经建单弹窗 / API 建 7 张单（描述 / 标题带 RUN_TAG 或时间戳后缀，T7 标题带 RUN_TAG），收尾直连实例库逐个清（每张单各自 try，共 2 轮，间隔 200ms，清完回查，遗留计失败，退出码 2）。
+ *   固定用户 id：1 admin / 13（对接人，须 active）/ 8（示例开发A，T6 A3 的在册开发）。固定 OA 号 '2026080077' 只是 set-oa-number 的写入值（不是查询键，无唯一约束），不用改。
+ *   批跑建议：needsService:true；非 exclusive（只建自己的单，按 id 清理；T1 对接人候选断言读全实例候选池，与同时改 users 的脚本不并行）；不需要服务端开关。
  *
  * 覆盖：
  *   T1 建单弹窗结构+校验：#f_title 存在且为**选填**（label 无必填星号）/ 描述必填拦截（留空点确定→toast
@@ -41,36 +46,50 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-// [S12b hotfix批1 收口·2026-08-06] 补 TEST_BASE_URL 覆盖（对齐 probe-s1-paste-thumb.js / test-corr-
-//   upload-preview-playwright.js 等既有兄弟套件同款约定）——本次改造涉及后端 intake_accept 逻辑
-//   （routes/sys-iteration/index.js/transitions.js），需要一个已加载最新后端代码的 server 实例；
-//   用户正在观察的 3000 端口 server 全程不可重启/杀，故验证时改指向临时 3100 副本实例，默认值仍是
-//   3000（不影响其余不传该环境变量的调用方）。
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;        // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库）
 // codex 220 L-4：原硬编码指向某次会话的临时目录，会话结束即失效——失败截图会静默写失败（目录不存在）
-// 且无从查阅。改用系统临时目录下固定子目录，每次运行前 mkdirSync recursive 确保存在。
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+// 且无从查阅。改用系统临时目录下固定子目录，截图前 mkdirSync recursive 确保存在。
+// [#106 S4d-5] 顶层 path.join 会被守卫 R6 判红：改 ready() 之后赋值（纯失败诊断截图，保留不删）
+let SCREENSHOT_DIR = null;
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;   // 示例对接人（v1.141 C10 起下拉候选=全 eligible 角色成员，她是其中之一；
                          //   SYS_INTAKE_LIAISON_IDS=[13] 现只管 release/roster 级窄集合授权，不再决定候选池）
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -81,6 +100,116 @@ let pass = 0, fail = 0;
 //   功能失败仍是 1，清理未收口单独用 2，两者不互相覆盖（见文件末尾退出逻辑）。
 //   故本清单提到模块级作用域，供 finally 之后的退出判定读取。
 const cleanupFailures = [];
+
+// [#106 S4d-5] 夹具 id / 标记提到模块级（原为 main 内的局部变量），供 finally 与入口 .catch 共用同一套清理（入口 .catch 之前根本不清理）。
+let createdIssueId = null;
+let oaExemptIssueId = null;   // T1.5（建单优化批 C3b）独立夹具
+// T2b/T2c（#69 标题放出为选填）独立夹具。
+// ⭐ 除 id 外**另存一份描述唯一标记**（codex 568-#69 审 M-1）：id 只有在"提交后固定等待 → dbGet 查到行"
+//   这条路走通时才会被赋值，若落库慢于固定等待、或查询本身异常，id 仍为 null 而单据**可能已经建出来**，
+//   finally 就漏清。存下标记后 finally 可按标记补查兜底，把"清理依赖查询成功"这个隐含前提去掉。
+//   ⭐ 三轮 M-1 补：另记「是否已尝试提交」。只有"提交动作确实发起过、却没拿到 id、补查也零行"这种
+//     组合才是**清理状态未知**（可能服务端已落库而我们不知道）；用例在填表阶段就失败、根本没点提交时，
+//     补查零行是正常的，不能报未知。marker 在提交之前就被赋值了，不足以区分这两种情形。
+let explicitTitleIssueId = null, explicitTitleDescMarker = null, explicitTitleSubmitAttempted = false;
+let blankTitleIssueId = null, blankTitleDescMarker = null, blankTitleSubmitAttempted = false;
+let t6FeatureId = null, t6BugId = null, t6ImprovementId = null;   // T6（工期对接测试与风险等级拆分 v1.1 §3.4/§7/§6b·C5，⭐ 用户拍板批1改造B新增 improvement 分支）独立夹具
+let t7DisplayId = null;   // T7（D22 批2 状态显示改名·2026-08-06）独立夹具
+
+/**
+ * [#106 S4d-5] 按 id 清一张单（timeline → 开发在册 → 单据）：三步各自 try，有失败整体再试一轮（共 2 轮，间隔 200ms），清完回查 sys_issues 是否还有该 id；
+ * 仍未清掉记入 cleanupFailures（退出码 2）并返回 false。原来三条 dbRun 裸 await，一条抛错整个 finally 中断（连 browser.close 都被跳过）。
+ */
+async function removeIssueChecked(label, id) {
+    let lastErr = '';
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        const errs = [];
+        for (const sql of [
+            'DELETE FROM sys_issue_timeline WHERE issue_id=?',
+            'DELETE FROM sys_issue_dev_assignees WHERE issue_id=?',
+            'DELETE FROM sys_issues WHERE id=?',
+        ]) {
+            try { await dbRun(sql, [id]); } catch (e) { errs.push(`${sql.split(' ')[2]}: ${e && e.message}`); }
+        }
+        try {
+            const left = await dbGet('SELECT COUNT(*) AS n FROM sys_issues WHERE id=?', [id]);
+            if (left.n !== 0) errs.push(`回查仍有残留 ${left.n} 行`);
+        } catch (e) { errs.push(`回查失败: ${e && e.message}`); }
+        if (errs.length === 0) { console.log(`  🧹 ${label} 测试夹具已清理（issue #${id}）`); return true; }
+        lastErr = errs.join('；');
+    }
+    console.log(`  ❗ ${label}：issue #${id} 清理失败，夹具残留：${lastErr}`);
+    cleanupFailures.push(`${label}: issue #${id} 清理失败 ${lastErr}`);
+    return false;
+}
+
+/**
+ * 清理本脚本建的全部夹具（finally 与入口 .catch 共用，幂等：清掉的 id 置空，再调一次不会重复处理）。
+ * T2b/T2c 的描述标记补查逻辑原样保留（codex 568-#69 审 M-1 / 二轮 M-1 / 三轮 M-1 / 四轮 M-2）；每个夹具独立 try，一个抛错不阻止其余。
+ */
+async function cleanupAllFixtures() {
+    if (!db) return;
+    // ⭐ codex 568-#69 审 M-1：不只按 id 清，**id 为空时按描述唯一标记补查**。标记在提交**之前**就已存下，覆盖得到"id 没取得但单据已建出"的窗口。
+    //   ⚠️ 覆盖边界如实声明（codex 568-#69 二轮 M-1）：本兜底**不能保证**覆盖所有迟到落库——若提交请求在进入 finally 时尚未完成，补查仍可能查不到，随后才落库；是收窄不是消灭。
+    //   二轮 M-1 点出的三点已修：① 区分"查询失败"与"查无记录"，查询失败计入失败；② 各夹具独立 try/catch；③ 清理失败汇总打印并走分层退出码。
+    // 返回「是否完成清理」：成功清掉 / 确认未提交 = true；补查失败、多行命中、清理状态未知、removeIssueChecked 没清掉 = false（调用方据此决定能否 clear 追踪信息）
+    const cleanupByIdOrMarker = async (label, id, marker, submitAttempted) => {
+        let targetId = id;
+        if (!targetId && marker) {
+            let found = null;
+            try {
+                // 精确匹配优先（marker 是本轮唯一串，描述以它开头）——LIKE 前缀查询在极端碰撞下可能取到别的行，故仍用前缀但**校验唯一性**。
+                const rows = await dbAll(`SELECT id, description FROM sys_issues WHERE description LIKE ?`, [`${marker}%`]);
+                if (rows.length > 1) {
+                    console.log(`  ⚠️ ${label}：描述标记 "${marker}" 命中 ${rows.length} 行（预期 1），不自动删除，需人工核实：${JSON.stringify(rows.map(r => r.id))}`);
+                    cleanupFailures.push(`${label}: marker 命中 ${rows.length} 行，未清理`);
+                    return false;
+                }
+                found = rows[0] || null;
+            } catch (e) {
+                console.log(`  ❗ ${label}：按标记补查**失败**（非"查无记录"），夹具可能残留：${e && e.message}`);
+                cleanupFailures.push(`${label}: 补查失败 ${e && e.message}`);
+                return false;
+            }
+            if (found) {
+                targetId = found.id;
+                console.log(`  ⚠️ ${label}：id 未取得但按描述标记补查到 issue #${targetId}（响示例开发N时/点击异常/落库迟到），执行兜底清理`);
+            }
+        }
+        if (!targetId) {
+            // ⭐ 三轮 M-1：零行不等于"没有夹具"。提交动作发起过、却既没拿到响应 id、补查也零行时，服务端仍可能在此之后落库 —— 这是**清理状态未知**，必须报出来。
+            if (submitAttempted) {
+                console.log(`  ❗ ${label}：已尝试提交但未取得 id，且按标记补查零行 —— **清理状态未知**（可能服务端迟于本次查询才落库），请人工核实标记 "${marker}"`);
+                cleanupFailures.push(`${label}: 清理状态未知（已提交/无 id/补查零行），标记 ${marker}`);
+                return false;
+            }
+            return true;   // 确认未提交（填表阶段就失败、没点过提交）：没有夹具可清，可以安全清掉追踪信息
+        }
+        return await removeIssueChecked(label, targetId);   // 传播 removeIssueChecked 的结果：没清掉就是 false
+    };
+    for (const [label, id, marker, submitAttempted, clear] of [
+        ['T2b', explicitTitleIssueId, explicitTitleDescMarker, explicitTitleSubmitAttempted, () => { explicitTitleIssueId = null; explicitTitleDescMarker = null; explicitTitleSubmitAttempted = false; }],
+        ['T2c', blankTitleIssueId, blankTitleDescMarker, blankTitleSubmitAttempted, () => { blankTitleIssueId = null; blankTitleDescMarker = null; blankTitleSubmitAttempted = false; }],
+    ]) {
+        // [#106 S4d-5 修复批] 只有「已完成清理」（清掉 / 确认未提交）才 clear()；补查失败、多行命中、清理状态未知、删除没清掉时保留 id / 标记 / 提交状态，入口 .catch 的二次清理还能据此重试
+        try { if (await cleanupByIdOrMarker(label, id, marker, submitAttempted)) clear(); }
+        catch (e) { console.log(`  ❗ ${label} 清理抛错，夹具可能残留：${e && e.message}`); cleanupFailures.push(`${label}: 清理抛错 ${e && e.message}`); }
+    }
+    // 其余夹具只按 id 清（T1-T4 / T1.5 / [284 号 M-3 必修] T6 三夹具 / 改造B improvement / D22 批2 T7）；清掉才置空，没清掉保留 id 供入口 .catch 再试
+    for (const [label, id, clear] of [
+        ['T1-T4', createdIssueId, () => { createdIssueId = null; }],
+        ['T1.5', oaExemptIssueId, () => { oaExemptIssueId = null; }],
+        ['T6 feature', t6FeatureId, () => { t6FeatureId = null; }],
+        ['T6 bug', t6BugId, () => { t6BugId = null; }],
+        ['T6 improvement', t6ImprovementId, () => { t6ImprovementId = null; }],
+        ['T7', t7DisplayId, () => { t7DisplayId = null; }],
+    ]) {
+        if (!id) continue;
+        try { if (await removeIssueChecked(label, id)) clear(); }
+        catch (e) { console.log(`  ❗ ${label} 清理抛错，夹具可能残留：${e && e.message}`); cleanupFailures.push(`${label}: 清理抛错 ${e && e.message}`); }
+    }
+}
 function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } else { console.log('  ❌ ' + msg); fail++; } return cond; }
 async function shotOnFail(page, cond, name, msg) {
     if (!must(cond, msg)) {
@@ -105,6 +234,11 @@ async function loginPage(browser, token) {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+    db = await openInstanceDb(DB_PATH);
     // 前置：确认示例对接人(id=13)在本地是 active（T2/T3/T6 都以她为选中对象；C10 后候选池是全 eligible
     //   成员，「唯一受理人」前提已不存在，此处只需她本人在池即可）。
     const activeLiaisons = await dbAll(`SELECT id, display_name, status FROM users WHERE id=? AND status='active'`, [LIAISON_ID]);
@@ -117,22 +251,7 @@ async function main() {
     const RUN_TAG = Date.now();
     const descFirstLine = `Playwright冒烟首行标题-${RUN_TAG}`;
     const descFull = `${descFirstLine}\n第二行不应影响标题（仅首行截取）`;
-    let createdIssueId = null;
-    let oaExemptIssueId = null;   // T1.5（建单优化批 C3b）独立夹具，finally 里与 createdIssueId 一并清理
-    // T2b/T2c（#69 标题放出为选填）独立夹具。
-    // ⭐ 除 id 外**另存一份描述唯一标记**（codex 568-#69 审 M-1）：id 只有在"提交后固定等待 → dbGet 查到行"
-    //   这条路走通时才会被赋值，若落库慢于固定等待、或查询本身异常，id 仍为 null 而单据**可能已经建出来**，
-    //   finally 就漏清。存下标记后 finally 可按标记补查兜底，把"清理依赖查询成功"这个隐含前提去掉。
-    //   （注：shotOnFail 内部调 must() 不抛错，故"断言失败"本身不会跳过清理——已由 T2b 变异实跑验证；
-    //     本兜底针对的是上述"id 压根没被赋值"的窗口，两者是不同的失效路径。）
-    //   ⭐ 三轮 M-1 补：另记「是否已尝试提交」。只有"提交动作确实发起过、却没拿到 id、补查也零行"这种
-    //     组合才是**清理状态未知**（可能服务端已落库而我们不知道）；用例在填表阶段就失败、根本没点提交时，
-    //     补查零行是正常的，不能报未知（否则误报会淹没真信号）。marker 不足以区分这两种情形——它在提交
-    //     之前就被赋值了。
-    let explicitTitleIssueId = null, explicitTitleDescMarker = null, explicitTitleSubmitAttempted = false;
-    let blankTitleIssueId = null, blankTitleDescMarker = null, blankTitleSubmitAttempted = false;
-    let t6FeatureId = null, t6BugId = null, t6ImprovementId = null;   // T6（工期对接测试与风险等级拆分 v1.1 §3.4/§7/§6b·C5，⭐ 用户拍板批1改造B新增 improvement 分支）独立夹具
-    let t7DisplayId = null;   // T7（D22 批2 状态显示改名·2026-08-06）独立夹具
+    // [#106 S4d-5] 夹具 id / 描述标记已提到模块级（见 cleanupAllFixtures 上方的说明）
 
     const browser = await chromium.launch();
     try {
@@ -845,7 +964,7 @@ async function main() {
             console.log('\n── T7：状态显示改名「待验证」→「待验收」（列表徽章 + 筛选器，存储值不变） ──');
             const t7Res = await fetch(`${BASE_URL}/api/sys-issues`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
-                body: JSON.stringify({ intake_contract_version: 2, type: 'feature', title: 't7-display', system_name: 'BMS', source: '内部', description: `T7-display-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
+                body: JSON.stringify({ intake_contract_version: 2, type: 'feature', title: `t7-display-${RUN_TAG}`, system_name: 'BMS', source: '内部', description: `T7-display-${RUN_TAG}`, intake_liaison_id: LIAISON_ID })
             });
             const t7Body = await t7Res.json();
             if (t7Res.status !== 201) throw new Error(`T7 前置失败：建单未 201，实得 ${t7Res.status} ${JSON.stringify(t7Body)}`);
@@ -860,7 +979,8 @@ async function main() {
             await page.waitForTimeout(600);
 
             // ① 列表徽章：本单所在行的状态徽章文字应显示「待验收」（非「待验证」）。
-            const row = page.locator(`tr:has-text("t7-display")`).first();
+            //   [#106 S4d-5] 标题带 RUN_TAG（原固定 't7-display' 在共享实例上遇到遗留行 / 并行脚本的同名单会 .first() 取错行）
+            const row = page.locator(`tr:has-text("t7-display-${RUN_TAG}")`).first();
             await shotOnFail(page, (await row.count()) > 0, 't7-list-row-exists', '列表存在本单所在行');
             const badgeText = await row.locator('.u-status-badge').first().textContent().catch(() => '');
             await shotOnFail(page, badgeText.trim() === '待验收', 't7-list-badge-display', `列表状态徽章显示「待验收」（非存储值「待验证」），实得："${badgeText.trim()}"`);
@@ -886,7 +1006,7 @@ async function main() {
             //   （证 value 真的是「待验证」在驱动查询，非误把显示文字"待验收"当成了查询参数）。
             await page.selectOption('#siFStatus', '待验证');
             await page.waitForTimeout(600);
-            const rowAfterFilter = page.locator(`tr:has-text("t7-display")`).first();
+            const rowAfterFilter = page.locator(`tr:has-text("t7-display-${RUN_TAG}")`).first();
             await shotOnFail(page, (await rowAfterFilter.count()) > 0, 't7-filter-query-by-storage-value', '按「待验收」选项筛选后（实际传参值="待验证"），本单仍在结果集内——筛选器查询确实按存储值而非显示文字');
             const badgeAfterFilter = await rowAfterFilter.locator('.u-status-badge').first().textContent().catch(() => '');
             await shotOnFail(page, badgeAfterFilter.trim() === '待验收', 't7-filter-result-badge-display', `筛选结果内该行徽章仍显示「待验收」，实得："${badgeAfterFilter.trim()}"`);
@@ -927,128 +1047,39 @@ async function main() {
         }
     } finally {
         // 🧹 清理测试夹具（不依赖存量数据，自建自清）
-        if (createdIssueId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [createdIssueId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [createdIssueId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [createdIssueId]);
-            console.log(`\n  🧹 测试夹具已清理（issue #${createdIssueId}）`);
-        }
-        if (oaExemptIssueId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [oaExemptIssueId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [oaExemptIssueId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [oaExemptIssueId]);
-            console.log(`  🧹 T1.5 测试夹具已清理（issue #${oaExemptIssueId}）`);
-        }
-        // T2b/T2c（#69）夹具——与上两组同一 try/finally 收口。
-        // ⭐ codex 568-#69 审 M-1：不只按 id 清，**id 为空时按描述唯一标记补查**。id 只在"固定等待后
-        //   dbGet 查到行"这条路走通时才有值；落库慢于等待、或查询异常时 id 为 null 而单据可能已建出来，
-        //   只按 id 清就会漏。标记在提交**之前**就已存下，覆盖得到这个窗口。
-        //   （断言失败本身不跳过清理——shotOnFail 内部不抛错，已由变异实跑验证；此处防的是另一条路径。）
-        //   ⚠️ 覆盖边界如实声明（codex 568-#69 二轮 M-1 修正原注释的绝对化措辞）：本兜底**不能保证**
-        //     覆盖所有迟到落库——若提交请求在进入 finally 时尚未完成，补查仍可能查不到，随后才落库。
-        //     它把漏清窗口从"等待期内没查到就必漏"收窄到"finally 时点仍未落库才漏"，是收窄不是消灭。
-        //   下面三点是二轮 M-1 点出的真实缺陷，已修：
-        //     ① 原 `catch(() => null)` 把"查询失败"和"查无记录"混为一谈并静默退出 → 改为区分，查询失败
-        //        明确打日志并**计入失败**（清理不静默）。
-        //     ② 原来两个 await 顺序执行，T2b 清理抛错会**阻止 T2c 清理** → 改为各自独立 try/catch，
-        //        全部尝试完再统一报告。
-        //     ③ 清理失败不再无声——汇总后打印，供跑测的人看见（本套件以 PASS/FAIL 汇总收尾，清理属夹具
-        //        卫生问题，打印到位即可，不劫持业务断言的成败语义）。
-        const cleanupByIdOrMarker = async (label, id, marker, submitAttempted) => {
-            let targetId = id;
-            if (!targetId && marker) {
-                let found = null;
-                try {
-                    // 精确匹配优先（marker 是本轮唯一串，描述以它开头）——LIKE 前缀查询在极端碰撞下可能
-                    //   取到别的行，故先按等值查完整描述不可行（描述含后续行），仍用前缀但**校验唯一性**。
-                    const rows = await dbAll(`SELECT id, description FROM sys_issues WHERE description LIKE ?`, [`${marker}%`]);
-                    if (rows.length > 1) {
-                        console.log(`  ⚠️ ${label}：描述标记 "${marker}" 命中 ${rows.length} 行（预期 1），不自动删除，需人工核实：${JSON.stringify(rows.map(r => r.id))}`);
-                        cleanupFailures.push(`${label}: marker 命中 ${rows.length} 行，未清理`);
-                        return;
-                    }
-                    found = rows[0] || null;
-                } catch (e) {
-                    console.log(`  ❗ ${label}：按标记补查**失败**（非"查无记录"），夹具可能残留：${e && e.message}`);
-                    cleanupFailures.push(`${label}: 补查失败 ${e && e.message}`);
-                    return;
-                }
-                if (found) {
-                    targetId = found.id;
-                    console.log(`  ⚠️ ${label}：id 未取得但按描述标记补查到 issue #${targetId}（响示例开发N时/点击异常/落库迟到），执行兜底清理`);
-                }
-            }
-            if (!targetId) {
-                // ⭐ 三轮 M-1：零行不等于"没有夹具"。提交动作发起过、却既没拿到响应 id、补查也零行时，
-                //   服务端仍可能在此之后落库 —— 这是**清理状态未知**，必须报出来，不能按"无夹具"静默结束。
-                if (submitAttempted) {
-                    console.log(`  ❗ ${label}：已尝试提交但未取得 id，且按标记补查零行 —— **清理状态未知**（可能服务端迟于本次查询才落库），请人工核实标记 "${marker}"`);
-                    cleanupFailures.push(`${label}: 清理状态未知（已提交/无 id/补查零行），标记 ${marker}`);
-                }
-                return;
-            }
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [targetId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [targetId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [targetId]);
-            console.log(`  🧹 ${label} 测试夹具已清理（issue #${targetId}）`);
-        };
-        for (const [label, id, marker, submitAttempted] of [
-            ['T2b', explicitTitleIssueId, explicitTitleDescMarker, explicitTitleSubmitAttempted],
-            ['T2c', blankTitleIssueId, blankTitleDescMarker, blankTitleSubmitAttempted],
-        ]) {
-            // ② 独立捕获：任一夹具清理抛错都不影响其余夹具被尝试清理。
-            try { await cleanupByIdOrMarker(label, id, marker, submitAttempted); }
-            catch (e) { console.log(`  ❗ ${label} 清理抛错，夹具可能残留：${e && e.message}`); cleanupFailures.push(`${label}: 清理抛错 ${e && e.message}`); }
-        }
+        // [#106 S4d-5] 清理见 cleanupAllFixtures（模块级）：每张单各自 try / 2 轮 / 回查 / 遗留计入 cleanupFailures（退出码 2）；浏览器关闭失败计失败
+        await cleanupAllFixtures();
         if (cleanupFailures.length) {
             console.log(`\n  ❗❗ 夹具清理存在 ${cleanupFailures.length} 项未收口（需人工核实，勿当作"已清理干净"）：\n     - ${cleanupFailures.join('\n     - ')}`);
         }
-        // [284 号 M-3 必修] T6 两夹具此前漏清——finally 是唯一收口点，任一断言中途失败也须走到这里
-        // （与上两组同一 try/finally 结构，天然覆盖失败路径，非额外新增的容错分支）。
-        if (t6FeatureId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6FeatureId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6FeatureId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6FeatureId]);
-            console.log(`  🧹 T6 feature 测试夹具已清理（issue #${t6FeatureId}）`);
-        }
-        if (t6BugId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6BugId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6BugId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6BugId]);
-            console.log(`  🧹 T6 bug 测试夹具已清理（issue #${t6BugId}）`);
-        }
-        // ⭐ 改造B新增：improvement 夹具同 feature/bug 一并在 finally 兜底清理。
-        if (t6ImprovementId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t6ImprovementId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t6ImprovementId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t6ImprovementId]);
-            console.log(`  🧹 T6 improvement 测试夹具已清理（issue #${t6ImprovementId}）`);
-        }
-        // ⭐ D22 批2新增：T7 状态显示改名夹具。
-        if (t7DisplayId) {
-            await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id=?`, [t7DisplayId]);
-            await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [t7DisplayId]);
-            await dbRun(`DELETE FROM sys_issues WHERE id=?`, [t7DisplayId]);
-            console.log(`  🧹 T7 测试夹具已清理（issue #${t7DisplayId}）`);
-        }
-        await browser.close();
-        db.close();
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     // ⭐ 退出码分层（codex 568-#69 三轮 M-3）：功能失败=1（既有语义不变，优先级最高，不被清理状态覆盖）；
     //   功能全通过但**夹具清理未收口**=2。这样"功能红"与"夹具没清干净"对只读退出码的调用方也可区分，
     //   不会再出现"夹具残留却被当作完全成功"。
+    // [#106 S4d-5] 收尾改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）。
+    let exitCode = 0;
     if (fail > 0) {
         console.log('  ❌ 建单优化批 C1/C2 前端 Playwright 冒烟存在失败项');
         if (cleanupFailures.length) console.log(`  ❗ 另有 ${cleanupFailures.length} 项夹具清理未收口（见上方明细）`);
-        process.exit(1);
-    }
-    if (cleanupFailures.length) {
+        exitCode = 1;
+    } else if (cleanupFailures.length) {
         console.log(`  ❗❗ 功能断言全通过，但有 ${cleanupFailures.length} 项夹具清理未收口——退出码 2（勿当作完全成功）`);
-        process.exit(2);
+        exitCode = 2;
+    } else {
+        console.log('  🎉 建单优化批 C1/C2 前端 Playwright 冒烟全部通过');
     }
-    console.log('  🎉 建单优化批 C1/C2 前端 Playwright 冒烟全部通过');
+    testEnv.finish(exitCode);
 }
 
-main().catch(e => { console.error('实测脚本异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await cleanupAllFixtures(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -3,7 +3,8 @@
  * 对齐 Data_Correction S1 的 corrPicker* 范式（本页命名 tr 前缀，见 trPickerCollect/trPickerRender/
  * trPickerRemove/trPickerFiles/trPickerReset/trPickerOnPick，Issue_Tracker.html 内联实现，不抽共享层）。
  *
- * 用法：本地 server（3000）已启动到最新分支代码后：node scripts/test-tracker-attach-picker-playwright.js
+ * 用法：node scripts/test-tracker-attach-picker-playwright.js
+ * [#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 的本地 server。
  * 对齐 test-corr-upload-preview-playwright.js / test-issue-tracker-paste-playwright.js 套件范式：
  *   JWT 注入 + login.html 中继跳转（鉴权页直接 goto 会被 checkAuth 销毁 context）。
  *
@@ -30,8 +31,8 @@ const os = require('os');
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const HTML_PATH = path.join(__dirname, '..', 'public', 'Issue_Tracker.html');
+let BASE_URL = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
+let HTML_PATH = null;   // U7 反证读取的页面源文件：顶层只放纯声明（守卫 R5 / R6），在入口 ready() 之后赋值
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
@@ -49,12 +50,31 @@ function makeTmpFiles() {
     return { dir, png1, png2, xlsx };
 }
 
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
+
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
+    HTML_PATH = path.join(__dirname, '..', 'public', 'Issue_Tracker.html');
     console.log('=== 需求跟踪 录入附件 picker 化 Playwright 实测 ===\n');
     const tmp = makeTmpFiles();
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ viewport: { width: 1400, height: 950 } });
-    const page = await context.newPage();
+    let browser = null;   // [#106 S4d-1 修复批 2] 浏览器启动 / newContext / newPage 都在下面同一个 try 里：任何一步抛错，finally 都会（已创建才）关浏览器并删临时目录
     const consoleErrors = [];
     // U6/U7 用 mock 的假 issueId（88888/88889）触发真实 submitIssue() 成功路径，其内部会紧接着
     // openDrawer(issueId) 去 GET 详情——这个 id 在真实 DB 里不存在，后端会如实返回 404（openDrawer 对
@@ -62,14 +82,17 @@ function makeTmpFiles() {
     // 豁免仅在 allow404 标志开启的窗口内生效（对齐 test-corr-upload-preview-playwright.js 的 allow409/
     // allow400 范式），防全局豁免掩盖其他接口意外 404 的回归。
     let allow404 = false;
-    page.on('console', m => {
-        if (m.type() !== 'error') return;
-        if (allow404 && /Failed to load resource.*404/.test(m.text())) return;
-        consoleErrors.push(m.text());
-    });
-    page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
     try {
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+        const page = await context.newPage();
+        page.on('console', m => {
+            if (m.type() !== 'error') return;
+            if (allow404 && /Failed to load resource.*404/.test(m.text())) return;
+            consoleErrors.push(m.text());
+        });
+        page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
         const token = await fx.signAs(fx.ADMIN_ID);
         await page.goto(`${BASE_URL}/login.html`, { waitUntil: 'load' });
         await page.evaluate(t => localStorage.setItem('token', t), token);
@@ -307,6 +330,7 @@ function makeTmpFiles() {
                     await page.waitForTimeout(300);
                 } catch (cleanupErr) {
                     console.log(`  ⚠️ U7 清理阶段异常（不掩盖原始失败）：${cleanupErr.message}`);
+                    expect(false, `U7 清理阶段（卸载拦截 + 重新加载真实页面）失败：${cleanupErr.message}`);   // [#106 S4d-1] 清理失败计失败；不抛，原始异常继续向外传
                 }
             }
         }
@@ -315,10 +339,16 @@ function makeTmpFiles() {
         console.log('\nU8. console 健康');
         expect(consoleErrors.length === 0, `全程 0 console error（实际 ${consoleErrors.length}${consoleErrors.length ? '：' + consoleErrors.slice(0, 3).join(' | ') : ''}）`);
     } finally {
-        await browser.close();
-        fs.rmSync(tmp.dir, { recursive: true, force: true });
+        // [#106 S4d-1] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过临时目录清理；任一失败都计失败
+        if (browser) { try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); } }
+        try { removeTreeChecked(tmp.dir); } catch (e) { expect(false, `清理临时文件目录失败 ${tmp.dir}：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-    process.exit(fail > 0 ? 1 : 0);
-})();
+    fx.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('贴图 picker 实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -1,0 +1,62 @@
+{
+  "createdAt": "2026-10-19T07:19:36.200Z",
+  "createdAtHead": "fa1dfc141de6472a10d8ed92ff439584a03392e1",
+  "maxEntries": 14,
+  "entries": {
+    "test-collab-failed-retention-e2e.js": [
+      "T2",
+      "T4"
+    ],
+    "test-collab-mysql-smoke-e2e.js": [
+      "T1",
+      "T2",
+      "T4"
+    ],
+    "test-collab-submit-e2e.js": [
+      "T1",
+      "T2",
+      "T4"
+    ],
+    "test-issue-c7-notify-e2e.js": [
+      "T2",
+      "T3"
+    ],
+    "test-model-c5-ods-playwright.js": [
+      "T1",
+      "T4",
+      "T5"
+    ],
+    "test-model-c6-ods-source-playwright.js": [
+      "T1",
+      "T4",
+      "T5"
+    ],
+    "test-model-c9-downstream-copy-playwright.js": [
+      "T1",
+      "T4",
+      "T5"
+    ],
+    "verify-collab-delivery-extra.js": [
+      "T1",
+      "T4"
+    ],
+    "verify-model-config-rev-migration.js": [
+      "T2"
+    ],
+    "verify-model-table-comment-migration.js": [
+      "T2"
+    ],
+    "verify-model-test-records-append-only.js": [
+      "T3"
+    ],
+    "verify-model-write-classification.js": [
+      "T3"
+    ],
+    "verify-notify-read-backfill.js": [
+      "T2"
+    ],
+    "verify-preview-excel-removed.js": [
+      "T3"
+    ]
+  }
+}

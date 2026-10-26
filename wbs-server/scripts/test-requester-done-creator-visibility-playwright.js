@@ -1,7 +1,8 @@
 /**
  * v1.77.0 创建人发送按钮可见性实测（codex 合并审 M-1 第十人衍生）
  *
- * 用法：本地 server(3000) 已启动后 node scripts/test-requester-done-creator-visibility-playwright.js
+ * 用法：node scripts/test-requester-done-creator-visibility-playwright.js
+ *   [#106 S3b] 被测服务 / 实例库 / 密钥来自 test-env：默认自起临时隔离实例（来源 = 本检出本地库快照），也可由 TEST_* 变量组指向已起好的隔离实例；不再要求 3000，不再写真实库。
  *
  * 背景：notify-requester-done 删 hasValidExporter 守卫 + 权限加创建人后，
  *   developer 交付路径（exporter=0）下创建人/admin 应能点发送按钮。
@@ -41,20 +42,27 @@ async function openDetailAs(browser, token, id) {
     const errs = [];
     page.on('pageerror', e => errs.push(e.message));
     page.on('console', m => { if (m.type() === 'error') errs.push(m.text()); });
-    await page.goto('http://localhost:3000/login.html');
+    await page.goto(`${fx.BASE}/login.html`);
     await page.evaluate(t => localStorage.setItem('token', t), token);
-    await page.goto('http://localhost:3000/Data_Collab.html');
+    await page.goto(`${fx.BASE}/Data_Collab.html`);
     await page.waitForLoadState('networkidle');
     await page.evaluate(i => openDetail(i), id);
     await page.waitForTimeout(700);
-    const visible = await page.evaluate(() => {
+    // [#106 S3b] 选择器由 .requester-done-notify-btn 改为 .u-nb-btn[data-collab-id]：前端统一线（v1.143.0 停点⑦，Data_Collab.html 的 notifyRequesterDone 处注释）已把按钮 class 改名，
+    //   旧选择器在现行页面上恒为 0 个匹配——C1 恒红、C2 空转。探针实证（隔离实例 + 同样的 DONE 单）：旧选择器 0 个、新选择器 1 个，按钮文案「通知业务方并发送数据」。
+    //   选择器来源（S3b 修复批 1，codex 13 建议）：`data-collab-id` 在整个前端只出现在 public/Data_Collab.html:2481 这一个按钮上
+    //   （<button class="u-btn-secondary u-nb-btn" data-collab-id="${safeId}" onclick="notifyRequesterDone(...)">），页面自己的 notifyRequesterDone（Data_Collab.html:5727）用的是同一个选择器
+    //   `.u-nb-btn[data-collab-id="${id}"]`。所以「匹配数恰为 1」就是「详情页渲染出了这一个按钮」：通用按钮类 u-nb-btn 之外还有 data-collab-id 约束，不会被别处的同类按钮顶替；
+    //   C1 同时断言匹配数恰为 1（重复渲染 / 误匹配到别的单的按钮都会判红），C2 断言 0。
+    const matches = await page.evaluate((cid) => {
         const body = document.getElementById('detailBody');
-        return !!(body && body.querySelector('.requester-done-notify-btn'));
-    });
-    return { page, visible, errs };
+        return body ? body.querySelectorAll(`.u-nb-btn[data-collab-id="${cid}"]`).length : 0;
+    }, id);
+    return { page, visible: matches > 0, matches, errs };
 }
 
 (async () => {
+    await fx.ready();   // 先于任何写库 / 网络请求 / 浏览器操作
     const adminToken = await fx.signAs(fx.ADMIN_ID);
     // 造 developer 交付路径 DONE 单：创建人=publisher（非 admin），exporter=0，有 active result_data
     const cr = await fx.apiCall('POST', '/api/collab/requests', adminToken, {
@@ -76,6 +84,7 @@ async function openDetailAs(browser, token, id) {
     console.log('\n── C1 admin（兼创建人）视角：developer 路径 DONE 单 ──');
     const c1 = await openDetailAs(browser, adminToken, id);
     must(c1.visible, 'C1 admin developer 路径 DONE 单按钮可见');
+    must(c1.matches === 1, 'C1 选择器 .u-nb-btn[data-collab-id] 在详情区恰好匹配 1 个按钮（Data_Collab.html:2481 唯一生成点）', `matches=${c1.matches}`);
     must(c1.errs.length === 0, 'C3a admin 视角无 JS 报错', c1.errs.join('|'));
 
     console.log('\n── C2 无关 user 视角 ──');
@@ -96,5 +105,6 @@ async function openDetailAs(browser, token, id) {
     await browser.close();
     await fx.cleanup(id);
     console.log(`\n=== ${pass} PASS / ${fail} FAIL ===`);
-    process.exit(fail ? 1 : 0);
-})().catch(e => { console.error(e); process.exit(1); });
+    await fx.teardown().catch((e) => { console.error('teardown 失败：' + e.message); fail++; });
+    fx.finish(fail ? 1 : 0);   // 成功路径：teardown 之后只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
+})().catch(async e => { console.error(e); await fx.teardown().catch(() => {}); process.exit(1); });

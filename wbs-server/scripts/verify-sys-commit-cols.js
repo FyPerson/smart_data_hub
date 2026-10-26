@@ -1,6 +1,6 @@
 // scripts/verify-sys-commit-cols.js — C1 验收：列表端点 frontend/backend commit 编码聚合两列
 //   SSOT = 锚点 docs/local/系统迭代/任务_commit号两列_20260803.md §3（D3/D4）
-//   用法：node scripts/verify-sys-commit-cols.js
+//   用法：node scripts/verify-sys-commit-cols.js [--real-db <路径>]   （[Y5] 真实库只读探针默认跳过，带开关才执行）
 //
 // 覆盖 C1 契约七条：
 //   [A1] 字段存在且值协议 = 合法 JSON 数组字符串（非分隔符拼接明文）
@@ -738,11 +738,11 @@ function parseArr(val, label) {
 
   // ═══ [Y5]（codex 355 三轮插入批 M2c）round_no 合法性数据探针 ═══
   //   双向证明：① 先在本文件既有内存测试库注入一条非法值，证明判据本身能判红（不是恒 0 的摆设）；
-  //   ② 再对真实本地库（task_pool.db）跑同一条查询，断言非法非 NULL round_no 计数=0——这是对 M2a
+  //   ② 再（仅在带 `--real-db <路径>` 时）对真实本地库（业务库）跑同一条查询，断言非法非 NULL round_no 计数=0——这是对 M2a
   //   （写点运行时断言）+ M2b（回填脚本写后探针）两层防线的实际验收：若那两层真的堵住了缺口，本地
   //   库现在不该有任何非法值。
   console.log('\n── [Y5]（M2c）round_no 合法性数据探针 ──');
-  let y5EnvSkipped = false;   // [D-fix2 LOW-6] 真实库断言是否因环境原因（无 task_pool.db / round_no 列未就绪）被跳过
+  let y5EnvSkipped = false;   // [D-fix2 LOW-6] 真实库断言是否被跳过（[S4e-4] 现仅在未带 --real-db 开关时为 true）
   {
     const ILLEGAL_ROUND_NO_SQL = `SELECT COUNT(*) AS c FROM sys_issue_dev_assignees
        WHERE round_no IS NOT NULL AND (typeof(round_no) != 'integer' OR round_no < 1)`;
@@ -765,12 +765,36 @@ function parseArr(val, label) {
     const cleanedCount = (await get(ILLEGAL_ROUND_NO_SQL)).c;
     assert.strictEqual(cleanedCount, 0, `[Y5] 前置：清理注入行后内存库应恢复 0，实得 ${cleanedCount}（清理本身失败会污染后续断言）`);
 
-    // 真实本地库（task_pool.db）——独立只读连接，用完即关，不与本文件其余测试共用连接
-    // [D-fix2 LOW-6] 环境相关的跳过分支不许悄悄同绿——两处 console.log 改 ⚠️ 前缀，并用 y5EnvSkipped
+    // 真实本地库（业务库）——独立只读连接，用完即关，不与本文件其余测试共用连接
+    // [S4e-4] 真实库探针改为 `--real-db <路径>` 显式开关，默认跳过（SKIP 不计通过、不计失败）；带开关时
+    //   路径必须是存在的文件（不存在即判失败，不静默跳过），一律 OPEN_READONLY 打开。
+    // [D-fix2 LOW-6] 环境相关的跳过分支不许悄悄同绿——console.log 改 ⚠️ 前缀，并用 y5EnvSkipped
     //   标记供末尾总结行读取，在"全部通过"横幅之外再单独喊一句「该条环境相关」，防止有人扫一眼绿色
     //   summary 就以为 [Y5] 的真实库断言真的跑过了。
-    const realDbPath = path.join(__dirname, '..', 'task_pool.db');
-    if (fs.existsSync(realDbPath)) {
+    // 开关解析（六个脚本写法一致）：值缺失 / 为空 / 以 - 开头 → 按缺少路径参数处理；以 --real 开头但不是 --real-db / --real-db=… 的参数 → unknown
+    const realDbSwitch = (() => {
+      const argv = process.argv.slice(2);
+      let sw = { given: false, value: '', unknown: null };
+      for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === '--real-db' || a.startsWith('--real-db=')) {
+          const v = a === '--real-db' ? argv[i + 1] : a.slice('--real-db='.length);
+          sw = { given: true, value: (typeof v !== 'string' || v === '' || v.startsWith('-')) ? '' : v, unknown: sw.unknown };
+        } else if (a.startsWith('--real')) {
+          sw = { given: true, value: sw.value, unknown: sw.unknown || a };
+        }
+      }
+      return sw;
+    })();
+    if (!realDbSwitch.given) {
+      y5EnvSkipped = true;
+      console.log('  ⚠️ [Y5] SKIP（真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启；本条不计通过、不计失败）');
+    } else {
+      assert.ok(realDbSwitch.unknown === null, `[Y5] 无法识别的开关 ${realDbSwitch.unknown}（只接受 --real-db <路径> 或 --real-db=<路径>）`);
+      assert.ok(realDbSwitch.value !== '', '[Y5] --real-db 缺少路径参数（用法：--real-db <业务库路径>）');
+      const realDbPath = path.resolve(process.cwd(), realDbSwitch.value);
+      assert.ok(fs.existsSync(realDbPath) && fs.statSync(realDbPath).isFile(),
+        `[Y5] --real-db 指定的路径不存在或不是文件：${realDbPath}（显式开启时不静默跳过）`);
       const realDb = new sqlite3.Database(realDbPath, sqlite3.OPEN_READONLY);
       const realGet = (sql) => new Promise((resolve, reject) => realDb.get(sql, (e, r) => e ? reject(e) : resolve(r)));
       const realAll = (sql) => new Promise((resolve, reject) => realDb.all(sql, (e, r) => e ? reject(e) : resolve(r)));
@@ -779,15 +803,13 @@ function parseArr(val, label) {
         const realIllegalCount = (await realGet(ILLEGAL_ROUND_NO_SQL)).c;
         assert.strictEqual(realIllegalCount, 0,
           `[Y5] ⭐⭐ 真实本地库 sys_issue_dev_assignees 非法非 NULL round_no 计数应为 0（M2a 写点运行时断言 + M2b 回填脚本写后探针共同兜底），实得 ${realIllegalCount}`);
-        ok('[Y5] ⭐⭐ 真实本地库（task_pool.db）round_no 合法性探针：非法非 NULL 计数=0（M2a/M2b 防线验收通过）');
+        ok('[Y5] ⭐⭐ 真实本地库（业务库）round_no 合法性探针：非法非 NULL 计数=0（M2a/M2b 防线验收通过）');
       } else {
-        y5EnvSkipped = true;
-        console.log('  ⚠️ [Y5] （跳过真实库断言：round_no 列尚不存在，服务从未启动过完成 ALTER）');
+        // [S4e-4] 显式指定了库却没有 round_no 列：不是业务库结构（或服务从未启动过完成 ALTER），判失败而非静默跳过
+        await new Promise((resolve) => realDb.close(resolve));
+        assert.fail(`[Y5] --real-db 指定的库 ${realDbPath} 里 sys_issue_dev_assignees 没有 round_no 列（不是业务库结构，或服务从未启动过完成 ALTER）`);
       }
       await new Promise((resolve) => realDb.close(resolve));
-    } else {
-      y5EnvSkipped = true;
-      console.log('  ⚠️ [Y5] （跳过真实库断言：本地未找到 task_pool.db）');
     }
   }
 
@@ -796,7 +818,7 @@ function parseArr(val, label) {
   // [D-fix2 LOW-6] "全部通过"横幅本身不区分"真的跑过"与"环境原因被跳过"——[Y5] 真实库那半条断言若被
   //   跳过，单独喊一句，不许它被绿色 summary 悄悄盖过去。
   if (y5EnvSkipped) {
-    console.log('  ⚠️ 注意：[Y5] 真实本地库（task_pool.db）round_no 合法性断言本次未执行（该条环境相关——本地无 task_pool.db 或 round_no 列尚未就绪），以上"全部通过"不含这半条覆盖，请勿据此断言真实库已验收。');
+    console.log('  ⚠️ 注意：[Y5] 真实本地库（业务库）round_no 合法性断言本次未执行（真实库只读探针默认跳过，需 `--real-db <路径>` 显式开启），以上"全部通过"不含这半条覆盖，请勿据此断言真实库已验收。');
   }
   console.log('  C1：A1 值协议(JSON数组) + A2 零命中[] + A3 前后端分流 + A4 录入顺序(+static 合同锁) + A5 ⭐含分号不错拆 + A6 含removed实例 + A7 多单隔离 + 既有字段回归');
   console.log('  C2：B1 live 分支 + B2 ⭐snapshot 防漂移(不回查 live) + B3 degraded 返回 null 不伪造 + B4 零 commit 返回 [] 对照 + B5 既有契约');

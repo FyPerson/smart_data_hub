@@ -3,20 +3,16 @@
  * 换壳方案 v0.2 · D3 / docs/local/HANDOFF.md 附录 A
  *
  * 覆盖：上传(txt/zip 合法·exe 拒) → 列表 → 下载(内容比对) → 删除(上传人/admin/越权) → 归档锁 → 不存在单。
- * 自启 PORT=3399，跑完按端口精确杀 + 清理测试单 + 清理落盘附件。
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完收掉实例并清理测试单（附件由端点删除）。
+ *   实例数据根的删除按形态分：自起实例时由 teardown 删除；变量组（共享实例）形态下 teardown 不做事，数据根由批跑器收实例时删除。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
-const path = require('path');
-const fs = require('fs');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const ROOT = path.join(__dirname, '..');
-const DB_FILE = path.join(ROOT, 'task_pool.db');
-const UP_DIR = path.join(ROOT, 'uploads', 'issue-lite');
+let BASE = null;       // ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值（实例库）
 const TITLE_PREFIX = '[D3VERIFY]';
 
 let pass = 0, fail = 0; const results = [];
@@ -36,54 +32,43 @@ async function upload(urlPath, token, filename, content, mime) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
-// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupRows() {
     return new Promise((res) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.serialize(() => {
-            // 容忍表尚未建（首次启动前 issue_lite_attachments 可能不存在）——错误回调吞掉
-            db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], () => {});
-            db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); res(); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return res(`打开实例库失败：${oe.message}`);   // 返回错误描述（null = 成功）；调用方计失败，不吞
+            let attErr = null;
+            db.serialize(() => {
+                // 实例库是已就绪服务的快照，附件表必然存在：两条 DELETE 的错误都不吞
+                db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], (e1) => { if (e1) attErr = e1; });
+                db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], (e2) => {
+                    db.close(() => res(attErr ? `DELETE 附件失败：${attErr.message}` : (e2 ? `DELETE 失败：${e2.message}` : null)));
+                });
+            });
         });
     });
 }
-function cleanupFiles() { try { fs.readdirSync(UP_DIR).forEach(f => { if (/^\d+_/.test(f)) { /* leave others */ } }); } catch (_) {} }
-async function waitReady(getLog, ms = 12000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(getLog())) { try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) return true; } catch (_) {} }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
+// 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+async function issueLiteServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
 }
 const REQ = { requester_name: '李四', requester_dept: '财务管理部', requester_phone: '13900002222' };
 function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单' }, REQ, extra || {}); }
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-    const uploadedFiles = [];
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
     try {
-        const ready = await waitReady(() => log);
-        check('服务 + schema 就绪', ready);
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        const ce0 = await cleanupRows();
+        if (ce0) check('清理历史测试单', false, ce0);
+        const ready = await issueLiteServiceReady();
+        check('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
         if (!ready) throw new Error('服务未就绪');
 
         const adminTok = await fx.signAs(fx.ADMIN_ID);   // 1 admin（上传人）
@@ -144,13 +129,16 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单' },
 
     } catch (e) { check('e2e 执行异常', false, e.message); }
     finally {
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
-        await cleanupRows();
-        // 清测试落盘文件（D3VERIFY 单产生的·按前缀 id 无法直接匹配，靠 DELETE 端点已删大部分；残留由 cleanupRows 后扫）
+        if (DB_FILE) { const ce = await cleanupRows(); if (ce) check('清理测试单', false, ce); }
+        // 落盘附件：D3VERIFY 单的附件由 DELETE 端点删除，残留在实例数据根里：自起实例时随 teardown 一并删除，变量组（共享实例）形态下由批跑器收实例时删除
+        try { await fx.teardown(); } catch (e) { check('teardown（收掉自起实例）', false, e.message); }
     }
     console.log('─────── D3 verify e2e 结果 ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? '✅ D3 PASS' : '❌ D3 FAIL'}（${pass} 通过 / ${fail} 失败）`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('D3 verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

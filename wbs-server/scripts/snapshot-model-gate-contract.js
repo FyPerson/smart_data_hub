@@ -794,7 +794,7 @@ function printReport(res, d, goldenRows, report) {
 async function main() {
   const argv = process.argv.slice(2);
   const argOf = (p) => { const a = argv.find(x => x.startsWith(p)); return a ? a.slice(p.length) : null; };
-  if (!process.env.JWT_SECRET || !process.env.DB_ENCRYPTION_KEY) throw new Error('缺少 JWT_SECRET / DB_ENCRYPTION_KEY（读自 wbs-server/.env）');
+  // [#106 S4b2] 删除原 process.env 秘钥校验：共享助手 verify-model-config-rev-http.js 不再加载 .env，改用每次运行随机的 H.JWT_SECRET_RUN / H.DB_KEY_RUN
   const wgIdx = argv.findIndex(x => x === '--write-golden' || x.startsWith('--write-golden='));
   const writeGoldenPath = wgIdx < 0 ? null : (argv[wgIdx].includes('=') ? argv[wgIdx].split('=').slice(1).join('=') : argv[wgIdx + 1]);
   if (wgIdx >= 0 && !writeGoldenPath) throw new Error('--write-golden 需要路径');

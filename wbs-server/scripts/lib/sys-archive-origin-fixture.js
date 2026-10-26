@@ -48,7 +48,11 @@ module.exports = async function startFixture() {
     app.use('/api', mod.router);
     app.get('/api/auth/me', authenticateToken, (req, res) => res.json(req.user));
     app.get('/api/user', authenticateToken, (req, res) => res.json(req.user));
-    app.use(express.static(path.resolve(__dirname, '../../public'), { etag: false, maxAge: 0 }));
+    // #106 W4 / S6b：与 server.js 同参数（同一份注入中间件挂在 express.static(public) 之前），夹具里的页面与生产同形（`?v=auto` 被替换成内容指纹）。
+    //   注意 etag:false 只管 static；HTML 的强 ETag 由注入中间件自己算。
+    const publicDir = path.resolve(__dirname, '../../public');
+    app.use(require('../../utils/html-asset-fingerprint').createHtmlAssetInjector({ publicDir, log: { error: noop }, startupStamp: String(Date.now()) }));
+    app.use(express.static(publicDir, { etag: false, maxAge: 0 }));
     // #95: bind through the shared safe-port helper (20000-49999, retries only EADDRINUSE/EACCES on bind, never HTTP).
     server = await listenOnSafePort(app);
     const base = `http://127.0.0.1:${server.address().port}`;

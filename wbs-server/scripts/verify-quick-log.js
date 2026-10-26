@@ -8,23 +8,22 @@
  *       独立防线直插断言）→ requester 全空 NULL 语义 + 列表排序 COALESCE(end_date,date(created_at))
  *       倒序 → 附件（合法/白名单外拒/数量超限拒·下载往返·删除·路径越界拦截·主记录删除级联）→ 404 族。
  *
- * harness 范式对齐 scripts/verify-issue-lite-c2.js 等既有 issue_lite 系列（grep 逐个核实：全部直接
- * 跑在真实 dev task_pool.db 上，非临时库副本），自启 PORT=3399、按端口精确杀、跑完清理测试行 + 落盘附件。
- *
  * 用法：node scripts/verify-quick-log.js
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库与真实 uploads：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完清理测试行 + 落盘附件。
+ *   落盘附件在实例数据根的 uploads 下（env().dataDir）；dataDir 取不到（变量组形态下没有实例清单）时直接失败，不跳过物理文件断言。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const ROOT = path.join(__dirname, '..');
-const DB_FILE = path.join(ROOT, 'task_pool.db');
-const UPLOAD_BASE = path.join(ROOT, 'uploads', 'quick-log');
+let BASE = null;         // ready() 之后赋值
+let DB_FILE = null;      // ready() 之后赋值（实例库）
+let ROOT = null;         // 检出的 wbs-server 目录（只读源码用）
+let UPLOAD_ROOT = null;  // 实例数据根下的 uploads 目录（物理文件在这里）
 const ADMIN_ID = fx.ADMIN_ID;      // 1，admin
 const NONADMIN_ID = fx.CONTACT_ID; // 3，role=user（非 admin）
 const PREFIX = '[QLVERIFY]';
@@ -55,58 +54,71 @@ async function apiUpload(urlPath, token, fields) {
     let j = null; try { j = await r.json(); } catch (_) { /* ignore */ }
     return { status: r.status, body: j };
 }
-// netstat 精确端口比较（findstr 子串匹配会误命中，对齐 verify-issue-lite-c2 范式）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) { /* ignore */ } });
-    } catch (_) { /* ignore */ }
-}
 function dbAll(sql, params) {
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.all(sql, params || [], (err, rows) => { db.close(); err ? reject(err) : resolve(rows); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return reject(oe);
+            db.all(sql, params || [], (err, rows) => { db.close(() => { err ? reject(err) : resolve(rows); }); });
+        });
     });
 }
 function dbRun(sql, params) {
     return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.run(sql, params || [], function (err) { db.close(); resolve({ err, lastID: this && this.lastID, changes: this && this.changes }); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve({ err: oe, lastID: undefined, changes: undefined });
+            db.run(sql, params || [], function (err) {
+                const out = { err, lastID: this && this.lastID, changes: this && this.changes };   // this 只在回调同步段有效，先取出
+                db.close(() => resolve(out));
+            });
+        });
     });
 }
+// 清理测试行 + 落盘附件；返回错误描述列表（空数组 = 清理干净），调用方对非空列表 check(…, false, …) 计失败——不吞错
+//   （隔离实例在 health/ready 之后 sys_quick_log 与附件表一定就绪，不再有「表可能还不存在」的整体吞错）。
 async function cleanupTestRows() {
+    const errs = [];
+    let rows;
     try {
-        const rows = await dbAll(`SELECT id FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
-        for (const r of rows) {
-            const atts = await dbAll(`SELECT file_name FROM sys_quick_log_attachments WHERE quick_log_id = ?`, [r.id]);
-            for (const a of atts) {
-                try { const p = path.join(ROOT, 'uploads', a.file_name); if (fs.existsSync(p)) fs.unlinkSync(p); } catch (_) { /* ignore */ }
-            }
-        }
-        await dbRun(`DELETE FROM sys_quick_log_attachments WHERE quick_log_id IN (SELECT id FROM sys_quick_log WHERE description LIKE ?)`, [PREFIX + '%']);
-        await dbRun(`DELETE FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
-    } catch (_) { /* 表可能还不存在（首次跑），忽略 */ }
-}
-async function waitReady(getLog, ms = 15000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        // 探测锚用"接口放行"稳定后缀而非表名文案——2026-08-01 复审收口改日志文案（表就绪→双表就绪）
-        //   曾让旧探测串永不命中造成假红：教训=探测/断言别钉在会演进的展示性文案上，钉语义锚。
-        if (/\[零星事项台账\] ✅ .*零星事项台账接口放行/.test(getLog())) {
-            try { const r = await fetch(`${BASE}/api/quick-logs`); if (r.status === 401) return true; } catch (_) { /* ignore */ }
-        }
-        await new Promise(r => setTimeout(r, 400));
+        rows = await dbAll(`SELECT id FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
+    } catch (e) {
+        // 查询失败时不删任何行：先删行会让落盘附件失去引用，下次预清理按前缀再也找不到它们（已计失败，残留随实例回收删除）
+        return [`查询测试行失败：${e && e.message}`];
     }
-    return false;
+    for (const r of rows) {
+        let atts;
+        try {
+            atts = await dbAll(`SELECT file_name FROM sys_quick_log_attachments WHERE quick_log_id = ?`, [r.id]);
+        } catch (e) {
+            errs.push(`查询附件行失败（quick_log_id=${r.id}）：${e && e.message}`);
+            return errs;   // 同上：不再执行下面按前缀的 DELETE，免得这一行的落盘附件失去引用
+        }
+        for (const a of atts) {
+            // 删除前把路径 resolve 成绝对路径，必须以 UPLOAD_ROOT + 路径分隔符为前缀；否则跳过并计失败（防库里被篡改 / 脚本自己写错的 file_name 删到实例 uploads 之外）。
+            //   例外：本脚本自己在「路径越界」用例里直插的伪造行 EVIL_FILE_NAME 只是 DB 行、从不是真实文件，跳过但不计失败。
+            const p = path.resolve(UPLOAD_ROOT, a.file_name);
+            if (!p.startsWith(path.resolve(UPLOAD_ROOT) + path.sep)) {
+                if (a.file_name !== EVIL_FILE_NAME) errs.push(`附件路径越界，已跳过删除：file_name=${a.file_name} → ${p}`);
+                continue;
+            }
+            try { fs.unlinkSync(p); } catch (e) { if (!e || e.code !== 'ENOENT') errs.push(`删除附件文件失败（${p}）：${e && e.message}`); }
+        }
+    }
+    const delAtt = await dbRun(`DELETE FROM sys_quick_log_attachments WHERE quick_log_id IN (SELECT id FROM sys_quick_log WHERE description LIKE ?)`, [PREFIX + '%']);
+    if (delAtt.err) errs.push(`DELETE 附件行失败：${delAtt.err.message}`);
+    const delLog = await dbRun(`DELETE FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
+    if (delLog.err) errs.push(`DELETE 测试行失败：${delLog.err.message}`);
+    return errs;
 }
+// 服务就绪 = 两次真实请求：health/ready 里 quick_log 模块 ready（语义锚，不钉日志文案）+ 未带 token 访问列表 401
+async function checkServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        let hb = null; try { hb = await hr.json(); } catch (_) { /* ignore */ }
+        if (!(hb && hb.modules && hb.modules.quick_log && hb.modules.quick_log.ready === true)) return false;
+        return (await fetch(`${BASE}/api/quick-logs`)).status === 401;
+    } catch (_) { return false; }
+}
+const EVIL_FILE_NAME = '../evil-outside-quick-log.txt';   // 路径越界用例直插的伪造 file_name（只是库里的一行，不对应任何文件）
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function baseBody(extra) {
@@ -118,14 +130,17 @@ function baseBody(extra) {
 }
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupTestRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     try {
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        ROOT = path.join(__dirname, '..');
+        // 物理文件断言（级联删除前后各查 20 个文件、清理）要落在实例数据根的 uploads 下；取不到 dataDir 就抛错，不静默跳过
+        const dataDir = testEnv.env().dataDir;
+        if (!dataDir) throw new Error('取不到实例数据根（env().dataDir 为 null：变量组形态下 TEST_DB_PATH 旁没有与 TEST_INSTANCE 一致的实例清单）：物理文件断言无法定位 uploads 目录，拒绝跳过');
+        UPLOAD_ROOT = path.join(dataDir, 'uploads');
+        const ce0 = await cleanupTestRows();
+        if (ce0.length) check('清理历史测试单', false, ce0.join('；'));
         // ===== 组 0：静态断言——中间件顺序（codex S1 复审 HIGH 采纳）=====
         //   e2e 无法便捷构造"schema 未就绪"态（表首启即建，正常跑起来后必 ready），故用静态断言诚实覆盖
         //   顺序本身：读源文本，逐条路由注册行断言 requireAdmin 出现位置早于 requireQuickLogSchemaReady——
@@ -141,9 +156,9 @@ function baseBody(extra) {
         });
         check('静态断言：全部8条 requireAdmin 先于 requireQuickLogSchemaReady', badOrderLines.length === 0, JSON.stringify(badOrderLines.map(l => l.trim())));
 
-        const ready = await waitReady(() => log);
+        const ready = await checkServiceReady();
         check('服务 + sys_quick_log schema 就绪', ready);
-        if (!ready) throw new Error('服务未就绪：' + log.slice(-2000));
+        if (!ready) throw new Error('服务未就绪：health/ready 里 quick_log 未就绪，或未带 token 的 /api/quick-logs 不是 401（env.logFile=' + testEnv.env().logFile + '）');
 
         // 直连 PRAGMA 断言附件表列齐（codex S1 复审 MED 采纳：readiness 补附件表复查后配一条直连验证）
         const attColsRows = await dbAll(`PRAGMA table_info("sys_quick_log_attachments")`);
@@ -274,7 +289,7 @@ function baseBody(extra) {
         const idPathEscape = r.body.item.id;
         const insEvil = await dbRun(
             `INSERT INTO sys_quick_log_attachments (quick_log_id, file_name, original_name) VALUES (?,?,?)`,
-            [idPathEscape, '../evil-outside-quick-log.txt', 'evil.txt']);
+            [idPathEscape, EVIL_FILE_NAME, 'evil.txt']);
         r = await api('GET', `/api/quick-logs/attachments/${insEvil.lastID}/download`, adminTok);
         check('伪造越界 file_name 下载 → 403 ILLEGAL_FILE_PATH', r.status === 403 && r.body.code === 'ILLEGAL_FILE_PATH', JSON.stringify(r.body));
 
@@ -299,7 +314,7 @@ function baseBody(extra) {
         }
         check('连续上传20个附件全部成功（未触及上限前）', limitOk && limitAttIds.length === 20);
         const rows20 = await dbAll('SELECT file_name FROM sys_quick_log_attachments WHERE quick_log_id = ?', [idAttLimit]);
-        rows20.forEach(rr => limitFilePaths.push(path.join(ROOT, 'uploads', rr.file_name)));
+        rows20.forEach(rr => limitFilePaths.push(path.join(UPLOAD_ROOT, rr.file_name)));
         // codex S1 审 MED 采纳后，数量上限判定并入条件 INSERT 原子执行（关并发竞态窗口）——
         //   状态码维持 400 ATTACHMENT_LIMIT 对齐 issue_lite 同款上限拒（server.js:14041），
         //   原子化只改判定时机不改错误码语义（主会话裁定：跨模块同名错误码不同状态=口径不一致）。
@@ -369,15 +384,22 @@ function baseBody(extra) {
     } catch (e) {
         check('e2e 执行异常', false, e.message + '\n' + (e.stack || ''));
     } finally {
-        try { child.kill('SIGKILL'); } catch (_) { /* ignore */ }
-        killPort(TEST_PORT);
-        await cleanupTestRows();
-        // 兜底清理可能残留的越界测试文件目录（正常路径下不会有本模块外文件被创建，仅防御性 no-op）
-        try { if (fs.existsSync(UPLOAD_BASE)) { /* 目录本身保留供下次复用，不删除 */ } } catch (_) { /* ignore */ }
+        if (DB_FILE && UPLOAD_ROOT) {
+            try {
+                const ce = await cleanupTestRows();
+                if (ce.length) check('清理测试单', false, ce.join('；'));
+            } catch (e) { check('清理测试单', false, '清理自身异常：' + (e && e.message)); }
+        }
+        // 实例数据根（含 uploads 目录）的删除按形态分：自起实例时由 teardown 删除；变量组（共享实例）形态下 teardown 不做事，数据根由批跑器收实例时删除
+        try { await fx.teardown(); } catch (e) { check('teardown（收掉自起实例）', false, e.message); }
     }
 
     console.log('─────── 零星事项台账 S1 verify e2e 结果 ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? '✅ PASS' : '❌ FAIL'}（${pass} 通过 / ${fail} 失败）`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('零星事项台账 verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

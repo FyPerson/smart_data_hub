@@ -3416,7 +3416,9 @@ module.exports = (deps) => {
   //   MED-5（C7-c）：原本还单独传一份 collector 给 inspections.js 的 GET /targets 直接用，那条路由
   //   随单独设备巡检整体退役已经删除，inspections.js 不再需要 collector 这个依赖（工厂签名同批收窄，
   //   见该文件头部注释）。
-  const inspectionCollector = deps.inspectionCollector || require('./inspection-collector').createCollector(deps.inspectionConfigPath);
+  //   [#106 S1b] deps.inspectionExternalDisabled === true（server.js 在隔离实例传入）：采集器既不读巡检配置文件、也不执行 PowerShell，
+  //   采集入口（inspection-collect.js 的 target() 读 host、collectSnapshot() 调 collect）全部经这个采集器，所以一处拦住。正常模式不传，行为与改造前相同。
+  const inspectionCollector = deps.inspectionCollector || require('./inspection-collector').createCollector(deps.inspectionConfigPath, { externalDisabled: deps.inspectionExternalDisabled === true });
   const inspectionCollect = require('./inspection-collect')({ collector: inspectionCollector, recordManagement });
   // C2b/C2f：仅测试可用的注入点——只在 TEST_HOOKS_ENABLED（deps.enableTestHooks===true）时才从
   //   deps.inspectionSheetTestHooks 取，闸未开时恒传 undefined（与 C2c M8 那批 _internals 测试
@@ -4625,5 +4627,14 @@ module.exports = (deps) => {
     return finishDiskAction(q, req, 'disk_move', body, opId, p);
   }
 
-  return { initSchema, router, shutdown, _internals };
+  // [#106 S3a] 只读就绪访问函数（汇总就绪接口 GET /api/health/ready 用）：判定顺序与 requireLedgerReady 一致（draining 先，再 readinessError()），
+  //   码值沿用既有 LEDGER_DRAINING / LEDGER_UNAVAILABLE / LEDGER_NOT_READY；不碰库、不触发初始化，不改任何中间件与 503 行为。
+  function getReadiness() {
+    if (state.draining) return { ready: false, code: 'LEDGER_DRAINING' };
+    const re = readinessError();
+    if (re) return { ready: false, code: re.code };
+    return { ready: true, code: null };
+  }
+
+  return { initSchema, router, shutdown, getReadiness, _internals };
 };

@@ -1,7 +1,11 @@
 /**
  * 模型中心列表页「点击表头排序」Playwright 视觉冒烟测试
  *
- * 用法：PORT=3300 node scripts/test-model-center-sort-playwright.js（先起本地 server，BASE_URL 指向它）
+ * 用法：node scripts/test-model-center-sort-playwright.js
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；`--port=` 参数、PORT 环境变量、写死 3300 与业务库 / .env 均已删除。
+ *   截图目录：默认是 os.tmpdir() 下用 mkdtemp 原子创建的本次运行独占目录 sdh-model-center-sort-<随机后缀>，收尾用 removeTreeChecked 删并确认（删失败计失败）；
+ *   显式设了 SCREENSHOT_DIR 环境变量时写到那里并保留（原有用法，不删用户指定的目录）。原默认值是写死的另一次会话 scratchpad 绝对路径。
+ *   依赖：隔离实例是本检出本地库的快照，模型中心列表要有足够多的条目（排序 / 分页断言，首跑核对）。
  *
  * 范围：
  *   - 移植自 Data_Collab.html v1.72.1 客户端排序范式，验证 Model_Center.html 新加的可排序表头
@@ -24,35 +28,39 @@
  */
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT_ARG = (process.argv.slice(2).find(a => a.startsWith('--port=')) || '').slice('--port='.length);   // C4b：可指定端口，优先于环境变量 PORT
-const PORT = PORT_ARG || process.env.PORT || '3300';
-const BASE_URL = `http://localhost:${PORT}`;
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR
-    || 'C:\\Users\\FY\\AppData\\Local\\Temp\\claude\\E-------------\\f7af31f3-83b1-409f-9af5-66bd66218363\\scratchpad';
+let BASE_URL = null;         // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let SCREENSHOT_DIR = null;   // [#106 S4d-3] ready() 之后赋值（顶层 path.join / Date.now 会被守卫 R6 判红）
+let OWN_SCREENSHOT_DIR = false;   // true = 本脚本自建的临时目录，收尾要删；SCREENSHOT_DIR 环境变量指定的目录不删
 
 const ADMIN_ID = 1;
 
+// [#106 S4d-3] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    return testEnv.signToken(userId);
+}
+
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
 }
 
 let assertCount = 0;
@@ -96,13 +104,24 @@ const GROUP_ROWS_FN = (override) => {
 };
 
 (async () => {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
     console.log('=== 模型中心列表页 点击表头排序 Playwright 视觉冒烟测试 ===\n');
 
-    const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
     let exitCode = 0;
+    let browser = null;
 
     try {
+        if (process.env.SCREENSHOT_DIR) {
+            SCREENSHOT_DIR = process.env.SCREENSHOT_DIR;
+            fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+        } else {
+            // [#106 S4d-3 codex 23b-L1] mkdtemp 原子创建本次运行独占的目录（多个工作树同时跑时不会共用、不会互删）；创建成功后才标记为自建
+            SCREENSHOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sdh-model-center-sort-'));
+            OWN_SCREENSHOT_DIR = true;
+        }
+        browser = await chromium.launch({ headless: true });
         const adminToken = await signAs(ADMIN_ID);
         const context = await browser.newContext();
         const page = await context.newPage();
@@ -350,7 +369,16 @@ const GROUP_ROWS_FN = (override) => {
         console.error('\n测试失败:', err.message);
         exitCode = 1;
     } finally {
-        await browser.close();
-        process.exit(exitCode);
+        // [#106 S4d-3] 两个收尾动作各自 try / catch：浏览器关闭失败不跳过截图目录清理；任一失败都计失败（退出码 1）
+        if (browser) { try { await browser.close(); } catch (e) { console.error(`❌ 浏览器关闭失败：${e && e.message}`); exitCode = 1; } }
+        if (OWN_SCREENSHOT_DIR && SCREENSHOT_DIR) {
+            try { removeTreeChecked(SCREENSHOT_DIR); } catch (e) { console.error(`❌ 清理截图目录失败 ${SCREENSHOT_DIR}：${e && e.message}`); exitCode = 1; }
+        }
     }
-})();
+    try { await testEnv.teardown(); } catch (e) { console.error(`❌ teardown（收掉自起实例）失败：${e && e.message}`); exitCode = 1; }
+    testEnv.finish(exitCode);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('测试异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

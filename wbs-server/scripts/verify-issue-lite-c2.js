@@ -7,22 +7,18 @@
  * ⚠️ 不触发真钉钉：所有 notify 测试都在实际发送前的 400/404 守卫处返回。
  * 开发固定示例开发C(配置 fallback id=10)·通知对象限示例开发C(10)/示例用户A(3)——本地库均在。
  *
- * 用法：node scripts/verify-issue-lite-c2.js（自启 PORT=3399，跑完按端口精确杀 + 清理测试单）
+ * 用法：node scripts/verify-issue-lite-c2.js
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完收掉实例并清理测试单。
+ *   原 `--isolated-read-status` 别名已删，改为直接运行 verify-notify-read-endpoints.js。
  */
 'use strict';
-if(process.argv.includes('--isolated-read-status')){
- const result=require('child_process').spawnSync(process.execPath,[require('path').join(__dirname,'verify-notify-read-endpoints.js')],{stdio:'inherit',timeout:300000,killSignal:'SIGKILL'});
- process.exit(result.status===0?0:1);
-}
-const { spawn, execSync } = require('child_process');
-const path = require('path');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
 const issueLiteNotify = require('../utils/issue-lite-notify');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const DB_FILE = path.join(__dirname, '..', 'task_pool.db');
+let BASE = null;       // ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值（实例库）
 const ADMIN_ID = fx.ADMIN_ID;     // 1 admin（归档权）
 const FENG_ID = fx.CONTACT_ID;    // 3 示例用户A user（非 admin·通知对象之一）
 const DEV_ID = 10;                // 示例开发C（固定开发·通知对象之一）
@@ -43,51 +39,43 @@ async function api(method, urlPath, token, body) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
-// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupTestRows() {
     return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); resolve(); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve(`打开实例库失败：${oe.message}`);   // 返回错误描述（null = 成功）；调用方计失败，不吞
+            db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], (de) => { db.close(() => resolve(de ? `DELETE 失败：${de.message}` : null)); });
+        });
     });
 }
-async function waitReady(getLog, ms = 12000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(getLog())) {
-            try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) return true; } catch (_) {}
-        }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
+// 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+async function issueLiteServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
 }
 const REQ = { requester_name: '张三', requester_dept: '市场营销部', requester_phone: '13800001111' };
 function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', requester_name: REQ.requester_name, requester_dept: REQ.requester_dept, requester_phone: REQ.requester_phone }, extra || {}); }
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupTestRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
     try {
-        const ready = await waitReady(() => log);
-        check('服务 + issue_lite schema 就绪', ready);
+        // 已删除的旧参数：收到就报错、以退出码 1 结束（走 catch → finally 收尾 → fx.finish(1)），不静默忽略。
+        //   写在 ready() 之后的第一条：静态守卫要求 `await ready()` 是入口函数体里第一条有副作用的语句，ready() 之前不能放任何检查；
+        //   此处不碰实例库 / 网络（DB_FILE 还没赋值，finally 的清理不会跑），只多一次自起实例的启动与收掉。
+        if (process.argv.includes('--isolated-read-status')) {
+            console.error('该参数已移除，已读状态套件请改跑 verify-notify-read-endpoints.js');
+            throw new Error('--isolated-read-status 参数已移除：已读状态套件请改跑 verify-notify-read-endpoints.js');
+        }
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        const ce0 = await cleanupTestRows();
+        if (ce0) check('清理历史测试单', false, ce0);
+        const ready = await issueLiteServiceReady();
+        check('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
         if (!ready) throw new Error('服务未就绪');
 
         const adminTok = await fx.signAs(ADMIN_ID);
@@ -118,7 +106,7 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
         check('正常建单 → 200 + 待处理 + 开发=示例开发C(10) + notify_target=10',
             r.status === 200 && it && it.status === '待处理' && it.assignee_id === DEV_ID && it.notify_target_id === DEV_ID && it.requester_name === '张三', JSON.stringify(r.body));
         const id = it ? it.id : null;
-        const peerMarkdown = issueLiteNotify.buildIssueLitePeerMarkdown(it, 'http://localhost:3000');
+        const peerMarkdown = issueLiteNotify.buildIssueLitePeerMarkdown(it, BASE);
         check('N1 文案统一为期望完成时间', peerMarkdown.includes('**期望完成时间**：2026-07-25') && !peerMarkdown.includes('需求日期') && !peerMarkdown.includes('需求完成时间'), peerMarkdown);
 
         // ===== 列表 / 筛选 =====
@@ -229,13 +217,16 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单', r
     } catch (e) {
         check('e2e 执行异常', false, e.message);
     } finally {
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
-        await cleanupTestRows();
+        if (DB_FILE) { const ce = await cleanupTestRows(); if (ce) check('清理测试单', false, ce); }
+        try { await fx.teardown(); } catch (e) { check('teardown（收掉自起实例）', false, e.message); }
     }
 
     console.log('─────── D2 verify e2e 结果 ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? '✅ D2 PASS' : '❌ D2 FAIL'}（${pass} 通过 / ${fail} 失败）`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('D2 verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

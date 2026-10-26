@@ -40,7 +40,7 @@
  *   ⑩（R-C2）「+ 新建上线单」从 foot 上移到 head 动作位，仍受 isAdmin() 门控；
  *      449-M1 空态文案「点右下角」改「点右上角」
  *   ⑪（R-C3）O1 加单候选列表所属系统徽章：`.u-sys-tag` 落页面内 `<style>`（不进共享 components.css，
- *      免 ?v= bump）、含中性 slate 三色值 + white-space:nowrap（D1/449-L1）；siModalAddToBatch 候选行
+ *      免四页回归；当时还要手动 bump ?v= 缓存串，W4 起缓存串由服务端自动注入）、含中性 slate 三色值 + white-space:nowrap（D1/449-L1）；siModalAddToBatch 候选行
  *      模板 system_name 假值不渲染空徽章、渲染值经 esc() 转义、标题改包 `.si-chk-text`（可收缩项）
  *   ⑫（观察反馈优化批 R7，demo 三轮定稿「X 独立行版」）#siBatchBox 直接子结构由 3 段变 4 段——
  *      `.si-close-bar` 独立成第一个子元素（内含唯一 `.si-close-handle` 按钮，onclick=siCloseBatch()），
@@ -595,7 +595,7 @@ check('.u-sys-tag 规则声明体存在于 Sys_Iteration.html 页面内 <style>�
     assert.ok(/border:[^;]*#e2e8f0/.test(rule), '缺 border 含 #e2e8f0（D1 中性 slate 边色）');
     assert.ok(/white-space:\s*nowrap/.test(rule), '缺 white-space:nowrap（449-L1：长系统名「小程序-智荟人力」（现最长·7 个汉字加 1 个连字符共 8 字符）防撑挤）');
 });
-check('.u-sys-tag 不出现在共享 components.css（红：被误挪进共享层——O1 明文"落页面内 <style>，免 ?v= bump 与四页回归"，误挪会让本页与另三页产生非预期共享耦合）', () => {
+check('.u-sys-tag 不出现在共享 components.css（红：被误挪进共享层——O1 明文"落页面内 <style>，免四页回归（W4 前还要免手动 bump ?v=）"，误挪会让本页与另三页产生非预期共享耦合）', () => {
     const componentsCssPath = path.join(__dirname, '..', 'public', 'assets', 'css', 'components.css');
     const componentsSrc = fs.readFileSync(componentsCssPath, 'utf8');
     assert.ok(!componentsSrc.includes('.u-sys-tag'), 'components.css 不应包含 .u-sys-tag（应仅存在于 Sys_Iteration.html 页面内 <style>）');

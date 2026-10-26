@@ -6,9 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智数模型中心 (Model Center)</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
     <!-- 模型详情抽屉 C3：引入共享组件层（u-drawer 骨架；全 .u- 前缀无污染面）-->
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* 加载动画 */
         @keyframes spin {
@@ -1297,15 +1297,15 @@
 
     <!-- SheetJS Library: 按需加载（仅批量导入时使用） -->
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
+    <script src="assets/js/app.js?v=auto"></script>
     <!-- 模型详情抽屉 C2：normalize 适配层 + 安全渲染工具（方案 v1.4 §5.1/§5.2），C3 起消费 -->
-    <script src="assets/js/model-detail-normalize.js?v=v1.125.0_mdc4"></script>
-    <!-- #77 C4b：目录列表纯函数核心（分组 / 命中 / 排序 / 分页 / 事件顺序；须在 normalize 之后、model-catalog.js 之前；改它须同时改 CORE_VERSION 与此处 ?v= 后缀） -->
-    <script src="assets/js/model-catalog-core.js?v=v1.180.0_mcc3"></script>
-    <!-- #77 C3a：脚本生成器共享库（原内联于本页；改它须同时改 KIT_VERSION 与此处 ?v= 后缀） -->
-    <script src="assets/js/model-script-gen.js?v=v1.180.0_msg1"></script>
-    <!-- #77 C4a：目录列表代码（原内联于本页，经典脚本，顶层名与内联共享全局环境；改它须同时改此处 ?v= 与 verify-shared-css-cache-bust.js 登记） -->
-    <script src="assets/js/model-catalog.js?v=v1.180.0_mcat17"></script>
+    <script src="assets/js/model-detail-normalize.js?v=auto"></script>
+    <!-- #77 C4b：目录列表纯函数核心（分组 / 命中 / 排序 / 分页 / 事件顺序；须在 normalize 之后、model-catalog.js 之前；CORE_VERSION 与库内做接口握手，缓存串由服务端自动注入） -->
+    <script src="assets/js/model-catalog-core.js?v=auto"></script>
+    <!-- #77 C3a：脚本生成器共享库（原内联于本页；KIT_VERSION 只是库的版本标识、页面不做运行时比对，页面与库的对应关系由 verify-model-script-gen-single-source.js 静态核对；缓存串由服务端自动注入） -->
+    <script src="assets/js/model-script-gen.js?v=auto"></script>
+    <!-- #77 C4a：目录列表代码（原内联于本页，经典脚本，顶层名与内联共享全局环境；缓存串由服务端自动注入，无需手改） -->
+    <script src="assets/js/model-catalog.js?v=auto"></script>
     <script>
         // 脚本生成器来自共享库 model-script-gen.js（页面内不再定义同名函数，由 verify-model-script-gen-single-source.js 守卫）
         const { generateDimDDLFromConfig, generateFullLoadScript, generateIncrementalScript, generateFdlNodeScript, generateDwdDDL, generateCompanionDDL, generateDwdFullLoadScript, generateDwdIncrementalScript, generateDwdFdlScript, generateDwdQualityRules, generateODSDDL, generateODSDDLWithColumns, generateSyncScript } = window.ModelScriptGen;
@@ -4787,8 +4787,8 @@
             }
         }
 
-        // 与 assets/js/model-detail-normalize.js 的 KIT_VERSION 对齐；改那个文件时两处一起改。
-        // 不一致 = 浏览器用了缓存的旧版 JS（新增字段全落空、界面显示「—」却不报错）。
+        // 与 assets/js/model-detail-normalize.js 的 KIT_VERSION 做接口握手；改该文件的接口（语义 / 字段契约）时两处一起改，缓存串由服务端自动注入、不在此列。
+        // 不一致 = 浏览器用了缓存的旧版 JS，或本常量没有随库内 KIT_VERSION 同步修改（新增字段全落空、界面显示「—」却不报错）。
         const MDC_KIT_EXPECTED = 'mdc4';
 
         function mdcCheckKitVersion() {
@@ -4797,7 +4797,7 @@
             if (kit.KIT_VERSION !== MDC_KIT_EXPECTED) {
                 console.error('[模型详情抽屉] normalize.js 版本不匹配：期望 ' + MDC_KIT_EXPECTED +
                     '，实际 ' + kit.KIT_VERSION + '。多半是浏览器缓存了旧版 JS —— 请硬刷新（Ctrl+F5）；' +
-                    '若是开发期，检查 Model_Center.html 里 model-detail-normalize.js 的 ?v= 缓存串是否已 bump。');
+                    '缓存串由服务端按文件内容自动注入；若仍不一致，请确认页面是经服务端打开的（而非本地文件或旧缓存副本），或页面期望常量未随库内 KIT_VERSION 同步修改。');
             }
         }
 
@@ -5643,18 +5643,12 @@
                 return Promise.resolve();
             }
             return new Promise((resolve, reject) => {
-                const script = document.createElement('script');
-                script.src = 'wbs-server/node_modules/xlsx/dist/xlsx.full.min.js';
-                script.onload = () => { _xlsxLoaded = true; resolve(); };
-                script.onerror = () => {
-                    // 本地失败则回退 CDN
-                    const cdn = document.createElement('script');
-                    cdn.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js';
-                    cdn.onload = () => { _xlsxLoaded = true; resolve(); };
-                    cdn.onerror = () => reject(new Error('SheetJS 库加载失败'));
-                    document.head.appendChild(cdn);
-                };
-                document.head.appendChild(script);
+                // 直接走 CDN：原先先试的本地路径 wbs-server/node_modules/xlsx/... 不在 public 下，隔离实例实测 GET 恒为 404，必然回退 CDN
+                const cdn = document.createElement('script');
+                cdn.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js';
+                cdn.onload = () => { _xlsxLoaded = true; resolve(); };
+                cdn.onerror = () => reject(new Error('SheetJS 库加载失败'));
+                document.head.appendChild(cdn);
             });
         }
 

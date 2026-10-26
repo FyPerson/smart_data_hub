@@ -14,7 +14,7 @@
 // 场景（即 dev 自己 SUBMIT 却被记为 admin 上传），是产品逻辑 bug 需要排查。
 //
 // 跑法：
-//   本地：cd wbs-server && node scripts/verify-result-attachment-owner-consistency.js
+//   本地：cd wbs-server && node scripts/probe-result-attachment-owner-consistency.js
 //   生产：scp 到 E:/Task_Pool/wbs-server/ 后 ssh 跑（参考 docs/CLAUDE.md SSH 配置）
 
 'use strict';

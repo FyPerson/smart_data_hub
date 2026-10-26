@@ -1,7 +1,11 @@
 /**
  * v1.75.0 commit D — 需求拉群讨论按钮 Playwright 实测
  *
- * 用法：本地 server(3000) 启动后 node scripts/test-issue-c4-create-chat-playwright.js
+ * 用法：node scripts/test-issue-c4-create-chat-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   造数：经 API 建 4 条需求单（标题 c4拉群按钮-*）+ 直连实例库改 dingtalk_* 列；收尾按状态码清理（200 / 404 算清掉，每个编号单独 try，共 2 轮），遗留计失败。
+ *   收口批：四个夹具标题都带运行标记 RUN_TAG（[c4-<pid>-<时间戳>]），清理先按标记补查（建单后客户端没拿到编号也能清到）；建单助手校验 HTTP 200 与正整数编号，不满足即抛错退 1。
+ *   固定用户 id：1 admin / 7 publisher / 19 创建人 / 8 被指派 / 9 路人 / 2 viewer（快照库里须存在且角色不变，首跑核对）。
  *
  * 测试矩阵（不真发钉钉，全 route mock）：
  *   T1 admin（权限）              → 看见「💬 拉群讨论」按钮
@@ -27,37 +31,53 @@
  * 清理：finally 删测试单 + 失败/中断重启 server 前需清 issues 残留。
  */
 'use strict';
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE_URL = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let RUN_TAG = null;    // [#106 S4d-2 收口批] ready() 之后赋值：[c4-<pid>-<时间戳>]，每个夹具标题都带它；建单后客户端没拿到编号时，清理按标记补查
 
 const ADMIN_ID = 1, PUBLISHER_ID = 7, USER_CREATOR_ID = 19, USER_ASSIGNEE_ID = 8, USER_BYSTANDER_ID = 9, VIEWER_ID = 2;
 
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(uid) {
-    const u = await new Promise((res, rej) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id,username,display_name,role FROM users WHERE id=?', [uid], (e, r) => { db.close(); e ? rej(e) : res(r); });
-    });
-    if (!u) throw new Error(`user ${uid} not found`);
-    return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(uid);
 }
 
-function dbRun(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.run(sql, p, function (e) { db.close(); e ? rej(e) : res(this); }); }); }
-function dbGet(sql, p) { return new Promise((res, rej) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, p, (e, r) => { db.close(); e ? rej(e) : res(r); }); }); }
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+    });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbRun(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.run(sql, p, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; db.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+}
+async function dbGet(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.get(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
 
+async function dbAll(sql, p) {
+    const db = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { db.all(sql, p, (e, r) => { db.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+}
+
+// [#106 S4d-2 收口批] 建单助手校验状态码与正整数编号，不满足即抛错（原来 undefined 编号被清理过滤器静默忽略）；服务端已落库而这里没拿到编号的，由 cleanupCreated 按 RUN_TAG 补查
 async function apiCreate(token, body) {
     const r = await fetch(`${BASE_URL}/api/issues`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = await r.json();
-    if (!r.ok) throw new Error(`create failed: ${JSON.stringify(j)}`);
-    return j.id;
+    let j = null; try { j = await r.json(); } catch (_) { j = null; }
+    const id = j && j.id;
+    if (r.status !== 200 || !Number.isInteger(id) || id <= 0) throw new Error(`create failed：HTTP ${r.status}，编号=${JSON.stringify(id)}，响应=${JSON.stringify(j).slice(0, 160)}`);
+    return id;
 }
-async function apiDelete(token, id) { await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); }
+// [#106 S4d-2] 返回状态码（原来丢弃，删除失败看不见）
+async function apiDelete(token, id) { const r = await fetch(`${BASE_URL}/api/issues/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); return r.status; }
 async function apiAssign(token, id, devId) { await fetch(`${BASE_URL}/api/issues/${id}/assign`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ assigned_to: devId }) }); }
 
 let pass = 0, fail = 0;
@@ -91,7 +111,36 @@ async function openDrawer(page, id) {
 
 const created = [];
 
+/**
+ * [#106 S4d-2] 清理造的需求单：每个编号单独 try / catch，一个失败不中断后续；看状态码（200 / 404 算清掉），只把清理成功的编号移出追踪；
+ * 失败的编号再试一轮（共 2 轮，间隔 200ms）；遗留逐个计失败。原来整个循环包在一个 try/catch 里只 log（一个抛错中断其余、不计失败）
+ */
+async function cleanupCreated(adminToken) {
+    try {   // [#106 S4d-2 收口批] 先按运行标记补查：建单请求服务端已落库、客户端读响应 / 解析失败而没登记编号的单
+        const tagged = RUN_TAG ? await dbAll(`SELECT id FROM issues WHERE title LIKE '%' || ? || '%'`, [RUN_TAG]) : [];
+        for (const r of tagged) if (!created.includes(r.id)) created.push(r.id);
+    } catch (e) { must(false, `清理前按运行标记补查失败：${e && e.message}`); }
+    const lastErr = new Map();
+    for (let round = 0; round < 2; round++) {
+        const pending = created.filter((id) => Number.isInteger(id));
+        if (pending.length === 0) break;
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of pending) {
+            try {
+                const st = await apiDelete(adminToken, id);
+                if (st === 200 || st === 404) { created.splice(created.indexOf(id), 1); lastErr.delete(id); }
+                else lastErr.set(id, `HTTP ${st}`);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    for (const id of created.filter((x) => Number.isInteger(x))) { console.log(`清理失败：#${id} ${lastErr.get(id)}`); must(false, `清理测试需求单 #${id} 失败（已重试 1 轮）：${lastErr.get(id)}`); }
+}
+
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    RUN_TAG = `[c4-${process.pid}-${Date.now()}]`;
     const adminToken = await signAs(ADMIN_ID);
     const publisherToken = await signAs(PUBLISHER_ID);
     const creatorToken = await signAs(USER_CREATOR_ID);
@@ -101,31 +150,31 @@ async function main() {
 
     console.log('\n══════ v1.75.0 commit D 拉群讨论按钮 Playwright 实测 ══════');
 
-    // 造单：
-    //   #A 未建群 + 指派 USER_ASSIGNEE_ID + 创建人 = USER_CREATOR_ID（T1/T2/T3/T4/T5/T6/T10-T17 复用）
-    //   #B 已建群 + chat_name='[需求]测试-讨论' + open_conversation_id='conv_B' （T7）
-    //   #C 已建群 + chat_name='' + open_conversation_id='conv_C'（T8 兜底文案）
-    //   #D 已建群但 open_conversation_id='   '（T9 trim 后空白仍按未建群）
-    const idA = await apiCreate(creatorToken, { title: 'c4拉群按钮-未建群', type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
-    created.push(idA);
-    await apiAssign(adminToken, idA, USER_ASSIGNEE_ID);
-
-    const idB = await apiCreate(creatorToken, { title: 'c4拉群按钮-已建群', type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
-    created.push(idB);
-    await dbRun('UPDATE issues SET dingtalk_chat_id=?, dingtalk_open_conversation_id=?, dingtalk_chat_name=? WHERE id=?',
-        ['chat_B', 'conv_B', '[需求]测试-讨论', idB]);
-
-    const idC = await apiCreate(creatorToken, { title: 'c4拉群按钮-chatname空', type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
-    created.push(idC);
-    await dbRun('UPDATE issues SET dingtalk_chat_id=?, dingtalk_open_conversation_id=?, dingtalk_chat_name=? WHERE id=?',
-        ['chat_C', 'conv_C', '', idC]);
-
-    const idD = await apiCreate(creatorToken, { title: 'c4拉群按钮-脏空白', type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
-    created.push(idD);
-    await dbRun('UPDATE issues SET dingtalk_open_conversation_id=? WHERE id=?', ['   ', idD]);
-
     const browser = await chromium.launch({ headless: true });
     try {
+        // 造单（[#106 S4d-2] 挪进 try：中途某次建单抛错时，已建的单也由 finally 清理）：
+        //   #A 未建群 + 指派 USER_ASSIGNEE_ID + 创建人 = USER_CREATOR_ID（T1/T2/T3/T4/T5/T6/T10-T17 复用）
+        //   #B 已建群 + chat_name='[需求]测试-讨论' + open_conversation_id='conv_B' （T7）
+        //   #C 已建群 + chat_name='' + open_conversation_id='conv_C'（T8 兜底文案）
+        //   #D 已建群但 open_conversation_id='   '（T9 trim 后空白仍按未建群）
+        const idA = await apiCreate(creatorToken, { title: 'c4拉群按钮-未建群' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
+        created.push(idA);
+        await apiAssign(adminToken, idA, USER_ASSIGNEE_ID);
+
+        const idB = await apiCreate(creatorToken, { title: 'c4拉群按钮-已建群' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
+        created.push(idB);
+        await dbRun('UPDATE issues SET dingtalk_chat_id=?, dingtalk_open_conversation_id=?, dingtalk_chat_name=? WHERE id=?',
+            ['chat_B', 'conv_B', '[需求]测试-讨论', idB]);
+
+        const idC = await apiCreate(creatorToken, { title: 'c4拉群按钮-chatname空' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
+        created.push(idC);
+        await dbRun('UPDATE issues SET dingtalk_chat_id=?, dingtalk_open_conversation_id=?, dingtalk_chat_name=? WHERE id=?',
+            ['chat_C', 'conv_C', '', idC]);
+
+        const idD = await apiCreate(creatorToken, { title: 'c4拉群按钮-脏空白' + RUN_TAG, type: '数据质量', requester_dept: '市场营销部', requester_name: '王', description: 'x' });
+        created.push(idD);
+        await dbRun('UPDATE issues SET dingtalk_open_conversation_id=? WHERE id=?', ['   ', idD]);
+
         // T1 admin 权限：未建群应见「💬 拉群讨论」按钮
         {
             const page = await gotoAs(browser, adminToken);
@@ -430,17 +479,18 @@ async function main() {
             await page.close();
         }
     } finally {
-        // 清理
-        try {
-            for (const id of created) await apiDelete(adminToken, id);
-        } catch (e) {
-            console.log('清理失败：', e.message);
-        }
-        await browser.close();
+        // 清理（[#106 S4d-2] 浏览器先关；每个编号单独 try / 看状态码 / 再试一轮 / 遗留计失败，见 cleanupCreated）
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        await cleanupCreated(adminToken);
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n══════ PASS ${pass} / FAIL ${fail} ══════`);
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(async (e) => {
+    console.error(e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

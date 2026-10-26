@@ -6,9 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智数模型配置台 (Model Workbench)</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
-    <!-- 共享组件层（与目录页同一缓存串；配置台自身不使用抽屉） -->
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
+    <!-- 共享组件层（与目录页同一份共享文件；配置台自身不使用抽屉） -->
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* 加载动画 */
         @keyframes spin {
@@ -1301,9 +1301,9 @@ OUTER APPLY (
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
-    <!-- #77 C3a：脚本生成器共享库（与目录页同一文件、同一缓存串；改它须同时改 KIT_VERSION 与两页的 ?v= 后缀） -->
-    <script src="assets/js/model-script-gen.js?v=v1.180.0_msg1"></script>
+    <script src="assets/js/app.js?v=auto"></script>
+    <!-- #77 C3a：脚本生成器共享库（与目录页同一文件；KIT_VERSION 只是库的版本标识、页面不做运行时比对，页面与库的对应关系由 verify-model-script-gen-single-source.js 静态核对；缓存串由服务端自动注入） -->
+    <script src="assets/js/model-script-gen.js?v=auto"></script>
     <script>
         // 脚本生成器来自共享库 model-script-gen.js（页面内不再定义同名函数，由 verify-model-script-gen-single-source.js 守卫）
         const { toSnakeCase, generateExpressionSQL, generateDimDDL, generateFullLoadScript, generateIncrementalScript, generateFdlNodeScript } = window.ModelScriptGen;

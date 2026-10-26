@@ -11,8 +11,14 @@
  *   通道，本脚本对"发送通知"类按钮统一只验证渲染，不点击）。dry-run 的真实调用行为由
  *   verify-sys-liaison-test.js [11d]（打桩计数断言）独立覆盖。
  *
- * 用法：本地 server（3000）已重启到含 C4b 前后端改动的代码后：
- *   node scripts/test-sys-liaison-test-frontend-playwright.js
+ * 用法：node scripts/test-sys-liaison-test-frontend-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   依赖隔离实例（本检出本地库的快照）里存在 active admin、至少一个非 13 的 active 普通用户、以及 id=13（示例对接人，受理人）——首跑核对。
+ *   钉钉与 dry-run（确定说法，非首跑核对项）：隔离实例的钉钉配置是实例的虚拟替身（utils/instance-db.js:87-90 VIRTUAL_DINGTALK_CONFIG，sdh-stub-* 虚拟串，外部调用被闸门挡住 / 走替身，见同文件 :316 注释），
+ *   不是上方「文件头原始说明」里的真实生产凭证；sys_notify_dry_run 属实例配置白名单键，按白名单从来源快照库复制（utils/instance-db.js:174-190，值随快照）。
+ *   本脚本仍然只验证渲染，不点击会走外呼链路的按钮（行为与迁移前一致，不因替身而放宽）。
+ *   夹具标题带 RUN_TAG 时间戳（唯一）；固定 oa_number 仅作造数列值、不被用作查询键，共享实例上并发运行不会撞车。
+ *
  *
  * 覆盖：
  *   [LT-T1] 列表页「待对接测试」状态徽章：class=si-s-liaisontest + 文案精确
@@ -42,20 +48,30 @@
  */
 'use strict';
 
-const path = require('path');
 const sqlite3 = require('sqlite3');
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// [#106 S4d-4] BASE_URL / DB_PATH：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-
-const db = new sqlite3.Database(DB_PATH);
-const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
-const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+  return new Promise((resolve, reject) => {
+    const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+  });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const run = async (sql, p = []) => {
+  const d = await openInstanceDb(DB_PATH);
+  return new Promise((res, rej) => { d.run(sql, p, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
+const get = async (sql, p = []) => {
+  const d = await openInstanceDb(DB_PATH);
+  return new Promise((res, rej) => { d.get(sql, p, (e, r) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(r); }); }); });
+};
 
 let passed = 0, failed = 0;
 let fatalError = null;
@@ -64,12 +80,17 @@ function must(cond, msg) {
   failed++; console.log('  ❌ ' + msg); return false;
 }
 
-const RUN_TAG = Date.now();
-const TITLE_A = `LT-对接测试冒烟A-${RUN_TAG}`;   // 示例对接人非在册（常规场景）
-const TITLE_B = `LT-对接测试冒烟B-自指-${RUN_TAG}`;   // 示例对接人同时在册（自指隐藏场景）
-const TITLE_C = `LT-对接测试冒烟C-版本锁-${RUN_TAG}`;   // [LT-T10·D-L1] 版本锁两步采用专用
-const TITLE_D = `LT-对接测试冒烟D-基准缺失-${RUN_TAG}`;   // [LT-T11·codex 542 M1] 基准 delivery_rev 缺失专用
+// [#106 S4d-4] RUN_TAG（Date.now()）与由它拼出的标题：入口 ready() 之后赋值（顶层调用 Date.now() 不是纯声明）
+let RUN_TAG = null;
+let TITLE_A = null;   // 示例对接人非在册（常规场景）
+let TITLE_B = null;   // 示例对接人同时在册（自指隐藏场景）
+let TITLE_C = null;   // [LT-T10·D-L1] 版本锁两步采用专用
+let TITLE_D = null;   // [LT-T11·codex 542 M1] 基准 delivery_rev 缺失专用
 let idA = null, idB = null, idC = null, idD = null;
+// [#106 S4d-4 修复批 F1] 夹具单编号登记：主行 INSERT 拿到 id 后立即登记，后续「花名册 INSERT / 事件 INSERT / UPDATE」任一步抛错时，
+//   收尾清理仍能清到这张单及已插的子表行（原来 idA..idD 要等 helper 成功返回才赋值，中途失败的单不进收尾追踪）。幂等
+const seededIds = [];
+function registerSeededId(id) { if (Number.isInteger(id) && id > 0 && !seededIds.includes(id)) seededIds.push(id); }
 
 // 落态「待对接测试」的最小夹具——直接 SQL 造（同 test-sys-effort-days-playwright.js 惯例，不经过
 // 完整 GATE 决策树链路，聚焦本次改动本身：前端徽章/按钮/弹窗）。
@@ -86,6 +107,7 @@ async function seedLiaisonTestIssue(title, devUserId, devUserName, extraMembers 
     [title, 1, devUserId, devUserName]
   );
   const id = ins.lastID;
+  registerSeededId(id);   // 建单即登记
   await run(
     `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status, resolved_at)
      VALUES (?, ?, ?, 1, 'code_submitted', datetime('now','localtime'))`,
@@ -129,6 +151,14 @@ async function seedLiaisonTestIssueWithSubmitEvent(title, devUserId, devUserName
 }
 
 (async () => {
+  await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+  BASE_URL = testEnv.env().baseUrl;
+  DB_PATH = testEnv.env().dbPath;
+  RUN_TAG = Date.now();
+  TITLE_A = `LT-对接测试冒烟A-${RUN_TAG}`;
+  TITLE_B = `LT-对接测试冒烟B-自指-${RUN_TAG}`;
+  TITLE_C = `LT-对接测试冒烟C-版本锁-${RUN_TAG}`;
+  TITLE_D = `LT-对接测试冒烟D-基准缺失-${RUN_TAG}`;
   let browser;
   try {
     const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
@@ -139,9 +169,10 @@ async function seedLiaisonTestIssueWithSubmitEvent(title, devUserId, devUserName
     const liaisonUser = await get(`SELECT id, username, display_name, role FROM users WHERE id = 13 AND status = 'active'`);
     if (!liaisonUser) throw new Error('库中 id=13（示例对接人）不存在或非 active，SYS_INTAKE_LIAISON_IDS 前提不成立');
 
-    const devTok = jwt.sign({ id: devUser.id, username: devUser.username, display_name: devUser.display_name, role: devUser.role }, JWT_SECRET, { expiresIn: '1h' });
-    const liaisonTok = jwt.sign({ id: liaisonUser.id, username: liaisonUser.username, display_name: liaisonUser.display_name, role: liaisonUser.role }, JWT_SECRET, { expiresIn: '1h' });
-    const adminTok = jwt.sign({ id: admin.id, username: admin.username, display_name: admin.display_name, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+    // [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env 的 JWT_SECRET
+    const devTok = await testEnv.signToken(devUser.id);
+    const liaisonTok = await testEnv.signToken(liaisonUser.id);
+    const adminTok = await testEnv.signToken(admin.id);
 
     idA = await seedLiaisonTestIssue(TITLE_A, devUser.id, devUser.display_name);
     idB = await seedLiaisonTestIssue(TITLE_B, devUser.id, devUser.display_name, [{ id: liaisonUser.id, name: liaisonUser.display_name }]);
@@ -621,31 +652,43 @@ async function seedLiaisonTestIssueWithSubmitEvent(title, devUserId, devUserName
     failed++;
     console.error('[FATAL]', e && (e.stack || e));
   } finally {
-    if (browser) await browser.close();
-    const cleanupErrs = [];
-    const safeDelete = async (sql, params, step) => {
-      try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
-    };
-    for (const id of [idA, idB, idC, idD]) {
-      if (!id) continue;
-      // [LT-T10] idC 额外带真实 dev_commits/dev_events 行（seedLiaisonTestIssueWithSubmitEvent 所插），
-      //   两表均无 issue_id 级联外键（同 index.js dev_commits/dev_events 表定义），须显式清理，否则
-      //   残留孤儿行——idA/idB 从未写过这两张表，多出的两条 DELETE 对它们是零命中的安全 no-op。
-      await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], 'dev_commits#' + id);
-      await safeDelete('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id], 'dev_events#' + id);
-      await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], 'dev_assignees#' + id);
-      await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], 'timeline#' + id);
-      await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], 'issues#' + id);
+    // [#106 S4d-4] 浏览器关闭失败计失败（原来无保护：抛错会盖掉清理与退出码）
+    if (browser) { try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); } }
+    // [#106 S4d-4] 清理失败计失败：每个编号单独 try（五张表按序删，任一步失败该编号保留在追踪里），清掉才移出追踪，
+    //   有失败再试一轮（共 2 轮，间隔 200ms，删除语句幂等）；遗留的编号逐个计失败；删后按编号回查残留（非 0 也计失败）
+    const trackedIds = [...new Set([idA, idB, idC, idD, ...seededIds].filter(Boolean))];   // seededIds：helper 建单即登记，覆盖中途失败没赋给 idA..idD 的单
+    const allIds = trackedIds.slice();
+    const lastErr = new Map();
+    for (let round = 0; round < 2 && trackedIds.length > 0; round++) {
+      if (round > 0) await new Promise((r) => setTimeout(r, 200));
+      for (const id of trackedIds.slice()) {
+        try {
+          // [LT-T10] idC 额外带真实 dev_commits/dev_events 行（seedLiaisonTestIssueWithSubmitEvent 所插），
+          //   两表均无 issue_id 级联外键（同 index.js dev_commits/dev_events 表定义），须显式清理，否则
+          //   残留孤儿行——idA/idB 从未写过这两张表，多出的两条 DELETE 对它们是零命中的安全 no-op。
+          await run('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id]);
+          await run('DELETE FROM sys_issue_dev_events WHERE issue_id = ?', [id]);
+          await run('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]);
+          await run('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]);
+          await run('DELETE FROM sys_issues WHERE id = ?', [id]);
+          trackedIds.splice(trackedIds.indexOf(id), 1);
+          lastErr.delete(id);
+        } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+      }
     }
-    const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title IN (?, ?, ?, ?)`, [TITLE_A, TITLE_B, TITLE_C, TITLE_D]);
+    for (const id of trackedIds) must(false, `夹具清理失败 issue #${id}（已重试 1 轮）：${lastErr.get(id)}`);
+    let left = null;
+    try {
+      left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title IN (?, ?, ?, ?) OR id IN (${allIds.map(() => '?').join(',') || 'NULL'})`, [TITLE_A, TITLE_B, TITLE_C, TITLE_D, ...allIds]);
+    } catch (e) { must(false, `夹具清理回查失败：${e && e.message}`); }
     console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条，应为 0：#${idA}, #${idB}, #${idC}, #${idD}）`);
-    must(cleanupErrs.length === 0, `夹具清理 SQL 全部无错误，实得 errs=${JSON.stringify(cleanupErrs)}`);
-    must(!!left && left.c === 0, `夹具清理后 sys_issues 残留应为 0，实得 ${left ? left.c : '(查询失败)'}`);
-    db.close();
-    console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈' : ''}`);
-    process.exit(failed === 0 && !fatalError ? 0 : 1);
+    if (left) must(left.c === 0, `夹具清理后 sys_issues 残留应为 0，实得 ${left.c}`);
   }
-})().catch(e => {
+  try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
+  console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈' : ''}`);
+  testEnv.finish(failed === 0 && !fatalError ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
   console.error('[顶层兜底] finally 段或未捕获 rejection：\n', e && (e.stack || e));
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
   process.exit(1);
 });

@@ -1,12 +1,11 @@
 /**
  * 上线逾期留痕（方案 20260910 v1.2）·C3 A 块前端 Playwright 活体验证
- * 用法：外部 server:3000 已起（本文件不自拉服务，见下方"server 编排"约定）后：
- *   node scripts/test-sys-release-overdue-playwright.js
- *
- * ⚠️ 一次只跑一个写 db 的 Playwright——本文件直连 task_pool.db 造夹具（同 test-sys-release-mgmt-
- *   playwright.js/c7/panel-c2b2 既有三个同族文件的约定：外部 server:3000 + 真实 task_pool.db +
- *   标题前缀隔离，非独立端口+db 副本——C3 任务书原写"独立端口+db 副本"与本模块三个既有 Playwright
- *   同胞文件的实际范式不一致，本文件按既有范式实现，偏离已在交付报告第 5 条注明）。
+ * 用法：node scripts/test-sys-release-overdue-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   原「外部 server:3000 + 真实 task_pool.db + 标题前缀隔离」的约定随之作废（C3 任务书原写的"独立端口+db 副本"现在才真正成立）。
+ *   批跑建议：needsService:true；非 exclusive（只建 RELOD- 前缀的批次与成员单，按本轮登记的 id 精确清理；批次 / 成员单自增 id，不碰固定日期与全局配置）；不需要服务端开关。
+ *   固定用户 id：1 admin / 8（示例开发A，role=user，须 active）/ 9（示例开发B，第二执行人）。planned_date 一律由 pastDateStr(n)（相对今天）现算，不依赖固定日期。
+ *   固定业务编号常量：无（批次标题 = RELOD- 前缀 + 场景名 + Date.now()，每次运行唯一；历史夹具标题 `RELOD-历史遗留记录-不属于本轮` 只用于「精确清单」变异证据，不作查询键，收尾自己精确删除）。
  *
  * 数据隔离：全部造数标题恒 RELOD- 前缀（共享面隔离约定，与 RELMG-/其它前缀区分）。
  *
@@ -50,32 +49,49 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-overdue-playwright-shots');
+let BASE_URL = null;        // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SCREENSHOT_DIR = null;  // [#106 S4d-5] ready() 之后赋值：os.tmpdir() 下的失败截图目录（顶层 path.join 会被守卫 R6 判红；纯失败诊断，保留不删）
 const TITLE_PREFIX = 'RELOD-';
 
 const ADMIN_ID = 1;
 const EXEC_ID = 8;     // 示例开发A（role=user，非白名单，供单人在册执行人视角——同族测试既有实例）
 const EXEC2_ID = 9;    // 示例开发B——第二执行人（非最后一人分支）
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -141,17 +157,8 @@ async function fetchJson(url, tok, opts = {}) {
     return { status: r.status, body };
 }
 
-function ensureServerListening(timeoutMs = 3000) {
-    const u = new URL(BASE_URL);
-    const host = u.hostname;
-    const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
-    return new Promise((resolve, reject) => {
-        const sock = net.createConnection({ port, host });
-        const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
-        sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件`)); });
-    });
-}
+// [#106 S4d-5] 原 ensureServerListening（net 探测写死/默认的 3000 端口）已删：隔离实例由 testEnv.ready() 起并核对身份。
+//   应用 readiness 探测保留，但必须在 ready() 之后调用（BASE_URL 此时才有值）。
 async function ensureAppReadinessEndpoint() {
     const r = await fetch(`${BASE_URL}/api/sys-issues/_readiness`).catch((e) => {
         throw new Error(`应用 readiness 探测请求失败（${e.message}）`);
@@ -225,15 +232,85 @@ async function openBatchDetail(page, relId) {
     await page.waitForTimeout(500);
 }
 
-(async () => {
+/**
+ * [#106 S4d-5] 清理本轮夹具（精确清单 createdReleaseIds / createdIssueIds）：每一步各自 try（一个失败不中断后续），有失败整体再试一轮（共 2 轮，间隔 200ms），
+ * 清完按本轮 id 精确回查六张表的残留；返回 { errors, residual }（errors 非空 = 最后一轮仍未清掉，调用方计失败）。
+ * 原来是一个大 try：一条 DELETE 抛错后面整段跳过，只 fail++ 一次。删除范围与回查范围保持一致（C4g·codex 563 M4）。
+ */
+async function cleanupFixtures() {
+    if (!db) return { errors: [], residual: null };
+    const rels = createdReleaseIds.slice();
+    const issues = createdIssueIds.slice();
+    let errors = [];
+    let residual = null;
+    // 单条语句各自 try：失败记一条错误（带标签）并返回 false，成功返回 true
+    const step = async (label, sql, params) => {
+        try { await dbRun(sql, params); return true; } catch (e) { errors.push(`${label}: ${e && e.message}`); return false; }
+    };
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        // [#106 S4d-5 修复批] 每条语句各自 try（step）：一条失败不再跳过同一对象后面的语句；子表有失败的对象，本轮不删它的父行（父行是下一轮重试子表删除的定位依据），与 release-c7 同一做法
+        const relSubFailed = new Set();
+        for (const rid of rels) {
+            const oks = [
+                await step(`批次 #${rid} 执行人子表`, 'DELETE FROM sys_release_executors WHERE release_id=?', [rid]),
+                await step(`批次 #${rid} 快照`, 'DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?', [rid]),
+            ];
+            if (oks.includes(false)) relSubFailed.add(rid);
+        }
+        const issueSubFailed = new Set();
+        for (const iid of issues) {
+            const oks = [
+                await step(`成员单 #${iid} timeline`, 'DELETE FROM sys_issue_timeline WHERE issue_id=?', [iid]),
+                await step(`成员单 #${iid} 开发在册行`, 'DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [iid]),
+                await step(`成员单 #${iid} 解除批次`, 'UPDATE sys_issues SET release_id=NULL WHERE id=?', [iid]),
+            ];
+            if (oks.includes(false)) issueSubFailed.add(iid);
+        }
+        for (const iid of issues) {
+            if (issueSubFailed.has(iid)) continue;   // 子表没清净，保留成员单行
+            await step(`成员单 #${iid}`, 'DELETE FROM sys_issues WHERE id=?', [iid]);
+        }
+        for (const rid of rels) {
+            if (relSubFailed.has(rid)) continue;   // 子表没清净，保留批次行
+            await step(`批次 #${rid}`, 'DELETE FROM sys_releases WHERE id=?', [rid]);
+        }
+        // 残留核验：按本轮实际造过的 id 集合精确查（而非再按前缀模糊查——此刻已从 sys_releases / sys_issues 里删掉，title 前缀查询会天然查不到，必须落到子表 + 原始 id 列表上）。
+        try {
+            const relPh = rels.map(() => '?').join(',');
+            const issPh = issues.map(() => '?').join(',');
+            const cnt = async (sql, params) => (params.length ? (await dbGet(sql, params)).c : 0);
+            residual = {
+                sys_releases: await cnt(`SELECT COUNT(*) c FROM sys_releases WHERE id IN (${relPh})`, rels),
+                sys_issues: await cnt(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${issPh})`, issues),
+                sys_release_executors: await cnt(`SELECT COUNT(*) c FROM sys_release_executors WHERE release_id IN (${relPh})`, rels),
+                sys_issue_timeline: await cnt(`SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id IN (${issPh})`, issues),
+                // [C4g·codex 563 M4 收口] 删除范围与核验范围必须一致，否则这两张表即便真漏删也不会被本核验发现。
+                sys_issue_release_commit_snapshots: await cnt(`SELECT COUNT(*) c FROM sys_issue_release_commit_snapshots WHERE release_id IN (${relPh})`, rels),
+                sys_issue_dev_assignees: await cnt(`SELECT COUNT(*) c FROM sys_issue_dev_assignees WHERE issue_id IN (${issPh})`, issues),
+            };
+            const residualTotal = Object.values(residual).reduce((a, b) => a + b, 0);
+            if (residualTotal !== 0) errors.push(`夹具清理后仍有残留（应恰为 0）：${JSON.stringify(residual)}`);
+        } catch (e) { errors.push(`残留核验查询本身异常: ${e && e.message}`); }
+        if (errors.length === 0) break;
+    }
+    return { errors, residual };
+}
+
+async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-overdue-playwright-shots');
     console.log('═══ 上线逾期留痕 C3 Playwright 活体验证 ═══\n');
     try {
-        await ensureServerListening();
         await ensureAppReadinessEndpoint();
     } catch (e) {
-        console.error('❌ server 编排前置探测失败：' + e.message);
-        process.exit(1);
+        // [#106 S4d-5] 原为 process.exit(1)：改 throw，由入口 .catch 做 teardown 后以 1 退出
+        throw new Error('server 编排前置探测失败：' + e.message);
     }
+    db = await openInstanceDb(DB_PATH);
 
     const adminTok = await signAs(ADMIN_ID);
     const execTok = await signAs(EXEC_ID);
@@ -1001,62 +1078,23 @@ async function openBatchDetail(page, relId) {
                 console.error('❌ 浏览器关闭异常：' + (closeErr && closeErr.message));
             }
         }
-        // [C3c·codex 557 合并审 M3 收口] 夹具清理（同族三个既有文件的既有纪律）——按 RELOD- 前缀删净
-        // 本文件写入的全部批次/成员单及其子表行，避免跨轮残留污染生产库共享面（尤其
-        // sys_release_executors 的 pending/done 行可能被其它模块的"我的上线单"聚合查询算进角标）。
-        // 清理异常与"删完后仍有残留"此前只 warn 不计入失败——那等于允许本文件悄悄泄漏测试数据到共享
-        // 生产库却仍报绿。改为：清理异常记入 fail（非零退出），清理后逐表精确按本轮夹具的 id 集合
-        // SELECT 残留行数，非 0 同样计入失败（不信"删语句跑完了"就等于"删干净了"，删语句本身可能因
-        // FK/锁/静默失败漏删部分行）。
-        // [C4g·codex 563 H1 收口] 本轮集合直接取 createdReleaseIds/createdIssueIds（创建成功当刻登记，
-        // 文件顶部定义）——不再按 TITLE_PREFIX 现查一遍：现查会把"本轮之外"同前缀的既有/历史记录一起
-        // 当成本轮夹具删掉，不是精确清单（feedback_shared_dir_test_cleanup_precise_list）。
-        let rels = createdReleaseIds.slice();
-        let issues = createdIssueIds.slice();
-        try {
-            for (const rid of rels) {
-                await dbRun('DELETE FROM sys_release_executors WHERE release_id=?', [rid]);
-                await dbRun('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?', [rid]);
-            }
-            for (const iid of issues) {
-                await dbRun('DELETE FROM sys_issue_timeline WHERE issue_id=?', [iid]);
-                await dbRun('DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [iid]);
-                await dbRun('UPDATE sys_issues SET release_id=NULL WHERE id=?', [iid]);
-            }
-            for (const iid of issues) await dbRun('DELETE FROM sys_issues WHERE id=?', [iid]);
-            for (const rid of rels) await dbRun('DELETE FROM sys_releases WHERE id=?', [rid]);
-            console.log(`\n🧹 夹具已清理：releases=${rels.length} issues=${issues.length}`);
-        } catch (cleanupErr) {
-            fail++;
-            failDetails.push('夹具清理异常（非零退出，非仅 warn）：' + (cleanupErr && cleanupErr.message));
-            console.error('❌ 夹具清理异常：' + (cleanupErr && cleanupErr.message));
-        }
-        // 残留核验：按本轮实际造过的 id 集合精确查（而非再按前缀模糊查——rels/issues 此刻已从
-        // sys_releases/sys_issues 里删掉，title 前缀查询会天然查不到，必须落到子表 + 原始 id 列表上）。
-        try {
-            const relPlaceholders = rels.length ? rels.map(() => '?').join(',') : null;
-            const issuePlaceholders = issues.length ? issues.map(() => '?').join(',') : null;
-            const residual = {};
-            residual.sys_releases = rels.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_releases WHERE id IN (${relPlaceholders})`, rels)).c : 0;
-            residual.sys_issues = issues.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${issuePlaceholders})`, issues)).c : 0;
-            residual.sys_release_executors = rels.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_release_executors WHERE release_id IN (${relPlaceholders})`, rels)).c : 0;
-            residual.sys_issue_timeline = issues.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id IN (${issuePlaceholders})`, issues)).c : 0;
-            // [C4g·codex 563 M4 收口] 原残留核验只查四表，漏了本文件清理逻辑里明明有删的两张表——
-            // 删除范围与核验范围必须一致，否则这两张表即便真漏删也不会被本核验发现。
-            residual.sys_issue_release_commit_snapshots = rels.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_issue_release_commit_snapshots WHERE release_id IN (${relPlaceholders})`, rels)).c : 0;
-            residual.sys_issue_dev_assignees = issues.length ? (await dbGet(`SELECT COUNT(*) c FROM sys_issue_dev_assignees WHERE issue_id IN (${issuePlaceholders})`, issues)).c : 0;
-            const residualTotal = Object.values(residual).reduce((a, b) => a + b, 0);
-            if (residualTotal !== 0) {
+        // [C3c·codex 557 合并审 M3 收口] 夹具清理（同族三个既有文件的既有纪律）——删净本文件写入的全部批次/成员单及其子表行，
+        // 避免跨轮残留污染共享面（尤其 sys_release_executors 的 pending/done 行可能被其它模块的"我的上线单"聚合查询算进角标）。
+        // 清理异常与"删完后仍有残留"必须计入失败（非零退出，非仅 warn）；清理后逐表精确按本轮夹具的 id 集合 SELECT 残留行数，非 0 同样计入失败
+        // （不信"删语句跑完了"就等于"删干净了"，删语句本身可能因 FK/锁/静默失败漏删部分行）。
+        // [C4g·codex 563 H1 收口] 本轮集合直接取 createdReleaseIds/createdIssueIds（创建成功当刻登记，文件顶部定义）——不再按 TITLE_PREFIX 现查一遍：
+        // 现查会把"本轮之外"同前缀的既有/历史记录一起当成本轮夹具删掉，不是精确清单（feedback_shared_dir_test_cleanup_precise_list）。
+        // [#106 S4d-5] 清理见 cleanupFixtures（模块级）：各步独立 try / 2 轮 / 精确回查六张表 / 遗留计失败。
+        {
+            const cleanup = await cleanupFixtures();
+            if (cleanup.errors.length) {
                 fail++;
-                failDetails.push(`夹具清理后仍有残留（应恰为 0）：${JSON.stringify(residual)}`);
-                console.error(`❌ 夹具清理后残留核验未通过：${JSON.stringify(residual)}`);
+                failDetails.push('夹具清理失败（已重试 1 轮）：' + cleanup.errors.join(' | '));
+                console.error('❌ 夹具清理失败（已重试 1 轮）：' + cleanup.errors.join(' | '));
             } else {
-                console.log(`🧹 残留核验通过：${JSON.stringify(residual)}（均为 0）`);
+                console.log(`\n🧹 夹具已清理：releases=${createdReleaseIds.length} issues=${createdIssueIds.length}`);
+                console.log(`🧹 残留核验通过：${JSON.stringify(cleanup.residual)}（均为 0）`);
             }
-        } catch (residualErr) {
-            fail++;
-            failDetails.push('残留核验查询本身异常：' + (residualErr && residualErr.message));
-            console.error('❌ 残留核验查询异常：' + (residualErr && residualErr.message));
         }
         // [C4h·codex 563-R M1 收口] 历史记录必须在清理之后仍然存在（保留性断言）；断言做完后本文件自己
         // 精确删除它——不再用空 catch 吞掉删除失败（那等于允许历史夹具真的删不掉时悄悄留在共享库里却
@@ -1090,13 +1128,34 @@ async function openBatchDetail(page, relId) {
                 console.error(`❌ 历史夹具 id=${hid} 收尾删除失败：` + (delErr && delErr.message));
             }
         }
-        db.close();
+        // [#106 S4d-5] 原为 db.close()（不等回调）：改等 close 回调，失败计失败
+        try { await closeDb(); } catch (closeDbErr) {
+            fail++;
+            failDetails.push('关闭实例库失败：' + (closeDbErr && closeDbErr.message));
+            console.error('❌ 关闭实例库失败：' + (closeDbErr && closeDbErr.message));
+        }
+    }
+
+    // [#106 S4d-5] 收掉自起实例；失败计失败
+    try { await testEnv.teardown(); } catch (tdErr) {
+        fail++;
+        failDetails.push('teardown（收掉自起实例）失败：' + (tdErr && tdErr.message));
+        console.error('❌ teardown（收掉自起实例）失败：' + (tdErr && tdErr.message));
     }
 
     console.log(`\n═══ 结果：${pass} 通过，${fail} 失败 ═══`);
     if (fail > 0) {
         console.log('失败详情：');
         failDetails.forEach(m => console.log('  - ' + m));
-        process.exit(1);
     }
-})();
+    // [#106 S4d-5] 成功路径原来没有显式收尾（靠事件循环自然排空）：补 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+    testEnv.finish(fail > 0 ? 1 : 0);
+}
+
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await cleanupFixtures(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -8,32 +8,24 @@
  *   - 非 admin(示例用户A user)：下拉不含"数据开发（完整版）"
  *   - 重型页 Issue_Tracker.html 对 admin 仍可正常加载（原封不动）
  *
- * 自启 PORT=3399，跑完按端口精确杀。
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照），也可由 TEST_* 变量组指向已起好的隔离实例；浏览器在 ready 之后才启动，页面地址由 ready 之后的 BASE 拼出。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
-const path = require('path');
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
+let BASE = null;   // ready() 之后赋值
 let pass = 0, fail = 0;
 function ok(name, cond, detail) { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name}  ${detail || ''}`); } }
-// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
+async function issueLiteServiceReady() {
     try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
 }
 async function loginGoto(context, token, page_path) {
     const page = await context.newPage();
@@ -44,17 +36,11 @@ async function loginGoto(context, token, page_path) {
 }
 
 (async () => {
-    killPort(TEST_PORT);
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-    const deadline = Date.now() + 12000; let ready = false;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(log)) { try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) { ready = true; break; } } catch (_) {} }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    ok('服务就绪', ready);
+    await fx.ready();   // 先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
+    BASE = fx.BASE;
+    // 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+    const ready = await issueLiteServiceReady();
+    ok('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
 
     const browser = await chromium.launch();
     try {
@@ -99,11 +85,14 @@ async function loginGoto(context, token, page_path) {
     } catch (e) {
         ok('C4 UI 执行', false, e.message);
     } finally {
-        await browser.close();
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
+        try { await browser.close(); } catch (_) { /* 浏览器已关闭 */ }
+        try { await fx.teardown(); } catch (e) { ok('teardown（收掉自起实例）', false, e.message); }
     }
 
     console.log(`\n总判定：${fail === 0 ? '✅ C4 UI PASS' : '❌ C4 UI FAIL'}（${pass} 通过 / ${fail} 失败）`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('C4 UI 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

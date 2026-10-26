@@ -2,7 +2,8 @@
  * 数据协作·终态通知记录展示（通知归档态统一 C1）前端 Playwright UI 实测
  *
  * 用法：node scripts/test-collab-terminal-notify-playwright.js
- * 前置：本地 server 已启动（localhost:3000）
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）
+ *   造数：createPendingFixture 造协作单（OA_FX_ 前缀），附件行 file_name 为 collab/test/c1_s8_result.xlsx（只造 DB 行、不落盘）；清理失败计失败。
  *
  * 覆盖（纯客户端 DOM 断言，直接 UPDATE collab_requests 造终态字段组合，不走真实工作流/钉钉）：
  *   S1 归档单（status=ARCHIVED，曾 DONE+已通知业务方(未读+有key)+已转发导出人+已通知预计(未读+有key)）
@@ -17,44 +18,72 @@
 'use strict';
 
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const { chromium } = require('playwright');
 const fx = require('./_test-fixture');
 
-const BASE_URL = fx.BASE;
-const DB_PATH = fx.DB_PATH;
+// [#106 S4d-1] BASE_URL / DB_PATH：fx.BASE / fx.DB_PATH 在 ready() 之前读取会抛错，改为入口 ready 之后赋值
+let BASE_URL = null;
+let DB_PATH = null;
 
 let pass = 0, fail = 0;
 function expect(cond, msg) { if (cond) { console.log(`  ✓ ${msg}`); pass++; } else { console.log(`  ✗ ${msg}`); fail++; } }
 
 const createdFixtureIds = [];
 
-function patchCollab(id, fields) {
+// [#106 S4d-1] 开库用夹具导出的 fx.openInstanceDb（OPEN_READWRITE、不带 OPEN_CREATE：路径不存在就报错而不是悄悄建空库；带打开回调转 Promise）
+async function patchCollab(id, fields) {
     const cols = Object.keys(fields);
-    if (cols.length === 0) return Promise.resolve();
+    if (cols.length === 0) return;
     const sets = cols.map(c => `${c}=?`).join(', ');
     const params = cols.map(c => fields[c]);
     params.push(id);
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(`UPDATE collab_requests SET ${sets} WHERE id=?`, params, function (err) {
-            db.close();
-            err ? reject(err) : resolve(this);
+            const changes = this && this.changes;
+            // 等 close 回调再落定：关库错误不丢（语句错误优先）
+            db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve({ changes }); });
         });
     });
 }
 
 // 造 1 个 active result_data 附件（S8 交付区需要交付文件列表；FK CASCADE 随 cleanup 一并删）
-function insertActiveResultData(collabId) {
+async function insertActiveResultData(collabId) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
         db.run(
             `INSERT INTO collab_attachments (collab_request_id, attachment_type, file_name, original_name, uploaded_by, uploaded_by_name, status, submission_version)
              VALUES (?, 'result_data', 'collab/test/c1_s8_result.xlsx', 'c1_s8_result.xlsx', ?, '示例用户B', 'active', 1)`,
             [collabId, fx.DEV1_ID],
-            function (err) { db.close(); err ? reject(err) : resolve(this.lastID); }
+            function (err) {
+                const lastID = this && this.lastID;
+                db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(lastID); });
+            }
         );
     });
+}
+
+/**
+ * [#106 S4d-1] 清理造的协作单：每个编号单独 try / catch，一个失败不中断后续；只把清理成功的编号移出追踪（createdFixtureIds 原地收缩）；
+ * 失败的编号再试一轮（共 2 轮，间隔 200ms）；仍遗留的逐个计失败。原来只 console.warn、不计失败，断言全过时脚本仍退出 0，实例里留着测试单
+ */
+async function cleanupCreatedFixtures() {
+    const lastErr = new Map();
+    for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of createdFixtureIds.slice()) {
+            try {
+                await fx.cleanup(id);
+                const at = createdFixtureIds.indexOf(id);
+                if (at >= 0) createdFixtureIds.splice(at, 1);
+                lastErr.delete(id);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    for (const id of createdFixtureIds) {
+        console.warn(`cleanup ${id} failed（已重试 1 轮）: ${lastErr.get(id)}`);
+        expect(false, `清理测试协作单 #${id} 失败（已重试 1 轮）: ${lastErr.get(id)}`);
+    }
 }
 
 // 每次调用起一个全新 context（而非复用同一 page 反复登录）：
@@ -90,6 +119,9 @@ function assertBlock(html, mustInclude, mustExclude, label) {
 }
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 写库 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = fx.BASE;
+    DB_PATH = fx.DB_PATH;
     console.log('=== C1 数据协作·终态通知记录展示 Playwright UI 实测 ===\n');
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
@@ -437,11 +469,16 @@ function assertBlock(html, mustInclude, mustExclude, label) {
         console.error('\n!! 运行异常：', e.stack || e.message);
         fail++;
     } finally {
-        await browser.close();
-        for (const id of createdFixtureIds) {
-            try { await fx.cleanup(id); } catch (e) { console.warn(`cleanup ${id} failed: ${e.message}`); }
-        }
-        console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
-        process.exit(fail === 0 ? 0 : 1);
+        // [#106 S4d-1] 关浏览器失败不跳过夹具清理；清理失败计失败（见 cleanupCreatedFixtures）
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
+        await cleanupCreatedFixtures();
     }
-})();
+
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n== Summary: ${pass} pass / ${fail} fail ==`);
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('终态通知实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -1,7 +1,7 @@
 /**
  * v1.74.0 C4a — 录入附件 endpoint 冒烟 e2e（方案 §1.3a / §4.1 / §6.2 T9）
  *
- * 用法：本地 server 已启动后 node scripts/test-issue-c4a-smoke.js
+ * 用法：node scripts/test-issue-c4a-smoke.js（入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组，四个必须同时给）
  * 复用 _test-fixture signAs（admin=1 / viewer=2 示例客服A / dev1=19）+ apiCall（建/删 issue 走 JSON）。
  * 上传走 multipart/form-data（Node 18+ 原生 FormData/Blob），单独 uploadFile helper。
  *
@@ -21,18 +21,24 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
+const testEnv = require('./lib/test-env');   // 仅用 env().dataDir；ready / teardown / finish 一律走 fx
 
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-const ISSUE_UPLOAD_BASE = path.join(UPLOAD_DIR, 'issues');
+// [#106 S4c-B] 实例库 / 实例上传目录来自 test-env：在 ready() 之后才赋值，不再指向业务库 task_pool.db 与检出里的 uploads。
+//   UPLOAD_DIR = <实例数据根>/uploads（server.js 启动时创建）；数据根取不到（变量组形态下 sdh-instance.json 与实例不一致）时抛错，
+//   不静默跳过物理文件断言（A2 / A3 / A9 / A12 / A14 依赖它）。
+let DB_PATH = null;
+let UPLOAD_DIR = null;
+let ISSUE_UPLOAD_BASE = null;
 
-function dbGet(sql, params) {
-    return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); }); });
+// 以下两个 helper：等 close 回调再落定，关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => { db.get(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); }); });
 }
-function dbAll(sql, params) {
-    return new Promise((resolve, reject) => { const db = new sqlite3.Database(DB_PATH); db.all(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); }); });
+async function dbAll(sql, params) {
+    const db = await fx.openInstanceDb(DB_PATH);
+    return new Promise((resolve, reject) => { db.all(sql, params, (e, r) => { db.close((ce) => { const err = e || ce; err ? reject(err) : resolve(r); }); }); });
 }
 let pass = 0, fail = 0;
 async function check(name, fn) { try { await fn(); console.log('  ✅ ' + name); pass++; } catch (e) { console.log('  ❌ ' + name + ' — ' + e.message); fail++; } }
@@ -204,10 +210,44 @@ async function main() {
     });
 
     // 清理
-    for (const id of created) await fx.apiCall('DELETE', `/api/issues/${id}`, adminToken);
+    // [#106 S4c 收口] 逐个 try/catch 并核对状态码（200 / 404 才算清掉），清掉的才移出追踪数组；剩余编号再试一轮；仍遗留的计入失败（fail），不中断后续清理
+    for (let round = 0; round < 2 && created.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+        for (const id of created.slice()) {
+            try {
+                const r = await fx.apiCall('DELETE', `/api/issues/${id}`, adminToken);
+                if (r.status === 200 || r.status === 404) created.splice(created.indexOf(id), 1);
+                else console.log(`  清理 #${id} 失败（第 ${round + 1} 轮）：HTTP ${r.status} ${JSON.stringify(r.body)}`);
+            } catch (e) { console.log(`  清理 #${id} 异常（第 ${round + 1} 轮）：${e.message}`); }
+        }
+    }
+    if (created.length > 0) { console.log(`  ❌ 测试单清理失败，遗留 id=${created.join(',')}`); fail += created.length; }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     console.log(fail === 0 ? '  🎉 C4a 录入附件冒烟全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    return fail;   // 不在 helper 里 process.exit：由入口在 teardown 之后 finish
 }
-main().catch(e => { console.error('冒烟脚本异常:', e); process.exit(1); });
+
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        DB_PATH = fx.DB_PATH;
+        const dataDir = testEnv.env().dataDir;
+        if (!dataDir) throw new Error('取不到实例数据根（env().dataDir 为 null）：无法确定实例的 uploads 目录，物理文件断言无法进行，拒绝继续');
+        UPLOAD_DIR = path.join(dataDir, 'uploads');
+        ISSUE_UPLOAD_BASE = path.join(UPLOAD_DIR, 'issues');
+        const nFailed = await main();
+        code = nFailed > 0 ? 1 : 0;
+    } catch (e) {
+        console.error('冒烟脚本异常:', e);
+    } finally {
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('issue-c4a smoke 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

@@ -1,11 +1,17 @@
 /**
  * test-sys-commit-cols-playwright.js — commit 编码两列 前端冒烟（C3 起，C5/C5b 阶段续补）
  *
- * 循 test-sys-bug-hold-frontend-playwright.js 套件范式（直接 SQL 造夹具 + JWT 注入 + login.html 中继跳转 +
- * 外部 server:3000 + 真实 task_pool.db，全程不点击会真实外呼钉钉的按钮）。
+ * 循 test-sys-bug-hold-frontend-playwright.js 套件范式（直接 SQL 造夹具 + JWT 注入 + login.html 中继跳转，
+ * 全程不点击会真实外呼钉钉的按钮）。
  *
- * 用法：本地 server（3000）**已重启到含 C1/C2 后端改动的代码**后：
- *   node scripts/test-sys-commit-cols-playwright.js
+ * 用法：node scripts/test-sys-commit-cols-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   造数：直连实例库插单据（标题 CC-<场景>-<RUN_TAG>）与上线单（release_no RCC-<RUN_TAG>-…），RUN_TAG = Date.now() 每次运行唯一；
+ *   收尾按登记的 id 级联删除（每个 id 的每一步各自 try，共 2 轮，间隔 200ms，清完回查，遗留计失败）。
+ *   用户：token 用实例库里第一个 active admin / 第一个 active 普通用户 / 第二个 active 普通用户（与迁移前同口径，不写死 id）；成员夹具里的 5–8 等是展示用 user_id（不要求 users 表里存在）。
+ *   失败证据截图（横滚）放 os.tmpdir() 下本脚本独有的 sys-commit-cols-playwright-shots 子目录（原在检出目录 test-screenshots 下；纯失败诊断，保留不删）。
+ *   批跑建议：needsService:true；非 exclusive（只建 CC- / RCC- 标记的数据，按 id 清理；[T2] / [T2c] 量页面横滚读全实例列表，数据量差异首跑核对）；不需要服务端开关。
+ *   [T26]（#106 W4 / S6b 改）：页面 app.js 引用写 ?v=auto，服务端注入内容指纹；断言 src 以 app.js?v=<磁盘字节 sha256 前 12 位> 结尾（现算）。此前 [T26] 锁的手写串常量已与页面现值漂移（既有红）——随 W4 一并消除。
  *
  * C3 覆盖：
  *   [T1] 列表页 14 列表头就位 + 列序正确（计划开工在末位）
@@ -93,28 +99,44 @@
 'use strict';
 
 const path = require('path');
+const os = require('os');
 const fs = require('fs');
 const sqlite3 = require('sqlite3');
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-// ⚠️ 必须加载 .env：server 端 JWT_SECRET 来自 .env，脚本不加载会退回 fallback 值 →
-//    签名不匹配 → 所有请求 403 → 被 checkAuth 踢回 login.html（本次踩坑，既有套件均有此行）
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（原来必须加载 .env 取 JWT_SECRET，隔离实例的密钥不在 .env 里）
+let BASE_URL = null;        // ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SCREENSHOT_DIR = null;  // ready() 之后赋值：os.tmpdir() 下的失败证据截图目录（顶层 path.join 会被守卫 R6 判红）
+// （#106 W4 / S6b：原 SI_ACTIVE_CACHE_QUERY 手写缓存串常量已删除——页面一律 ?v=auto，由服务端注入内容指纹，[T26] 改为核对指纹 = 磁盘字节 sha256 前 12 位。）
 
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(__dirname, '..', 'test-screenshots');
-// D12 缓存串现役值——唯一定义处，[T26] 的断言与探测输入均引用本常量，不再是散落在正则字面量里的
-// 拷贝。每次生产代码 bump app.js 缓存串，改这一个常量即可同步，不用去 [T26] 内部找字面量改；
-// 忘记同步 = 断言假绿（锁住的是旧串，测不出"生产已 bump 但测试没跟上"这种不一致）。
-const SI_ACTIVE_CACHE_QUERY = 'v1.142.0_notify1';
-
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
 const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));   // [D 组件①·T33c] 多行查询
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
 let passed = 0, failed = 0;
 // codex 264 号末次合并审 HIGH-1 采纳后，codex 265 号复审磁盘查证（git show 上下文）判明：旧 catch
@@ -149,7 +171,7 @@ async function loginPage(browser, token) {
     return page;
 }
 
-const RUN_TAG = Date.now();
+let RUN_TAG = null;   // [#106 S4d-5] ready() 之后赋值：Date.now()（顶层调用会被守卫 R6 判红）
 const createdIssueIds = [];
 const createdReleaseIds = [];   // ⚠️ 必须在 try 外声明——finally 的清理要访问它（在 try 内声明会 ReferenceError）
 
@@ -175,13 +197,19 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
     run(`INSERT INTO sys_issue_dev_commits (issue_id, dev_assignee_id, dev_user_id, component, commit_ref, created_at)
          VALUES (?, ?, ?, ?, ?, datetime('now'))`, [issueId, daId, userId, component, ref]);
 
-(async () => {
+async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-commit-cols-playwright-shots');
+    RUN_TAG = Date.now();
+    db = await openInstanceDb(DB_PATH);
     let browser;
     try {
         // users 表用 `status`（非 is_active）标活跃态——列名以 PRAGMA table_info 实测为准，不凭印象写
         const admin = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'admin' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!admin) throw new Error('库中无 active admin 用户，无法造 token');
-        const adminTok = jwt.sign({ id: admin.id, username: admin.username, display_name: admin.display_name, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+        const adminTok = await testEnv.signToken(admin.id);   // [#106 S4d-5] 实例密钥签（读实例库 users 行），不再自读 JWT_SECRET
         // codex 259 M-2：[T29b] 需要走真实 submit/return 端点——本文件此前所有 mkMember(issueId, 5/6/7…)
         //   都是纯 SQL 造的假 user_id（不对应 users 表真实行），够用于"admin 查看列表"场景，但 submit/
         //   return 端点跑在**真实运行中的 server**（非本文件其余大量 verify-sys-*.js 那种自建 in-process
@@ -189,7 +217,7 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         //   real、active 的 role='user' 账号来签发可用的 dev token。
         const devUser = await get(`SELECT id, username, display_name, role FROM users WHERE role = 'user' AND status = 'active' ORDER BY id LIMIT 1`);
         if (!devUser) throw new Error('库中无 active 普通用户（role=user），无法造 [T29b] 的 dev token');
-        const devTokFlow = jwt.sign({ id: devUser.id, username: devUser.username, display_name: devUser.display_name, role: devUser.role }, JWT_SECRET, { expiresIn: '1h' });
+        const devTokFlow = await testEnv.signToken(devUser.id);   // [#106 S4d-5] 同上
         // codex 264 号末次合并审 [T33b]：DELETE dev-assignees 端点对 gated 家族（DEV/VERIFY）有
         //   LAST_ASSIGNEE 硬闸——"不能移除在册最后一名开发"（index.js:3633-3636，activeCount===1 即拒），
         //   要真实移除 devUser 就必须先有第二名在册开发把 activeCount 顶到 2。查一个不同于 devUser 的
@@ -1226,16 +1254,16 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
             '[T25] D13：通知已读状态串的 title 经 tipOf 走 siFmtDTSec 保到秒（源码合同锁·弱一档证据）');
 
         // ── [T26] D12 缓存串 + 配套守卫 ───────────────────────────────────────────────
-        //   改共享静态资源必 bump 缓存串；但 bump 只解决"下次加载"，挡不住浏览器此刻仍持有旧 app.js——
+        //   （W4 起缓存串由服务端按内容注入指纹，不再手动 bump。）但新指纹只解决"下次加载"，挡不住浏览器此刻仍持有旧 app.js——
         //   旧版没有 'minute' 分支会 fallthrough 回带秒的默认分支，**页面看着正常、秒悄悄回来了**。
         //   守卫把这种静默失败变成 console.error。本条锁"守卫存在且探测串与实现一致"。
         const bumpedPages = await page.evaluate(() => document.querySelector('script[src*="assets/js/app.js"]').getAttribute('src'));
-        // ⚠️ 现役值＝文件头部 SI_ACTIVE_CACHE_QUERY 常量（唯一定义处，本断言引用它而非另写字面量）——
-        //   每次生产代码 bump 缓存串，同步改那一个常量即可，不用在本文件里逐处找字面量改；忘记同步会
-        //   让本断言假绿（锁的是旧串，测不出生产已 bump 但测试没跟上这种漂移）。用 endsWith 做精确尾部
-        //   匹配（非 RegExp）——常量本身含字面量 `.`，塞进正则会被解释成通配符，字符串比较更安全直接。
-        must(bumpedPages.endsWith(`app.js?v=${SI_ACTIVE_CACHE_QUERY}`),
-            `[T26] ⭐ D12：app.js 缓存串应为当前现役串 ${SI_ACTIVE_CACHE_QUERY}（bump 时本常量须同步），实得 "${bumpedPages}"`);
+        // ⚠️ #106 W4 / S6b：页面写 ?v=auto，服务端按 app.js 内容注入指纹。现役值＝app.js 磁盘字节 sha256 前 12 位（现算，不写死）——
+        //   证明“页面拿到的 app.js 地址带着当前文件内容的指纹”，改了 app.js 而浏览器仍持旧缓存的情形由指纹变化 + 下面的陈旧缓存守卫共同兜底。
+        //   原断言锁手写串（SI_ACTIVE_CACHE_QUERY = v1.142.0_notify1）早已与页面现值漂移，W4 后不存在这种串。
+        const appFp = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(__dirname, '..', 'public', 'assets', 'js', 'app.js'))).digest('hex').slice(0, 12);
+        must(bumpedPages.endsWith(`app.js?v=${appFp}`),
+            `[T26] ⭐ D12：app.js 缓存串应为 app.js 磁盘字节 sha256 前 12 位 ${appFp}，实得 "${bumpedPages}"`);
         must(/formatDateTimeUnified\('2026-01-02 03:04:05', 'minute'\)/.test(srcT25)
             && /probe !== '2026-01-02 03:04'/.test(srcT25),
             '[T26] ⭐ 陈旧缓存守卫存在，且其探测输入/期望输出与 [T22] 用的是同一组值（守卫自身写错就成了永不触发的摆设）');
@@ -2156,23 +2184,45 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         fatalError = e;
         console.error('\n[异常] 套件中途抛出未捕获异常（完整堆栈，非仅 message）：\n', e && (e.stack || e));
     } finally {
-        if (browser) await browser.close();
+        // [#106 S4d-5] 原 `if (browser) await browser.close();` 抛错会让整个 finally 段中断（跳过全部库清理）：改独立 try，失败计入 cleanupErrs
+        const cleanupErrs = [];
+        if (browser) {
+            try { await browser.close(); } catch (e) { cleanupErrs.push({ step: 'browser.close', message: e && e.message }); }
+        }
         // 清理夹具（含子表）——S2（同 S1b cleanup 纪律）：SQL 清理错误不吞，收集后统一断言，
         //   不再用 `.catch(() => {})` 静默丢弃（那样即便 DELETE 真失败，日志和退出码都看不出来）。
-        const cleanupErrs = [];
-        const safeDelete = async (sql, params, step) => {
-            try { await run(sql, params); } catch (e) { cleanupErrs.push({ step, message: e && e.message }); }
-        };
-        for (const id of createdIssueIds) {
-            await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
-            await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
-            await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
-            await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+        // [#106 S4d-5] 每个 id 的每一步各自 try；有失败整体再试一轮（共 2 轮，间隔 200ms）；每轮清完回查 sys_issues / sys_releases 按 id 的残留，非 0 计入本轮失败；
+        //   仍失败的计入 cleanupErrs（下方 [T31] 断言据此判红）。原来只有一轮。
+        let roundErrs = [];
+        for (let round = 0; round < 2; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            roundErrs = [];
+            const safeDelete = async (sql, params, step) => {
+                try { await run(sql, params); } catch (e) { roundErrs.push({ step, message: e && e.message }); }
+            };
+            for (const id of createdIssueIds) {
+                await safeDelete('DELETE FROM sys_issue_dev_commits WHERE issue_id = ?', [id], `dev_commits#${id}`);
+                await safeDelete('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id], `dev_assignees#${id}`);
+                await safeDelete('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id], `timeline#${id}`);
+                await safeDelete('DELETE FROM sys_issues WHERE id = ?', [id], `issues#${id}`);
+            }
+            for (const rid of createdReleaseIds) {
+                await safeDelete('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id = ?', [rid], `snapshots#${rid}`);
+                await safeDelete('DELETE FROM sys_releases WHERE id = ?', [rid], `releases#${rid}`);
+            }
+            try {
+                if (createdIssueIds.length) {
+                    const leftIds = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE id IN (${createdIssueIds.map(() => '?').join(',')})`, createdIssueIds);
+                    if (leftIds.c !== 0) roundErrs.push({ step: '回查', message: `sys_issues 按 id 回查仍有 ${leftIds.c} 条残留` });
+                }
+                if (createdReleaseIds.length) {
+                    const leftRelIds = await get(`SELECT COUNT(*) AS c FROM sys_releases WHERE id IN (${createdReleaseIds.map(() => '?').join(',')})`, createdReleaseIds);
+                    if (leftRelIds.c !== 0) roundErrs.push({ step: '回查', message: `sys_releases 按 id 回查仍有 ${leftRelIds.c} 条残留` });
+                }
+            } catch (e) { roundErrs.push({ step: '回查', message: e && e.message }); }
+            if (roundErrs.length === 0) break;
         }
-        for (const rid of createdReleaseIds) {
-            await safeDelete('DELETE FROM sys_issue_release_commit_snapshots WHERE release_id = ?', [rid], `snapshots#${rid}`);
-            await safeDelete('DELETE FROM sys_releases WHERE id = ?', [rid], `releases#${rid}`);
-        }
+        cleanupErrs.push(...roundErrs);
         const left = await get(`SELECT COUNT(*) AS c FROM sys_issues WHERE title LIKE ?`, [`CC-%-${RUN_TAG}`]);
         const leftRel = await get(`SELECT COUNT(*) AS c FROM sys_releases WHERE release_no LIKE ?`, [`RCC-${RUN_TAG}-%`]);
         console.log(`\n  🧹 夹具已清理（残留 issue ${left ? left.c : '?'} 条 / release ${leftRel ? leftRel.c : '?'} 条，均应为 0）`);
@@ -2196,18 +2246,26 @@ const seedCommit = (issueId, daId, userId, component, ref) =>
         }
         must(createdIssueIds.length === 0 || timelineLeftCount === 0,
             `[T31] S4：夹具清理后 sys_issue_timeline 残留应为 0（含 [T29c] 插入的伪 resume 行），实得 ${timelineLeftCount === null ? '(查询失败)' : timelineLeftCount}`);
-        db.close();
+        // [#106 S4d-5] 原为 db.close()（不等回调）：改等 close 回调，失败计失败；随后收掉自起实例，失败计失败
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
+        try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
         console.log(`\n  合计 ${passed} PASS / ${failed} FAIL${fatalError ? '  ⚠️ FATAL：套件中途抛出未捕获异常，见上方完整堆栈（此次结果不可信赖为"仅这些用例失败"）' : ''}`);
-        // codex 265 号复审磁盘查证后改写：旧 catch 本来就有 failed++，断言失败与 catch 到的异常原本
-        //   就都会走 exit(1)——这里判 `failed === 0 && !fatalError` 不是在补一个"会报全绿"的窟窿，
-        //   而是让 fatalError 在汇总行里独立可见（见上方 let fatalError 声明处的三点价值说明）。
-        process.exit(failed === 0 && !fatalError ? 0 : 1);
     }
-})().catch(e => {
+    // codex 265 号复审磁盘查证后改写：旧 catch 本来就有 failed++，断言失败与 catch 到的异常原本
+    //   就都会走 exit(1)——这里判 `failed === 0 && !fatalError` 不是在补一个"会报全绿"的窟窿，
+    //   而是让 fatalError 在汇总行里独立可见（见上方 let fatalError 声明处的三点价值说明）。
+    // [#106 S4d-5] 原为 finally 里 process.exit(...)：改 teardown 之后 testEnv.finish(code)（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+    testEnv.finish(failed === 0 && !fatalError ? 0 : 1);
+}
+
+main().catch(async (e) => {
     // codex 265 号 M-1：外层 rejection 兜底——封住"finally 段自身抛错（例如 browser.close()/
-    //   cleanup() 内部 await 失败）导致 IIFE 整体 rejected、绕过上面的汇总打印与 process.exit 调用"
+    //   cleanup() 内部 await 失败）导致 main 整体 rejected、绕过上面的汇总打印与退出码设置"
     //   这条路径。Node 现代版本对未处理的 rejection 默认也会以非零码退出（那是运行时环境的安全网），
     //   但退出码的正确性不应该依赖运行时兜底，代码自身要把这条路径显式封死。
+    // [#106 S4d-5] 同时覆盖 ready() 失败（实例起不来）：teardown 后以 1 退出。
     console.error('[顶层兜底] finally 段或未捕获 rejection：\n', e && (e.stack || e));
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

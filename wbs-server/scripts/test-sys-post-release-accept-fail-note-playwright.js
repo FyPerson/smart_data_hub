@@ -13,7 +13,15 @@
  * 系统迭代·F-3「补验收弹窗 fail 说明必填」前端 Playwright 冒烟
  * （用户拍板 P8·后端已改 400 POST_RELEASE_ACCEPT_FAIL_NOTE_REQUIRED）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-post-release-accept-fail-note-playwright.js
+ * 用法：node scripts/test-sys-post-release-accept-fail-note-playwright.js
+ * 前置：[#106 S4d-4] ① 无服务前置：经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *       ② 被测服务需要 SYS_FASTLANE_ENABLE=1（先行上线授权 / 确认链路的服务端开关，server.js:22251 `fastlaneAuthorizeEnabled: process.env.SYS_FASTLANE_ENABLE === '1'`，
+ *          不是脚本自己的开关；闸关时夹具里的 fast-release-authorize 返 403 FAST_RELEASE_FEATURE_DISABLED，夹具直接抛错）：
+ *          · 脚本自起实例（单独运行）时，本脚本在 ready() 的选项里带 extraEnv: { SYS_FASTLANE_ENABLE: '1' }（test-instance.js 接受该选项，只拒 SDH_* 与被剔除的键），所以单独运行即可；
+ *          · 批跑器起的共享实例（TEST_* 变量组形态）会忽略 ready() 选项，且批跑器的 --instance-options-file 不接受 extraEnv：共享实例要开，只能靠子进程继承的父进程环境
+ *            （启动批跑器的 shell 里先设 SYS_FASTLANE_ENABLE=1）或本检出 wbs-server/.env 里有该键（它在 .env 白名单里，不会被置空）。批跑建议：本脚本 exclusive（写当日值班表 sys_release_duty_roster），并让批跑器所在环境带 SYS_FASTLANE_ENABLE=1。
+ *       ③ 依赖隔离实例（本检出本地库的快照）里存在固定用户 id 1（admin）/ 8（开发 + 默认值班人）与 id 13（受理人）——首跑核对。
+ *       ④ 失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * 夹具：真实链路造出「先行上线待补验收」态（不用 SQL 造态）——受理→指派→估时→授权(fast-release-authorize)
  *   →submit（普通提交，无 direct_release 字段——S2 已拆直上分支）挂牌 → 值班执行人
@@ -42,32 +50,41 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const net = require('net');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / SCREENSHOT_DIR：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let SCREENSHOT_DIR = null;
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;   // 示例对接人
 const DEV_ID = 8;        // 示例开发A（本地真实 active 非 viewer 账号，同 test-sys-eta-generation-playwright.js 既有复用账号）
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.get(sql, params, (e, row) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(row); }); }); });
+};
 // [S3 收口新增] dbRun——新链需要在夹具里造"当日值班"这一条真实数据（submit 挂牌逻辑读的是真实
 //   sys_release_duty_roster，非 mock），此前文件只读不写，现补写通道。
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
@@ -98,6 +115,10 @@ function siFlagsInRow(page, issueId) {
 }
 
 let seq = 0;
+// [#106 S4d-4 修复批] 夹具单编号登记：建单（201）拿到 id 后立即登记，后续「受理 / 指派 / 估时 / 授权 / 提交 / 确认翻牌」任一步抛错时，收尾清理仍能清到这张单
+//   （原来 id 只在 mkFastlanePendingBug 成功返回后才由调用方 push，多步推进中途失败的单会漏清）。幂等（同 submit-withdraw 的 registerCreatedId 写法）
+const createdIds = [];
+function registerCreatedId(id) { if (Number.isInteger(id) && id > 0 && !createdIds.includes(id)) createdIds.push(id); }
 // [R7 补漏] 见 mkFastlanePendingBug 内注释——非 null 时记录本文件测试运行期间真正插入的当日值班行 id，
 // 供 main() 的 finally 精确回滚（仅删本次插入的那一行，不做"当日日期全表扫"这类可能误删真实数据的操作）。
 let dutyInsertTracking = null;
@@ -113,6 +134,7 @@ async function mkFastlanePendingBug(adminTok, devTok) {
     const body = await r.json();
     if (r.status !== 201) throw new Error(`建单失败：${r.status} ${JSON.stringify(body)}`);
     const id = body.id;
+    registerCreatedId(id);   // 建单即登记
 
     let resp = await fetch(`${BASE_URL}/api/sys-issues/${id}/intake-accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` }, body: '{}' });
     if (resp.status !== 200) throw new Error(`[夹具-受理] 应 200，实得 ${resp.status} ${JSON.stringify(await resp.json().catch(() => null))}`);
@@ -205,7 +227,7 @@ function ensureServerListening(timeoutMs = 3000) {
         const sock = net.createConnection({ port, host });
         const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${host}:${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
         sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件`)); });
+        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${host}:${port} 未监听（${e.message}）——ready() 之后被测实例应已在监听，请查隔离实例的启动日志`)); });
     });
 }
 // [R4] TCP 连接成功只证明"有进程在监听端口"，不证明"监听者是目标 server.js"（同 MEMORY「生产 PM2
@@ -222,6 +244,11 @@ async function ensureAppReadinessEndpoint() {
 }
 
 async function main() {
+    // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）。选项只对自起形态有意义：被测服务需要 SYS_FASTLANE_ENABLE=1（见文件头说明）
+    await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '1' } });
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
     await ensureServerListening();
     console.log('  ✅ 端口 Listen 探测通过（server 已就绪）');
     await ensureAppReadinessEndpoint();
@@ -230,14 +257,14 @@ async function main() {
     const devTok = await signAs(DEV_ID);
     console.log('\n══════ 系统迭代·F-3 补验收弹窗 fail 说明必填 前端 Playwright 冒烟 ══════');
 
-    const createdIds = [];
+    // createdIds / registerCreatedId 在模块级（mkFastlanePendingBug 建单后立即登记，见上）
     const browser = await chromium.launch();
     try {
         // ═══════════════════════════════════════════════════════════════
         // T1-T4：单条真实链路——一张 fastlane pending 单，先验前端拦截再验补填成功
         // ═══════════════════════════════════════════════════════════════
         const id = await mkFastlanePendingBug(adminTok, devTok);
-        createdIds.push(id);
+        registerCreatedId(id);   // 幂等（helper 内已登记）
 
         const page = await loginPage(browser, adminTok);   // post-release-accept 要求 admin，同建单人身份打开
         await page.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id}`);
@@ -295,7 +322,7 @@ async function main() {
         const rowT4 = await dbGet('SELECT post_release_acceptance, post_derive_issue_id FROM sys_issues WHERE id=?', [id]);
         await shotOnFail(page, rowT4.post_release_acceptance === 'failed_derived', 't4-status-updated', `库内 post_release_acceptance=failed_derived（实得=${rowT4.post_release_acceptance}）`);
         await shotOnFail(page, !!rowT4.post_derive_issue_id, 't4-derived-id', `派生单 id 已落库（实得=${rowT4.post_derive_issue_id}）`);
-        if (rowT4.post_derive_issue_id) createdIds.push(rowT4.post_derive_issue_id);
+        if (rowT4.post_derive_issue_id) registerCreatedId(rowT4.post_derive_issue_id);
 
         // ── T4b【追加批·2026-08-13·修复：列表页「补验收未通过」徽章】提交成功后 siAfterAction 已
         //   重跑 siLoadList（同 siRenderDrawer 一并刷新），列表该单应出现新徽章，title 含派生单号。
@@ -323,7 +350,7 @@ async function main() {
         // ═══════════════════════════════════════════════════════════════
         console.log('\n── T5：★对照组·pass + 说明留空 → 提交成功（证明必填不是恒必填） ──');
         const id5 = await mkFastlanePendingBug(adminTok, devTok);
-        createdIds.push(id5);
+        registerCreatedId(id5);
         const page5 = await loginPage(browser, adminTok);
         await page5.goto(`${BASE_URL}/Sys_Iteration.html?issue=${id5}`);
         await page5.waitForLoadState('networkidle');
@@ -374,29 +401,44 @@ async function main() {
         //   翻牌全链路，实际触达 sys_issue_dev_commits（commits 提交）+ sys_fast_release_executors（挂牌行）
         //   两张，本次一并补齐；attachments/delete_audit/release_commit_snapshots 三张本夹具未上传附件/
         //   未删单/未触发批次发布，结构性够不着，无需清理。
-        const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
         // [R7] 清理异常汇总——此前逐条 catch(e) => console.warn 只打印不影响退出码，一次清理失败很容易
         // 被大量正常输出淹没而被忽略，进程仍以 0 退出。改为累计计数，非零即拉低最终 exit code。
+        // [#106 S4d-4] 每个编号单独 try，清掉才移出追踪，有失败再试一轮（共 2 轮，间隔 200ms，删除语句幂等）；两轮后仍失败的编号计清理异常
         let cleanupErrorCount = 0;
         const CHILD_TABLES = ['sys_issue_dev_commits', 'sys_fast_release_executors', 'sys_issue_timeline', 'sys_issue_dev_events', 'sys_issue_dev_assignees'];
-        for (const id of createdIds) {
-            try {
-                for (const t of CHILD_TABLES) await dbRun(`DELETE FROM ${t} WHERE issue_id=?`, [id]);
-                await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
-            } catch (e) { cleanupErrorCount++; console.warn(`夹具清理失败 issue #${id}: ${e.message}`); }
+        const allCreatedIds = createdIds.slice();
+        const pendingIds = createdIds.slice();
+        const lastErr = new Map();
+        for (let round = 0; round < 2 && pendingIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));
+            for (const id of pendingIds.slice()) {
+                try {
+                    for (const t of CHILD_TABLES) await dbRun(`DELETE FROM ${t} WHERE issue_id=?`, [id]);
+                    await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
+                    pendingIds.splice(pendingIds.indexOf(id), 1);
+                    lastErr.delete(id);
+                } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+            }
         }
+        for (const id of pendingIds) { cleanupErrorCount++; console.warn(`夹具清理失败 issue #${id}（已重试 1 轮）: ${lastErr.get(id)}`); }
         // [R7] 逐表核对 createdIds 对应行数=0（不止查主表，五张子表各自独立核对——子表 DELETE 若单独
         // 抛错但被上面 try/catch 吞掉继续跑主表 DELETE，旧写法只报"issue 已清理"不会暴露子表孤儿行）。
-        const idList = createdIds.length ? createdIds : [-1];
+        const idList = allCreatedIds.length ? allCreatedIds : [-1];
         const placeholders = idList.map(() => '?').join(',');
         let totalResidual = 0;
         const residualDetail = {};
-        for (const t of [...CHILD_TABLES, 'sys_issues']) {
-            const col = t === 'sys_issues' ? 'id' : 'issue_id';
-            const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
-            const c = r ? r.c : 0;
-            residualDetail[t] = c;
-            totalResidual += c;
+        // [#106 S4d-4] 回查本身失败也计失败（原来无 try：库不可读时会抛出并吞掉后面的值班表回滚与退出码）
+        try {
+            for (const t of [...CHILD_TABLES, 'sys_issues']) {
+                const col = t === 'sys_issues' ? 'id' : 'issue_id';
+                const r = await dbGet(`SELECT COUNT(*) c FROM ${t} WHERE ${col} IN (${placeholders})`, idList);
+                const c = r ? r.c : 0;
+                residualDetail[t] = c;
+                totalResidual += c;
+            }
+        } catch (e) {
+            cleanupErrorCount++;
+            console.warn(`夹具清理回查失败: ${e && e.message}`);
         }
         console.log(`  🧹 夹具清理完成（共创建 ${createdIds.length} 条，清理异常 ${cleanupErrorCount} 次，逐表残留=${JSON.stringify(residualDetail)}，合计残留 ${totalResidual} 行，均应为 0）`);
         if (cleanupErrorCount > 0 || totalResidual > 0) {
@@ -406,22 +448,31 @@ async function main() {
         // [R7 补漏] 当日值班表测试插入行精确回滚——见 mkFastlanePendingBug 内 dutyInsertTracking 注释：
         // 此前本文件从未清理这行数据，每跑一次就在本地库永久留下一条测试插入的"今天谁值班"记录。
         if (dutyInsertTracking && dutyInsertTracking.insertedRowId) {
-            try {
-                await dbRun('DELETE FROM sys_release_duty_roster WHERE id=?', [dutyInsertTracking.insertedRowId]);
-                const dutyRemain = await dbGet('SELECT COUNT(*) c FROM sys_release_duty_roster WHERE id=?', [dutyInsertTracking.insertedRowId]);
-                if (dutyRemain && dutyRemain.c > 0) {
-                    fail++;
-                    console.warn(`[R7] 值班表测试插入行 #${dutyInsertTracking.insertedRowId} 清理后仍残留（应为 0，实得 ${dutyRemain.c}）`);
-                }
-            } catch (e) {
+            // [#106 S4d-4] 失败再试一轮（共 2 轮，间隔 200ms）；两轮后仍失败 / 回查仍残留都计失败
+            let dutyErr = null;
+            for (let round = 0; round < 2; round++) {
+                if (round > 0) await new Promise((r) => setTimeout(r, 200));
+                try {
+                    await dbRun('DELETE FROM sys_release_duty_roster WHERE id=?', [dutyInsertTracking.insertedRowId]);
+                    const dutyRemain = await dbGet('SELECT COUNT(*) c FROM sys_release_duty_roster WHERE id=?', [dutyInsertTracking.insertedRowId]);
+                    if (dutyRemain && dutyRemain.c > 0) throw new Error(`清理后仍残留（应为 0，实得 ${dutyRemain.c}）`);
+                    dutyErr = null;
+                    break;
+                } catch (e) { dutyErr = e; }
+            }
+            if (dutyErr) {
                 fail++;
-                console.warn(`夹具清理失败 duty roster #${dutyInsertTracking.insertedRowId}: ${e.message}`);
+                console.warn(`[R7] 值班表测试插入行 #${dutyInsertTracking.insertedRowId} 清理失败（已重试 1 轮）: ${dutyErr.message}`);
             }
         }
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) process.exit(1);
     }
+    try { await testEnv.teardown(); } catch (e) { fail++; console.warn('teardown（收掉自起实例）失败:', e && e.message || e); }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((e) => { console.error('顶层异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('顶层异常:', e && e.stack || e);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

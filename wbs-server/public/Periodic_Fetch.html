@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>周期取数推送 - 智数协同平台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="assets/css/style.css?v=v1.141.0_badge2">
+    <link rel="stylesheet" href="assets/css/style.css?v=auto">
     <!-- 状态徽章统一 S3：引入共享组件层（本页只用其中的 .u-status-badge + .sem-* 语义类）。
          引入安全性论证（22 号审已背书·数字为 S3-fix 实测复核值）：components.css 现有 **124 条**规则，
          根选择器只有三种——`.u-*` 121 条、`.unified-page` 2 条、`:root` 1 条。
@@ -14,7 +14,7 @@
          本页任何现有元素；`:root` 那条只声明 --sem-* 自定义属性，未被 var() 引用时零视觉效果，
          对本页同样是惰性的。⇒ 引入是安全的，只有新写的 u-status-badge 会生效。
          （这三个数字由 verify-unify-static.js 的断言⓪b 持续守着，改动会红。） -->
-    <link rel="stylesheet" href="assets/css/components.css?v=v1.153.0_fastlanetier15">
+    <link rel="stylesheet" href="assets/css/components.css?v=auto">
     <style>
         /* ============================================================
            周期取数推送页 · 页面私有样式（全部 pf- 前缀，避免与 style.css 碰撞）
@@ -394,7 +394,7 @@
         </div>
     </div>
 
-    <script src="assets/js/app.js?v=v1.180.0_mc77c1a4"></script>
+    <script src="assets/js/app.js?v=auto"></script>
     <script>
     /* ============================================================
        周期取数推送前端 · 仅 admin 可用

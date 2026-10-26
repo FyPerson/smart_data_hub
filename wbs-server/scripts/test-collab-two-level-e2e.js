@@ -4,7 +4,7 @@
  * 用法：node scripts/test-collab-two-level-e2e.js
  *
  * 前置：
- *   - 本地 server 已启动（localhost:3000）
+ *   - 入口 ready() 自起隔离实例，或核对批跑器给的 TEST_* 变量组（四个必须同时给）
  *   - 本地 task_pool.db schema 已含 v3 五字段
  *   - 用户：admin(id=1) / 示例用户A demo_user_a(id=3, user) / 示例用户B demo_user_b(id=19, user) / 示例发布者 19900000003(id=7, publisher)
  *   - source db_connection: id=2 业务系统BMS
@@ -29,15 +29,12 @@
 
 'use strict';
 
-const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+// [#106 S4c-A1] 本脚本原先不用夹具，自己写死 3000 / 业务库路径 / .env 的 JWT_SECRET；整体换成夹具（test-env）：
+//   BASE / DB_PATH 在 ready() 之后才赋值，签名走 fx.signAs，建出的协作单由 fx.cleanup 清理。
+const fx = require('./_test-fixture');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE = null;
+let DB_PATH = null;
 
 // 测试角色 id
 const ADMIN_ID = 1;
@@ -49,25 +46,18 @@ const TARGET_DB_CONN_ID = 2; // 业务系统BMS
 
 const tokens = {};
 let createdId = null;
+// [#106 S4c-1 修复批 1] T02 / T03 本应被拒（400）；若服务端回归成放行并返回 id，这些单也归本脚本清理（只收本脚本自己建的单）
+const extraCreatedIds = [];
 
 async function loginAs(userId) {
-    const user = await new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH);
-        db.get('SELECT id, username, display_name, role FROM users WHERE id=?', [userId],
-            (err, row) => { db.close(); err ? reject(err) : resolve(row); });
-    });
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-    );
+    return fx.signAs(userId);
 }
 
-function dbGet(sql, params = []) {
+async function dbGet(sql, params = []) {
+    const db = await fx.openInstanceDb(DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY);
-        db.get(sql, params, (err, row) => { db.close(); err ? reject(err) : resolve(row); });
+        // 等 close 回调再落定：关库错误不丢，resolve 时句柄已关闭（语句错误优先）
+        db.get(sql, params, (err, row) => { db.close((cerr) => { const e = err || cerr; e ? reject(e) : resolve(row); }); });
     });
 }
 
@@ -132,12 +122,14 @@ async function main() {
     const r2 = await apiCall('POST', '/api/collab/requests', tokens.admin, {
         ...createBody, oa_request_no: oaNo + '-T02', developer_id: DEV1_ID
     });
+    if (r2.body && r2.body.id) extraCreatedIds.push(r2.body.id);   // 回归（本该 400 却建成）时也要清理
     record('T02 越权直填 developer_id 被拒', r2.status === 400, `status=${r2.status} err=${r2.body && r2.body.error}`);
 
     // T03 admin 创建时缺 contact_person_id → 400
     console.log('T03 admin 创建时缺 contact_person_id → 400');
     const { contact_person_id, ...noContact } = createBody;
     const r3 = await apiCall('POST', '/api/collab/requests', tokens.admin, { ...noContact, assign_mode: 'normal', oa_request_no: oaNo + '-T03' });
+    if (r3.body && r3.body.id) extraCreatedIds.push(r3.body.id);   // 回归（本该 400 却建成）时也要清理
     const r3Error = String(r3.body && r3.body.error || '');
     record('T03 normal 缺 contact_person_id 被拒', r3.status === 400 && /contact_person_id|对接人/.test(r3Error), `status=${r3.status} err=${r3Error}`);
 
@@ -234,12 +226,39 @@ async function main() {
     if (passed < total) {
         console.log('\n失败用例：');
         results.filter(r => !r.pass).forEach(r => console.log(`  ❌ ${r.name} — ${r.detail}`));
-        process.exit(1);
+    } else {
+        console.log('✅ 全部通过');
     }
-    console.log('✅ 全部通过');
+    // helper 不再 process.exit：由入口按 results 判定、在 teardown 之后 finish
 }
 
-main().catch(e => {
-    console.error('测试异常:', e);
+(async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出）
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
+    let code = 1;
+    try {
+        BASE = fx.BASE;
+        DB_PATH = fx.DB_PATH;
+        await main();
+        code = results.length > 0 && results.every(r => r.pass) ? 0 : 1;
+    } catch (e) {
+        console.error('测试异常:', e);
+    } finally {
+        // 清理只删本脚本自己建的单（T01 的 TEST-V3-* 协作单）；共享实例下不留残留
+        // [#106 S4c 收口] 两类编号合成一个待清理列表，逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留即 code = 1，不中断后续清理与 teardown
+        const pendingCleanup = (createdId !== null ? [createdId] : []).concat(extraCreatedIds);
+        for (let round = 0; round < 2 && pendingCleanup.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of pendingCleanup.slice()) {
+                try { await fx.cleanup(id); pendingCleanup.splice(pendingCleanup.indexOf(id), 1); } catch (e) { console.warn(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+            }
+        }
+        if (pendingCleanup.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${pendingCleanup.join(',')}`); code = 1; }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); code = 1; }
+    }
+    fx.finish(code);   // teardown 已落定；只设退出码（见 lib/test-env.js finish），不在 finally 里调
+})().catch(async (e) => {
+    console.error('two-level e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

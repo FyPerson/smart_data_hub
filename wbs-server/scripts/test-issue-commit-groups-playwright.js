@@ -1,6 +1,10 @@
 /**
  * commit 记录改造（2026-07-19）— Playwright 端到端冒烟
- * 用法：本地 server(3000) 已启动后 node scripts/test-issue-commit-groups-playwright.js
+ * 用法：node scripts/test-issue-commit-groups-playwright.js
+ * [#106 S4d-2] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   造数：直连实例库插 1 张 sys_issues 单（标题 commit改造冒烟单）+ 1 条 dev_assignees；收尾先走 API DELETE（200 / 404 算清掉），否则直连库兜底删主表与两张子表（兜底即计失败：服务端删单要删 7 张子表 + 物理附件），并回查主表行，
+ *   共 2 轮间隔 200ms，遗留计失败（原来兜底的三条 DELETE 都是 `.catch(() => {})` 吞错、也不回查）；入口 .catch 也会尽力清理。
+ *   固定值：用户 id 1 admin / 19。
  *
  * 改造口径（HANDOFF §A）：提交弹窗「Commit 记录」由「下拉选前端/后端 + 固定两槽」改为——
  *   ① 固定「前端组 / 后端组」两分组（去下拉·组固定 component）
@@ -22,21 +26,36 @@
  *   C7 控制台无 JS 报错
  */
 'use strict';
-const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+const testEnv = require('./lib/test-env');
 
-const BASE = 'http://localhost:3000';
-const DB = path.join(__dirname, '..', 'task_pool.db');
-const SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
+let BASE = null;   // [#106 S4d-2] ready() 之后赋值：testEnv.env().baseUrl
+let DB = null;     // [#106 S4d-2] ready() 之后赋值：testEnv.env().dbPath（实例库）
 const ADMIN = 1, DEV_A = 19;   // 示例用户B
 
-const dbGet = (s, p) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.get(s, p, (e, x) => { d.close(); e ? j(e) : r(x); }); });
-const dbAll = (s, p) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.all(s, p, (e, x) => { d.close(); e ? j(e) : r(x); }); });
-const dbRun = (s, p) => new Promise((r, j) => { const d = new sqlite3.Database(DB); d.run(s, p, function (e) { d.close(); e ? j(e) : r(this); }); });
-async function sign(uid) { const u = await dbGet('SELECT id,username,display_name,role FROM users WHERE id=?', [uid]); return jwt.sign({ id: u.id, username: u.username, display_name: u.display_name, role: u.role }, SECRET, { expiresIn: '4h' }); }
+// [#106 S4d-2] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE）；本脚本只用 test-env、不引夹具，故保留本地副本
+function openInstanceDb(dbPath) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(db)));
+  });
+}
+// close 等回调落定，关库错误不丢（语句错误优先）
+async function dbGet(s, p) {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.get(s, p, (e, x) => { d.close((ce) => { const err = e || ce; err ? j(err) : r(x); }); }); });
+}
+async function dbAll(s, p) {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.all(s, p, (e, x) => { d.close((ce) => { const err = e || ce; err ? j(err) : r(x); }); }); });
+}
+async function dbRun(s, p) {
+  const d = await openInstanceDb(DB);
+  return new Promise((r, j) => { d.run(s, p, function (e) { const ctx = { lastID: this && this.lastID, changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? j(err) : r(ctx); }); }); });
+}
+// [#106 S4d-2] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
+async function sign(uid) { return testEnv.signToken(uid); }
 async function api(tok, method, url, body) {
   const r = await fetch(BASE + url, { method, headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = { _raw: t.slice(0, 160) }; }
@@ -72,8 +91,58 @@ async function openDrawer(page, id) { await page.evaluate(i => siOpenDrawer(i), 
 async function openSubmit(page) { await page.evaluate(() => siModalSubmit(siDetail.issue)); await page.waitForTimeout(400); }
 
 let issueId = null;
+let adminTok = null;   // [#106 S4d-2] 提到模块级，供入口 .catch 里尽力清理用
+
+/**
+ * [#106 S4d-2] 清理造的 sys_issues 单：先走 API DELETE（200 / 404 算清掉）；否则直连实例库兜底删主表与 dev_commits / dev_assignees 两张子表（其余 5 张子表 + 物理附件不删，兜底即计失败），并回查主表行确已不在；
+ * 兜底一旦开始（fallbackTried），之后哪怕回查抛错、下一轮 API 返回 404 或 200，也仍返回同一条「兜底即计失败」说明（用首次触发兜底的状态码），不判成功；API 200 / 404 都先按 id 回查主表确已不在；
+ * 失败再试一轮（共 2 轮，间隔 200ms）；清掉才把 issueId 置空（入口 .catch 里再调一次是幂等的）；返回 null = API 已删净（200 / 404），否则返回失败说明（兜底成功也返回说明）。
+ * 原来兜底的三条 DELETE 都是 `.catch(() => {})` 吞错、不回查，兜底失败也退出 0
+ */
+async function cleanupIssue() {
+  if (!issueId) return null;
+  let lastErr = null;
+  let fallbackTried = false;   // [#106 S4d-2 送审前小修] 兜底开始前置 true：兜底的 DELETE sys_issues 可能已生效而回查抛错，下一轮 API 会返回 404，此时不能判成功
+  let fallbackStatus = null;   // 触发兜底的那次 API 状态码（说明文字用）
+  const fallbackNote = (st) => `API DELETE 返回 ${st}；已直连兜底删主表与 dev_commits / dev_assignees，dev_events / release_commit_snapshots / fast_release_executors / attachments / timeline 可能残留`;
+  for (let round = 0; round < 2; round++) {
+    if (round > 0) await new Promise((r) => setTimeout(r, 200));
+    try {
+      const d = await api(adminTok, 'DELETE', `/api/sys-issues/${issueId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' });
+      console.log(`  · 清理测试单 #${issueId}（${d.status}）`);
+      if (d.status === 200 || d.status === 404) {
+        // [#106 S4d-2 收口批] 200 与 404 合并处理：按 id 回查确认主表已清才置空；兜底已开始过（fallbackTried）时，下一轮 API 无论 200 还是 404 都不能判成功——
+        // 前一轮兜底只删了主表与两张子表，其余 5 张子表 + 物理附件可能残留，返回的说明用「首次」触发兜底的状态码（重试不覆盖）
+        const still = await dbGet(`SELECT id FROM sys_issues WHERE id = ?`, [issueId]);
+        if (still) { lastErr = `API 返回 ${d.status}，但主表行仍在`; continue; }
+        issueId = null;
+        return fallbackTried ? fallbackNote(fallbackStatus) : null;
+      }
+      // 兜底：夹具改直连落库后，DELETE 端点在新版受理流程下的状态门尚未逐一核实过，
+      // 若 API 删除未成功（非 200），直接落库兜底删主表与 dev_commits / dev_assignees 两张子表，防残留（同 test-sys-commit-cols-playwright.js 范式；其余 5 张子表 + 物理附件不删，兜底即计失败）。
+      fallbackTried = true; if (fallbackStatus === null) fallbackStatus = d.status;   // 首次触发兜底的状态码，重试不覆盖
+      await dbRun(`DELETE FROM sys_issue_dev_commits WHERE issue_id = ?`, [issueId]);
+      await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?`, [issueId]);
+      await dbRun(`DELETE FROM sys_issues WHERE id = ?`, [issueId]);
+      const left = await dbGet(`SELECT id FROM sys_issues WHERE id = ?`, [issueId]);
+      // [#106 S4d-2 修复批] 兜底即计失败：服务端删单要删 7 张子表 + 物理附件（routes/sys-iteration/index.js DELETE 端点），这里只删了主表与两张子表，不能判清理成功
+      if (!left) {
+        console.log(`  · API 删除未 200（${d.status}），已直连落库兜底清理 #${issueId}`);
+        issueId = null;
+        return fallbackNote(fallbackStatus);
+      }
+      lastErr = `API 返回 ${d.status}，直连兜底后主表行仍在`;
+    } catch (e) { lastErr = (e && e.message) || String(e); }
+  }
+  return lastErr;
+}
+
 async function main() {
-  const adminTok = await sign(ADMIN), devATok = await sign(DEV_A);
+  await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+  BASE = testEnv.env().baseUrl;
+  DB = testEnv.env().dbPath;
+  adminTok = await sign(ADMIN);
+  const devATok = await sign(DEV_A);
   console.log('\n══════ commit 记录改造 端到端冒烟 ══════');
 
   // 造数：直接落库到「开发中」+ 本人在册 pending，旁路受理/排期/指派新流程。
@@ -225,22 +294,19 @@ async function main() {
 
     must(allErrs.length === 0, `C7 控制台无 JS 报错（${allErrs.length} 个${allErrs.length ? ': ' + allErrs.slice(0, 2).join(' | ') : ''}）`);
   } finally {
-    await browser.close();
-    if (issueId) {
-      const d = await api(adminTok, 'DELETE', `/api/sys-issues/${issueId}`, { reason: '自动化实测收尾清理（C2a 起 reason 必填）' });
-      console.log(`  · 清理测试单 #${issueId}（${d.status}）`);
-      // 兜底：夹具改直连落库后，DELETE 端点在新版受理流程下的状态门尚未逐一核实过，
-      // 若 API 删除未成功（非 200），直接落库删净子表+主表，防残留（同 test-sys-commit-cols-playwright.js 范式）。
-      if (d.status !== 200) {
-        await dbRun(`DELETE FROM sys_issue_dev_commits WHERE issue_id = ?`, [issueId]).catch(() => {});
-        await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?`, [issueId]).catch(() => {});
-        await dbRun(`DELETE FROM sys_issues WHERE id = ?`, [issueId]).catch(() => {});
-        console.log(`  · API 删除未 200，已直连落库兜底清理 #${issueId}`);
-      }
-    }
+    try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+    const keepId = issueId;
+    const cleanupErr = await cleanupIssue();
+    if (cleanupErr) must(false, `清理测试单 #${keepId} 未判成功：${cleanupErr}`);
   }
+  try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
   console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
   console.log(fail === 0 ? '  🎉 commit 记录改造 端到端冒烟全部通过\n' : '  🚫 存在失败项\n');
-  process.exit(fail === 0 ? 0 : 1);
+  testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('commit 改造冒烟异常:', e); process.exit(1); });
+main().catch(async (e) => {
+  console.error('commit 改造冒烟异常:', e);
+  try { await cleanupIssue(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+  try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+  process.exit(1);
+});

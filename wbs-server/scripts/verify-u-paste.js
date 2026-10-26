@@ -3,7 +3,7 @@
  *
  * 范围：只测试不依赖真实 DOM 布局引擎的纯逻辑面——MIME 映射、文件名合成（含序号/前缀参数化）、
  * 文本粘贴保护判定链（classifyClipboardItems/shouldIntercept/isEditableFocus）、register() 入参校验、
- * KIT_VERSION 与引用页缓存串是否同步。isVisible()/resolveCandidates()/真实 paste 事件驱动的浏览器行为
+ * 引用页 u-paste.js 恰为 ?v=auto 与 KIT_VERSION 接口握手常量是否同步。isVisible()/resolveCandidates()/真实 paste 事件驱动的浏览器行为
  * 由 test-sys-paste-playwright.js（33 组）与 test-quick-log-playwright.js（贴图直通用例）覆盖，不重复。
  *
  * 用法：node scripts/verify-u-paste.js
@@ -206,25 +206,34 @@ console.log('\nF4c. M2 零注册前置状态（纯状态断言，不可测的 DO
     expect(UPaste._registrationCount() === 0, 'unregister 后 _registrationCount()=0（0 注册态可达，paste 处理器 M2 分支的前置条件成立）', UPaste._registrationCount());
 }
 
-// ---------- KIT_VERSION 与引用页缓存串同步核查（codex S3 复审 L3 采纳：改为扫描 public 下所有引用
+// ---------- KIT_VERSION 与引用页版本比对常量同步核查（codex S3 复审 L3 采纳：改为扫描 public 下所有引用
 //   u-paste.js 的 HTML，S4/S5 接入新页自动纳入覆盖，不必维护一份页面清单）----------
-console.log('\nF5. KIT_VERSION 与所有引用页缓存串/版本比对常量同步（扫描 public/*.html）');
+// #106 W4 / S6b：缓存串不再与 KIT_VERSION 同步（页面引用一律 ?v=auto，由服务端按文件内容注入指纹）；
+//   本节原先证明的“src 串尾 tag = KIT_VERSION”改为证明“src 恰为 ?v=auto”，“*_KIT_EXPECTED = KIT_VERSION”的接口握手断言保留。
+console.log('\nF5. 所有引用页的 u-paste.js 引用恰为 ?v=auto，且版本比对常量 = KIT_VERSION（扫描 public/*.html）');
 {
-    const publicDir = path.join(__dirname, '..', 'public');
+    // 默认读 public；--public-dir=<目录> 仅供变异自证（在临时副本上改页面，不动工作区页面）
+    const pdArg = process.argv.find(a => a.startsWith('--public-dir='));
+    const publicDir = pdArg ? path.resolve(pdArg.slice('--public-dir='.length)) : path.join(__dirname, '..', 'public');
+    // 与静态守卫同口径解析 <script src>：守卫导出的 scanHtml / attrOf（两种引号、无引号、属性名大小写、注释与脚本正文跳过）
+    const guard = require('./verify-shared-css-cache-bust');
+    const scriptSrcs = (html, name) => guard.scanHtml(html)
+        .filter(t => t.name === 'script')
+        .map(t => guard.attrOf(t, 'src'))
+        .filter(v => v !== undefined && new RegExp('(^|/)' + name.replace(/\./g, '\\.') + '$', 'i').test(v.trim().split(/[?#]/)[0]));
     const htmlFiles = fs.readdirSync(publicDir).filter(f => f.toLowerCase().endsWith('.html'));
     const referencing = [];
     for (const f of htmlFiles) {
         const full = path.join(publicDir, f);
         const html = fs.readFileSync(full, 'utf8');
-        if (/u-paste\.js\?v=/.test(html)) referencing.push({ file: f, html });
+        // 按资源路径（<script src> 的路径部分以 u-paste.js 结尾，不管有没有 ?v=、用哪种引号）挑引用页；缺 ?v=auto 的引用由下面的断言判红，不会被挑选条件漏掉
+        if (scriptSrcs(html, 'u-paste.js').length > 0) referencing.push({ file: f, html });
     }
     expect(referencing.length >= 1, `至少 1 个页面引用 u-paste.js（实得=${referencing.length}：${referencing.map(r => r.file).join(',')}）`, referencing.length);
     for (const { file, html } of referencing) {
-        const srcMatch = /u-paste\.js\?v=v[\d.]+_([a-zA-Z0-9]+)"/.exec(html);
-        expect(!!srcMatch, `${file}：含 u-paste.js?v=..._<tag> 引用`, srcMatch);
-        if (srcMatch) {
-            expect(srcMatch[1] === UPaste.KIT_VERSION, `${file}：<script src> 缓存串尾部 tag 与 KIT_VERSION 一致（实得="${srcMatch[1]}"，期望="${UPaste.KIT_VERSION}"）`, srcMatch[1]);
-        }
+        const srcMatches = scriptSrcs(html, 'u-paste.js');
+        expect(srcMatches.length === 1, `${file}：恰有 1 处 <script src=...u-paste.js...> 引用`, srcMatches.length);
+        expect(srcMatches.length === 1 && srcMatches[0] === 'assets/js/u-paste.js?v=auto', `${file}：<script src> 原始值恰为 assets/js/u-paste.js?v=auto（不再手写缓存串）`, srcMatches);
         // 页面比对常量命名约定：以 _UPASTE_KIT_EXPECTED 结尾（Sys_Iteration 用 SI_UPASTE_KIT_EXPECTED，
         // 未来页面各自前缀不同但须遵循同一后缀，本断言不依赖具体页面前缀，S4/S5 接入新页零维护成本）。
         const expectMatch = /[A-Z0-9_]*_UPASTE_KIT_EXPECTED\s*=\s*'([^']+)'/.exec(html);

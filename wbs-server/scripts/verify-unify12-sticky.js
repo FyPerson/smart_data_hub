@@ -10,7 +10,7 @@
  *   2. 挂类：Data_Correction / Sys_Iteration / Issue_Lite / Issue_Tracker / Data_Collab 五页抽屉
  *      顶部 action-bar 均挂 u-action-bar-sticky
  *   3. Sys_Iteration 页内 top:-18px 条件覆盖（si-drawer-body padding-top=18px 差值对齐）
- *   4. 缓存串：6 个引用页 components.css?v= 已 bump 到 v1.123.0_unify12
+ *   4. 缓存串：6 个引用页 components.css 引用恰为 ?v=auto（#106 W4 / S6b 起；原为“已 bump 到 v1.123.0_unify12”）
  *   5. Data_Collab footer 清除：无 u-drawer-footer DOM/CSS 规则/detailFooterLeft 功能引用；
  *      renderDetail 组装 actionBarHtml 在 taskInfoHtml 之前；decideFooterButtons 仍被调用
  *   6. 各页内联 script 语法有效（new Function 编译不执行）
@@ -90,10 +90,14 @@ check('Sys_Iteration：si-drawer-body > .u-action-bar-sticky::before 尺寸覆�
 });
 
 console.log('— 4. 缓存串 —');
+// #106 W4 / S6b：原断言“components.css?v=v1.123.1_unify12b”早已与现值漂移（现值随后续迭代换过多次）。
+//   W4 起页面一律写 ?v=auto、指纹由服务端按文件内容注入，这里改为证明：6 页都引用 components.css、查询串恰为 ?v=auto、不含任何手写旧串。
 for (const [name, src] of Object.entries(pages)) {
-    check(`${name}：components.css?v=v1.123.1_unify12b`, () => {
-        assert.ok(src.includes('components.css?v=v1.123.1_unify12b'), '缓存串未 bump');
-        assert.ok(!/components\.css\?v=v1\.1(10\.4_unify|23\.0_unify12)"/.test(src), '旧缓存串残留');
+    check(`${name}：components.css?v=auto`, () => {
+        const tags = src.match(/<link\b[^>]*\bhref="[^"]*components\.css[^"]*"[^>]*>/g) || [];
+        assert.strictEqual(tags.length, 1, `components.css 引用应恰 1 处，实得 ${tags.length}`);
+        assert.ok(/\bhref="assets\/css\/components\.css\?v=auto"/.test(tags[0]), `components.css 引用不是 ?v=auto：${tags[0]}`);
+        assert.ok(!/components\.css\?v=(?!auto")/.test(src), '出现手写的 components.css?v=<值>（含旧缓存串）');
     });
 }
 

@@ -100,7 +100,8 @@
  *   node scripts/test-model-catalog-baseline-playwright.js --allow-changes    登记键允许与基线不同但必须满足期望新值；每条登记规则必须至少命中一次（C4c-2：6 族共 143 条）
  *   node scripts/test-model-catalog-baseline-playwright.js --record --reading=view|legacy   录制（只在 HEAD 上用；C4c-2 起必须显式写旧读法，默认的 dataact 读法不能录制）；录制守卫见 checkRecordGuard
  *   node scripts/test-model-catalog-baseline-playwright.js --record --reading=view|legacy --out-dir=<dir>   录到临时目录（确定性校验用，守卫照常）
- *   node scripts/test-model-catalog-baseline-playwright.js --port=<n>         隔离实例端口（默认 3377）；只按自己 spawn 的 pid 停
+ *   [#106 S4b2] 隔离实例由 scripts/lib/test-env.js 的 ready() 提供（本检出库快照 + 隔离模式 server.js，端口随机，数据根在系统临时目录，teardown 时整体删除）；
+ *     `--port=<n>` 与 MC_CATALOG_WORKDIR 随自起服务删除；各模式（含 --self-test-*）都先起实例（裁定 D5）；ready() 之后在实例库里清洗并按夹具造数（原来在库副本上做，终态相同）。
  *   node scripts/test-model-catalog-baseline-playwright.js --reading=legacy|view|dataact   读法（C4c-2 起默认 dataact；legacy / view 在新页面上必然 fail-closed，只用于在 HEAD 检出上复现基线）：legacy = 5883e906 的算式（总页数 = ceil(allModelsData.length / pageSize)、全集 = getSortedModels()）；
  *                                                  view = 经 getCatalogView()（totalPages / orderedIds）。两种读法在同一页面上必须给出逐字节相同的 MC_DUMP（C4b 新旧读法同结果证明）
  *   node scripts/test-model-catalog-baseline-playwright.js --self-test-compare   比较机制自证（不起服务）
@@ -120,46 +121,57 @@
  */
 'use strict';
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, spawnSync } = require('child_process');
+const testEnv = require('./lib/test-env');
 
-const ROOT = path.resolve(__dirname, '..');
-const MODELS_FILE = path.join(__dirname, 'fixtures', 'model-workbench-baseline', 'models.json');   // C3a-0 夹具，只读
-const FIX_DIR = path.join(__dirname, 'fixtures', 'model-catalog-baseline');
-const BASELINE_FILE = path.join(FIX_DIR, 'baseline.json');
-const MANIFEST_FILE = path.join(FIX_DIR, 'MANIFEST.json');
-const MC_HTML = path.join(ROOT, 'public', 'Model_Center.html');
-const MC_CATALOG_JS = path.join(ROOT, 'public', 'assets', 'js', 'model-catalog.js');   // C4a 起列表代码逐字搬到这里（存在才读）
+// [#106 S4b2] 顶层只有纯声明：路径 / 命令行参数 / 派生常量在入口函数里 `await testEnv.ready()` 之后由 initRuntime() / initDerived() 赋值。
+let ROOT = null;
+let MODELS_FILE = null;   // C3a-0 夹具，只读
+let FIX_DIR = null;
+let BASELINE_FILE = null;
+let MANIFEST_FILE = null;
+let MC_HTML = null;
+let MC_CATALOG_JS = null;   // C4a 起列表代码逐字搬到这里（存在才读）
+let BASE = null;            // testEnv.env().baseUrl
 /**
  * 「页面源码」= Model_Center.html + model-catalog.js（存在才读）按此顺序拼接的文本。所有「函数名 / 结构要出现在页面源码里」的静态检查
  * （HANDLER_TO_ACT、EXTRA_HANDLER、TRIGGER_CALLS、PROBE_NAMES 的防陈旧检查）都读它：C4a 把列表代码搬进 catalog 之后，函数名不在 html 里但仍在页面里。
  * 录制守卫的哈希（modelCenterSha256Lf）仍只算 Model_Center.html，不受影响。
  */
 const readPageSource = () => fs.readFileSync(MC_HTML, 'utf8') + (fs.existsSync(MC_CATALOG_JS) ? '\n' + fs.readFileSync(MC_CATALOG_JS, 'utf8') : '');
-const ARGS = process.argv.slice(2);
-const PORT_ARG = (ARGS.find(a => a.startsWith('--port=')) || '').slice('--port='.length);
-if (PORT_ARG && !/^\d{2,5}$/.test(PORT_ARG)) { console.error('--port 必须是数字：' + PORT_ARG); process.exit(2); }
-const PORT = PORT_ARG ? Number(PORT_ARG) : 3377;
-const BASE = `http://localhost:${PORT}`;
-const WORKDIR_PREFIX = 'mc-catalog-';   // L2：工作目录名必须含本驱动专用前缀
-const WORKDIR_MARKER = '.mc-catalog-workdir';
-const WORKDIR = path.resolve(process.env.MC_CATALOG_WORKDIR || (fs.existsSync('E:/tmp') ? 'E:/tmp/' : os.tmpdir() + path.sep) + (process.env.MC_CATALOG_WORKDIR ? '' : WORKDIR_PREFIX + 'run-p' + PORT));
 const SETTLE_LIMIT_MS = 10000;
 const FIXED_ISO = '2026-01-15T04:05:06.000Z';
 const TIMEZONE = 'Asia/Shanghai';
-const RECORD = ARGS.includes('--record');
-const READING_ARG = (ARGS.find(a => a.startsWith('--reading=')) || '').slice('--reading='.length);
-const READING = READING_ARG || 'dataact';   // C4c-2 起默认读法 = dataact（view / legacy 在新页面上必然 fail-closed，只用于在 HEAD 检出上复现基线）
-if (!['legacy', 'view', 'dataact'].includes(READING)) { console.error('--reading 必须是 legacy、view 或 dataact：' + READING); process.exit(2); }
-if (READING === 'dataact' && ARGS.includes('--record')) { console.error('--record 不能用 dataact 读法（默认读法就是 dataact）：基线只在 HEAD 上用旧读法录制，请显式写 --reading=view 或 --reading=legacy'); process.exit(2); }
+// [#106 S4b2] 命令行参数（--port / MC_CATALOG_WORKDIR 及其工作目录防误删机制随自起服务删除）：入口函数 ready() 之后由 initRuntime() 解析。
+let ARGS = [];
+let RECORD = false;
+let READING = 'dataact';   // C4c-2 起默认读法 = dataact（view / legacy 在新页面上必然 fail-closed，只用于在 HEAD 检出上复现基线）
 /** view / dataact 读法都经稳定接口 getCatalogView()（总页数按组、全集 = orderedIds）；legacy 用 5883e906 的按行算式 */
-const USE_VIEW = READING !== 'legacy';
-const ALLOW_CHANGES = ARGS.includes('--allow-changes');
-const FORCE_RECORD = ARGS.includes('--force-record');
-const OUT_DIR_ARG = (ARGS.find(a => a.startsWith('--out-dir=')) || '').slice('--out-dir='.length);
+let USE_VIEW = true;
+let ALLOW_CHANGES = false;
+let FORCE_RECORD = false;
+let OUT_DIR_ARG = '';
+function initRuntime() {
+  ROOT = path.resolve(__dirname, '..');
+  MODELS_FILE = path.join(__dirname, 'fixtures', 'model-workbench-baseline', 'models.json');
+  FIX_DIR = path.join(__dirname, 'fixtures', 'model-catalog-baseline');
+  BASELINE_FILE = path.join(FIX_DIR, 'baseline.json');
+  MANIFEST_FILE = path.join(FIX_DIR, 'MANIFEST.json');
+  MC_HTML = path.join(ROOT, 'public', 'Model_Center.html');
+  MC_CATALOG_JS = path.join(ROOT, 'public', 'assets', 'js', 'model-catalog.js');
+  BASE = testEnv.env().baseUrl;
+  ARGS = process.argv.slice(2);
+  RECORD = ARGS.includes('--record');
+  const READING_ARG = (ARGS.find(a => a.startsWith('--reading=')) || '').slice('--reading='.length);
+  READING = READING_ARG || 'dataact';
+  if (!['legacy', 'view', 'dataact'].includes(READING)) { console.error('--reading 必须是 legacy、view 或 dataact：' + READING); process.exit(2); }
+  if (READING === 'dataact' && ARGS.includes('--record')) { console.error('--record 不能用 dataact 读法（默认读法就是 dataact）：基线只在 HEAD 上用旧读法录制，请显式写 --reading=view 或 --reading=legacy'); process.exit(2); }
+  USE_VIEW = READING !== 'legacy';
+  ALLOW_CHANGES = ARGS.includes('--allow-changes');
+  FORCE_RECORD = ARGS.includes('--force-record');
+  OUT_DIR_ARG = (ARGS.find(a => a.startsWith('--out-dir=')) || '').slice('--out-dir='.length);
+}
 
 const h = (s) => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 12);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -439,10 +451,12 @@ const TASK_SEEDS = [
   { id: 9014, model: 6, status: 'ARCHIVED', owner: '管理员', owner_id: 1, at: '2026-01-05 09:00:00' },
 ];
 /** 创建者夹具（共享夹具里所有模型 created_by_id=1=admin，admin 短路了「非管理员创建者」分支；这里追加由普通 user#6 创建、技术负责人为他人的 DIM / DWD，脱敏假名） */
-const CREATOR_MODELS = [
+// [#106 S4b2] 顶层不再调用 .map：原始行在 *_RAW 里，补默认值的 .map 挪进 initDerived()（入口函数 ready() 之后调用）。
+const CREATOR_MODELS_RAW = [
   { id: 201, layer: 'dim', table_name: 'dim_w9001_creator', table_comment: '字段说明901', update_cycle: 'di', design_notes: '设计说明901' },
   { id: 202, layer: 'dwd', table_name: 'dwd_w9002_creator_df', table_comment: '字段说明902', update_cycle: 'df' },
-].map(m => ({ domain: '', tech_owner: '管理员', biz_owner: '', status: 'CREATED', created_at: '2026-01-01 08:00:00', updated_at: '2026-01-02 08:00:00', source_table: null, source_system: null, model_type: 'TABLE', created_by_id: 6, category: 'general', dim_config: null, is_deleted: 0, config_mode: 'standard', design_notes: null, companion_of: null, ...m }));
+];
+let CREATOR_MODELS = null;
 /**
  * 大写分层 / 权限分支夹具（H2 + M4；生产 39/145 个模型的 layer 是大写，HEAD 渲染按 layer.toUpperCase() 分支，目录代码必须大小写不敏感）。
  * 覆盖项 → 模型 id：
@@ -454,7 +468,7 @@ const CREATOR_MODELS = [
  *   208  小写 DWD 伴生行，companion_of=207，技术负责人=owner                        → 伴生行的负责人分支（伴生表删除对有编辑权的人可用）
  *   209  小写 DIM，tech_owner=' owner_b '（前后空格 + 小写）                        → 负责人比较的去空白 + 大小写（用户 Owner_B）
  */
-const UPPER_AND_OWNER_MODELS = [
+const UPPER_AND_OWNER_MODELS_RAW = [
   { id: 203, layer: 'ODS', table_name: 'ods_w9003_upper_df', table_comment: '字段说明903', update_cycle: 'df', tech_owner: '测试负责人', source_system: 'W0003', source_table: 'w9003_src', status: 'ONLINE' },
   { id: 204, layer: 'DWD', table_name: 'dwd_w9004_upper_df', table_comment: '字段说明904', update_cycle: 'df' },
   { id: 205, layer: 'DWD', table_name: 'dwd_w9004_upper_change_di', table_comment: '字段说明905', update_cycle: 'di', config_mode: 'companion', companion_of: 204 },
@@ -462,48 +476,19 @@ const UPPER_AND_OWNER_MODELS = [
   { id: 207, layer: 'dwd', table_name: 'dwd_w9007_owner_df', table_comment: '字段说明907', update_cycle: 'df', tech_owner: '测试负责人' },
   { id: 208, layer: 'dwd', table_name: 'dwd_w9007_owner_change_di', table_comment: '字段说明908', update_cycle: 'di', config_mode: 'companion', companion_of: 207, tech_owner: '测试负责人' },
   { id: 209, layer: 'dim', table_name: 'dim_w9009_ownerb', table_comment: '字段说明909', update_cycle: 'di', tech_owner: ' owner_b ' },
-].map(m => ({ domain: '', tech_owner: '管理员', biz_owner: '', status: 'CREATED', created_at: '2026-01-01 08:00:00', updated_at: '2026-01-02 08:00:00', source_table: null, source_system: null, model_type: 'TABLE', created_by_id: 1, category: 'general', dim_config: null, is_deleted: 0, config_mode: 'standard', design_notes: null, companion_of: null, ...m }));
+];
+let UPPER_AND_OWNER_MODELS = null;
 const loadModelRows = () => JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8')).rows;
 
 function dbRun(db, sql, params = []) { return new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); })); }
 function dbClose(db) { return new Promise((res, rej) => db.close(e => e ? rej(e) : res())); }
-const tryUnlink = (f) => { try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') throw e; } };
-/**
- * L2：工作目录防误删。目录必须在 E:/tmp/ 或系统临时目录之下、目录名含 mc-catalog-；首次使用时（目录不存在或为空）写运行标记文件，
- * 已存在且非空却没有标记 → 拒绝运行，不删除任何文件。删库文件前（removeDbFiles）再校验一次标记。
- */
-function workdirProblem(dir) {
-  const norm = (x) => path.resolve(x).replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '') + '/';
-  const d = norm(dir);
-  if (!(d.startsWith('e:/tmp/') || d.startsWith(norm(os.tmpdir())))) return '工作目录 ' + dir + ' 不在 E:/tmp/ 或系统临时目录下';
-  if (!path.basename(path.resolve(dir)).startsWith(WORKDIR_PREFIX)) return '工作目录名 ' + path.basename(dir) + ' 不含本驱动专用前缀 ' + WORKDIR_PREFIX;
-  return null;
-}
-function ensureWorkdir(dir) {
-  const bad = workdirProblem(dir);
-  if (bad) { console.error('[workdir] 拒绝运行（未删除任何文件）：' + bad + '。MC_CATALOG_WORKDIR 必须指向 E:/tmp/ 或系统临时目录下、名字以 ' + WORKDIR_PREFIX + ' 开头的目录。'); process.exit(2); }
-  const marker = path.join(dir, WORKDIR_MARKER);
-  if (fs.existsSync(marker)) return;
-  if (fs.existsSync(dir) && fs.readdirSync(dir).length) { console.error('[workdir] 拒绝运行（未删除任何文件）：目录 ' + dir + ' 已存在、非空且没有运行标记 ' + WORKDIR_MARKER + '，不是本驱动创建的目录。请换一个新目录名。'); process.exit(2); }
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(marker, 'created by test-model-catalog-baseline-playwright.js\n');
-}
-const removeDbFiles = (dbPath) => {
-  if (workdirProblem(path.dirname(dbPath)) || !fs.existsSync(path.join(path.dirname(dbPath), WORKDIR_MARKER))) throw new Error('拒绝删除库文件：' + dbPath + ' 所在目录不是本驱动的已标记工作目录');
-  for (const s of ['', '-wal', '-shm', '-journal']) tryUnlink(dbPath + s);
-};
+// [#106 S4b2] 原工作目录防误删机制（workdirProblem / ensureWorkdir / removeDbFiles / MC_CATALOG_WORKDIR）随自起服务和库副本删除：实例数据根由 test-env 创建和删除。
 
-/** opts.mutateComment：{ id, comment } → 把某夹具模型的 table_comment 改掉（escapeHtml 实证用的单独库副本） */
+/** opts.mutateComment：{ id, comment } → 把某夹具模型的 table_comment 改掉（escapeHtml 实证用）；[#106 S4b2] 现在对 ready() 已建好的实例库清洗并造数（一个进程一个实例，各模式互斥）；关库等回调完成。
+ *  整表清场：批跑只能登记为 exclusive:true 或 needsService:false，不能做共享实例成员（会抹掉同一实例上其他成员的数据）。 */
 async function prepareDb(dbPath, opts = {}) {
   const sqlite3 = require('sqlite3');
-  fs.mkdirSync(WORKDIR, { recursive: true });
-  removeDbFiles(dbPath);
-  const realDb = path.join(ROOT, 'task_pool.db');
-  if (!fs.existsSync(realDb)) throw new Error('缺少 wbs-server/task_pool.db（包装器也要求它存在）');
-  const src = await new Promise((res, rej) => { const d = new sqlite3.Database(realDb, sqlite3.OPEN_READONLY, e => e ? rej(e) : res(d)); });
-  await dbRun(src, 'VACUUM INTO ?', [dbPath]);   // 一致性快照；VACUUM INTO 不写源库
-  await dbClose(src);
-  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => e ? rej(e) : res(d)); });
+  const db = await new Promise((res, rej) => { const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, e => { if (e) return rej(e); d.configure('busyTimeout', 8000); res(d); }); });
   for (const t of ['system_configs', 'db_connections', 'periodic_tasks', 'model_change_logs', 'model_test_records', 'task_pool', 'data_models', 'users', 'sys_domains', 'sys_source_systems']) {
     await dbRun(db, `DELETE FROM ${t}`);
   }
@@ -532,45 +517,11 @@ async function prepareDb(dbPath, opts = {}) {
   await dbClose(db);
 }
 
-function portBusy() {
-  return new Promise((resolve) => {
-    const s = net.createConnection({ port: PORT, host: '127.0.0.1' });
-    s.once('connect', () => { s.destroy(); resolve(true); });
-    s.once('error', () => resolve(false));
-  });
-}
-
-let serverChild = null;
-let serverKillIssued = false;
-/** 只按自己 spawn 的 pid 停，同一 pid 只杀一次 */
-function killServer() {
-  if (!serverChild || !serverChild.pid || serverKillIssued || serverChild.__dead) return;
-  serverKillIssued = true;
-  try { spawnSync('taskkill', ['/T', '/F', '/PID', String(serverChild.pid)], { stdio: 'ignore' }); } catch (_) { /* 下面等 exit 事件 */ }
-}
-async function stopServerAndCleanup(dbPath) {
-  killServer();
-  const t0 = Date.now();
-  while (serverChild && !serverChild.__dead && Date.now() - t0 < 10000) await sleep(100);
-  if (serverChild && !serverChild.__dead) { console.error('[cleanup] 隔离实例进程未在 10s 内退出，库副本未删除：' + dbPath); return; }
-  try { removeDbFiles(dbPath); } catch (e) { console.error('[cleanup] 删除库副本失败：' + e.message); }
-}
-async function startServer(dbPath) {
-  const logPath = path.join(WORKDIR, 'server.log');
-  const fd = fs.openSync(logPath, 'w');
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'scripts', '_test-it-asset-ledger-server-wrapper.js')], {
-    cwd: ROOT, stdio: ['ignore', fd, fd],
-    env: { ...process.env, PORT: String(PORT), IA_TEST_DB_PATH: dbPath, SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' },
-  });
-  fs.closeSync(fd);
-  serverChild.on('exit', () => { serverChild.__dead = true; });
-  const t0 = Date.now();
-  for (;;) {
-    if (serverChild.__dead) throw new Error('隔离实例提前退出，见日志 ' + logPath + '：\n' + fs.readFileSync(logPath, 'utf8').slice(-1500));
-    if (/Task Pool Server running/.test(fs.readFileSync(logPath, 'utf8'))) return;
-    if (Date.now() - t0 > 60000) throw new Error('隔离实例 60s 内未就绪，见日志 ' + logPath);
-    await sleep(250);
-  }
+// [#106 S4b2] 原 portBusy / killServer / stopServerAndCleanup / startServer（写死 3377、按 pid 杀 wrapper 进程、等日志就绪、删库副本）整段删除：实例由 test-env 起停。
+//   「服务就绪」的判定：原来靠日志 "Task Pool Server running"；改为一次真实请求——未带 token 访问 /api/models 必须 401（assertServing）。
+async function assertServing() {
+  const probe = await fetch(`${BASE}/api/models`);
+  if (probe.status !== 401) throw new Error(`[就绪核对] 未带 token 访问 /api/models 应 401，实得 ${probe.status}（服务没有在应答本脚本要测的路由）`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -727,7 +678,7 @@ const listHash = (page) => page.evaluate(() => document.getElementById('modelLis
  * 换掉它们只是为了点触发按钮时不真的去开关菜单）。页面上缺任何一个全局函数 → 探针抛错（防对应表 / 页面漂移）。
  */
 // 只对 HEAD 有效（含旧下拉触发函数 TRIGGER_CALLS）；新读法见 PROBE_NAMES_DATAACT
-const PROBE_NAMES = [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer', ...TRIGGER_CALLS];
+let PROBE_NAMES = null;   // [#106 S4b2] 值 [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer', ...TRIGGER_CALLS] 在 initDerived() 里赋（顶层不调用 Object.keys）
 /**
  * HEAD 读法（H1）：对当前页每一行，读操作区每个可交互元素的原始描述（onclick / 文字 / disabled / 置灰样式 / title），
  * 并把 PROBE_NAMES 里的全局函数临时换成记录型替身后对该元素 el.click()，把点击期间收到的调用（函数名 + 归一化参数）一并返回；
@@ -801,7 +752,7 @@ const DESCRIBE_AND_PROBE_FN = ({ names, normSrc, triggers }) => {
   } finally { for (const n of names) window[n] = saved[n]; }
   return out;
 };
-const PROBE_ARG = { names: PROBE_NAMES, normSrc: normArg.toString(), triggers: [...TRIGGER_CALLS] };
+let PROBE_ARG = null;   // [#106 S4b2] 值 { names: PROBE_NAMES, normSrc: normArg.toString(), triggers: [...TRIGGER_CALLS] } 在 initDerived() 里赋
 /** C4c 预留读法：读 [data-entry]（可选 data-handler）；当前页面没有，不调用 */
 const READ_DATA_ENTRY_FN = () => {
   const res = {};
@@ -1016,20 +967,21 @@ function buildAllowedChanges() {
  * 夹具：45 行 / 42 组；上游名非空的只有 #50 / #52 / #55（DIM / DWD 且 sourceTables 非空）；夹具无 impl_note、无实现对象。
  */
 const RNG = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+const R101_125 = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125];   // [#106 S4b2] = RNG(101, 125) 的字面量（顶层不调用函数）
 const FRONT_KEYWORD_EXPECT = {
   'dim_': { direct: [50, 55, 58, 60, 62, 65, 201, 209] },
   'w0007': { direct: [8, 50, 52] },                       // #52 靠上游名 ods_w0006_w0007_w0008_df（后端只命中 #8 / #50）
   '0060': { direct: [52, 53] },                                  // 表名片段；不当作 #60（C-6）
   'change': { direct: [50, 53, 205, 208] },   // #50 靠上游名 …_change_df；#52 / #204 / #207 随伴生进组
-  '_df': { direct: [6, 8, 50, 52, 55, 59, ...RNG(101, 125), 202, 203, 204, 206, 207] },   // 通配例外：前端当字面量，#50 / #55 靠上游名多出
+  '_df': { direct: [6, 8, 50, 52, 55, 59, ...R101_125, 202, 203, 204, 206, 207] },   // 通配例外：前端当字面量，#50 / #55 靠上游名多出
   '字段说明': { direct: [6, 8, 50, 52, 53, 55, 59, 60, 62, 65, 201, 202, 203, 204, 205, 206, 207, 208, 209] },
   '说明1': { direct: [6, 52, 53] },
-  '填充': { direct: RNG(101, 125) },
+  '填充': { direct: R101_125 },
   'w0002': { direct: [6] },
   'filler_07': { direct: [107] },
   'W0003': { direct: [6, 8, 203, 206] },
   'w0003': { direct: [6, 8, 203, 206] },
-  'SYS_A': { direct: RNG(101, 125) },
+  'SYS_A': { direct: R101_125 },
   '来源系统甲': { direct: [] },
   '52': { direct: [52] },                                        // ID 精确匹配（后端不搜 id，命中 0 行）
   'DIM_W0037': { direct: [55] },
@@ -1039,7 +991,7 @@ const FRONT_KEYWORD_EXPECT = {
   '不存在的词xyz': { direct: [] },
 };
 /** 默认序（C4-0 夹具 45 行 / 42 组，A.8 ①，手写）：按 table_name 升序，伴生紧跟主模型（#53→#52、#205→#204、#208→#207）；运行时硬断言页面 orderedIds 与它全等 */
-const DEFAULT_ORDER_HAND = [60, 50, 55, 58, 62, 65, 201, 209, 52, 53, 59, 202, 204, 205, 207, 208, ...RNG(101, 125), 6, 8, 203, 206];
+const DEFAULT_ORDER_HAND = [60, 50, 55, 58, 62, 65, 201, 209, 52, 53, 59, 202, 204, 205, 207, 208, ...R101_125, 6, 8, 203, 206];
 /** 可见序列的独立推导：命中任一成员（主或伴生）的组整组显示，按默认序 */
 const visibleOf = (direct) => { const prim = (id) => (id in COMPANION_OF ? COMPANION_OF[id] : id); const hit = new Set(direct.map(prim)); return DEFAULT_ORDER_HAND.filter(id => hit.has(prim(id))); };
 const GROUP_PAGES_EXPECT = { totalModels: 45, totalGroups: 42, totalPages: 3, page1Ids: 23, page2Ids: 20, page3: [203, 206], locate6: { page: 2, index: 19 }, locate8: { page: 2, index: 20 } };
@@ -1145,9 +1097,9 @@ async function readSort(page, tr) {
 // =============================================================================================
 /** 契约 12：排序按钮的 8 个键（与顺序无关）。基线只有其中 6 个（其余 4 个基线键下线、domain / acceptance_at 基线里没有，由 C4c-2 登记） */
 const DATAACT_SORT_KEYS = ['layer', 'table_name', 'status', 'acceptance_at', 'tech_owner', 'updated_at', 'domain', 'id'];
-const DATAACT_BASELINE_SORT_KEYS = SORT_KEYS.filter(k => DATAACT_SORT_KEYS.includes(k));   // = id / layer / table_name / tech_owner / status / updated_at（6 个，自证里硬断言）
+let DATAACT_BASELINE_SORT_KEYS = [];   // [#106 S4b2] 值 SORT_KEYS.filter(k => DATAACT_SORT_KEYS.includes(k)) 在 initDerived() 里赋；= id / layer / table_name / tech_owner / status / updated_at（6 个，自证里硬断言）
 /** 点击读法要换成记录型替身的全局函数：对应表全部键 + 行内入口函数 + 抽屉（不含旧触发函数 toggleDim*）。页面缺任何一个 → 抛错 */
-const PROBE_NAMES_DATAACT = [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer'];
+let PROBE_NAMES_DATAACT = [];   // [#106 S4b2] 值 [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer'] 在 initDerived() 里赋
 /** data-entry 值 → 基线入口名（iteration-history 是派单里的叫法，基线入口名是 iteration-badge，两者都接受） */
 const ENTRY_ALIAS = { 'iteration-history': 'iteration-badge' };
 const ENTRY_EXPECT_FN = { 'open-drawer': 'openModelDrawer', 'design-notes': 'showDesignNotesPopover', 'iteration-badge': 'viewIterationHistory' };
@@ -1720,7 +1672,7 @@ async function readNav(ctx) {
  * pathRe 一律按整串匹配（比较时包成 ^(?:…)$）。C4a–C4e 只在这里追加登记（精确值），不重录 baseline.json。当前：C4B-SORT 58 条（buildAllowedChanges 由基线推出）。
  * --self-test-compare 会对每条登记规则做逐条自证（节点在基线里存在 / 期望新值放行 / 第三个值判红）。
  */
-const ALLOWED_CHANGES = buildAllowedChanges();   // C4b：C4B-SORT（58 条，由基线按规则推出）
+let ALLOWED_CHANGES = null;   // C4b：C4B-SORT（58 条，由基线按规则推出）；[#106 S4b2] 值 buildAllowedChanges() 在 initDerived() 里赋（它读 baseline.json，路径在 ready 之后才有）
 
 const escRe = (s) => s.replace(/[.+?^${}()|[\]\\]/g, (c) => '\\' + c);
 const exactRe = (p) => '^' + escRe(p) + '$';
@@ -2146,7 +2098,7 @@ const SYNTH_ROWS = [
   // 填充行（37T M3）：id 101 对应真实库的填充 ODS #101，走完整建格校验（extraIds）
   { id: 101, layer: 'ods', table_name: 'ods_filler_01_df', table_comment: '填充', status: 'ONLINE', companion_of: null, design_notes: null, iter: 0, canEdit: true, canValidate: true, tech_owner: '甲', updated_at: '2026-01-02', domain: 'd1', acceptance_at: null },
 ];
-SYNTH_ROWS.forEach((m, i) => { m.stages = { structure: { ok: i % 2 === 0, rules: [i, i + 1] }, data: i % 3 === 0 ? null : { rows: i * 10 } }; m.deep = { l1: { l2: { l3: { l4: { l5: { l6: { l7: { l8: { v: i } } } } } } } } }; });   // 嵌套字段：浅拷贝可被识别
+function initSynthRows() { SYNTH_ROWS.forEach((m, i) => { m.stages = { structure: { ok: i % 2 === 0, rules: [i, i + 1] }, data: i % 3 === 0 ? null : { rows: i * 10 } }; m.deep = { l1: { l2: { l3: { l4: { l5: { l6: { l7: { l8: { v: i } } } } } } } } }; }); }   // 嵌套字段：浅拷贝可被识别；[#106 S4b2] 原为顶层语句，改成函数由 initDerived() 调用
 /** 一行的操作规格（手写规则，与 HEAD 渲染一致：置灰原因 / 调用的函数 / 参数个数）。args 里 {$row:true} = 行副本（归一化后 {$model:id}） */
 function synthSpec(m) {
   const L = m.layer.toUpperCase(), comp = !!m.companion_of, ROW = { $row: true };
@@ -2245,7 +2197,7 @@ function synthEntry(m, cfg, bodyMenus) {
 const synthShuffle = (h) => h.replace(/<(button|div|span)((?:\s+[\w-]+(?:="[^"]*")?)+)>/g, (_, t, attrs) => '<' + t + (attrs.match(/\s+[\w-]+(?:="[^"]*")?/g) || []).reverse().join('') + '>').replace(/></g, '>\n   <');
 const SYNTH_CSS = '[hidden]{display:none!important} body{font:14px sans-serif;margin:8px;padding-top:72px} #fixedNav{position:fixed;top:0;left:0;right:0;height:64px;z-index:1000;background:#fff;border-bottom:1px solid #999} .tall .entry{min-height:260px} .entry{position:relative;min-height:56px;padding:6px;border-bottom:1px solid #ccc} .model-row-actions{display:inline-flex;gap:4px;align-items:center;margin-left:12px} .mw{position:relative;display:inline-block} .menu{position:absolute;right:0;top:100%;z-index:10;background:#fff;border:1px solid #999;min-width:150px} .menu button{display:block;width:100%;text-align:left;padding:6px} #sortBar button{margin-right:4px}';
 /** S.4 页面脚本（经 String.raw 内嵌，内部不得出现反引号 / ${）。MUT = 变异码；honest 实现 = MUT 为空 */
-const SYNTH_SCRIPT = String.raw`
+const SYNTH_SCRIPT = () => String.raw`
 var CFG = __CFG__;
 var MUT = CFG.mut || '';
 var allModelsData = CFG.rows;
@@ -2424,7 +2376,7 @@ function synthPage(cfg) {
   const keys = cfg.mut === 'sortKeys' ? DATAACT_SORT_KEYS.slice(1) : DATAACT_SORT_KEYS;
   const sortBar = keys.map(k => '<button type="button" data-sort-by="' + k + '">' + k + '</button>').join('');
   const listHtml = cfg.form === 'head' ? '<table id="modelListTable"><tbody id="modelListBody"></tbody></table>' : '<div id="modelListBody"' + (cfg.mut === 'roleList' ? '' : ' role="list"') + '></div>';
-  let scriptSrc = SYNTH_SCRIPT;
+  let scriptSrc = SYNTH_SCRIPT();   // [#106 S4b2] 顶层不再调用 String.raw 标签模板：SYNTH_SCRIPT 改成返回脚本文本的箭头函数
   if (cfg.mut === 'readonlySort') scriptSrc = scriptSrc.replace('let currentSortBy = null;', "var __sb = null; Object.defineProperty(window, 'currentSortBy', { get: function () { return __sb; }, set: function () {} });").replace('{ currentSortBy = by; currentSortDir = dir; }', '{ __sb = by; currentSortDir = dir; }');   // 排序全局只读（getter），页面用私有状态排序
   if (cfg.mut === 'stickySort') scriptSrc = scriptSrc.replace('let currentSortBy = null;', "var __sb = null; Object.defineProperty(window, 'currentSortBy', { get: function () { return __sb; }, set: function (v) { if (v !== null) __sb = v; } });");   // 写入有效但无法恢复成 null
   if (cfg.mut === 'noSortGlobal') scriptSrc = scriptSrc.replace(/currentSortBy/g, 'sortByX');   // M3：页面没有 currentSortBy 全局
@@ -2757,15 +2709,12 @@ function fillerExpected(id, tableName) {
 async function mainRecordOrCompare(dbPath) {
   checkRecordGuard();
   checkBackendSearchFields(fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8'));   // M1：后端搜索字段硬断言（录制 / 比较都执行）
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动（不自动换端口；3000 是用户进程，不得占用或杀）。`); process.exit(2); }
-  const dotenv = require('dotenv');
   const { chromium } = require('playwright');
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
-  if (!secret) throw new Error('wbs-server/.env 缺 JWT_SECRET');
+  const secret = testEnv.env().jwtSecret;   // 实例随机密钥（与服务端同源）；不再读 .env
   const rows = loadModelRows();
   const rowOf = (id) => rows.find(r => r.id === id);
+  await assertServing();
   await prepareDb(dbPath);
-  await startServer(dbPath);
   const browser = await chromium.launch({ headless: true });
   const out = {};
   try {
@@ -2868,13 +2817,11 @@ async function mainRecordOrCompare(dbPath) {
 
 /** escapeHtml 引号注入实证：单独库副本里把 #55 的 table_comment 改成含 `" data-xss="1`，打开目录页检查带 title 的元素是否出现 data-xss 属性。只打印，不进 baseline */
 async function mainEscapeProbe(dbPath) {
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动。`); process.exit(2); }
-  const dotenv = require('dotenv');
   const { chromium } = require('playwright');
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
+  const secret = testEnv.env().jwtSecret;
   const PAYLOAD = 'XSS探针" data-xss="1';
+  await assertServing();
   await prepareDb(dbPath, { mutateComment: { id: 55, comment: PAYLOAD } });
-  await startServer(dbPath);
   const browser = await chromium.launch({ headless: true });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, timezoneId: TIMEZONE });
@@ -2901,14 +2848,12 @@ async function mainEscapeProbe(dbPath) {
  *   HEAD 形态只打印；data-entry 形态下「执行：是」→ 退出码 1（修复后的页面不得执行）。
  */
 async function mainDesignNotesXssProbe(dbPath) {
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动。`); process.exit(2); }
-  const dotenv = require('dotenv');
   const { chromium } = require('playwright');
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
+  const secret = testEnv.env().jwtSecret;
   const PAYLOAD = '<img src=x onerror="window.__xss=(window.__xss||0)+1">';
   const TARGETS = [50, 53];   // DIM #50（主模型）与 #53（变更追踪伴生）
+  await assertServing();
   await prepareDb(dbPath, { mutateRows: { 50: { design_notes: PAYLOAD }, 53: { design_notes: PAYLOAD } } });
-  await startServer(dbPath);
   const browser = await chromium.launch({ headless: true });
   let executed = false, form = '(未知)';
   const rowsOut = [];
@@ -2959,13 +2904,11 @@ function callCounts(cur) {
  *   结构检查（静态节点 / 全局）：getSortedModels / getCatalogView 赋成 undefined、排序按钮全部移除 → 「目录页结构或全局已改」。
  */
 async function mainSelfTestProbe(dbPath) {
-  if (await portBusy()) { console.error(`端口 ${PORT} 已被占用，拒绝启动。`); process.exit(2); }
   if (READING !== 'dataact') { console.error('--self-test-probe 自 C4c-2 起只支持 dataact 读法（旧读法只对 HEAD 有效）'); process.exit(2); }
-  const dotenv = require('dotenv');
   const { chromium } = require('playwright');
-  const secret = dotenv.parse(fs.readFileSync(path.join(ROOT, '.env'))).JWT_SECRET;
+  const secret = testEnv.env().jwtSecret;
+  await assertServing();
   await prepareDb(dbPath);
-  await startServer(dbPath);
   const browser = await chromium.launch({ headless: true });
   let bad = 0, n = 0;
   const check = (label, cond, extra) => { n++; if (!cond) { bad++; console.log('  FAIL ' + label + (extra ? '：' + extra : '')); } else console.log('  ok   ' + label + (extra ? '：' + extra : '')); };
@@ -3038,23 +2981,33 @@ function writeOutputs(cur) {
   return { dir, bf, size: fs.statSync(bf).size };
 }
 
+/** [#106 S4b2] 原先在模块顶层求值的派生常量（顶层只允许纯声明）：入口函数 ready() 与 initRuntime() 之后调用，顺序与原来的出现顺序一致 */
+function initDerived() {
+  const withDefaults = (createdById) => (m) => ({ domain: '', tech_owner: '管理员', biz_owner: '', status: 'CREATED', created_at: '2026-01-01 08:00:00', updated_at: '2026-01-02 08:00:00', source_table: null, source_system: null, model_type: 'TABLE', created_by_id: createdById, category: 'general', dim_config: null, is_deleted: 0, config_mode: 'standard', design_notes: null, companion_of: null, ...m });
+  CREATOR_MODELS = CREATOR_MODELS_RAW.map(withDefaults(6));
+  UPPER_AND_OWNER_MODELS = UPPER_AND_OWNER_MODELS_RAW.map(withDefaults(1));
+  PROBE_NAMES = [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer', ...TRIGGER_CALLS];
+  PROBE_ARG = { names: PROBE_NAMES, normSrc: normArg.toString(), triggers: [...TRIGGER_CALLS] };
+  DATAACT_BASELINE_SORT_KEYS = SORT_KEYS.filter(k => DATAACT_SORT_KEYS.includes(k));
+  PROBE_NAMES_DATAACT = [...Object.keys(HANDLER_TO_ACT), ...Object.keys(EXTRA_HANDLER), 'openModelDrawer'];
+  ALLOWED_CHANGES = buildAllowedChanges();
+  initSynthRows();
+}
+
 (async () => {
-  if (ARGS.includes('--self-test-compare')) process.exit(selfTestCompare());
-  if (ARGS.includes('--self-test-mapping')) process.exit(await selfTestMapping());
-  if (ARGS.includes('--self-test-settle')) process.exit(await selfTestSettle());
-  if (ARGS.includes('--self-test-dataact')) process.exit(await selfTestDataAct());
   let code = 1;
-  const dbPath = path.join(WORKDIR, 'catalog.db');
-  ensureWorkdir(WORKDIR);   // L2：先校验 / 打标记，再碰任何文件
-  removeDbFiles(dbPath);
-  const cleanupSync = () => {
-    killServer();
-    for (let i = 0; i < 20; i++) { try { removeDbFiles(dbPath); return; } catch (_) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); } }
-  };
-  process.on('exit', cleanupSync);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { cleanupSync(); process.exit(130); });
-  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
-  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); cleanupSync(); process.exit(1); });
+  // [#106 S4b2] ready() 是入口函数里第一条有副作用的语句（选项是纯字面量）；之后才解析参数 / 求派生常量。自测模式（--self-test-*）本不需要服务，但按硬规则也先起实例（裁定 D5）。
+  //   SIGINT / SIGTERM 由 test-env 自己收实例（teardown 后以 130 / 143 退出），进程退出时的清理由它的 exit 钩子兜底。
+  await testEnv.ready({ extraEnv: { SYS_FASTLANE_ENABLE: '0', LOG_LEVEL: 'INFO' } });
+  initRuntime();
+  initDerived();
+  process.on('uncaughtException', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  process.on('unhandledRejection', (e) => { console.error(e && e.stack || e); process.exit(1); });
+  if (ARGS.includes('--self-test-compare')) { const c = selfTestCompare(); await testEnv.teardown(); testEnv.finish(c); return; }
+  if (ARGS.includes('--self-test-mapping')) { const c = await selfTestMapping(); await testEnv.teardown(); testEnv.finish(c); return; }
+  if (ARGS.includes('--self-test-settle')) { const c = await selfTestSettle(); await testEnv.teardown(); testEnv.finish(c); return; }
+  if (ARGS.includes('--self-test-dataact')) { const c = await selfTestDataAct(); await testEnv.teardown(); testEnv.finish(c); return; }
+  const dbPath = testEnv.env().dbPath;
   try {
     if (ARGS.includes('--escape-probe')) { await mainEscapeProbe(dbPath); code = 0; } else if (ARGS.includes('--design-notes-xss-probe')) { code = await mainDesignNotesXssProbe(dbPath); } else if (ARGS.includes('--self-test-probe')) { code = await mainSelfTestProbe(dbPath); } else {
       if (!RECORD) { if (!fs.existsSync(BASELINE_FILE)) throw new Error('缺少基线文件，请先在 HEAD 上 --record'); checkManifestIntegrity(); }
@@ -3084,7 +3037,12 @@ function writeOutputs(cur) {
     console.error(e && e.stack || e);
     code = 1;
   } finally {
-    await stopServerAndCleanup(dbPath);
+    await testEnv.teardown();
   }
-  process.exit(code);
-})();
+  // [#106 S4b2a] teardown 已在上面的 finally 里 await 落定；出口改 finish（只设退出码，不终止执行），它是入口函数的最后一条语句。入口 .catch 里的 process.exit(1) 不改。
+  testEnv.finish(code);
+})().catch(async (e) => {
+  console.error(e && e.stack || e);
+  try { await testEnv.teardown(); } catch (_) { /* 尽力收实例 */ }
+  process.exit(1);
+});

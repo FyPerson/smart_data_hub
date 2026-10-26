@@ -13,25 +13,25 @@
  *   6. 类型筛选 + 按类型细分小表可用（用户追加口径②）
  *
  * 只读浏览：不提交任何表单、不触碰生产数据，纯 GET + 前端交互观察。
- * 直连本机已在跑的 3000 端口（真实 task_pool.db，非 fixture 隔离——本脚本全程只读）。
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例），不再直连本机 3000 端口的真实 task_pool.db / .env；
+ *   被测数据是本检出本地库的快照副本，本脚本仍全程只读（实例库只用 OPEN_READONLY 查一个 admin 用户 id）。
+ *   写死的 Chromium 路径 executablePath 已删，用 Playwright 默认浏览器。
+ *   ⚠️ EXPECTED_TOTAL（修正 14 / 开发 8 / 协作 51 / 迭代 18）按快照库里的行数写死：它依赖「快照库」当前数据，快照变了必须回来改（首跑核对；原样保留，不改断言）。
+ *   批跑建议：exclusive（断言绝对计数，同一共享实例上并行的造数脚本会让总数漂移）。
  *
  * 用法：node scripts/test-statistics-efficiency-e2e.js
  */
 'use strict';
 
-const path = require('path');
 const http = require('http');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const PORT = process.env.PORT || '3000';
-const BASE_URL = `http://localhost:${PORT}`;
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const CHROME_PATH = 'C:/Users/FY/AppData/Local/ms-playwright/chromium-1208/chrome-win64/chrome.exe';
+let BASE_URL = null;   // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;    // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let HOST = null;       // 同上：从 baseUrl 解析的 hostname / port（http.get 用）
+let PORT = null;
 
 let pass = 0;
 let fail = 0;
@@ -47,14 +47,23 @@ function check(cond, label, detail) {
     }
 }
 
-const db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY);
-const dbGet = (sql, params = []) => new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-});
+// [#106 S4d-3] 只读打开实例库（OPEN_READONLY，带打开回调转 Promise，路径不存在就报错）；每次查询开关一次，关库等回调、错误不丢。
+//   模块顶层不再 new Database(业务库)；与 _test-fixture.js 的 openInstanceDb 同源思路（那个是 READWRITE，本脚本只读故用 READONLY）
+function openInstanceDbReadonly(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+const dbGet = async (sql, params = []) => {
+    const d = await openInstanceDbReadonly(DB_PATH);
+    return new Promise((resolve, reject) => {
+        d.get(sql, params, (err, row) => { d.close((ce) => { const e = err || ce; e ? reject(e) : resolve(row); }); });
+    });
+};
 
 function httpGetJson(p, token) {
     return new Promise((resolve, reject) => {
-        http.get({ host: 'localhost', port: PORT, path: p, headers: { Authorization: 'Bearer ' + token } }, (res) => {
+        http.get({ host: HOST, port: PORT, path: p, headers: { Authorization: 'Bearer ' + token } }, (res) => {
             let d = '';
             res.on('data', (c) => { d += c; });
             res.on('end', () => {
@@ -68,20 +77,22 @@ function httpGetJson(p, token) {
 async function signAsAdmin() {
     const user = await dbGet("SELECT id, username, display_name, role FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1");
     if (!user) throw new Error('db 中找不到 admin 用户，无法签发 JWT');
-    const token = jwt.sign(
-        { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '2h' }
-    );
+    const token = await testEnv.signToken(user.id);   // [#106 S4d-3] 实例密钥签（原 jwt.sign + .env 的 JWT_SECRET；有效期 1 小时）
     return token;
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    const parsedUrl = new URL(BASE_URL);
+    HOST = parsedUrl.hostname;
+    PORT = parsedUrl.port;
     console.log('=== 统计中心效率统计 Playwright 交互自验 ===\n');
 
     console.log('--- 0. 前置：探测 server / 签发 admin JWT ---');
     const versionRes = await httpGetJson('/api/version', 'no-token-needed').catch(() => null);
-    check(!!versionRes, '本机 server 在 3000 端口响应', versionRes ? '' : '请先手动起 server（node server.js）');
+    check(!!versionRes, '被测服务（隔离实例）响应 /api/version', versionRes ? '' : '实例未响应');
     const token = await signAsAdmin();
     check(!!token, 'admin JWT 签发成功');
     console.log('');
@@ -166,7 +177,7 @@ async function main() {
     check(invalidModule.status === 400, '非法 module 参数 → 400', `实际 ${invalidModule.status}`);
 
     const noAuth = await new Promise((resolve) => {
-        http.get({ host: 'localhost', port: PORT, path: '/api/statistics/efficiency' }, (res) => resolve(res.statusCode)).on('error', () => resolve(0));
+        http.get({ host: HOST, port: PORT, path: '/api/statistics/efficiency' }, (res) => resolve(res.statusCode)).on('error', () => resolve(0));
     });
     check(noAuth === 401, '无 token 访问 → 401', `实际 ${noAuth}`);
     console.log('');
@@ -175,7 +186,7 @@ async function main() {
     // 2. 浏览器交互层
     // ============================================================
     console.log('--- 2. 浏览器交互层（Playwright headless chromium） ---');
-    const browser = await chromium.launch({ headless: true, executablePath: CHROME_PATH });
+    const browser = await chromium.launch({ headless: true });   // [#106 S4d-3] 删写死的 executablePath，用 Playwright 默认浏览器
     const consoleErrors = [];
     try {
         const context = await browser.newContext();
@@ -347,20 +358,21 @@ async function main() {
         check(realErrors.length === 0, '0 console error（已滤 favicon 噪声）',
             realErrors.length ? `${realErrors.length} 条：${realErrors.slice(0, 3).map((e) => `${e.text}${e.url ? ' @ ' + e.url : ''}`).join(' | ')}` : '');
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { check(false, '浏览器关闭', e && e.message); }   // [#106 S4d-3] 失败计失败
     }
     console.log('');
 
+    try { await testEnv.teardown(); } catch (e) { check(false, 'teardown（收掉自起实例）', e && e.message); }
     console.log(`=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
     if (fail > 0) {
         console.log('\n失败明细：');
         failures.forEach((f, i) => console.log(`  ${i + 1}. ${f.label}${f.detail ? ' — ' + f.detail : ''}`));
     }
-    db.close();
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
     console.error('e2e 脚本异常：', err);
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
     process.exit(1);
 });

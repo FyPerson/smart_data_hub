@@ -1573,7 +1573,7 @@ async function main() {
     const expectedNo = sysDeriveNumbering.sysIssueDisplayNo(mdIssue);
     assert.strictEqual(expectedNo, '#5_2', `[DN9] 前置：夹具应产出 #5_2, got ${expectedNo}`);
     const bareId = `#${mdIssue.id}`;   // #999——若某 builder 漏接 helper 直拼 issue.id 会落成这个形态
-    const baseUrl = 'http://localhost:3000';
+    const baseUrl = 'http://instance.invalid';   // 只用于拼深链文案，DN9 断言只看子编号与裸 #id，不依赖端口值（S4e-1：去掉写死的 3000）
     const BUILDERS = [
       ['buildSysDevMarkdown', 'assign 分支', () => I.buildSysDevMarkdown(mdIssue, 'assign', baseUrl)],
       ['buildSysDevMarkdown', 'notifyReturnedToDeveloper 分支', () => I.buildSysDevMarkdown(mdIssue, 'notifyReturnedToDeveloper', baseUrl)],

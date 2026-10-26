@@ -34,9 +34,12 @@ function normalize(raw){
  if(!s.virtual_disks.length)s.component_errors.push('未取得RAID虚拟盘信息');
  s.collection_status=!s.server?'failed':s.component_errors.length?'partial':'success';return s;
 }
-function createCollector(configPath=defaultConfig){return {
- host:()=>configuredHost(configPath),
+// [#106 S1b] options.externalDisabled===true（隔离实例，由 server.js 经 index.js 传入）：host() 返回 null 且不读配置文件，
+//   collect() 以 code=EXTERNAL_DISABLED 拒绝且不启动 PowerShell。本文件不 require 实例模块：it-ledger 目录下的变异脚本会把这些文件整体复制到临时目录加载。
+function createCollector(configPath=defaultConfig,options={}){const disabled=!!options&&options.externalDisabled===true;return {
+ host:()=>disabled?null:configuredHost(configPath),
  collect:()=>new Promise((resolve,reject)=>{
+  if(disabled)return reject(Object.assign(Error('EXTERNAL_DISABLED: 隔离实例不执行设备巡检采集'),{code:'EXTERNAL_DISABLED'}));
   if(process.platform!=='win32')return reject(Error('COLLECTOR_REQUIRES_WINDOWS'));
   execFile('powershell.exe',['-NoProfile','-NonInteractive','-File',path.resolve(__dirname,'../../scripts/collect-it-device.ps1'),'-ConfigPath',configPath],{windowsHide:true,timeout:180000,maxBuffer:2*1024*1024,encoding:'utf8'},(error,stdout)=>{
    if(error)return reject(Error(error.killed?'COLLECTOR_TIMEOUT':'COLLECTOR_EXEC_FAILED'));

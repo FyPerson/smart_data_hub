@@ -2,7 +2,10 @@
  * 模型中心 C7 · 整条目点击打开详情抽屉 Playwright 实测（2026-07-24 初版；C4c-2 子批 2c 按新卡片结构重写 R1–R10）
  *
  * 用法：node scripts/test-model-c7-row-click-playwright.js
- * 前置：本地 server 已启动（TEST_BASE_URL，默认 localhost:3000）
+ * 前置：无服务前置（[#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例，也可由 TEST_* 变量组指向已起好的隔离实例；不再依赖 localhost:3000）。
+ *   依赖：隔离实例是本检出本地库的快照，/api/models 至少要有 2 行（路由改写给 rows[0] / rows[1] 注入前提数据；首跑核对）。
+ *   [#106 S4d-1] 退出码：0 = 全部断言通过；1 = 有断言失败或脚本异常；2 = 配置错误（未知的 C7_MUT，或变异锚点不是恰好 1 次，与原版一致，可与「断言判红」的 1 区分）。
+ *   未知的 C7_MUT 在 ready 之后 throw 带 c7Config 标记的错误，入口 .catch 里 teardown 之后以 2 退出；变异锚点不是恰好 1 次时计失败 + 置 c7ConfigError + 中止该次请求，成功路径收尾 fx.finish(2)。
  * 新结构（C4c-2）：条目 = #modelListBody [data-id]（首行 .catalog-row1 / 第二行 .catalog-row2）；操作区 .model-row-actions（验收 + ⋯，菜单是条目内的 [role=menu]）；
  *   点击委托：MC 的 C7 委托（initModelDrawer）+ CAT 的列表委托（catalogBindList，data-act / data-entry 分发）。
  * 覆盖：
@@ -19,10 +22,10 @@
  *   R10 列表重渲染替换 opener 后关抽屉，焦点仍回到该条目表名按钮（N3）；悬停读计算样式（卡片边框色或阴影悬停前后有变化，不锁颜色值）；.model-open-btn:hover 无下划线
  *   R11 展开面板（C4c-3 3a）：点展开按钮不开抽屉；点面板空白处（面板自己的内边距，命中元素就是 .pane）不开抽屉（C7 委托排除 .pane）
  *   R11b 面板里的模型链接（button[data-open-model]，Q14）：点击打开「那个模型」的抽屉（openModelDrawer 调用序列恰为 [目标 id]，不是所在条目的 id），抽屉副标题匹配目标 id
- *   R12 normalize.js 版本印记与缓存串一致
+ *   R12 normalize.js 版本印记：KIT_VERSION 暴露 + 版本不一致时运行时 console.error（W4 起不再断言 HTML 缓存串含 KIT_VERSION）
  *   全程 0 console error
  * 同步性（DOM 契约 14）：菜单开关 / 委托分发 / renderModelsPage 都是同步完成的，所以「抽屉没开」在 click 返回后立即读（再过两帧作为帧边界，不用 sleep 猜时序）。
- * 页内变异自证（C7_MUT=<名>，拦截 Model_Center.html 文档做锚点替换，锚点必须恰好出现 1 次，否则直接报错退出；期望判红，下列「红」是实测）：
+ * 页内变异自证（C7_MUT=<名>，拦截 Model_Center.html 文档做锚点替换，锚点必须恰好出现 1 次，否则计失败、中止该次请求并以退出码 2 收尾；期望判红，下列「红」是实测）：
  *   no-actions-exclude（C7 委托的排除选择器去掉 .model-row-actions）→ R2b（点操作区空白 / gap 会开抽屉）判红；
  *   no-container-exclude（排除选择器同时去掉 [role="menu"], [role="menuitem"] 与 .model-row-actions）→ R2b（点操作区空白 / gap）与 R8（点菜单上沿）都判红。
  *   （单独去掉 [role="menu"], [role="menuitem"] 是等价变异：菜单渲染在 .model-row-actions 里面，仍被后者排除，所以不单列。）
@@ -53,7 +56,7 @@ function expect(cond, msg, detail) {
     if (cond) { console.log(`  ✓ ${msg}`); pass++; }
     else { console.log(`  ✗ ${msg}${detail !== undefined ? '  got=' + JSON.stringify(detail) : ''}`); fail++; }
 }
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
+let BASE = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
 const WAIT = 8000;
 const C7_MUTS = {
     'no-actions-exclude': [['[role="menu"], [role="menuitem"], .pane, .model-row-actions\')) { return; }', '[role="menu"], [role="menuitem"], .pane\')) { return; }']],
@@ -79,7 +82,7 @@ const C7_CAT_MUTS = {
     'dispatch-valdata-phase': { edits: [["case 'validate-data': catalogCall('openValidationModal', [m.id, m.table_name, m.status, isDIM ? 'DIM' : 'DWD', 'data']); break;", "case 'validate-data': catalogCall('openValidationModal', [m.id, m.table_name, m.status, isDIM ? 'DIM' : 'DWD', 'semantic']); break;"]], probe: "case 'validate-data': catalogCall('openValidationModal', [m.id, m.table_name, m.status, isDIM ? 'DIM' : 'DWD', 'semantic'])" },
 };
 const C7_MUT = process.env.C7_MUT || '';
-if (C7_MUT && !C7_MUTS[C7_MUT] && !C7_CAT_MUTS[C7_MUT]) { console.error('未知的 C7_MUT：' + C7_MUT); process.exit(2); }
+let c7ConfigError = false;   // [#106 S4d-1] 变异锚点不是恰好 1 次时置 true：收尾退出码 2（配置错误，与断言判红的 1 区分）
 
 const drawerOpen = (page) => page.evaluate(() => document.getElementById('modelDetailDrawer').classList.contains('open'));
 /** 抽屉副标题（#modelDrawerSub）只在详情异步加载后由 renderModelDrawer 写入，openModelDrawer / closeModelDrawer 都不清它：
@@ -110,7 +113,14 @@ const hitsItself = (loc, x, y) => loc.evaluate((el, p) => document.elementFromPo
 const HANDLERS = ['openWorkbench', 'openDimDDLModal', 'openDimETLModal', 'openDwdDDLModal', 'openDwdScriptModal', 'openEditModal', 'openDimConfigViewModal', 'openDwdConfigViewModal', 'viewModelChangeLogs', 'deleteModel', 'openDDLModal', 'openValidationModal'];
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 模型中心 C7 整条目点击 实测 ===\n');
+    // [#106 S4d-1] 原顶层 process.exit(2) 改 throw（带 c7Config 标记）：入口 .catch 里 teardown 后以 2 退出（配置错误，与断言判红的 1 区分）
+    if (C7_MUT && !C7_MUTS[C7_MUT] && !C7_CAT_MUTS[C7_MUT]) { const err = new Error('未知的 C7_MUT：' + C7_MUT); err.c7Config = true; throw err; }
+    // [#106 S4d-1] 变异锚点不是恰好 1 次：原 route 回调里 process.exit(2)；现在计失败 + 置 c7ConfigError + 中止这次请求
+    //   （Model_Center.html 分支文档加载被中止 → 进入下面的 catch；model-catalog.js 分支页面照常加载，靠变异探针的 TypeError 或 waitForSelector 超时进入 catch），收尾 fx.finish(2)
+    const anchorMismatch = async (route, msg) => { c7ConfigError = true; console.error(msg); expect(false, msg); await route.abort(); };
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
     const context = await browser.newContext({ viewport: { width: 1700, height: 950 } });
@@ -136,7 +146,7 @@ const HANDLERS = ['openWorkbench', 'openDimDDLModal', 'openDimETLModal', 'openDw
                 const resp = await route.fetch(); let body = await resp.text();
                 for (const [a, b] of C7_MUTS[C7_MUT]) {
                     const n = body.split(a).length - 1;
-                    if (n !== 1) { console.error('C7 变异 ' + C7_MUT + '：锚点出现 ' + n + ' 次（必须恰好 1 次）：' + a); process.exit(2); }
+                    if (n !== 1) { await anchorMismatch(route, 'C7 变异 ' + C7_MUT + '：锚点出现 ' + n + ' 次（必须恰好 1 次）：' + a); return; }
                     body = body.split(a).join(b);
                 }
                 console.log('  [C7_MUT] ' + C7_MUT + '：已对 Model_Center.html 完成 ' + C7_MUTS[C7_MUT].length + ' 处锚点替换');
@@ -148,7 +158,7 @@ const HANDLERS = ['openWorkbench', 'openDimDDLModal', 'openDimETLModal', 'openDw
                 const resp = await route.fetch(); let body = await resp.text();
                 for (const [a, b] of C7_CAT_MUTS[C7_MUT].edits) {
                     const n = body.split(a).length - 1;
-                    if (n !== 1) { console.error('C7 变异 ' + C7_MUT + '：锚点在 model-catalog.js 里出现 ' + n + ' 次（必须恰好 1 次）：' + a); process.exit(2); }
+                    if (n !== 1) { await anchorMismatch(route, 'C7 变异 ' + C7_MUT + '：锚点在 model-catalog.js 里出现 ' + n + ' 次（必须恰好 1 次）：' + a); return; }
                     body = body.split(a).join(b);
                 }
                 console.log('  [C7_MUT] ' + C7_MUT + '：已对 model-catalog.js 完成 ' + C7_CAT_MUTS[C7_MUT].edits.length + ' 处锚点替换');
@@ -611,13 +621,14 @@ const HANDLERS = ['openWorkbench', 'openDimDDLModal', 'openDimETLModal', 'openDw
         expect(underlineRule === null, '.model-open-btn:hover 下划线规则不存在', underlineRule);
 
         // ===== R12 normalize.js 版本守卫 =====
-        console.log('R12. normalize.js 版本印记与缓存串一致');
+        console.log('R12. normalize.js 版本印记（KIT_VERSION 暴露 + 运行时比对报错）');
         const kitCheck = await page.evaluate(() => {
             const src = Array.from(document.querySelectorAll('script[src*="model-detail-normalize"]')).map(s => s.getAttribute('src'))[0] || '';
             return { kitVersion: window.ModelDetailKit && window.ModelDetailKit.KIT_VERSION, src };
         });
         expect(!!kitCheck.kitVersion, 'normalize.js 暴露 KIT_VERSION', kitCheck);
-        expect(kitCheck.src.includes(kitCheck.kitVersion), 'HTML 缓存串包含 KIT_VERSION（两处已同步 bump）', kitCheck);
+        // #106 W4 / S6b：原断言“HTML 缓存串包含 KIT_VERSION”已删除——页面引用一律 ?v=auto，缓存串由服务端注入内容指纹，不再与 KIT_VERSION 同步；
+        //   KIT_VERSION 只剩接口握手：下面的运行时比对（mdcCheckKitVersion 在版本不一致时 console.error）保留。
         const warnFired = await page.evaluate(() => {
             const real = window.ModelDetailKit.KIT_VERSION;
             let msg = null;
@@ -640,10 +651,16 @@ const HANDLERS = ['openWorkbench', 'openDimDDLModal', 'openDimETLModal', 'openDw
         console.error('\n脚本异常:', e.message);
         fail++;
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);
-    process.exit(fail ? 1 : 0);
-})();
+    fx.finish(c7ConfigError ? 2 : (fail ? 1 : 0));   // 收尾（配置错误 2 优先于断言失败 1）：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('C7 实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    if (e && e.c7Config) process.exit(2);   // 配置错误（未知 C7_MUT）：2，与断言判红 / 脚本异常的 1 区分
+    process.exit(1);
+});
 function J(v) { return JSON.stringify(v); }

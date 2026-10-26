@@ -30,7 +30,7 @@ async function check(name, fn) {
     catch (e) { console.log('  ❌ ' + name + ' — ' + e.message); fail++; }
 }
 
-const baseUrl = 'http://192.168.1.100:3000';
+const baseUrl = 'http://example.invalid';   // [#106 S4c-B] 仅作样例传给 builder 的占位域名（原为写死端口 3000 的生产地址）；断言只对 Issue_Tracker.html?id=15 做 includes，不依赖主机名
 const sampleIssue = {
     id: 15,
     title: '市场部 5 月业绩分析看板',

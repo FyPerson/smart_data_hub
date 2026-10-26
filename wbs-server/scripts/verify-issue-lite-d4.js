@@ -4,19 +4,18 @@
  *
  * ⚠️ 拉群会真建钉钉群——本 verify **只测钉钉调用前的守卫**（权限/幂等/id），绝不触发真建群。
  *    真建群 e2e 需用户在场（会真拉群）。授权路径靠"预置 open_conv_id 幂等短路"安全验证。
- * 自启 PORT=3399，跑完按端口精确杀 + 清理测试单。
+ * [#106 S3b] 不再自 spawn 在写死的 3399、不再按端口杀进程、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完收掉实例并清理测试单。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
-const path = require('path');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const DB_FILE = path.join(__dirname, '..', 'task_pool.db');
 const DEV_ID = 10; // 示例开发C
 const TITLE_PREFIX = '[D4VERIFY]';
+
+let BASE = null;
+let DB_FILE = null;
 
 let pass = 0, fail = 0; const results = [];
 function check(name, cond, detail) { if (cond) { pass++; results.push(`  ✅ ${name}`); } else { fail++; results.push(`  ❌ ${name}${detail ? ' · ' + detail : ''}`); } }
@@ -28,47 +27,25 @@ async function api(method, urlPath, token, body) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
-// codex 15 C-1 范式（F 收口 sweep）：netstat 本地地址列精确端口比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupRows() {
-    return new Promise((res) => { const db = new sqlite3.Database(DB_FILE); db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); res(); }); });
+    return new Promise((res) => { const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE); db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); res(); }); });
 }
 function setOpenConv(id, val) {
-    return new Promise((res) => { const db = new sqlite3.Database(DB_FILE); db.run(`UPDATE issue_lite SET dingtalk_open_conversation_id=?, dingtalk_chat_id=?, dingtalk_chat_name=? WHERE id=?`, [val, 'cid_' + id, '[数据开发]测试群', id], () => { db.close(); res(); }); });
-}
-async function waitReady(getLog, ms = 12000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(getLog())) { try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) return true; } catch (_) {} }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
+    return new Promise((res) => { const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE); db.run(`UPDATE issue_lite SET dingtalk_open_conversation_id=?, dingtalk_chat_id=?, dingtalk_chat_name=? WHERE id=?`, [val, 'cid_' + id, '[数据开发]测试群', id], () => { db.close(); res(); }); });
 }
 const REQ = { requester_name: '王五', requester_dept: '交付运营部', requester_phone: '13700003333' };
 function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单' }, REQ, extra || {}); }
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句（静态守卫硬规则，S3b 修复批 2a）：失败直接落到末尾的 .catch（打印并以非零退出），不会先吞掉失败再继续做 I/O
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
+    let ready = false;
     try {
-        const ready = await waitReady(() => log);
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        await cleanupRows();
+        // 未带 token 访问 issue_lite 列表须 401：服务确实在应答 issue_lite 路由（不是别的服务占着端口）
+        ready = (await api('GET', '/api/issue-lite', null)).status === 401;
         check('服务 + schema 就绪', ready);
         if (!ready) throw new Error('服务未就绪');
 
@@ -103,12 +80,16 @@ function bodyWith(extra) { return Object.assign({ title: TITLE_PREFIX + '单' },
 
     } catch (e) { check('e2e 执行异常', false, e.message); }
     finally {
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
-        await cleanupRows();
+        if (DB_FILE) await cleanupRows();
+        try { await fx.teardown(); } catch (e) { check('teardown（收掉自起实例）', false, e.message); }
     }
     console.log('─────── D4 verify e2e 结果 ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? '✅ D4 PASS' : '❌ D4 FAIL'}（${pass} 通过 / ${fail} 失败）·真建群 e2e 需在场`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 成功路径：finally 里已 await teardown；只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    // ready() 失败（或收尾阶段的意外异常）：打印并以非零退出；teardown 在 ready 失败时没有实例可收，失败也不再抛
+    console.error('D4 verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

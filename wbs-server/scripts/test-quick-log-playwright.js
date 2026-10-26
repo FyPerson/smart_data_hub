@@ -9,7 +9,10 @@
  * 对齐 test-sys-paste-playwright.js / test-sys-intake-liaison-playwright.js 套件范式：
  *   JWT 注入 + login.html 中继跳转（鉴权页直接 goto 会被 checkAuth 销毁 context）。
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-quick-log-playwright.js
+ * 用法：node scripts/test-quick-log-playwright.js
+ * 前置：[#106 S4d-4] 无服务前置——经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 / .env。
+ *   上传的附件物理文件在 <实例数据根>/uploads 下（env().dataDir，未知即抛）；本脚本的临时文件放 os.tmpdir() 下本脚本独有的 ql-pw-* 子目录，收尾用 removeTreeChecked 删并确认（失败计失败）。
+ *   失败截图写 os.tmpdir() 下的 sys-playwright-shots（仅断言失败时才创建，保留供查阅，不在收尾删除）。
  *
  * 覆盖：
  *   T1  admin-only 守卫：非 admin 直接访问 Quick_Log.html 被拒（alert+跳转 Task_Pool.html）+ 全程零
@@ -33,35 +36,63 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
+const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const ROOT = path.join(__dirname, '..');
-const DB_PATH = path.join(ROOT, 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+// [#106 S4d-4] BASE_URL / DB_PATH / UPLOAD_DIR / SCREENSHOT_DIR / TMP_DIR：入口 ready() 之后赋值（顶层只放纯声明，守卫 R5 / R6）；不再写死 localhost:3000 / 业务库 / .env / JWT_SECRET
+let BASE_URL = null;
+let DB_PATH = null;
+let UPLOAD_DIR = null;      // <实例数据根>/uploads
+let SCREENSHOT_DIR = null;
+let TMP_DIR = null;         // 本脚本独有的临时文件目录（os.tmpdir() 下 ql-pw-*），收尾删
 const PREFIX = '[QLPWTEST]';
 
 const ADMIN_ID = 1;
 const NONADMIN_ID = 3;   // demo_user_a，role=user（S1 verify 同款非 admin fixture）
 
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
-const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
-const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+// [#106 S4d-4] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 每次调用开一次库；close 等回调落定，关库错误不丢（语句错误优先）
+const dbAll = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.all(sql, params, (e, rows) => { d.close((ce) => { const err = e || ce; err ? rej(err) : res(rows); }); }); });
+};
+const dbRun = async (sql, params = []) => {
+    const d = await openInstanceDb(DB_PATH);
+    return new Promise((res, rej) => { d.run(sql, params, function (e) { const ctx = { changes: this && this.changes }; d.close((ce) => { const err = e || ce; err ? rej(err) : res(ctx); }); }); });
+};
 
+// [#106 S4d-4] 令牌由 test-env 用实例密钥签（读实例库 users 行，用户不存在即抛）
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
 }
 
 let pass = 0, fail = 0;
 function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } else { console.log('  ❌ ' + msg); fail++; } return cond; }
+
+/** 删目录树：逐项 lstat，链接只删链接本身不进入，文件 unlink、目录递归后 rmdir（不用 fs.rmSync：Node v24 对含中文路径静默不删）；目录不存在视为已清；删后 lstat 确认，仍存在则抛错（调用方计失败）。写法同 verify-collab-multifile-datascope.js 的 removeTreeChecked */
+function removeTreeChecked(dir) {
+    let st;
+    try { st = fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    if (st.isSymbolicLink()) {
+        try { fs.unlinkSync(dir); } catch (e) { if (e && (e.code === 'EPERM' || e.code === 'EISDIR')) fs.rmdirSync(dir); else throw e; }
+        return;
+    }
+    if (st.isDirectory()) {
+        for (const name of fs.readdirSync(dir)) removeTreeChecked(path.join(dir, name));
+        fs.rmdirSync(dir);
+    } else {
+        fs.unlinkSync(dir);
+    }
+    try { fs.lstatSync(dir); } catch (e) { if (e && e.code === 'ENOENT') return; throw e; }
+    throw new Error(`删除后仍存在：${dir}`);
+}
 async function shotOnFail(page, cond, name, msg) {
     if (!must(cond, msg)) {
         const p = path.join(SCREENSHOT_DIR, `quicklog-fail-${name}.png`);
@@ -97,18 +128,74 @@ async function loginPage(browser, token) {
     return page;
 }
 
+// [#106 S4d-4] 清理失败一律计失败（原来 catch 只打日志「非致命」，残留测试行 / 附件文件时退出码仍 0）：
+//   附件物理文件逐个 try（ENOENT 视为已清，其余错误计失败）；库行按前缀删除后回查剩余行数（非 0 也计失败）；整体失败也计失败
+// [#106 S4d-4 修复批 M1] 跨轮状态照 test-issue-lite-paste-playwright.js 的 cleanup 范式：
+//   ① 待删物理文件放跨轮 Map（键 = 绝对路径）；② 每轮先查行，查询失败本轮不删任何行（附件行是定位物理文件的唯一依据）；
+//   ③ pending 里每个路径 unlink 后用 pathExists（lstat，只认 ENOENT 为不存在）确认已不存在才移出，其余错误（含 EACCES 无法判定）计错误；
+//   ④ 只有本轮查询成功、无越界路径、pending 已空才删附件行，附件行删成功才删主行，最后回查；⑤ 共 2 轮，间隔 200ms；
+//   ⑥ 返回最后一轮仍存在的错误说明 + pending 剩余路径（调用方 cleanupTestRowsCounted 逐条计失败）。
+//   越界判据：解析后的绝对路径必须落在 <UPLOAD_DIR>/quick-log 子树内（服务端上传落点，routes/quick-log/index.js:213）；越界路径不删文件、计一条错误，且本轮不删行（行留着，下一轮 / 下一次运行仍能重新发现）
+function pathExists(p) {
+    try { fs.lstatSync(p); return true; } catch (e) { if (e && e.code === 'ENOENT') return false; throw e; }
+}
 async function cleanupTestRows() {
-    try {
-        const rows = await dbAll(`SELECT id FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
-        for (const r of rows) {
-            const atts = await dbAll(`SELECT file_name FROM sys_quick_log_attachments WHERE quick_log_id = ?`, [r.id]);
-            for (const a of atts) {
-                try { const p = path.join(ROOT, 'uploads', a.file_name); if (fs.existsSync(p)) fs.unlinkSync(p); } catch (_) { /* ignore */ }
+    const subDir = path.resolve(UPLOAD_DIR, 'quick-log');
+    const pending = new Map();   // 待删物理文件：键 = 绝对路径，跨轮保留
+    let errors = [];
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        let queryOk = true, outOfBounds = false;
+        try {
+            const rows = await dbAll(`SELECT id FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
+            for (const r of rows) {
+                const atts = await dbAll(`SELECT file_name FROM sys_quick_log_attachments WHERE quick_log_id = ?`, [r.id]);
+                for (const a of atts) {
+                    const fileName = a && a.file_name;
+                    if (!fileName) continue;
+                    const fullPath = path.resolve(UPLOAD_DIR, fileName);
+                    if (!fullPath.startsWith(subDir + path.sep)) {
+                        errors.push(`越界路径未删（file_name 不在 uploads/quick-log 内）: file_name="${fileName}" → ${fullPath}`);
+                        outOfBounds = true;
+                        continue;
+                    }
+                    pending.set(fullPath, true);
+                }
+            }
+        } catch (e) { queryOk = false; errors.push(`查测试记录 / 附件行失败: ${e && e.message}`); }
+        for (const fullPath of Array.from(pending.keys())) {
+            try {
+                if (pathExists(fullPath)) fs.unlinkSync(fullPath);
+                if (pathExists(fullPath)) throw new Error('unlink 后文件仍存在');
+                pending.delete(fullPath);   // 只移除确认已不存在的路径
+            } catch (e) { errors.push(`附件文件删除失败 ${fullPath}: ${e && e.message}`); }
+        }
+        if (queryOk && !outOfBounds && pending.size === 0) {
+            let attRowsDeleted = false;
+            try {
+                await dbRun(`DELETE FROM sys_quick_log_attachments WHERE quick_log_id IN (SELECT id FROM sys_quick_log WHERE description LIKE ?)`, [PREFIX + '%']);
+                attRowsDeleted = true;
+            } catch (e) { errors.push(`删附件行失败: ${e && e.message}`); }
+            if (attRowsDeleted) {
+                try { await dbRun(`DELETE FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']); } catch (e) { errors.push(`删测试记录失败: ${e && e.message}`); }
+                try {
+                    const left = await dbAll(`SELECT id FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
+                    if (left.length) errors.push(`回查仍有 ${left.length} 条 ${PREFIX} 测试记录残留：#${left.map((x) => x.id).join(',')}`);
+                } catch (e) { errors.push(`回查失败: ${e && e.message}`); }
             }
         }
-        await dbRun(`DELETE FROM sys_quick_log_attachments WHERE quick_log_id IN (SELECT id FROM sys_quick_log WHERE description LIKE ?)`, [PREFIX + '%']);
-        await dbRun(`DELETE FROM sys_quick_log WHERE description LIKE ?`, [PREFIX + '%']);
-    } catch (e) { console.error('[清理] 失败（非致命）：', e.message); }
+        if (errors.length === 0 && pending.size === 0) break;
+    }
+    for (const p of pending.keys()) {
+        if (!errors.some((m) => m.includes(p))) errors.push(`物理文件未清除（跨轮遗留）: ${p}`);
+    }
+    return errors;
+}
+// 清理失败一律计失败：cleanupTestRows 返回的每条剩余错误各计一次
+async function cleanupTestRowsCounted() {
+    const errors = await cleanupTestRows();
+    for (const m of errors) must(false, `[清理] ${m}`);
 }
 
 // 同 test-sys-paste-playwright.js 的 dispatchPaste（1x1 透明 PNG + DataTransfer 构造 + 合成 paste 事件）
@@ -131,7 +218,15 @@ async function dispatchPaste(page, { withImage = true, focusSelector = null } = 
 }
 
 async function main() {
-    await cleanupTestRows();
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    const dataDir = testEnv.env().dataDir;
+    if (!dataDir) throw new Error('实例数据根（env().dataDir）未知：无法定位 uploads 目录——变量组形态下 TEST_DB_PATH 所在目录没有与 TEST_INSTANCE 匹配的 sdh-instance.json');
+    UPLOAD_DIR = path.join(dataDir, 'uploads');
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+    TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ql-pw-'));
+    await cleanupTestRowsCounted();
     const adminTok = await signAs(ADMIN_ID);
     const nonAdminTok = await signAs(NONADMIN_ID);
     console.log('\n══════ 零星事项台账 Playwright 冒烟（独立页 Quick_Log.html） ══════');
@@ -275,7 +370,7 @@ async function main() {
         const attEmptyText = await page.locator('#qlEditAttList').textContent();
         await shotOnFail(page, (attEmptyText || '').includes('暂无附件'), 't6-att-empty', `T6 编辑弹窗打开时附件清单显示"暂无附件"（实得="${(attEmptyText || '').trim()}"）`);
 
-        const tmpFilePath = path.join(os.tmpdir(), 'ql-pw-test-attachment.txt');
+        const tmpFilePath = path.join(TMP_DIR, 'ql-pw-test-attachment.txt');
         fs.writeFileSync(tmpFilePath, 'quick-log playwright test attachment content');
         await page.setInputFiles('#qlPickerInput_ql-edit', tmpFilePath);
         await page.waitForTimeout(300);
@@ -324,7 +419,7 @@ async function main() {
         await page.waitForTimeout(200);
         await page.fill('#f_description', PREFIX + 'L2上传失败测试');
         await page.fill('#f_result_note', PREFIX + 'L2结果说明');
-        const l2FilePath = path.join(os.tmpdir(), 'ql-pw-l2-fail-attachment.txt');
+        const l2FilePath = path.join(TMP_DIR, 'ql-pw-l2-fail-attachment.txt');
         fs.writeFileSync(l2FilePath, 'this upload will be forced to fail');
         await page.setInputFiles('#qlPickerInput_ql-create', l2FilePath);
         await page.waitForTimeout(200);
@@ -424,14 +519,22 @@ async function main() {
         await page.close();
         await naPage.close();
     } finally {
-        await browser.close();
-        await cleanupTestRows();
-        db.close();
+        // [#106 S4d-4] 浏览器关闭失败计失败；清理失败计失败（cleanupTestRows 内部）；临时目录用 removeTreeChecked 删并确认
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
+        await cleanupTestRowsCounted();
+        try { removeTreeChecked(TMP_DIR); } catch (e) { must(false, `临时目录清理失败 ${TMP_DIR}：${e && e.message}`); }
     }
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
 
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
-    if (fail > 0) { console.log('  ❌ 零星事项台账 Playwright 冒烟存在失败项'); process.exit(1); }
-    console.log('  🎉 零星事项台账 Playwright 冒烟全部通过');
+    if (fail > 0) console.log('  ❌ 零星事项台账 Playwright 冒烟存在失败项');
+    else console.log('  🎉 零星事项台账 Playwright 冒烟全部通过');
+    testEnv.finish(fail > 0 ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main().catch(e => { console.error('❌ 脚本执行异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('❌ 脚本执行异常:', e && e.stack || e);
+    try { if (TMP_DIR) removeTreeChecked(TMP_DIR); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

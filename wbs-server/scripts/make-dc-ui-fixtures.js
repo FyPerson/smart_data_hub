@@ -20,15 +20,15 @@
  *   演示/观察数据播种脚本，而本脚本是**回归测试资产必须进 git**（否则依赖它的 Playwright
  *   脚本在别的机器/部署后仍会 ENOENT——正是本脚本要修的问题）。改名前先确认该忽略规则。
  *
- * 前置：dev 服务器需在 BASE 运行（直改本地 dev 库）。
- * 独立运行：node scripts/make-dc-ui-fixtures.js
+ * [#106 S4d-1] 现状：只作库被已迁移到隔离实例的脚本 require（如 test-collab-direct-close-c-playwright.js，调用方先 fx.ready()，
+ *   本文件只经 fx.BASE / fx.openInstanceDb 操作该实例）。命令行独立运行在迁移前不可用：没有 ready 就读 fx.BASE 会抛 FX_NOT_READY、
+ *   以退出码 1 失败关闭（登记表里本文件是 EXEMPT「演示 / 观察环境用」，需要独立运行时另行重做）。
  */
 'use strict';
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const sqlite3 = require('sqlite3').verbose();
 const fx = require('./_test-fixture');
 
 const SINGLE_PATH = path.join(os.tmpdir(), 'dc-testsingle.json');
@@ -36,31 +36,36 @@ const NORMAL_PATH = path.join(os.tmpdir(), 'dc-testnormal.json');
 const NORMAL2_PATH = path.join(os.tmpdir(), 'dc-testnormal2.json');
 const PENDING_PATH = path.join(os.tmpdir(), 'dc-testpending.json');
 
-function dbGet(sql, params) {
+// [#106 S4d-1] 开库走夹具导出的 fx.openInstanceDb（带打开回调、OPEN_READWRITE、不带 OPEN_CREATE：库不存在就报错，不悄悄建空库）；
+//   等 close 回调落定，关库错误不丢（语句错误优先）
+async function dbGet(sql, params) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
-        db.get(sql, params, (e, r) => { db.close(); e ? reject(e) : resolve(r); });
+        db.get(sql, params, (e, r) => { db.close((cerr) => { const err = e || cerr; err ? reject(err) : resolve(r); }); });
     });
 }
-function dbRun(sql, params) {
+async function dbRun(sql, params) {
+    const db = await fx.openInstanceDb(fx.DB_PATH);
     return new Promise((resolve, reject) => {
-        const db = new sqlite3.Database(fx.DB_PATH);
-        db.run(sql, params, function (e) { db.close(); e ? reject(e) : resolve(this); });
+        db.run(sql, params, function (e) { const stmt = this; db.close((cerr) => { const err = e || cerr; err ? reject(err) : resolve(stmt); }); });
     });
 }
 
 // 2026-09-07 新增：造一张停在 PENDING（已指派开发、开发未提交）的单，供 C-UI-8 测行政闭环放开。
 //   createPendingFixture 恒止于 PENDING，**不做任何 setCollabState**——这里要的就是它的原始形态
 //   （submission_version 初始值、无附件、无 exporter），任何加工都会削弱"待开发单真实形态"这个前提。
-async function makePendingSingle() {
+// [#106 S4d-1] track = 调用方的追踪数组：建单后立即登记编号，后续步骤抛错时失败回滚也能清到这张单
+async function makePendingSingle(track) {
     const f = await fx.createPendingFixture();
+    track.push(f.id);
     const row = await dbGet(
         'SELECT assign_mode, forwarded_to_exporter_at, status, developer_id FROM collab_requests WHERE id=?', [f.id]);
     return { id: f.id, row };
 }
 
-async function makeExporting(assignMode, forwarded) {
+async function makeExporting(assignMode, forwarded, track) {
     const f = await fx.createPendingFixture();
+    track.push(f.id);
     const exporterRow = await dbGet('SELECT display_name FROM users WHERE id=?', [fx.EXPORTER_ID]);
     await fx.setCollabState(f.id, {
         status: 'EXPORTING',
@@ -114,18 +119,14 @@ async function seed(opts = {}) {
 
     const createdIds = [];
     try {
-        const direct = await makeExporting('admin_direct', null);
-        createdIds.push(direct.id);
-        const normal = await makeExporting('normal', '2026-09-01 17:29:37');
-        createdIds.push(normal.id);
+        const direct = await makeExporting('admin_direct', null, createdIds);
+        const normal = await makeExporting('normal', '2026-09-01 17:29:37', createdIds);
         // 2026-09-06 新增：第二张 normal 已转发单，专供 admin 侧行政闭环用例（C-UI-7）——
         //   与 exporter 侧 C-UI-4/5/6 共用的 `normal` 分开，避免 C-UI-4 把单闭环成 DONE 后
         //   C-UI-7 拿到的已不是 EXPORTING 态。
-        const normal2 = await makeExporting('normal', '2026-09-01 17:29:37');
-        createdIds.push(normal2.id);
+        const normal2 = await makeExporting('normal', '2026-09-01 17:29:37', createdIds);
         // 2026-09-07 新增：一张 PENDING（已指派未提交）单，专供 C-UI-8 测「行政闭环放开到任意状态」
-        const pending = await makePendingSingle();
-        createdIds.push(pending.id);
+        const pending = await makePendingSingle(createdIds);
 
         // 形态自校验：防「播种成功但形态不对」静默误导下游 UI 断言（夹具错会让断言测的是别的东西）
         const bad = [];
@@ -169,7 +170,13 @@ async function seed(opts = {}) {
         return { single, normal: norm, normal2: norm2, pending: pend, ids: createdIds };
     } catch (e) {
         // 失败回滚：删掉本次已创建的单，避免半截夹具残留在库里
-        await cleanupSeeded(createdIds, true);
+        // [#106 S4d-1] 回滚清理的失败不再丢弃：打印残留说明，并附到抛出的错误上（err.cleanupErrors），调用方据此逐条计失败
+        const cleanupErrors = await cleanupSeeded(createdIds, true);
+        if (cleanupErrors.length) {
+            cleanupErrors.forEach((m) => console.error('⚠️ 播种失败回滚未清干净: ' + m));
+            // 与夹具 createPendingFixture 指派失败时带上来的 e.cleanupErrors 合并，不覆盖
+            if (e && typeof e === 'object') e.cleanupErrors = (Array.isArray(e.cleanupErrors) ? e.cleanupErrors : []).concat(cleanupErrors);
+        }
         throw e;
     }
 }

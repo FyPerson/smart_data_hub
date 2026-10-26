@@ -2,6 +2,8 @@
  * 模型中心 C4 · 详情抽屉视图四段（各 kind） Playwright 实测（2026-07-24）
  *
  * 用法：node scripts/test-model-c4-views-playwright.js
+ * [#106 S4d-1] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000。
+ *   依赖：隔离实例是本检出本地库的快照，下面 #50 / #52 / #53 / #58 四个模型要在快照里存在（首跑核对；缺失时对应断言会如实报红）。
  * 规格：方案 v1.4 §5.1 映射表 + demo v2 版式 + D3（kind 切换）+ D4（新徽章/dw_* 折叠）+ §5.7（历史 readOnly）
  * 覆盖（用本地库真实模型）：
  *   #52 DWD：徽章/血缘卡(主表+JOIN)/更新策略+主键 kv/字段清单(108 个·PK/派生徽章)/搜索×dw_*折叠组合/加工逻辑 details
@@ -23,7 +25,7 @@ function expect(cond, msg, detail) {
     else { console.log(`  ✗ ${msg}${detail !== undefined ? '  got=' + JSON.stringify(detail) : ''}`); fail++; }
 }
 
-const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000';
+let BASE = null;   // [#106 S4d-1] ready() 之后赋值：fx.BASE
 
 async function openDrawerById(page, id) {
     await page.evaluate(i => openModelDrawer(i), id);
@@ -39,6 +41,8 @@ async function closeDrawer(page) {
 }
 
 (async () => {
+    await fx.ready();   // 入口第一条有副作用的语句；先于任何网络请求 / 浏览器：自起隔离实例（或核对 TEST_* 变量组）
+    BASE = fx.BASE;
     console.log('=== 模型中心 C4 视图四段 Playwright 实测 ===\n');
     const browser = await chromium.launch({ headless: true });
     const consoleErrors = [];
@@ -273,9 +277,14 @@ async function closeDrawer(page) {
         console.error('测试异常:', e);
         fail++;
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { expect(false, `浏览器关闭失败：${e && e.message}`); }
     }
 
+    try { await fx.teardown(); } catch (e) { expect(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);
-    process.exit(fail ? 1 : 0);
-})();
+    fx.finish(fail ? 1 : 0);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('C4 实测异常：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

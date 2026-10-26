@@ -7,9 +7,26 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-// 真实临时上传根（verify-sys-attachments 真跑落盘用；其余脚本不写文件，仅占位过校验）
-const UPLOAD_DIR = path.join(os.tmpdir(), 'sys-verify-uploads');
-try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch (_) { /* best-effort */ }
+// 真实临时上传根（verify-sys-attachments 真跑落盘用；其余脚本不写文件，仅占位过校验）。
+// 每进程私有：旧写法是 os.tmpdir()/sys-verify-uploads 这个固定的跨进程共享目录，约 100 个 FAMILY 成员经本助手注入使用，
+//   verify-sys-delete 还会递归删整棵 sys-iteration 子树——两条线各跑一份 FAMILY 时会互删对方正在用的附件（S10 修复批 2 预筛 MED-1）。
+// 规则：每个加载本助手的进程都 fs.mkdtempSync(os.tmpdir()/sys-verify-uploads-*) 建自己的私有目录，不跨进程复用、不写环境变量
+//   （codex 46 M：写进 process.env 让后代继承，会在「公共父进程先加载本助手、再并发起多个成员」时让它们重新共用一个目录；
+//    现有派生点——跨零点自重跑、_probe-* 探针——都不需要与父进程共用上传目录，所以不提供继承）。
+//   本进程退出时清理：退出码为 0 才删；非 0 退出保留现场并打印路径（取证用）；清理本身失败则打印并把退出码置 1（不重试）。
+//   进程被强杀时 exit 事件不触发，目录会残留（已知局限）。
+const lineCommon = require('../../scripts/lines/line-common.js');
+const UPLOAD_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sys-verify-uploads-'));
+process.on('exit', (code) => {
+  if (code !== 0) { console.error(`[_sys-attach-test-deps] 进程以退出码 ${code} 结束，保留上传目录现场：${UPLOAD_DIR}`); return; }
+  try {
+    lineCommon.deleteTreeNoFollow(fs.realpathSync.native(UPLOAD_DIR), []);
+    fs.rmdirSync(UPLOAD_DIR);
+  } catch (e) {
+    console.error(`[_sys-attach-test-deps] 清理上传目录失败：${UPLOAD_DIR} :: ${(e && e.message) || e}`);
+    process.exitCode = 1;
+  }
+});
 const ALLOWED_FILE_DIRS = [UPLOAD_DIR];
 
 // 对齐 server.js normalizeAttachmentExt：控制字符 → 空串（拒绝）；trim；path.extname 取末尾扩展名小写。

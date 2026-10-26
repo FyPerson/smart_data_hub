@@ -2,7 +2,11 @@
  * 系统迭代·组 C·SC2「ETA 超容差理由 UI」前端 Playwright 冒烟
  * （方案 §3C.8·docs/local/系统迭代/预计完成时间与先行上线_方案_20260812_v1.3.md）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-eta-overrun-reason-playwright.js
+ * 用法：node scripts/test-sys-eta-overrun-reason-playwright.js
+ * [#106 S4d-3] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 TEST_BASE_URL / localhost:3000 / 业务库 task_pool.db / .env。
+ *   造数：经 API 建 2 张 improvement 单（标题 ETA-理由-探针-<序号>，OA 号用 Date.now() 纯数字，唯一）；收尾直连实例库按 id 逐张清（每步各自 try，有失败整体再试一轮，共 2 轮，间隔 200ms），
+ *   清完回查，遗留计失败；入口 `main();` 补了 `.catch`（尽力清理 + teardown 后 exit(1)）。
+ *   固定值：用户 id 1 admin / 8（示例开发A，在册开发，须 active 非 viewer）、受理人 13（快照库里须存在，首跑核对）。
  *
  * ⚠️ 为何新建独立文件而非扩展 test-sys-eta-generation-playwright.js（组 A 主题）：本文件测的是组 C 的
  *   超容差理由块（不是组 A 的自动生成/必填闸），且组 A 文件的全部夹具都是 bug 类型——bug 不参与容差
@@ -39,28 +43,59 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+let BASE_URL = null;         // [#106 S4d-3] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;          // [#106 S4d-3] ready() 之后赋值：testEnv.env().dbPath（实例库）
+let SCREENSHOT_DIR = null;   // [#106 S4d-3] ready() 之后赋值（顶层 path.join 会被守卫 R6 判红）：os.tmpdir() 下的 sys-playwright-shots
 
 const ADMIN_ID = 1;
 const LIAISON_ID = 13;   // 示例对接人
 const DEV_ID = 8;        // 示例开发A（本地真实 active 非 viewer 账号，同 test-sys-eta-generation-playwright.js T4/T5 既有复用账号）
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-3] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
+const closeDb = () => new Promise((res, rej) => { if (!db) return res(); const d = db; db = null; d.close((e) => (e ? rej(e) : res())); });
 
+// [#106 S4d-3] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+
+// 夹具 id（模块级，供收尾与入口 .catch 共用）
+const createdIds = [];
+
+/**
+ * [#106 S4d-3] 清理夹具：每张单独 try（4 条 DELETE 同一 try，失败整张留在追踪里），清成功才移出追踪；有失败整体再试一轮（共 2 轮，间隔 200ms）；
+ * 返回仍未清掉的说明数组。原来 `catch → console.warn` 不计失败，回查 `remain` 也不判定，清理失败时脚本仍可能 PASS
+ */
+async function cleanupCreated() {
+    if (!db) return createdIds.length ? ['实例库未打开，夹具无法清理'] : [];
+    const lastErr = new Map();
+    for (let round = 0; round < 2 && createdIds.length > 0; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        for (const id of createdIds.slice()) {
+            try {
+                await dbRun('DELETE FROM sys_issue_timeline WHERE issue_id=?', [id]);
+                await dbRun('DELETE FROM sys_issue_dev_events WHERE issue_id=?', [id]);
+                await dbRun('DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [id]);
+                await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
+                createdIds.splice(createdIds.indexOf(id), 1);
+                lastErr.delete(id);
+            } catch (e) { lastErr.set(id, (e && e.message) || String(e)); }
+        }
+    }
+    return createdIds.map((id) => `issue #${id}: ${lastErr.get(id)}`);
 }
 
 let pass = 0, fail = 0;
@@ -108,10 +143,14 @@ async function mkChangeViaApi(adminTok, deadlineStr) {
 }
 
 async function main() {
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-playwright-shots');
+    db = await openInstanceDb(DB_PATH);
     const adminTok = await signAs(ADMIN_ID);
     console.log('\n══════ 系统迭代·组C·SC2 ETA 超容差理由 UI 前端 Playwright 冒烟 ══════');
 
-    const createdIds = [];
     const browser = await chromium.launch();
     try {
         // ═══════════════════════════════════════════════════════════════
@@ -350,22 +389,30 @@ async function main() {
         console.error('实测脚本异常:', e && e.stack || e);
         fail++;
     } finally {
-        await browser.close();
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
         // 夹具清理（issue 删除会级联相关子表，同既有 verify-sys-* 惯例）
-        for (const id of createdIds) {
-            try {
-                await dbRun('DELETE FROM sys_issue_timeline WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issue_dev_events WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issue_dev_assignees WHERE issue_id=?', [id]);
-                await dbRun('DELETE FROM sys_issues WHERE id=?', [id]);
-            } catch (e) { console.warn(`夹具清理失败 issue #${id}: ${e.message}`); }
-        }
-        const remain = await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${createdIds.map(() => '?').join(',') || 'NULL'})`, createdIds);
-        console.log(`  🧹 夹具已清理（残留 ${remain ? remain.c : 0} 条，应为 0）`);
-        db.close();
-        console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
-        if (fail > 0) process.exit(1);
+        // [#106 S4d-3] 清理见 cleanupCreated（各张独立 try / 2 轮 / 遗留计失败）；回查残留也计失败
+        const allIds = createdIds.slice();   // 清理会收缩 createdIds，回查要用完整清单
+        const cleanupErrs = await cleanupCreated();
+        let remain = null;
+        try {
+            remain = await dbGet(`SELECT COUNT(*) c FROM sys_issues WHERE id IN (${allIds.map(() => '?').join(',') || 'NULL'})`, allIds);
+        } catch (e) { cleanupErrs.push(`残留回查: ${e && e.message}`); }
+        console.log(`  🧹 夹具已清理（残留 ${remain ? remain.c : '?'} 条，应为 0）`);
+        must(cleanupErrs.length === 0 && !!remain && remain.c === 0, `夹具清理无错误且残留为 0（残留 ${remain ? remain.c : '?'}${cleanupErrs.length ? '；错误：' + cleanupErrs.join(' | ') : ''}）`);
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
     }
+
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
+    console.log(`\n=== ${fail === 0 ? 'PASS' : 'FAIL'}：${pass} 项通过 / ${fail} 项失败 ===`);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
 
-main();
+// [#106 S4d-3] 入口补 .catch：尽力清理 + 关库 + teardown 后 exit(1)（原 `main();` 无 catch，ready 之前 / finally 之外的抛错变成未处理拒绝）
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await cleanupCreated(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await closeDb(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

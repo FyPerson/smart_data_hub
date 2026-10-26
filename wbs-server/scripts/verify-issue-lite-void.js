@@ -9,17 +9,16 @@
  *       → 附件只读(列表/下载仍可) → 后补通知对象(空缺可补·权限·已设 409·非法 400)
  * ⚠️ 不触发真钉钉：voided/参数守卫全部先于钉钉调用返回；不对"有通知对象的正常单"调 notify。
  *
- * 用法：node scripts/verify-issue-lite-void.js（自启 PORT=3399，跑完按端口精确杀 + 清理测试单）
+ * 用法：node scripts/verify-issue-lite-void.js
+ * [#106 S4b1] 不再自 spawn 服务、不再写死端口 3399、不再按端口杀进程、不再等日志轮询、不再读写真实库：经 scripts/lib/test-env.js 自起临时隔离实例
+ *   （来源 = 本检出本地库快照，钉钉走替身、周期任务关闭），也可由 TEST_* 变量组指向已起好的隔离实例；跑完收掉实例并清理测试单。
  */
 'use strict';
-const { spawn, execSync } = require('child_process');
-const path = require('path');
 const sqlite3 = require('sqlite3');
 const fx = require('./_test-fixture');
 
-const TEST_PORT = 3399;
-const BASE = `http://localhost:${TEST_PORT}`;
-const DB_FILE = path.join(__dirname, '..', 'task_pool.db');
+let BASE = null;       // ready() 之后赋值
+let DB_FILE = null;    // ready() 之后赋值（实例库）
 const ADMIN_ID = fx.ADMIN_ID;     // 1 admin
 const FENG_ID = fx.CONTACT_ID;    // 3 示例用户A（非 admin）
 const DEV_ID = 10;                // 示例开发C（固定开发·非 admin）
@@ -47,39 +46,38 @@ async function upload(id, token, name, content) {
     let j = null; try { j = await r.json(); } catch (_) {}
     return { status: r.status, body: j };
 }
-// codex 15 C-1：解析 netstat 本地地址列做**精确端口**比较（findstr :3399 子串匹配会误命中 33990-33999）
-function killPort(port) {
-    try {
-        const out = execSync('netstat -ano -p tcp', { encoding: 'utf8', shell: 'cmd.exe' });
-        const pids = new Set();
-        out.split(/\r?\n/).forEach(line => {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length >= 5 && cols[0] === 'TCP' && /LISTENING/i.test(cols[3])) {
-                const m = cols[1].match(/:(\d+)$/);
-                if (m && Number(m[1]) === port) pids.add(cols[4]);
-            }
-        });
-        pids.forEach(pid => { try { execSync(`taskkill /F /PID ${pid}`, { shell: 'cmd.exe' }); } catch (_) {} });
-    } catch (_) {}
-}
 function cleanupTestRows() {
     return new Promise((resolve) => {
-        const db = new sqlite3.Database(DB_FILE);
-        db.serialize(() => {
-            db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], () => {});
-            db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], () => { db.close(); resolve(); });
+        const db = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve(`打开实例库失败：${oe.message}`);   // 返回错误描述（null = 成功）；调用方计失败，不吞
+            let attErr = null;
+            db.serialize(() => {
+                db.run(`DELETE FROM issue_lite_attachments WHERE issue_lite_id IN (SELECT id FROM issue_lite WHERE title LIKE ?)`, [TITLE_PREFIX + '%'], (e1) => { if (e1) attErr = e1; });
+                db.run(`DELETE FROM issue_lite WHERE title LIKE ?`, [TITLE_PREFIX + '%'], (e2) => {
+                    db.close(() => resolve(attErr ? `DELETE 附件失败：${attErr.message}` : (e2 ? `DELETE 失败：${e2.message}` : null)));
+                });
+            });
         });
     });
 }
-async function waitReady(getLog, ms = 12000) {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline) {
-        if (/数据开发换壳 C1] ✅ issue_lite 表就绪/.test(getLog())) {
-            try { const r = await fetch(`${BASE}/api/issue-lite`); if (r.status === 401) return true; } catch (_) {}
-        }
-        await new Promise(r => setTimeout(r, 400));
-    }
-    return false;
+// 服务就绪 = 两次真实请求：health/ready 里 issue_lite 模块 ready + 未带 token 访问列表 401（服务确实在应答 issue_lite 路由）
+async function issueLiteServiceReady() {
+    try {
+        const hr = await fetch(`${BASE}/api/health/ready`);
+        const hb = await hr.json().catch(() => null);
+        const m = hb && hb.modules && hb.modules.issue_lite;
+        if (!m || m.ready !== true) return false;
+        return (await fetch(`${BASE}/api/issue-lite`)).status === 401;
+    } catch (_) { return false; }
+}
+// 直接对实例库跑一条写 SQL，返回 changes（打开失败 / 执行失败 = -1）。两处「SQL 层防线钉」共用，一律 OPEN_READWRITE（不带 OPEN_CREATE）
+function runChanges(sql, params) {
+    return new Promise((resolve) => {
+        const d = new sqlite3.Database(DB_FILE, sqlite3.OPEN_READWRITE, (oe) => {
+            if (oe) return resolve(-1);
+            d.run(sql, params, function (e) { const c = e ? -1 : this.changes; d.close(() => resolve(c)); });
+        });
+    });
 }
 const REASON = '误建重复登记，走作废流程';
 function bodyWith(title, extra) {
@@ -87,16 +85,14 @@ function bodyWith(title, extra) {
 }
 
 (async () => {
-    killPort(TEST_PORT);
-    await cleanupTestRows();
-    let log = '';
-    const child = spawn('node', ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(TEST_PORT), LOG_LEVEL: 'INFO' } });
-    child.stdout.on('data', d => { log += d.toString(); });
-    child.stderr.on('data', d => { log += d.toString(); });
-
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）；test-env 已等到全部模块（含 issue_lite）就绪
     try {
-        const ready = await waitReady(() => log);
-        check('服务 + issue_lite schema 就绪', ready);
+        BASE = fx.BASE;
+        DB_FILE = fx.DB_PATH;
+        const ce0 = await cleanupTestRows();
+        if (ce0) check('清理历史测试单', false, ce0);
+        const ready = await issueLiteServiceReady();
+        check('health/ready issue_lite 就绪 + 未带 token 列表 401', ready);
         if (!ready) throw new Error('服务未就绪');
 
         const adminTok = await fx.signAs(ADMIN_ID);
@@ -217,11 +213,7 @@ function bodyWith(title, extra) {
 
         // 条件 DELETE 层回归钉（codex 14 复审 L-3）：顺序请求打不到该防线（前置读检查先拦），
         //   直接对已作废父单的附件执行端点同款条件 DELETE SQL，钉住"作废后 SQL 层也删不动"
-        const sqlChanges = await new Promise((resolve) => {
-            const d = new sqlite3.Database(DB_FILE);
-            d.run(`DELETE FROM issue_lite_attachments WHERE id = ? AND issue_lite_id IN (SELECT id FROM issue_lite WHERE voided_at IS NULL)`,
-                [attId], function (e) { const c = e ? -1 : this.changes; d.close(() => resolve(c)); });
-        });
+        const sqlChanges = await runChanges(`DELETE FROM issue_lite_attachments WHERE id = ? AND issue_lite_id IN (SELECT id FROM issue_lite WHERE voided_at IS NULL)`, [attId]);
         const attStill = (await api('GET', `/api/issue-lite/${C.id}/attachments`, adminTok)).body || [];
         check('条件 DELETE 对已作废父单 changes=0 且附件仍在（SQL 层防线钉住）',
             sqlChanges === 0 && attStill.some(x => x.id === attId), `changes=${sqlChanges}`);
@@ -269,25 +261,23 @@ function bodyWith(title, extra) {
         check('[夹具] X 单上传附件成功', !!archAttId);
         r = await api('PUT', `/api/issue-lite/${X.id}/status`, adminTok, { status: '已归档' });
         check('[夹具] X 归档 → 200', r.status === 200);
-        const archChanges = await new Promise((resolve) => {
-            const d = new sqlite3.Database(DB_FILE);
-            d.run(`DELETE FROM issue_lite_attachments WHERE id = ? AND issue_lite_id IN (SELECT id FROM issue_lite WHERE voided_at IS NULL AND status != '已归档')`,
-                [archAttId], function (e) { const c = e ? -1 : this.changes; d.close(() => resolve(c)); });
-        });
+        const archChanges = await runChanges(`DELETE FROM issue_lite_attachments WHERE id = ? AND issue_lite_id IN (SELECT id FROM issue_lite WHERE voided_at IS NULL AND status != '已归档')`, [archAttId]);
         const archList = (await api('GET', `/api/issue-lite/${X.id}/attachments`, adminTok)).body || [];
         check('非 admin 条件 DELETE 对已归档父单 changes=0 且附件仍在（SQL 层防线钉住）', archChanges === 0 && archList.some(x => x.id === archAttId), `changes=${archChanges}`);
     } catch (e) {
         fail++;
         results.push(`  ❌ 异常中断：${e.message}`);
     } finally {
-        try { child.kill('SIGKILL'); } catch (_) {}
-        killPort(TEST_PORT);
-        await new Promise(r => setTimeout(r, 500));
-        await cleanupTestRows();
+        if (DB_FILE) { const ce = await cleanupTestRows(); if (ce) check('清理测试单', false, ce); }
+        try { await fx.teardown(); } catch (e) { fail++; results.push(`  ❌ teardown（收掉自起实例）失败：${e.message}`); }
     }
 
     console.log('─────── Commit B 作废后端 verify ───────');
     results.forEach(l => console.log(l));
     console.log(`\n总判定：${fail === 0 ? `✅ PASS（${pass}/${pass + fail}）` : `❌ FAIL（${fail} 项失败 / 共 ${pass + fail}）`}`);
-    process.exit(fail === 0 ? 0 : 1);
-})();
+    fx.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + 10 秒 unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
+})().catch(async (e) => {
+    console.error('Commit B verify 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

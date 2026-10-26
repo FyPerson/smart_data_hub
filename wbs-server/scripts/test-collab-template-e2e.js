@@ -12,22 +12,12 @@
  */
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const { tmpdir } = require('os');
 const fx = require('./_test-fixture');
 
-const BASE = 'http://localhost:3000';
+// [#106 S4c-A1] 被测服务来自 test-env（自起隔离实例或 TEST_* 变量组）：BASE 在 ready() 之后才有值，不再写死 3000
+let BASE = null;
 
-let testTmpDir = null;
 const createdFixtureIds = [];
-
-function makeTmpFile(filename, content) {
-    if (!testTmpDir) testTmpDir = fs.mkdtempSync(path.join(tmpdir(), 'collab-template-test-'));
-    const p = path.join(testTmpDir, filename);
-    fs.writeFileSync(p, content);
-    return p;
-}
 
 async function postAttachment(reqId, token, attachmentType, fileName, fileContent) {
     const fd = new FormData();
@@ -167,20 +157,31 @@ async function runTests() {
 }
 
 (async () => {
+    // ready() 在 try 之外、入口函数的第一条有副作用的语句：失败直接落到末尾 .catch（非零退出），不先吞掉失败再做 I/O
+    await fx.ready();   // 先于任何写库 / 网络请求：自起隔离实例（或核对 TEST_* 变量组）
     try {
+        BASE = fx.BASE;
         await runTests();
     } catch (e) {
         console.error('\n[FATAL]', e);
         failed++;
     } finally {
         // cleanup
-        for (const id of createdFixtureIds) {
-            try { await fx.cleanup(id); } catch (e) { console.warn(`cleanup ${id} failed: ${e.message}`); }
+        // [#106 S4c 收口] 夹具清理逐个 try/catch：只移除清理成功的编号，剩余编号再试一轮；仍遗留的每个计 1 次失败，不中断后续清理与 teardown
+        for (let round = 0; round < 2 && createdFixtureIds.length > 0; round++) {
+            if (round > 0) await new Promise((r) => setTimeout(r, 200));   // [#106 S4c 送审前小修] 两轮之间等 200ms：防服务端事务外异步回写偶发 SQLITE_BUSY 被计失败
+            for (const id of createdFixtureIds.slice()) {
+                try { await fx.cleanup(id); createdFixtureIds.splice(createdFixtureIds.indexOf(id), 1); } catch (e) { console.error(`cleanup ${id} failed (第 ${round + 1} 轮): ${e.message}`); }
+            }
         }
-        if (testTmpDir) {
-            try { fs.rmSync(testTmpDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
-        }
-        console.log(`\n=== 结果：${passed} passed / ${failed} failed ===`);
-        process.exit(failed === 0 ? 0 : 1);
+        if (createdFixtureIds.length > 0) { console.error(`夹具清理失败，遗留协作单 id=${createdFixtureIds.join(',')}`); failed += createdFixtureIds.length; }
+        try { await fx.teardown(); } catch (e) { console.error(`teardown 失败：${e.message}`); failed++; }
     }
-})();
+    console.log(`\n=== 结果：${passed} passed / ${failed} failed ===`);
+    fx.finish(failed === 0 ? 0 : 1);   // 成功路径：teardown 已落定，只设退出码、让事件循环自然结束（见 lib/test-env.js finish）
+})().catch(async (e) => {
+    // ready() 失败（或收尾阶段的意外异常）：打印并以非零退出；ready 失败时没有实例可收
+    console.error('template e2e 启动失败：', e && e.stack || e);
+    try { await fx.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});

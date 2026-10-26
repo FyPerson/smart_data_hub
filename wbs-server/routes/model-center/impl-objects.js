@@ -509,7 +509,9 @@ function createImplObjects(deps) {
             });
         }
         sweepReady = true;
-        return dailySweep.start();
+        const scheduled = dailySweep.start();
+        if (scheduled) logger.info('[impl-objects] 每日核验已排定');   // #106：调度决策的同步可观察信号（隔离实例验证用），不改变行为
+        return scheduled;
     }
     /** 停止每日任务与核验队列（stopService 调用）：队列停止接收新任务并等在途任务完成，整体最多等 3 秒，不让关机卡在慢连接上 */
     async function stopDailyVerify() {

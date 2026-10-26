@@ -2509,7 +2509,7 @@ module.exports = (deps) => {
       //   （实测 verify-sys-multidev-reset 连跑 5 次 OK/FAIL/FAIL/OK/FAIL，修正后连跑 6 次全 OK）。
       if (migrationBodyOk && !SYS_SCHEMA_STATE.error) {
         SYS_SCHEMA_STATE.ready = true;
-        if (deps.expirySweepEnabled === true && !expirySweepShutdown) expirySweep.start();
+        if (deps.expirySweepEnabled === true && !expirySweepShutdown) { if (expirySweep.start()) logger.info('[sys-expiry] 周期扫描已排定'); } // #106：调度决策的同步可观察信号（只在 start() 真正排定时打印，与 impl-objects 同口径；下一行就绪日志在决策之后打印），隔离实例验证用，不改变行为
         logger.info(`[系统迭代 C1] ✅ sys ${SYS_REQUIRED_TABLES.length}表就绪 + C0 受理门约束就位，写入口放行。`);
       }
     }
@@ -22234,5 +22234,8 @@ module.exports = (deps) => {
     DEFAULT_SINGLE_COMMIT_GROUP_SYSTEMS,   // [S2d·codex 493-R M] I0 同对象断言——钉住 index.js 消费的正是 transitions.js 导出的同一引用，非各自维护副本
   };
 
-  return { initSchema, router, _internals, stopExpirySweep:() => { expirySweepShutdown = true; return expirySweep.stop(); } };
+  // [#106 S3a] 只读就绪访问函数（汇总就绪接口 GET /api/health/ready 用）：只折算 SYS_SCHEMA_STATE，不碰库、不触发初始化；既有 /api/sys-issues/_readiness 与 503 行为不变
+  const getReadiness = () => require('../../utils/health-ready').summarizeState(SYS_SCHEMA_STATE);
+
+  return { initSchema, router, getReadiness, _internals, stopExpirySweep:() => { expirySweepShutdown = true; return expirySweep.stop(); } };
 };

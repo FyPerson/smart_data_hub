@@ -39,15 +39,21 @@
  *      上线说明必填框（决策 7 三修后单人=天然最后一人这条渲染路径的浏览器级验证，低成本追加，
  *      与 G3 的多人版验证互补·非重复）
  *
- * 用法：本地 server（3000）已重启到最新分支代码后：node scripts/test-sys-release-panel-c2b2-playwright.js
+ * 用法：node scripts/test-sys-release-panel-c2b2-playwright.js
+ * [#106 S4d-5] 经 scripts/lib/test-env.js 自起临时隔离实例（也可由 TEST_* 变量组指向已起好的隔离实例）；不再依赖 localhost:3000 / 业务库 task_pool.db / .env。
+ *   加解密键：隔离实例的服务端在隔离模式下用固定键 ISOLATED_ENCRYPTION_KEY（server.js:3028；utils/aes-password.js:21 导出的公开常量，不是机密），
+ *   本脚本读 sys_notify_dry_run / 写 sys_release_default_executor_ids 的加解密都经 aes-password 的 encryptWithKey / decryptWithKey 配这把键，不再读 DB_ENCRYPTION_KEY（隔离模式下它被置空）。
+ *   三个前置闸原样保留（首跑核对点）：
+ *     闸 1（main 开头）sys_notify_dry_run 解密值必须恒等 'on'，否则 throw 中止（防对「发通知 / 查询已读」真实外呼；隔离实例的钉钉凭证本是虚拟值，闸仍保留）。
+ *       判据：实例库 system_configs 里该键的密文经隔离键解出 === 'on'；该键由建库时从来源库白名单搬运（utils/instance-db.js:182-183），来源库没有这一行则实例里没有，闸会红——首跑看这一条。
+ *     闸 2（G1）sys_release_duty_roster 在 2032-04-07 无在册行（removed_at IS NULL），否则 throw 中止（防覆盖真实排班）。
+ *     闸 3（G1）system_configs 里没有 sys_release_default_executor_ids 行，否则 throw 中止（防覆盖真配置）；该键同样在建库白名单里（instance-db.js:185），来源库有这一行则实例里也有，闸会红——首跑看这一条。
+ *   批跑建议：exclusive（写固定日期 2032-04-07 的排班与 sys_release_default_executor_ids 全局单例配置；与其它写 sys_issues / sys_releases 的脚本不并行）；needsService:true；不需要服务端开关。
  * JWT 注入范式复用项目既有先例（goto login.html → localStorage token → goto 业务页）——鉴权页直接 goto
  * 业务页会被 checkAuth 销毁 context。
  *
- * ⚠️ LOW-6（C6 预筛回卷）并发边界：本文件与项目里其它任何会写 task_pool.db 的 Playwright 套件
- * （如 test-sys-release-c7-playwright.js / test-sys-intake-liaison-playwright.js 等）**禁止同时对同一个
- * 本地 db 并发运行**——多个套件各自建各自的测试夹具、各自在 finally 里清理，交叉运行时一个套件的
- * DELETE 可能命中另一个套件正在使用的行 id（尤其 sys_issue_timeline 等无强隔离的表），产生互相踩踏的
- * 假失败或数据错乱。一次只跑一个写 db 的 Playwright 套件。
+ * ⚠️ LOW-6（C6 预筛回卷）并发边界：本文件会写固定日期排班与全局配置键，批跑时须 exclusive（见上）；
+ * 同一实例上与其它写 sys_issue_timeline 等无强隔离表的套件并发，一个套件的 DELETE 可能命中另一个套件正在使用的行 id，产生互相踩踏的假失败。
  *
  * ⚠️ 钉钉安全边界（实测确认，写进完成报告）：
  *   - 行级通知端点（POST /sys-releases/:id/executors/:userId/notify）与批次级前身不同，本身受
@@ -66,43 +72,18 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
-const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
-const jwt = require('jsonwebtoken');
 const { chromium } = require('playwright');
+const testEnv = require('./lib/test-env');
+// [#106 S4d-5] 隔离实例的服务端在隔离模式下用固定的 ISOLATED_ENCRYPTION_KEY 加解密 system_configs（server.js:3028），
+//   它是 utils/aes-password.js 导出的公开常量（不是机密），测试侧直接引用；不读 DB_ENCRYPTION_KEY、不读 .env、不自造键。
+const { ISOLATED_ENCRYPTION_KEY, encryptWithKey, decryptWithKey } = require('../utils/aes-password');
 
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const BASE_URL = 'http://localhost:3000';
-const DB_PATH = path.join(__dirname, '..', 'task_pool.db');
-const JWT_SECRET = process.env.JWT_SECRET;   // [#82 2026-09-16] 原硬编码回退值已删（字面量不复述）；本脚本已加载 .env，该回退值本就是死代码
-// LOW-6（C6 预筛回卷）：原硬编码路径含某一次会话的 scratchpad UUID——那是本次编写脚本时所在的临时会话
-// 目录，换一个新会话/新机器跑本文件，这个目录大概率不存在，会让失败截图静默丢失（screenshot 调用本身
-// 包在 try/catch 里吞掉了）。改用 os.tmpdir() 在运行时现算一个与仓库无关的固定子目录，目录不存在就建。
-const SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-panel-c2b2-playwright-screenshots');
-if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
-// server.js:2784-2810 逐字复刻——system_configs 值一律走这套 AES-256-CBC 加密约定，本文件仅用它写测试专用的
-// sys_release_default_executor_ids 键（写前已查证该键当前无行，不覆盖任何真实配置；不触碰 sys_notify_dry_run）。
-// [#76 2026-09-16] DB_ENCRYPTION_KEY fail-closed，逐字复刻 server.js:2784-2790 约定：**不留任何
-//   默认回退值**。原硬编码回退值已删（字面量刻意不在注释里复述——复述等于再留一份坏样板，
-//   让后来者 grep 到还以为在用）。2026-08-26 凭证泄露闭环当时
-//   只改了 server.js，scripts/ 整目录漏扫（[[feedback_pattern_sweep_not_symptom_list]] 同款复发）。
-const ENCRYPTION_KEY = process.env.DB_ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
-  console.error('[FATAL] 环境变量 DB_ENCRYPTION_KEY 未设置或长度不足 32 字节。');
-  console.error('        ⚠️ 本脚本读写的是既有加密数据：请恢复该库对应的密钥，不要随手生成新值');
-  console.error('           （新密钥解不开既有密文，还会在同一个库里混入用不同密钥加密的值）。');
-  console.error('        仅首次初始化独立测试库时才生成: openssl rand -base64 32 | cut -c1-32');
-  process.exit(1);
-}
-// [codex 571-M2] 上面的 .length 是 UTF-16 字符数、不是字节数——含非 ASCII 的密钥可能凑够 32 个
-//   "字符"却通不过 createCipheriv 的真实字节要求。派生逻辑（padEnd(32).slice(0,32)）保持与
-//   server.js 逐字同款不动，这里只在校验层追加一道防线，与 _set-sys-single-commit-group.js 同口径。
-if (!/^[!-~]+$/.test(ENCRYPTION_KEY) || Buffer.byteLength(ENCRYPTION_KEY, 'utf8') < 32) {
-  console.error('[FATAL] DB_ENCRYPTION_KEY 须为 ≥32 字节的 ASCII 可打印字符（与 server.js 同一派生口径）');
-  process.exit(1);
-}
+let BASE_URL = null;        // [#106 S4d-5] ready() 之后赋值：testEnv.env().baseUrl
+let DB_PATH = null;         // [#106 S4d-5] ready() 之后赋值：testEnv.env().dbPath（实例库）
+// LOW-6（C6 预筛回卷）：失败截图目录放 os.tmpdir() 下与仓库无关的固定子目录（不再写在仓库内、也不含某次会话的临时目录）。
+//   [#106 S4d-5] 顶层 path.join 会被守卫 R6 判红：改 ready() 之后赋值；目录改在第一次截图时才建（纯失败诊断，保留不删）。
+let SCREENSHOT_DIR = null;
 
 const ADMIN_ID = 1;       // 管理员
 const LIAISON_ID = 13;    // 示例对接人（对接人白名单，排班写权限用）
@@ -111,23 +92,141 @@ const EXEC_B_ID = 9;      // 示例开发B（active·role=user，有上线执行
 const EXEC_C_ID = 12;     // 示例开发D（active·role=user，有上线执行资格）
 const VIEWER_ID = 2;      // 示例客服A（active·role=viewer，无上线执行资格，供置灰断言用）
 
-const db = new sqlite3.Database(DB_PATH);
+// [#106 S4d-5] 打开实例库：只读写已存在的实例库（OPEN_READWRITE，不带 OPEN_CREATE，路径不存在就报错而不是悄悄建空库），带打开回调转 Promise。
+//   与 _test-fixture.js 的 openInstanceDb 同源，S4c 提交后可改用夹具导出
+function openInstanceDb(dbPath) {
+    return new Promise((resolve, reject) => {
+        const d = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE, (err) => (err ? reject(err) : resolve(d)));
+    });
+}
+// 模块顶层不再 new Database(业务库)：改为 ready() 之后打开，收尾等 close 回调
+let db = null;
 const dbGet = (sql, params = []) => new Promise((res, rej) => db.get(sql, params, (e, row) => e ? rej(e) : res(row)));
 const dbRun = (sql, params = []) => new Promise((res, rej) => db.run(sql, params, function (e) { e ? rej(e) : res(this); }));
 const dbAll = (sql, params = []) => new Promise((res, rej) => db.all(sql, params, (e, rows) => e ? rej(e) : res(rows)));
+// [#106 S4d-5 修复批] 关库只在 close 回调成功后才置空句柄：失败（SQLITE_BUSY 等）时句柄保留、错误抛给调用方，兜底调用还能重试
+//   （原来先置空再等回调：失败后句柄丢了，兜底 closeDb() 直接返回，Windows 上还可能挡住实例库删除）。关库进行中的并发调用共用同一个 Promise。
+let dbClosing = null;
+const closeDb = () => {
+    if (!db) return Promise.resolve();
+    if (dbClosing) return dbClosing;
+    const d = db;
+    dbClosing = new Promise((res, rej) => { d.close((e) => { dbClosing = null; if (e) return rej(e); if (db === d) db = null; res(); }); });
+    return dbClosing;
+};
+// teardown 前的兜底关库：有界重试（共 2 次，间隔 200ms），仍失败则把最后一次错误抛给调用方
+const closeDbBounded = async () => {
+    try { return await closeDb(); } catch (_) { await new Promise((r) => setTimeout(r, 200)); return closeDb(); }
+};
 
+// [#106 S4d-5] system_configs 的加解密一律配隔离实例的固定键（原本逐字复刻 server.js 的 AES 约定 + 读 DB_ENCRYPTION_KEY，现经 aes-password 的纯函数）
 function encryptConfigValue(value) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);
-    let encrypted = cipher.update(value, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
+    return encryptWithKey(ISOLATED_ENCRYPTION_KEY, value);
 }
 
+// [#106 S4d-5] 令牌由 test-env 用实例密钥签（读实例库 users 行）；不再自读 .env / 业务库
 async function signAs(userId) {
-    const user = await dbGet('SELECT id, username, display_name, role FROM users WHERE id=?', [userId]);
-    if (!user) throw new Error(`user id=${userId} not found`);
-    return jwt.sign({ id: user.id, username: user.username, display_name: user.display_name, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+    return testEnv.signToken(userId);
+}
+
+// 夹具追踪（模块级，供收尾与入口 .catch 共用；原为 main 内的局部变量）
+const createdIssueIds = [];
+const createdReleaseIds = [];
+const dutyDates = [];
+// MED-2（C6 预筛回卷）：只有本脚本自己真正写入过排班/配置行，收尾才允许删——防止「本地 db 已经
+// 被真实部署写过 sys_release_default_executor_ids 真配置（如生产要求人工写入的 23=示例开发L）之后，
+// 再在本地跑本测试，因为前置核验软告警但不中止，最终收尾把真配置也删掉」这类事故。
+let insertedDuty = false, insertedConfig = false;
+// LOW-5（C6 预筛回卷）：`ref_id` 列在 sys_issue_timeline 里不是「release 专属」语义——不同
+// action_code 家族可能把它当不同的外键使用（issue_id 本身因为是本测试新建的全新自增 id，不存在
+// 这层歧义，唯独 ref_id 存在"巧合撞上其它特性用同一数值当别的意思"的风险）。收窄到本文件真实
+// 可能写出的、release 语义明确的 action_code 集合（与 Sys_Iteration.html SI_TL_RELEASE_SCOPE_LABEL
+// 权威映射表逐字同源），而不是"ref_id 数值撞上了就删"。
+// ⚠️ [#67 A3·2026-09-16] 本数组对标的是 **SI_TL_RELEASE_SCOPE_LABEL（9 码，含 release_date_change）**，
+//   **不是**新增的可隐藏白名单 SI_TL_HIDABLE_SCOPE_CODES（8 码，不含改期）。两者差集恰为改期。
+//   清理要删「本测试写出的全部 release 语义行」，改期行当然也要删 ⇒ 本数组保持 9 码不动。
+//   勿因为新集合是 8 码就把这里也改成 8 码——那会漏删改期行、污染后续跑次。
+const RELEASE_SCOPE_ACTION_CODES = [
+    'release_add', 'release_remove', 'release_date_change', 'release_schedule_cancel',
+    'release_published', 'release_executors_set', 'release_executor_notify',
+    'release_executor_done', 'release_hotfix_create',
+];
+const placeholders = (arr) => arr.map(() => '?').join(',');
+
+/**
+ * [#106 S4d-5] 清理夹具：每一步各自 try（一个失败不中断后续），有失败整体再试一轮（共 2 轮，间隔 200ms），清完回查，遗留计失败；返回最后一轮仍未清掉的失败说明数组（调用方计失败）。
+ * 原来是 finally 里一整个 try，一条 DELETE 抛错后面全部跳过，只 fail++ 一次。删除顺序与原来一致：上线单子表 / 快照 / timeline → 单据子表与单据 → 上线单 → 本脚本自己写入的排班与配置。
+ * MED-2：insertedDuty / insertedConfig 为 false 时（G1 前置核验已 throw 或还没走到写入）不删排班与配置行。
+ */
+async function cleanupFixtures() {
+    if (!db) return [];
+    let errors = [];
+    // 单条语句各自 try：失败记一条错误（带标签）并返回 false，成功返回 true
+    const step = async (label, sql, params) => {
+        try { await dbRun(sql, params); return true; } catch (e) { errors.push(`${label}: ${e && e.message}`); return false; }
+    };
+    for (let round = 0; round < 2; round++) {
+        if (round > 0) await new Promise((r) => setTimeout(r, 200));
+        errors = [];
+        // 兜底：G2 的应急上线单靠响应体 release_id 登记，解析不到时 id 没进追踪——本脚本新建单据的 release_id 指向的上线单也是本脚本造的，并入追踪
+        let fallbackOk = true;
+        try {
+            if (createdIssueIds.length) {
+                for (const r of await dbAll(`SELECT DISTINCT release_id FROM sys_issues WHERE id IN (${placeholders(createdIssueIds)}) AND release_id IS NOT NULL`, createdIssueIds)) {
+                    if (!createdReleaseIds.includes(r.release_id)) createdReleaseIds.push(r.release_id);
+                }
+            }
+        } catch (e) {
+            // [#106 S4d-5 修复批 L1] 兜底查询失败：单据的 release_id 是找到该上线单的唯一线索，此时若照删单据，上线单就成了找不回的孤儿。
+            //   本轮不删单据与上线单（上线单子表 → 单据 → 上线单三段整体跳过，留待下一轮）；排班 / 全局配置的删除与它们无关，照常恢复（下面 if 之外）；
+            //   最后一轮仍失败则这条错误留在返回值里，调用方计失败
+            fallbackOk = false;
+            errors.push(`按单据 release_id 兜底查上线单失败（本轮不删单据与上线单，留待下一轮；排班 / 配置照常恢复）: ${e && e.message}`);
+        }
+        if (fallbackOk) {
+            // [#106 S4d-5 修复批] 每条 DELETE 各自 try（step）：一条失败不再跳过同一对象后面的语句；子表有失败的对象，本轮不删它的父行（父行是下一轮重试子表删除的定位依据），与 release-c7 同一做法
+            const relSubFailed = new Set();
+            for (const rid of createdReleaseIds) {
+                const oks = [
+                    await step(`上线单 #${rid} 执行人子表`, `DELETE FROM sys_release_executors WHERE release_id=?`, [rid]),
+                    await step(`上线单 #${rid} 快照`, `DELETE FROM sys_issue_release_commit_snapshots WHERE release_id=?`, [rid]),
+                    await step(`上线单 #${rid} timeline`, `DELETE FROM sys_issue_timeline WHERE ref_id=? AND action_code IN (${placeholders(RELEASE_SCOPE_ACTION_CODES)})`, [rid, ...RELEASE_SCOPE_ACTION_CODES]),
+                ];
+                if (oks.includes(false)) relSubFailed.add(rid);
+            }
+            for (const iid of createdIssueIds) {
+                // issue_id 是本测试新建单据自己的自增主键，不存在跨 action_code 歧义（该 id 之前不曾存在，任何指向它的 timeline 行必然是本测试自己产生的），不需要同款 action_code 收窄。
+                const oks = [
+                    await step(`单据 #${iid} timeline`, `DELETE FROM sys_issue_timeline WHERE issue_id=?`, [iid]),
+                    await step(`单据 #${iid} 开发在册行`, `DELETE FROM sys_issue_dev_assignees WHERE issue_id=?`, [iid]),
+                ];
+                if (oks.includes(false)) continue;   // 子表没清净，保留单据行
+                await step(`单据 #${iid}`, `DELETE FROM sys_issues WHERE id=?`, [iid]);
+            }
+            for (const rid of createdReleaseIds) {
+                if (relSubFailed.has(rid)) continue;   // 子表没清净，保留上线单行
+                await step(`上线单 #${rid}`, `DELETE FROM sys_releases WHERE id=?`, [rid]);
+            }
+        }
+        if (insertedDuty) {
+            for (const d of dutyDates) await step(`排班 ${d}`, `DELETE FROM sys_release_duty_roster WHERE duty_date=?`, [d]);
+        }
+        if (insertedConfig) {
+            await step(`配置 sys_release_default_executor_ids`, `DELETE FROM system_configs WHERE config_key='sys_release_default_executor_ids'`, []);
+        }
+        // 清完回查：本脚本追踪的单据 / 上线单 / 自己写入的排班与配置是否还在
+        try {
+            const leftIssues = createdIssueIds.length ? await dbAll(`SELECT id FROM sys_issues WHERE id IN (${placeholders(createdIssueIds)})`, createdIssueIds) : [];
+            const leftReleases = createdReleaseIds.length ? await dbAll(`SELECT id FROM sys_releases WHERE id IN (${placeholders(createdReleaseIds)})`, createdReleaseIds) : [];
+            const leftDuty = (insertedDuty && dutyDates.length) ? await dbAll(`SELECT id FROM sys_release_duty_roster WHERE duty_date IN (${placeholders(dutyDates)})`, dutyDates) : [];
+            const leftConfig = insertedConfig ? await dbGet(`SELECT config_key FROM system_configs WHERE config_key='sys_release_default_executor_ids'`) : null;
+            if (leftIssues.length || leftReleases.length || leftDuty.length || leftConfig) {
+                errors.push(`清理后仍有残留：sys_issues ${leftIssues.length} 条 / sys_releases ${leftReleases.length} 条 / 排班 ${leftDuty.length} 条 / 配置 ${leftConfig ? 1 : 0} 条`);
+            }
+        } catch (e) { errors.push(`清理后回查失败: ${e && e.message}`); }
+        if (errors.length === 0) break;
+    }
+    return errors;
 }
 // 直接 fetch 调用（供夹具搭建 + 「事务外抢先」制造判序差用，不经浏览器）。
 async function api(token, method, p, body) {
@@ -145,7 +244,7 @@ function must(cond, msg) { if (cond) { console.log('  ✅ ' + msg); pass++; } el
 async function shotOnFail(page, cond, name, msg) {
     if (!must(cond, msg)) {
         const p = path.join(SCREENSHOT_DIR, `c6-relexec-fail-${name}.png`);
-        try { await page.screenshot({ path: p }); failShots.push(p); console.log(`     📸 失败截图: ${p}`); } catch (_) { /* 截图本身失败不影响主流程 */ }
+        try { fs.mkdirSync(SCREENSHOT_DIR, { recursive: true }); await page.screenshot({ path: p }); failShots.push(p); console.log(`     📸 失败截图: ${p}`); } catch (_) { /* 截图本身失败不影响主流程 */ }
     }
 }
 
@@ -199,22 +298,14 @@ async function lastToastText(page) {
         return nodes.length ? nodes[nodes.length - 1].textContent.trim() : '';
     });
 }
-// LOW-6（C6 预筛回卷）：项目既有 gotchas 范式（playwright_suite_gotchas.md 第4条）——本套件契约=
-// 外部已启动的 dev server:3000，脚本自己不拉起服务；跑前用端口 Listen 探测代替"直接 goto 然后让
-// Playwright 自己超时"，前者给出的错误信息精确（"server 未起"），后者会含糊地卡在某个具体断言上，
-// 定位耗时更久。
-function ensureServerListening(port = 3000, host = '127.0.0.1', timeoutMs = 3000) {
-    return new Promise((resolve, reject) => {
-        const sock = net.createConnection({ port, host });
-        const timer = setTimeout(() => { sock.destroy(); reject(new Error(`端口 ${port} 探测超时（${timeoutMs}ms）——server 未就绪或响应异常`)); }, timeoutMs);
-        sock.once('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-        sock.once('error', (e) => { clearTimeout(timer); reject(new Error(`端口 ${port} 未监听（${e.message}）——请先启动 node server.js 再跑本文件`)); });
-    });
-}
+// [#106 S4d-5] 原 LOW-6 的端口 Listen 探测（ensureServerListening，写死 3000）已删：隔离实例由 testEnv.ready() 起并核对身份，不再有「外部已启动的 3000 server」。
 
 async function main() {
-    await ensureServerListening();
-    console.log('  ✅ 端口 3000 Listen 探测通过（server 已就绪）');
+    await testEnv.ready();   // 入口第一条有副作用的语句：自起隔离实例（或核对 TEST_* 变量组）
+    BASE_URL = testEnv.env().baseUrl;
+    DB_PATH = testEnv.env().dbPath;
+    SCREENSHOT_DIR = path.join(os.tmpdir(), 'sys-release-panel-c2b2-playwright-screenshots');
+    db = await openInstanceDb(DB_PATH);
     const adminTok = await signAs(ADMIN_ID);
     const liaisonTok = await signAs(LIAISON_ID);
     const execATok = await signAs(EXEC_A_ID);
@@ -230,28 +321,19 @@ async function main() {
         let val = null;
         if (row && row.config_value_encrypted) {
             try {
-                const [ivHex, dataHex] = String(row.config_value_encrypted).split(':');
-                const iv = Buffer.from(ivHex, 'hex');
-                const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY.padEnd(32).slice(0, 32)), iv);
-                val = decipher.update(dataHex, 'hex', 'utf8') + decipher.final('utf8');
+                // [#106 S4d-5] 配隔离实例的固定键解密（原为 DB_ENCRYPTION_KEY 逐字复刻 server.js 的解密）
+                val = decryptWithKey(ISOLATED_ENCRYPTION_KEY, String(row.config_value_encrypted));
             } catch (_) { val = '(解密失败)'; }
         }
         if (val !== 'on') {
+            // [#106 S4d-5] 原为 db.close() + process.exit(1)：改 throw，由入口 .catch 清理（此刻还没建任何夹具）+ teardown 后以 1 退出
             console.error(`\n🚫 安全中止：system_configs.sys_notify_dry_run 当前值="${val}"（非 'on'）——继续跑会对「发通知/查询已读」按钮做真实外呼，脚本拒绝继续。`);
-            db.close();
-            process.exit(1);
+            throw new Error(`前置闸 1 失败：system_configs.sys_notify_dry_run 解密值="${val}"（非 'on'）`);
         }
         console.log('  ✅ 前置安全核验：sys_notify_dry_run="on"（本文件全程只读该配置，未做任何写入）');
     }
 
-    // ── 夹具 helper ──
-    const createdIssueIds = [];
-    const createdReleaseIds = [];
-    const dutyDates = [];
-    // MED-2（C6 预筛回卷）：只有本脚本自己真正写入过排班/配置行，收尾才允许删——防止「本地 db 已经
-    // 被真实部署写过 sys_release_default_executor_ids 真配置（如生产要求人工写入的 23=示例开发L）之后，
-    // 再在本地跑本测试，因为前置核验软告警但不中止，最终收尾把真配置也删掉」这类事故。
-    let insertedDuty = false, insertedConfig = false;
+    // ── 夹具 helper ──（追踪数组 / insertedDuty / insertedConfig 已提到模块级，供 cleanupFixtures 与入口 .catch 共用）
     const mkIssue = async (type, title) => {
         const r = await api(adminTok, 'POST', '/api/sys-issues', {
             type, title, system_name: 'BMS', source: '内部', intake_contract_version: 2,
@@ -259,8 +341,8 @@ async function main() {
         });
         if (r.status !== 201) throw new Error(`建单失败: ${JSON.stringify(r.body)}`);
         const id = r.body.id;
+        createdIssueIds.push(id);   // [#106 S4d-5] 先登记再 UPDATE：UPDATE 抛错时这张单也在追踪里（原来登记在 UPDATE 之后，会漏清）
         await dbRun(`UPDATE sys_issues SET status='待上线' WHERE id=?`, [id]);
-        createdIssueIds.push(id);
         return id;
     };
     // RELEASE 中心守卫（_publishReleaseCoreInTxn）要求批次内每个成员单自己的开发在册名单非空且全员非
@@ -812,70 +894,28 @@ async function main() {
         }
 
     } finally {
-        for (const p of openPages) { try { await p.close(); } catch (_) { /* ignore */ } }
-        await browser.close();
+        for (const p of openPages) { try { await p.close(); } catch (_) { /* 页面随浏览器一并关闭，下面 browser.close 的失败才计失败 */ } }
+        try { await browser.close(); } catch (e) { must(false, `浏览器关闭失败：${e && e.message}`); }
         // ── 清理测试夹具 + 断言清理结果（无论通过与否都执行）──
-        // LOW-5（C6 预筛回卷）：`ref_id` 列在 sys_issue_timeline 里不是「release 专属」语义——不同
-        // action_code 家族可能把它当不同的外键使用（issue_id 本身因为是本测试新建的全新自增 id，不存在
-        // 这层歧义，唯独 ref_id 存在"巧合撞上其它特性用同一数值当别的意思"的风险）。收窄到本文件真实
-        // 可能写出的、release 语义明确的 action_code 集合（与 Sys_Iteration.html SI_TL_RELEASE_SCOPE_LABEL
-        // 权威映射表逐字同源），而不是"ref_id 数值撞上了就删"。
-        // ⚠️ [#67 A3·2026-09-16] 本数组对标的是 **SI_TL_RELEASE_SCOPE_LABEL（9 码，含 release_date_change）**，
-        //   **不是**新增的可隐藏白名单 SI_TL_HIDABLE_SCOPE_CODES（8 码，不含改期）。两者差集恰为改期。
-        //   清理要删「本测试写出的全部 release 语义行」，改期行当然也要删 ⇒ 本数组保持 9 码不动。
-        //   勿因为新集合是 8 码就把这里也改成 8 码——那会漏删改期行、污染后续跑次。
-        const RELEASE_SCOPE_ACTION_CODES = [
-            'release_add', 'release_remove', 'release_date_change', 'release_schedule_cancel',
-            'release_published', 'release_executors_set', 'release_executor_notify',
-            'release_executor_done', 'release_hotfix_create',
-        ];
-        try {
-            if (createdReleaseIds.length) {
-                const ph = createdReleaseIds.map(() => '?').join(',');
-                await dbRun(`DELETE FROM sys_release_executors WHERE release_id IN (${ph})`, createdReleaseIds);
-                await dbRun(`DELETE FROM sys_issue_release_commit_snapshots WHERE release_id IN (${ph})`, createdReleaseIds);
-                const phCodes = RELEASE_SCOPE_ACTION_CODES.map(() => '?').join(',');
-                await dbRun(
-                    `DELETE FROM sys_issue_timeline WHERE ref_id IN (${ph}) AND action_code IN (${phCodes})`,
-                    [...createdReleaseIds, ...RELEASE_SCOPE_ACTION_CODES]
-                );
-            }
-            if (createdIssueIds.length) {
-                const phI = createdIssueIds.map(() => '?').join(',');
-                // issue_id 是本测试新建单据自己的自增主键，不存在跨 action_code 歧义（该 id 之前不曾
-                // 存在，任何指向它的 timeline 行必然是本测试自己产生的），不需要同款 action_code 收窄。
-                await dbRun(`DELETE FROM sys_issue_timeline WHERE issue_id IN (${phI})`, createdIssueIds);
-                await dbRun(`DELETE FROM sys_issue_dev_assignees WHERE issue_id IN (${phI})`, createdIssueIds);
-                await dbRun(`DELETE FROM sys_issues WHERE id IN (${phI})`, createdIssueIds);
-            }
-            if (createdReleaseIds.length) {
-                const ph = createdReleaseIds.map(() => '?').join(',');
-                await dbRun(`DELETE FROM sys_releases WHERE id IN (${ph})`, createdReleaseIds);
-            }
-            // MED-2：只删自己插入过的行——insertedDuty/insertedConfig 为 false 时说明 G1 前置核验已经
-            // throw 硬中止（dutyDates 为空数组 / config 从未被本脚本写过），不该去删任何东西。
-            if (insertedDuty) { for (const d of dutyDates) await dbRun(`DELETE FROM sys_release_duty_roster WHERE duty_date=?`, [d]); }
-            if (insertedConfig) { await dbRun(`DELETE FROM system_configs WHERE config_key='sys_release_default_executor_ids'`); }
-
-            const leftIssues = createdIssueIds.length ? await dbAll(`SELECT id FROM sys_issues WHERE id IN (${createdIssueIds.map(() => '?').join(',')})`, createdIssueIds) : [];
-            const leftReleases = createdReleaseIds.length ? await dbAll(`SELECT id FROM sys_releases WHERE id IN (${createdReleaseIds.map(() => '?').join(',')})`, createdReleaseIds) : [];
-            const leftDuty = (insertedDuty && dutyDates.length) ? await dbAll(`SELECT id FROM sys_release_duty_roster WHERE duty_date IN (${dutyDates.map(() => '?').join(',')})`, dutyDates) : [];
-            const leftConfig = insertedConfig ? await dbGet(`SELECT config_key FROM system_configs WHERE config_key='sys_release_default_executor_ids'`) : null;
-            must(leftIssues.length === 0, `清理断言：${createdIssueIds.length} 个测试单据全部删除（残留 ${leftIssues.length}）`);
-            must(leftReleases.length === 0, `清理断言：${createdReleaseIds.length} 个测试批次全部删除（残留 ${leftReleases.length}）`);
-            must(leftDuty.length === 0, `清理断言：${insertedDuty ? dutyDates.length : 0} 条本脚本自己写入的测试排班全部删除（残留 ${leftDuty.length}）`);
-            must(!leftConfig, `清理断言：${insertedConfig ? '本脚本写入的测试用 sys_release_default_executor_ids 配置行已删除' : '本脚本从未写过该配置（前置核验中止或未到该步），无需删除'}`);
-            console.log(`\n  🧹 测试夹具已清理并断言核验：issues=[${createdIssueIds.join(',')}] releases=[${createdReleaseIds.join(',')}] duty(自己插入=${insertedDuty})=[${dutyDates.join(',')}] config(自己插入=${insertedConfig})`);
-        } catch (cleanErr) {
-            fail++;
-            console.error('  ⚠️ 清理夹具时出错（需人工核查残留）:', cleanErr.message);
-        }
-        db.close();
+        // [#106 S4d-5] 清理见 cleanupFixtures（模块级）：各步独立 try / 2 轮 / 回查 / 遗留计失败。LOW-5 / #67 A3 的 action_code 收窄说明随 RELEASE_SCOPE_ACTION_CODES 一并搬到模块级。
+        const cleanupErrs = await cleanupFixtures();
+        must(cleanupErrs.length === 0, cleanupErrs.length === 0
+            ? `清理断言：${createdIssueIds.length} 个测试单据 / ${createdReleaseIds.length} 个测试批次 / ${insertedDuty ? dutyDates.length : 0} 条本脚本写入的排班 / ${insertedConfig ? '1 条' : '0 条'}本脚本写入的 sys_release_default_executor_ids 配置行全部删除并回查无残留`
+            : `测试夹具清理失败（已重试 1 轮）：${cleanupErrs.join(' | ')}`);
+        console.log(`\n  🧹 测试夹具已清理并断言核验：issues=[${createdIssueIds.join(',')}] releases=[${createdReleaseIds.join(',')}] duty(自己插入=${insertedDuty})=[${dutyDates.join(',')}] config(自己插入=${insertedConfig})`);
+        try { await closeDb(); } catch (e) { must(false, `关闭实例库失败：${e && e.message}`); }
     }
 
+    try { await testEnv.teardown(); } catch (e) { must(false, `teardown（收掉自起实例）：${e && e.message}`); }
     console.log(`\n  合计 ${pass} PASS / ${fail} FAIL`);
     if (failShots.length) console.log('  失败截图：\n    ' + failShots.join('\n    '));
     console.log(fail === 0 ? '  🎉 C6 收口 Playwright 冒烟全部通过\n' : '  🚫 存在失败项\n');
-    process.exit(fail === 0 ? 0 : 1);
+    testEnv.finish(fail === 0 ? 0 : 1);   // 收尾：teardown 之后设退出码 + unref 兜底（不直接 process.exit：Node v24 / Windows 上 fetch 刚完成就 exit 会触发 libuv 断言）
 }
-main().catch(e => { console.error('实测脚本异常:', e && e.stack || e); process.exit(1); });
+main().catch(async (e) => {
+    console.error('实测脚本异常:', e && e.stack || e);
+    try { await cleanupFixtures(); } catch (_) { /* 已在报错路径，尽力清理 */ }
+    try { await closeDbBounded(); } catch (_) { /* 已在报错路径 */ }
+    try { await testEnv.teardown(); } catch (_) { /* 已在报错路径 */ }
+    process.exit(1);
+});
