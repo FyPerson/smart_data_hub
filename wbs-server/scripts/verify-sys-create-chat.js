@@ -5,8 +5,9 @@
 // ⚠️ 移植双份局限（同 correction verify / RC-L2）：复刻而非 require server.js（顶层 app.listen 占端口）。
 //   create-chat handler 与 express req/res + 钉钉 SDK 强耦合、无法直接跑；本脚本复刻其**纯决策核**——
 //   ① 成员入口 addSysChatMember（不排 id=1，require 真实防漂移）
-//   ② 校验顺序 checkSysChatGate（可见性→拉群权限→type=bug→幂等→描述→状态门槛；顺序逐字对齐 endpoint）
-//   ③ 成员规划 planSysMembers（固定底座 示例用户A+建单人+开发+发起人，无额外/无排除；ding 去重 + missing_required）
+//   ② 校验顺序 checkSysChatGate（可见性→拉群权限→幂等→描述→状态门槛；顺序逐字对齐 endpoint；#207 删 type=bug 闸、发起人按在册开发）
+//   ③ 成员规划 planSysMembers（固定底座 建单人+对接人+在册开发全员+发起人，管理员建单加示例用户A；群主=建单人→示例用户A；ding 去重 + missing_required）
+//   ⓪ #207 拉群允许 / 排除名单硬门：允许 ∪ 排除 = transitions.ALLOWED_STATUSES 全集、不相交、无幽灵值、前端镜像逐值一致
 //   ④ 报障人反查降级四态 planSysRequester（no_phone/not_found/lookup_failed/命中或dup→included）
 //   ⑤ 群名码点截断 ⑥ 旁路 UPDATE 6 群字段双 WHERE 守卫（真实 sqlite：并发抢先/流转出可拉态 → changes=0）。
 //   钉钉号反查（async）在 endpoint 内 best-effort，本脚本以"ding 已解析（字符串或 ''）"建模其结果，专注决策矩阵。
@@ -32,17 +33,20 @@ const _mod = require('../routes/sys-iteration')({
 });
 const I = _mod._internals;
 const COLLAB_CHAT_ADMIN_ID = 3;                                  // 示例用户A（deps 常量）
-const SYS_CHAT_ALLOWED_STATUSES = I.SYS_CHAT_ALLOWED_STATUSES;   // ⭐ require 真实（['处理中','待验证','待上线']）
+const SYS_CHAT_ALLOWED_STATUSES = I.SYS_CHAT_ALLOWED_STATUSES;   // ⭐ require 真实（#207：除已关闭/已作废外 12 态）
+const SYS_CHAT_EXCLUDED_STATUSES = I.SYS_CHAT_EXCLUDED_STATUSES; // ⭐ require 真实（#207：['已关闭','已作废']）
 const addSysChatMember = I.addSysChatMember;                     // ⭐ require 真实（不排 id=1）
+const T = require('../routes/sys-iteration/transitions');        // ⭐ 状态全集来源（ALLOWED_STATUSES 四流）
+const fs = require('fs');
 
-// 校验顺序复刻（顺序逐字对齐 endpoint：可见性→拉群权限→type=bug→幂等→描述→状态门槛）。返回 {http,code}；null=放行到建群。
+// 校验顺序复刻（顺序逐字对齐 endpoint：可见性→拉群权限→幂等→描述→状态门槛；#207 删 type=bug 闸、assignee 改在册开发）。
+//   c.roster = 本单在册开发 user_id 数组（removed_at IS NULL）。返回 {http,code}；null=放行到建群。
 function checkSysChatGate(c, actor, chatDesc) {
     const isAdmin = actor.role === 'admin';
     const isCreator = Number(c.created_by) === actor.id && actor.id > 0;
-    const isAssignee = Number(c.assigned_to) === actor.id && actor.id > 0;
-    if (!isAdmin && !isCreator && !isAssignee) return { http: 403, code: 'NOT_AUTHORIZED_TO_VIEW' };
-    if (!isAdmin && !isAssignee) return { http: 403, code: 'NOT_ALLOWED_TO_CREATE_CHAT' };
-    if (c.type !== 'bug') return { http: 409, code: 'CHAT_ONLY_FOR_BUG' };
+    const isRosterDev = actor.id > 0 && (c.roster || []).map(Number).includes(actor.id);
+    if (!isAdmin && !isCreator && !isRosterDev) return { http: 403, code: 'NOT_AUTHORIZED_TO_VIEW' };
+    if (!isAdmin && !isRosterDev) return { http: 403, code: 'NOT_ALLOWED_TO_CREATE_CHAT' };
     if (c.dingtalk_open_conversation_id) return { http: 200, code: 'IDEMPOTENT', idempotent: true };
     const desc = (typeof chatDesc === 'string') ? chatDesc.trim() : '';
     if (!desc) return { http: 400, code: 'CHAT_DESC_REQUIRED' };
@@ -52,18 +56,24 @@ function checkSysChatGate(c, actor, chatDesc) {
 }
 
 // 成员规划复刻（钉钉号已解析：userMap.get(id) = {ding:'..'|''}；无额外成员、无排除名单——bug 流比 correction 简单）
-function planSysMembers({ createdBy, assignedTo, triggerId, requester, userMap }) {
+// #207（用户 2026-11-04 拍板）复刻 planSysChatBase：建单人 + (建单人是管理员 ? 示例用户A) + 对接人 + 全部在册开发 + 发起人；
+//   群主按 ownerOrder（建单人 → 示例用户A[仅建单人是管理员]）取第一个解析到钉钉号的；发起人不接任（用户 11-04 定，codex 600 MED-2）。
+//   群主按去重前的「每人钉钉号」选（codex 600 MED-3）。端到端由 verify-sys-chat-picker 真跑。
+function planSysMembers({ createdBy, creatorIsAdmin = false, liaisonId = null, rosterIds = [], triggerId, requester, userMap }) {
     const baseIdSet = new Set();
-    addSysChatMember(baseIdSet, COLLAB_CHAT_ADMIN_ID);
     addSysChatMember(baseIdSet, createdBy);
-    addSysChatMember(baseIdSet, assignedTo);
+    if (creatorIsAdmin) addSysChatMember(baseIdSet, COLLAB_CHAT_ADMIN_ID);
+    addSysChatMember(baseIdSet, liaisonId);
+    for (const rid of rosterIds) addSysChatMember(baseIdSet, rid);
     addSysChatMember(baseIdSet, triggerId);
-    const memberDingList = [], seenDing = new Set(), missingRequired = [];
+    const ownerOrder = [createdBy, ...(creatorIsAdmin ? [COLLAB_CHAT_ADMIN_ID] : [])];
+    const memberDingList = [], seenDing = new Set(), missingRequired = [], baseDingByUid = new Map();
     for (const bid of baseIdSet) {
         const u = userMap.get(bid);
         if (!u) { missingRequired.push(bid); continue; }
         const ding = u.ding || '';
         if (!ding) { missingRequired.push(bid); continue; }
+        baseDingByUid.set(bid, ding);
         if (!seenDing.has(ding)) { seenDing.add(ding); memberDingList.push({ userId: bid, ding }); }
     }
     let requesterIncluded = false;
@@ -71,7 +81,9 @@ function planSysMembers({ createdBy, assignedTo, triggerId, requester, userMap }
         if (!seenDing.has(requester.ding)) { seenDing.add(requester.ding); memberDingList.push({ userId: 0, ding: requester.ding }); requesterIncluded = true; }
         else requesterIncluded = true;   // dup：报障人钉钉号已在成员 → 已在群
     }
-    return { memberDingList, missingRequired, requesterIncluded, seenDing };
+    let owner = null;
+    for (const oid of ownerOrder) { const od = baseDingByUid.get(oid); if (od) { owner = { userId: oid, ding: od }; break; } }
+    return { memberDingList, missingRequired, requesterIncluded, seenDing, ownerId: owner ? owner.userId : null, ownerDing: owner ? owner.ding : null };
 }
 
 // 报障人反查降级四态复刻（endpoint 内 async 反查的纯决策核）：
@@ -132,10 +144,30 @@ let passed = 0;
 const ok = (m) => { passed++; console.log(`  ✓ ${m}`); };
 
 async function main() {
-    // [0] SYS_CHAT_ALLOWED_STATUSES 契约（require 真实，防漂移锚点）
-    assert.deepStrictEqual([...SYS_CHAT_ALLOWED_STATUSES].sort(), ['处理中', '待上线', '待验证'].sort(), '可拉群态 = 处理中/待验证/待上线（指派后非终态）');
-    assert.ok(!SYS_CHAT_ALLOWED_STATUSES.includes('待处理') && !SYS_CHAT_ALLOWED_STATUSES.includes('已上线') && !SYS_CHAT_ALLOWED_STATUSES.includes('已作废'), '排 待处理[未指派]/已上线·已作废[终态]');
-    ok('SYS_CHAT_ALLOWED_STATUSES 契约：处理中/待验证/待上线（require 真实，非复刻）');
+    // [0] SYS_CHAT_ALLOWED_STATUSES 契约（require 真实，防漂移锚点；#207 放开）
+    assert.deepStrictEqual([...SYS_CHAT_EXCLUDED_STATUSES].sort(), ['已作废', '已关闭'].sort(), '排除名单 = 已关闭(已归档)/已作废');
+    assert.deepStrictEqual([...SYS_CHAT_ALLOWED_STATUSES].sort(),
+        ['待受理', '待修改', '待指派', '待处理', '已暂缓', '开发中', '处理中', '待对接测试', '待验证', '待上线', '已上线', '已拒绝'].sort(),
+        '允许名单 = 除已关闭/已作废外 12 态（含已上线/已拒绝/已暂缓/待受理）');
+    assert.strictEqual(new Set(SYS_CHAT_ALLOWED_STATUSES).size, SYS_CHAT_ALLOWED_STATUSES.length, '允许名单无重复');
+    // [0a] 「允许 ∪ 排除 = 全部状态」硬门：全集取 transitions.ALLOWED_STATUSES 四流并集——新增状态未表态 / 名单里有幽灵值 / 两表相交都判红
+    const allStatuses = new Set();
+    for (const type of Object.keys(T.ALLOWED_STATUSES)) for (const s of T.ALLOWED_STATUSES[type]) allStatuses.add(s);
+    assert.ok(Object.keys(T.ALLOWED_STATUSES).length >= 4, '状态全集来源四流齐全（防 require 拿到空对象假绿）got ' + Object.keys(T.ALLOWED_STATUSES));
+    const allowedSet = new Set(SYS_CHAT_ALLOWED_STATUSES), excludedSet = new Set(SYS_CHAT_EXCLUDED_STATUSES);
+    const overlap = [...allowedSet].filter(s => excludedSet.has(s));
+    assert.deepStrictEqual(overlap, [], '允许与排除不相交 got ' + overlap);
+    const unclassified = [...allStatuses].filter(s => !allowedSet.has(s) && !excludedSet.has(s));
+    assert.deepStrictEqual(unclassified, [], '状态机新增状态必须在拉群允许 / 排除名单表态，未表态：' + unclassified);
+    const ghosts = [...allowedSet, ...excludedSet].filter(s => !allStatuses.has(s));
+    assert.deepStrictEqual(ghosts, [], '名单里不得有状态机不存在的幽灵值：' + ghosts);
+    // [0b] 前端镜像 SI_CHAT_STATUSES 与后端允许名单逐值一致（读源码字面量；CRLF 归一后匹配）
+    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'Sys_Iteration.html'), 'utf8').replace(/\r\n/g, '\n');
+    const m = html.match(/const SI_CHAT_STATUSES = \[([^\]]*)\];/);
+    assert.ok(m, '前端 SI_CHAT_STATUSES 字面量可定位');
+    const feList = m[1].split(',').map(x => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+    assert.deepStrictEqual(feList, [...SYS_CHAT_ALLOWED_STATUSES], '前端 SI_CHAT_STATUSES 与后端 SYS_CHAT_ALLOWED_STATUSES 逐值同序一致 got ' + feList);
+    ok('SYS_CHAT_ALLOWED/EXCLUDED 契约：12 允许 + 2 排除 / 允许∪排除=状态机全集 / 不相交 / 无幽灵值 / 前端镜像逐值一致');
 
     // [1] addSysChatMember 不排 id=1，但排 ≤0/NaN；'5'→5（require 真实）
     const s1 = new Set(); addSysChatMember(s1, 1); addSysChatMember(s1, 0); addSysChatMember(s1, -3); addSysChatMember(s1, NaN); addSysChatMember(s1, '5');
@@ -144,14 +176,18 @@ async function main() {
     assert.ok(s1.has(5), '字符串数字 "5" 归一化加入');
     ok('成员入口：addSysChatMember 保留 id=1 / 排 ≤0·NaN / "5"→5');
 
-    // [2] 校验顺序：可见性 → 拉群权限 → type=bug → 幂等 → 描述 → 状态门槛
-    const base = { type: 'bug', created_by: 1, assigned_to: 5, status: '处理中', dingtalk_open_conversation_id: null };
+    // [2] 校验顺序：可见性 → 拉群权限 → 幂等 → 描述 → 状态门槛（#207：无 type 闸；发起人=admin∪在册开发）
+    const base = { type: 'bug', created_by: 1, assigned_to: 5, roster: [5, 6], status: '处理中', dingtalk_open_conversation_id: null };
     assert.strictEqual(checkSysChatGate(base, { id: 99, role: 'user' }, '议题').code, 'NOT_AUTHORIZED_TO_VIEW', '非相关 user → 可见性 403');
-    assert.strictEqual(checkSysChatGate({ ...base, created_by: 8 }, { id: 8, role: 'user' }, '议题').code, 'NOT_ALLOWED_TO_CREATE_CHAT', '建单人(非admin非assignee) 可见但无拉群权 → 403');
-    assert.strictEqual(checkSysChatGate({ ...base, type: 'feature' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_ONLY_FOR_BUG', 'feature 类型 → CHAT_ONLY_FOR_BUG（bug 专属）');
-    assert.strictEqual(checkSysChatGate(base, { id: 5, role: 'user' }, '议题'), null, '被指派开发本人 + bug + 处理中 + 有描述 → 放行');
+    assert.strictEqual(checkSysChatGate({ ...base, created_by: 8 }, { id: 8, role: 'user' }, '议题').code, 'NOT_ALLOWED_TO_CREATE_CHAT', '建单人(非admin非在册) 可见但无拉群权 → 403');
+    for (const type of ['feature', 'improvement', 'config']) {
+        assert.strictEqual(checkSysChatGate({ ...base, type }, { id: 1, role: 'admin' }, '议题'), null, `${type} 类型 → 放行（#207 四类单子都可拉群）`);
+    }
+    assert.strictEqual(checkSysChatGate(base, { id: 5, role: 'user' }, '议题'), null, '在册开发（代表）+ 处理中 + 有描述 → 放行');
+    assert.strictEqual(checkSysChatGate(base, { id: 6, role: 'user' }, '议题'), null, '在册协作开发（非 assigned_to）→ 放行（不分主次）');
+    assert.strictEqual(checkSysChatGate({ ...base, roster: [6] }, { id: 5, role: 'user' }, '议题').code, 'NOT_AUTHORIZED_TO_VIEW', 'assigned_to 残值但已不在册 → 不再凭 assigned_to 放行');
     assert.strictEqual(checkSysChatGate(base, { id: 1, role: 'admin' }, '议题'), null, 'admin → 放行');
-    ok('校验顺序：非相关→VIEW403 / creator→拉群403 / feature→CHAT_ONLY_FOR_BUG / assignee·admin(有描述)→放行');
+    ok('校验顺序：非相关→VIEW403 / creator→拉群403 / 四类型放行 / 在册代表·协作·admin 放行 / 不在册的 assigned_to 拒');
 
     // [3] 描述必填门槛（幂等之后、状态之前）：空/纯空白 → CHAT_DESC_REQUIRED；>500 → TOO_LONG
     assert.strictEqual(checkSysChatGate(base, { id: 1, role: 'admin' }, '').code, 'CHAT_DESC_REQUIRED', '空描述 → CHAT_DESC_REQUIRED');
@@ -161,38 +197,55 @@ async function main() {
     assert.strictEqual(checkSysChatGate(base, { id: 1, role: 'admin' }, 'x'.repeat(500)), null, '描述 =500 边界内 → 放行');
     ok('描述门槛：空/纯空白/未传 → REQUIRED / >500 → TOO_LONG / =500 放行');
 
-    // [4] 状态门槛（有描述后）：待处理[未指派]/已上线[终态] 拒
-    assert.strictEqual(checkSysChatGate({ ...base, status: '待处理' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_NOT_ALLOWED_IN_STATUS', '待处理(未指派) → 门槛拒');
-    assert.strictEqual(checkSysChatGate({ ...base, status: '已上线' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_NOT_ALLOWED_IN_STATUS', '已上线(终态) → 门槛拒');
-    assert.strictEqual(checkSysChatGate({ ...base, status: '待验证' }, { id: 1, role: 'admin' }, '议题'), null, '待验证 → 放行');
-    ok('状态门槛：待处理/已上线 拒 / 待验证 放行');
+    // [4] 状态门槛（有描述后）：#207 起只拒 已关闭(已归档)/已作废，其余全部放行
+    assert.strictEqual(checkSysChatGate({ ...base, status: '已关闭' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_NOT_ALLOWED_IN_STATUS', '已关闭(已归档) → 门槛拒');
+    assert.strictEqual(checkSysChatGate({ ...base, status: '已作废' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_NOT_ALLOWED_IN_STATUS', '已作废 → 门槛拒');
+    for (const s of ['待受理', '待处理', '已暂缓', '待验证', '已上线', '已拒绝']) {
+        assert.strictEqual(checkSysChatGate({ ...base, status: s }, { id: 1, role: 'admin' }, '议题'), null, `${s} → 放行`);
+    }
+    ok('状态门槛：已关闭/已作废 拒 / 待受理·待处理·已暂缓·待验证·已上线·已拒绝 放行');
 
     // [5] 幂等 + 防泄露顺序：已建群优先返回、但仍在鉴权/type 之后；空描述也能拿幂等（幂等先于描述，本次修正）
-    const built = { type: 'bug', created_by: 1, assigned_to: 5, status: '待上线', dingtalk_open_conversation_id: 'oc_x' };
+    const built = { type: 'bug', created_by: 1, assigned_to: 5, roster: [5], status: '待上线', dingtalk_open_conversation_id: 'oc_x' };
     assert.strictEqual(checkSysChatGate(built, { id: 99, role: 'user' }, '议题').code, 'NOT_AUTHORIZED_TO_VIEW', '无关 user 即使已建群也先 VIEW403（不泄露 oc_id）');
-    assert.strictEqual(checkSysChatGate(built, { id: 5, role: 'user' }, '').code, 'IDEMPOTENT', 'assignee 对已建群单 + 空描述 → 仍幂等返回（幂等先于描述，已建群不需再填议题）');
-    assert.strictEqual(checkSysChatGate({ ...built, type: 'feature' }, { id: 1, role: 'admin' }, '议题').code, 'CHAT_ONLY_FOR_BUG', '已建群但 type=feature → type 守卫先于幂等（防御，理论不可达）');
-    ok('幂等/防泄露：无关user→VIEW403 / 已建群+空描述→幂等（先于描述）/ type 守卫先于幂等');
+    assert.strictEqual(checkSysChatGate(built, { id: 5, role: 'user' }, '').code, 'IDEMPOTENT', '在册开发对已建群单 + 空描述 → 仍幂等返回（幂等先于描述，已建群不需再填议题）');
+    assert.strictEqual(checkSysChatGate({ ...built, status: '已关闭' }, { id: 1, role: 'admin' }, '').code, 'IDEMPOTENT', '已归档但已建群 → 幂等返回原群（幂等先于状态门槛；重新打开沿用原群）');
+    ok('幂等/防泄露：无关user→VIEW403 / 已建群+空描述→幂等（先于描述）/ 已归档已建群→幂等（先于状态门槛）');
 
-    // [6] 成员规划：底座 示例用户A3+建单人+开发+发起人 全入 + ding 去重 + missing_required
-    const um1 = new Map([[3, { ding: 'd3' }], [1, { ding: 'd1' }], [5, { ding: 'd5' }]]);
-    const p1 = planSysMembers({ createdBy: 1, assignedTo: 5, triggerId: 1, requester: { ding: 'dR' }, userMap: um1 });
+    // [6] 成员规划（#207）：建单人 + 对接人 + 全部在册开发 + 发起人；建单人是管理员时加示例用户A；群主=建单人
+    const um1 = new Map([[3, { ding: 'd3' }], [1, { ding: 'd1' }], [5, { ding: 'd5' }], [6, { ding: 'd6' }], [8, { ding: 'd8' }], [13, { ding: 'd13' }]]);
+    const p1 = planSysMembers({ createdBy: 1, creatorIsAdmin: true, liaisonId: 13, rosterIds: [5, 6], triggerId: 1, requester: { ding: 'dR' }, userMap: um1 });
     const ids1 = p1.memberDingList.map(m => m.userId);
-    assert.ok(ids1.includes(3) && ids1.includes(1) && ids1.includes(5), '底座含 示例用户A3 + 建单人1 + 开发5');
+    assert.ok([1, 3, 13, 5, 6].every(x => ids1.includes(x)), '管理员建单：建单人1 + 示例用户A3 + 对接人13 + 在册开发5/6 got ' + ids1);
     assert.ok(ids1.includes(0), '报障人以 userId=0 加入');
     assert.strictEqual(p1.missingRequired.length, 0, '无缺钉钉号');
-    ok('成员规划：示例用户A+建单人+开发入群 / 报障人 userId=0 加入 / 无缺号');
+    assert.strictEqual(p1.ownerId, 1, '群主 = 建单人（解析得到时）');
+    const p1n = planSysMembers({ createdBy: 8, creatorIsAdmin: false, liaisonId: 13, rosterIds: [5], triggerId: 5, requester: null, userMap: um1 });
+    const ids1n = p1n.memberDingList.map(m => m.userId);
+    assert.ok(!ids1n.includes(3), '非管理员建单 → 不拉示例用户A got ' + ids1n);
+    assert.ok([8, 13, 5].every(x => ids1n.includes(x)), '非管理员建单：建单人8 + 对接人13 + 在册开发5');
+    assert.strictEqual(p1n.ownerId, 8, '非管理员建单 → 群主 = 建单人8');
+    ok('成员规划：建单人+对接人+全部在册开发+发起人 / 管理员建单才拉示例用户A / 群主=建单人 / 报障人 userId=0');
 
-    // [7] ding 去重（报障人撞开发同号）+ 底座缺号 → missing_required（不阻断，示例用户A仍在）
-    const p1b = planSysMembers({ createdBy: 1, assignedTo: 5, triggerId: 1, requester: { ding: 'd5' }, userMap: um1 });
+    // [7] 群主回退 + ding 去重 + 缺号
+    const umNoCreator = new Map([...um1, [1, { ding: '' }], [8, { ding: '' }]]);
+    assert.strictEqual(planSysMembers({ createdBy: 1, creatorIsAdmin: true, liaisonId: 13, rosterIds: [5], triggerId: 5, requester: null, userMap: umNoCreator }).ownerId, 3, '管理员建单人无钉钉号 → 群主退到示例用户A');
+    assert.strictEqual(planSysMembers({ createdBy: 8, creatorIsAdmin: false, liaisonId: 13, rosterIds: [5], triggerId: 5, requester: null, userMap: umNoCreator }).ownerId, null, '非管理员建单人无钉钉号 → 无群主（发起人5 有钉钉号也不接任；端点 OWNER_NOT_RESOLVABLE）');
+    const umNoOwner = new Map([...umNoCreator, [3, { ding: '' }]]);
+    assert.strictEqual(planSysMembers({ createdBy: 1, creatorIsAdmin: true, liaisonId: 13, rosterIds: [5], triggerId: 5, requester: null, userMap: umNoOwner }).ownerId, null, '管理员建单人与示例用户A都无钉钉号 → 无群主（发起人5 不接任）');
+    // 群主按去重前的钉钉号选：示例用户A3 与建单人1 同钉钉号时，去重后只留建单人那条，群主仍取到该钉钉号
+    const umSame = new Map([...um1, [3, { ding: 'd1' }]]);
+    const pSame = planSysMembers({ createdBy: 1, creatorIsAdmin: true, liaisonId: 13, rosterIds: [5], triggerId: 5, requester: null, userMap: umSame });
+    assert.ok(pSame.ownerId === 1 && pSame.ownerDing === 'd1' && pSame.memberDingList.filter(m => m.ding === 'd1').length === 1, '同号去重后群主钉钉号仍在成员里且只出现一次');
+    const p1b = planSysMembers({ createdBy: 1, creatorIsAdmin: true, rosterIds: [5], triggerId: 1, requester: { ding: 'd5' }, userMap: um1 });
     assert.strictEqual(p1b.memberDingList.filter(m => m.ding === 'd5').length, 1, '报障人 ding 撞开发 → 只出现一次');
     assert.strictEqual(p1b.requesterIncluded, true, '撞号也算 requesterIncluded（已在群）');
     const um2 = new Map([[3, { ding: 'd3' }], [1, { ding: 'd1' }], [5, { ding: '' }]]);
-    const p2 = planSysMembers({ createdBy: 1, assignedTo: 5, triggerId: 1, requester: null, userMap: um2 });
+    const p2 = planSysMembers({ createdBy: 1, creatorIsAdmin: true, rosterIds: [5], triggerId: 1, requester: null, userMap: um2 });
     assert.ok(p2.missingRequired.includes(5), '开发5 缺钉钉号 → missing_required');
     assert.ok(!p2.memberDingList.some(m => m.userId === 5), '缺号成员不入群');
-    assert.ok(p2.memberDingList.some(m => m.userId === 3), '示例用户A仍入群（部分缺号不阻断）');
-    ok('去重 + 缺号：报障人撞号去重 / 开发缺号 → missing_required 不阻断（示例用户A在）');
+    assert.ok(p2.memberDingList.some(m => m.userId === 1), '建单人仍入群（部分缺号不阻断）');
+    ok('群主回退：建单人→示例用户A(仅管理员建单)，发起人不接任 / 全无→null / 报障人撞号去重 / 开发缺号 missing 不阻断');
 
     // [8] 报障人反查降级四态
     assert.deepStrictEqual(planSysRequester({ phone: '' }), { included: false, reason: 'no_phone' }, '未填手机 → no_phone');
@@ -223,12 +276,14 @@ async function main() {
     assert.strictEqual(row1.status, '处理中', '旁路不动 status');
     ok('旁路守卫[正常]：合法态落 6 群字段 changes=1 + desc 留痕 + 不动 status');
 
-    // [11] 流转出可拉态（已作废/已上线）→ changes=0（sys 用 status 兜作废，无 voided_at 列）
+    // [11] 流转出可拉态（已作废/已关闭）→ changes=0（sys 用 status 兜作废，无 voided_at 列）；#207 已上线可拉 → changes=1
     const n2 = (await run(`INSERT INTO sys_issues (status, type) VALUES ('已作废', 'bug')`)).lastID;
     assert.strictEqual((await bypassUpdate(n2)).changes, 0, '已作废 → 守卫拦 changes=0（STATE_CHANGED）');
-    const n3 = (await run(`INSERT INTO sys_issues (status, type) VALUES ('已上线', 'bug')`)).lastID;
-    assert.strictEqual((await bypassUpdate(n3)).changes, 0, '已上线(终态) → 守卫拦 changes=0');
-    ok('旁路守卫[状态变化]：已作废/已上线 → changes=0（STATE_CHANGED 兜底）');
+    const n2b = (await run(`INSERT INTO sys_issues (status, type) VALUES ('已关闭', 'feature')`)).lastID;
+    assert.strictEqual((await bypassUpdate(n2b)).changes, 0, '已关闭(已归档) → 守卫拦 changes=0');
+    const n3 = (await run(`INSERT INTO sys_issues (status, type) VALUES ('已上线', 'feature')`)).lastID;
+    assert.strictEqual((await bypassUpdate(n3)).changes, 1, '#207：已上线 feature → 可落库 changes=1');
+    ok('旁路守卫[状态变化]：已作废/已关闭 → changes=0（STATE_CHANGED 兜底）/ 已上线 → changes=1');
 
     // [12] 并发抢先：已有 open_conversation_id → changes=0 + 旧群信息不被覆盖（退化幂等）
     const n4 = (await run(`INSERT INTO sys_issues (status, type, dingtalk_open_conversation_id, dingtalk_chat_id) VALUES ('处理中', 'bug', 'oc_pre', 'cid_pre')`)).lastID;
@@ -255,9 +310,12 @@ async function main() {
     // [14] REAL syncSysChatAddDev「绝不抛」直测（[codex29 M-1]）：_db0 无 sys_issues 表 → 首个 SELECT 抛 → 真函数内部 catch 吞掉返 exception，绝不冒泡影响改派主流程
     const realSync = await I.syncSysChatAddDev(1, 5);
     assert.deepStrictEqual(realSync, { synced: false, reason: 'exception' }, 'REAL syncSysChatAddDev：DB 异常被内部 catch 吞、返 exception，绝不抛（改派主流程不受影响）');
-    ok('REAL syncSysChatAddDev 绝不抛：DB 异常 → 内部 catch → {synced:false,reason:exception}（best-effort 契约真函数直测）');
+    // [#207] 批量版同样绝不抛：DB 异常 → 返空数组；空入参 → 不查库直接返空
+    assert.deepStrictEqual(await I.syncSysChatAddDevs(1, [5, 6]), [], 'REAL syncSysChatAddDevs：DB 异常被吞返 []，绝不抛');
+    assert.deepStrictEqual(await I.syncSysChatAddDevs(1, []), [], 'REAL syncSysChatAddDevs：空入参 → []');
+    ok('REAL syncSysChatAddDev / syncSysChatAddDevs 绝不抛：DB 异常 → 内部 catch（best-effort 契约真函数直测）');
 
-    console.log(`\n[全部通过] ${passed}/${passed} ✓ bug 流 Commit ③ 拉群验证通过（SYS_CHAT_ALLOWED_STATUSES 契约 / 成员入口不排id=1 / 校验顺序 可见性→拉群权→type=bug→幂等→描述→状态 / 描述门槛 / 幂等先于描述+防泄露 / 成员规划底座·报障人·去重·缺号 / 报障人降级四态 / 群名码点截断 / 旁路 UPDATE 6 群字段双 WHERE 守卫 正常·状态变化·并发）`);
+    console.log(`\n[全部通过] ${passed}/${passed} ✓ 系统迭代拉群验证通过（SYS_CHAT 允许/排除名单硬门 / 成员入口不排id=1 / 校验顺序 可见性→拉群权（admin∪在册）→幂等→描述→状态 / 描述门槛 / 幂等先于描述+防泄露 / 成员规划底座·报障人·去重·缺号 / 报障人降级四态 / 群名码点截断 / 旁路 UPDATE 6 群字段双 WHERE 守卫 正常·状态变化·并发）`);
     db.close(); _db0.close();
 }
 main().catch((e) => { console.error('\n[失败]', e && e.message, e && e.stack); try { db.close(); } catch (_) {} process.exit(1); });

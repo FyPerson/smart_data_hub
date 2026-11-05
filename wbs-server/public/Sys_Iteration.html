@@ -1496,7 +1496,8 @@
     function siOaFillable(iss) { return (SI_OA_ALLOWED_STATUSES[iss.type] || []).includes(iss.status); }
     // [codex29 L-3] 拉群可发起态——⚠️ 须与后端 SYS_CHAT_ALLOWED_STATUSES（index.js）同源：改一端必须改另一端。
     //   （sys 模块动作可见性一贯是前端硬编码镜像后端，未上 capability 字段以保模块一致性；后端有真门槛兜底）。
-    const SI_CHAT_STATUSES = ['处理中', '待验证', '待上线'];
+    //   [#207] 放开为「除已归档（库值已关闭）/ 已作废外全部状态」，四类单子通用；逐值与后端一致（verify-sys-create-chat [0b] 卡两端字面量）。
+    const SI_CHAT_STATUSES = ['待受理', '待修改', '待指派', '待处理', '已暂缓', '开发中', '处理中', '待对接测试', '待验证', '待上线', '已上线', '已拒绝'];
     // ── bug 流对接人白名单（Commit ④a，示例发布者 id=7 / 示例对接人 id=13）——⚠️ 三处同步：后端 index.js SYS_BUG_LIAISON_USER_IDS
     //   + 本常量 + scripts/verify-sys-liaison.js（verify 卡三处字面量一致防漂移）。前端仅控 assign/reassign 按钮显隐，
     //   真权限后端 requireAdminOrBugLiaison + type='bug' 精判兜底（前端镜像非授权源）。
@@ -4031,11 +4032,11 @@
         // 讨论群（§5 bug 流拉群；已建才展示，留痕：议题 + 拉群时间）
         let chat = '';
         if (iss.dingtalk_open_conversation_id) {
-            chat = `<div class="u-detail-section"><h3>讨论群</h3><div class="u-kv-grid">
+            chat = `<div class="u-detail-section" id="siDChatSection"><h3>讨论群</h3><div class="u-kv-grid">
                 <div class="u-kv-item full"><label>群名称</label><div class="v">${esc(iss.dingtalk_chat_name || '—')}</div></div>
                 <div class="u-kv-item full"><label>拉群议题</label><div class="v">${iss.dingtalk_chat_desc ? esc(iss.dingtalk_chat_desc) : '—'}</div></div>
                 <div class="u-kv-item"><label>拉群时间</label><div class="v">${iss.dingtalk_chat_created_at ? esc(siFmtDT(iss.dingtalk_chat_created_at)) : '—'}</div></div>
-            </div><div class="si-note-box">钉钉群已建，请到钉钉客户端查看。钉钉无解散接口，用完由群主（示例用户A）在客户端手动解散。</div></div>`;
+            </div><div class="si-note-box">钉钉群已建，请到钉钉客户端查看。钉钉无解散接口，用完由群主在客户端手动解散。</div></div>`;
         }
 
         // C-orch：上线编排独立区块（2026-07-07 样式统一：从底部操作区拆出，置于「基本信息」与「通知」之间）。
@@ -6243,8 +6244,19 @@
     // ============================================================
     function siRenderActions(iss) {
         const box = document.getElementById('siDActions');
-        if (!META_OK) { box.innerHTML = '<span class="si-muted">只读模式：状态动作暂不可用</span>'; return; }
-        if (iss.status === '已作废') { box.innerHTML = '<span class="si-muted">单据已作废，只读。</span>'; return; }  // G：作废单只读，不出 void/derive（后端对已作废再 void 会重复写 timeline）
+        // [#207·codex 600 LOW-1] 只读模式下拉群按钮同样常驻：已建群仍可定位，未建群置灰说明原因。
+        if (!META_OK) {
+            box.innerHTML = '<span class="si-muted">只读模式：状态动作暂不可用</span>'
+                + siChatButtonHtml(iss.dingtalk_open_conversation_id ? { mode: 'built', reason: '' } : { mode: 'disabled', reason: '只读模式下暂不可拉群（页面配置未加载成功，请刷新重试）' });
+            return;
+        }
+        // G：作废单只读，不出 void/derive（后端对已作废再 void 会重复写 timeline）。[#207] 拉群按钮常驻：作废单也出
+        //   （未建群 → 置灰说明原因；已建群 →「已建群」定位到讨论群区块）。
+        if (iss.status === '已作废') {
+            box.innerHTML = '<span class="si-muted">单据已作废，只读。</span>'
+                + siChatButtonHtml(siChatButtonState(iss, isAdmin(), !!(siCaps && siCaps.isRosterMember)));
+            return;
+        }
         const flows = (META.typeFlows && META.typeFlows[iss.type]) || [];
         const isAdminUser = isAdmin();
         // C7 契约裁定点：W06 类动作（estimate/feasibility/blocked）与 submit 原按单一 assigned_to 门控，
@@ -6445,11 +6457,11 @@
             hotfixBtn = `<button class="u-btn-primary u-btn-sm" onclick="siModalHotfix(siDetail.issue)">应急上线</button>`;
         }
 
-        // 拉群讨论（§5 bug 流旁路动作，非 meta transition；type=bug + 指派后非终态 + 未建群 + admin||owner-dev）
-        let chatBtn = '';
-        if (iss.type === 'bug' && (isAdminUser || isOwnerDev) && SI_CHAT_STATUSES.includes(iss.status) && !iss.dingtalk_open_conversation_id) {
-            chatBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siDoAction('create-chat')">拉群讨论</button>`;
-        }
+        // 拉群讨论（§5 旁路动作，非 meta transition）。[#207] 按钮常驻：已建群 →「已建群」定位到讨论群区块；
+        //   可拉（admin∨在册开发 ∧ 状态在 SI_CHAT_STATUSES）→ 正常；否则置灰并在 title 说明原因。
+        //   四类单子通用。前端只做展示，是否允许以后端 create-chat 为准。
+        const chatState = siChatButtonState(iss, isAdminUser, isOwnerDev);
+        const chatBtn = siChatButtonHtml(chatState);
         // C4：通知按钮全部搬进详情页「通知」区（siRenderNotify，逐类三能力），本操作区不再放通知按钮
         //   （旧 ④b-1 notifyBtns 已退场；bug 流手动通知见 siRenderNotify + siNotifyDevSend/siNotifyRelayClick/
         //   siNotifyCreatorClick/siNotifyRequesterClick）。
@@ -6533,7 +6545,32 @@
         if (siCaps && siCaps.canWithdrawSubmission) {
             withdrawBtn = `<button class="u-btn-secondary u-btn-sm" onclick="siModalWithdrawSubmission(siDetail.issue)">撤回提交</button>`;
         }
-        box.innerHTML = gate + ((btns + hotfixBtn + chatBtn + amendBtn + withdrawBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns) || fallback);
+        // [#207] 拉群按钮常驻后恒非空：置灰态不算「可执行动作」，其余动作皆空时仍出兜底文案（按钮跟在文案后）。
+        const otherActs = btns + hotfixBtn + amendBtn + withdrawBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns;
+        box.innerHTML = gate + ((otherActs || chatState.mode !== 'disabled')
+            ? (btns + hotfixBtn + chatBtn + amendBtn + withdrawBtn + adminDelBtn + techLeadBtns + oaBtn + fastReleaseBtns)
+            : (fallback + chatBtn));
+    }
+
+    // [#207] 拉群按钮三态（前端只展示，后端 create-chat 为准）。已建群对所有能看详情的人都显示「已建群」
+    //   （讨论群区块本就对所有人展示）；未建群时先判发起权、再判状态门槛，与后端 403 → 409 的先后一致。
+    //   返回 { mode: 'built' | 'open' | 'disabled', reason }。
+    function siChatButtonState(iss, isAdminUser, isRosterDev) {
+        if (iss.dingtalk_open_conversation_id) return { mode: 'built', reason: '' };
+        if (!isAdminUser && !isRosterDev) return { mode: 'disabled', reason: '仅管理员或本单在册开发可发起拉群' };
+        if (iss.status === '已关闭') return { mode: 'disabled', reason: '已归档的单不可拉群（重新打开后可拉）' };
+        if (iss.status === '已作废') return { mode: 'disabled', reason: '已作废的单不可拉群' };
+        if (!SI_CHAT_STATUSES.includes(iss.status)) return { mode: 'disabled', reason: `当前状态（${siStatusDisplay(iss.status)}）不可拉群` };
+        return { mode: 'open', reason: '' };
+    }
+    function siChatButtonHtml(chatState) {
+        if (chatState.mode === 'open') return `<button class="u-btn-secondary u-btn-sm" onclick="siDoAction('create-chat')">拉群讨论</button>`;
+        if (chatState.mode === 'built') return `<button class="u-btn-secondary u-btn-sm" title="本单已建讨论群，点击查看群信息" onclick="siScrollToChatSection()">已建群</button>`;
+        return `<button class="u-btn-secondary u-btn-sm" disabled title="${esc(chatState.reason)}">拉群讨论</button>`;
+    }
+    function siScrollToChatSection() {
+        const el = document.getElementById('siDChatSection');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     // ============================================================
@@ -8294,7 +8331,7 @@
         const cand = (cr.data && cr.data.candidates) || [];
         const baseM = (cr.data && cr.data.base_members) || [];
         const reqInfo = (cr.data && cr.data.requester) || { eligible: false, name: '' };
-        const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '群主/建单人/开发/你';
+        const baseNames = baseM.map(b => esc(b.display_name)).join('、') || '建单人/对接人/在册开发/你';
         const pickerHtml = `<div class="u-form-group"><label>可选拉入成员（有手机号的系统用户，手动勾选）</label>
             <div style="max-height:min(150px,45vh);overflow:auto;overscroll-behavior:contain;border:1px solid #e5e7eb;border-radius:6px;padding:6px">
               ${cand.length ? cand.map(u => `<label class="si-chk-row"><input type="checkbox" class="si-mp-chk" value="${u.id}"><span class="si-chk-text">${esc(u.display_name)}</span></label>`).join('') : '<span class="si-muted">无其他可选成员（无绑手机号的系统用户）</span>'}
@@ -8307,7 +8344,7 @@
         siModal('拉群讨论', [
             fTextarea('chat_desc', '拉群议题', '', true, '必填：本次拉群要讨论什么（记入迭代单留痕 + 群欢迎卡片），≤500 字'),
             { k: null, html: pickerHtml },
-            note('钉钉无解散接口，用完请群主（示例用户A）在钉钉客户端手动解散。')
+            note('群主为本单建单人（建单人是管理员时同时拉入示例用户A，建单人未绑定钉钉时由示例用户A接任群主）。钉钉无解散接口，用完请群主在钉钉客户端手动解散。')
         ], async v => {
             const desc = (v.chat_desc || '').trim();
             if (!desc) { showToast('拉群议题必填', 'error'); return false; }
@@ -8321,7 +8358,8 @@
             const d = r.data || {};
             if (d.idempotent) { showToast('该单已有讨论群，请到钉钉查看', 'info'); return true; }
             let msg = '讨论群已创建';
-            const miss = Array.isArray(d.missing_required_member_ids) ? d.missing_required_member_ids.length : 0;
+            if (d.owner_is_fallback && d.owner_name) msg += `（建单人未绑定钉钉，群主由${d.owner_name}担任）`;
+            const miss =Array.isArray(d.missing_required_member_ids) ? d.missing_required_member_ids.length : 0;
             if (miss) msg += `（${miss} 名固定成员无钉钉号未拉入）`;
             const selSkip = Array.isArray(d.selected_skipped) ? d.selected_skipped.length : 0;
             if (selSkip) msg += `，${selSkip} 名选中成员无钉钉号未拉入`;

@@ -4516,6 +4516,7 @@ module.exports = (deps) => {
 
     const added = [];
     const skipped = [];
+    const addedUserIds = [];
     for (const uid of targetIds) {
       if (activeUserIds.has(uid)) { skipped.push(uid); continue; }   // 已在册：幂等跳过
       const user = await dbGetAsync('SELECT id, display_name, username, role FROM users WHERE id = ?', [uid]);
@@ -4530,8 +4531,9 @@ module.exports = (deps) => {
       const action = everSeenUserIds.has(uid) ? 're-add' : 'add';
       await insertDevEvent({ issueId, devAssigneeId: daId, action, operatorId: actorId });
       added.push(daId);
+      addedUserIds.push(uid);
     }
-    return { added, skipped };
+    return { added, skipped, addedUserIds };   // [#207] addedUserIds 供调用方提交后加群
   }
 
   // ⭐ 角色权限重构 v2.1 §4：OA 流程号契约守卫。
@@ -7681,6 +7683,7 @@ module.exports = (deps) => {
       let devAssignees, primaryRow, targetStatus;
       let assignEtaOverdue = null;   // [组A·2.3] 提到外层——事务内写，post-commit notify/响应体两处都要读
       let assignNotifyReason = false;   // [组 C·SC1·§3C.7] 超容差理由写入/变化时通知建单人
+      const assignInsertedUserIds = [];   // [#207] 本次新入册的开发 user_id（事务提交后若已建群则加群）
       try {
         const row = await dbGetAsync('SELECT id, type, status, oa_number, oa_exempt, intake_liaison_id, reopen_count, return_count, dev_estimated_at, deadline, eta_overrun_reason_code, eta_overrun_reason_note FROM sys_issues WHERE id = ?', [id]);
         if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
@@ -7819,6 +7822,7 @@ module.exports = (deps) => {
         const existingSet = new Set(existingActive.map(r => Number(r.user_id)));
         for (const uid of memberIds) {
           if (existingSet.has(uid)) continue;
+          assignInsertedUserIds.push(uid);   // [#207] 提交后加群用
           const uname = uid === devId ? devName : collaborators.find(c => c.id === uid).name;
           const insRes = await dbRunAsync(
             `INSERT INTO sys_issue_dev_assignees (issue_id, user_id, user_name, is_primary, dev_status, round_no) VALUES (?, ?, ?, 0, 'pending', ?)`,
@@ -7933,6 +7937,8 @@ module.exports = (deps) => {
         throw txErr;
       }
       await dispatchSysNotify(id, 'notifyAssignedDeveloper', actor.id);
+      // [#207] 首次指派时若该单已先拉群（待受理 / 待处理等态可拉群），把新入册开发加进群（best-effort，绝不抛）
+      await syncSysChatAddDevs(id, assignInsertedUserIds);
       // [组A·2.3] 超时指派/人工设定的新 ETA——按"变化时通知建单人"，复用 /estimate 同款 marker
       //   （见 dispatchSysNotify 的 notifyEstimateToCreatorAndRequester 分支）。
       // [MED-4·如实登记] 当前 isAutoNotifyEnabled() 恒 false（交互优化 C2 起全 type 手动化，见该函数定义处
@@ -8275,8 +8281,9 @@ module.exports = (deps) => {
       //   代表真实变化才是"需要通知新负责人"的准确信号）。
       if (repChanged && newRepUserId !== null) {
         await dispatchSysNotify(id, 'notifyAssignedDeveloper', actor.id);
-        await syncSysChatAddDev(id, newRepUserId);
       }
+      // [#207] 讨论群同步从「仅代表换人」扩到「全部新增成员 ∪ 新代表」（开发不分主次；只加不移，Option A 不变）
+      await syncSysChatAddDevs(id, [...toAdd, ...((repChanged && newRepUserId !== null) ? [newRepUserId] : [])]);
       // [组A·2.3] 超时指派/人工设定的新 ETA——按"变化时通知建单人"，与上面代表变更通知相互独立
       //   （即便本次改派代表未变，ETA 变更本身仍是一次真实的变化，需要通知）。
       // [MED-4·如实登记] 同 /assign：isAutoNotifyEnabled() 当前恒 false（交互优化 C2 起全 type 手动化），
@@ -8311,6 +8318,7 @@ module.exports = (deps) => {
   //   POST dev-assignees/:id/excuse / POST dev-assignees/:id/supersede-excuse
   //   方案 §10 API 契约 + §4.3 矩阵 + §5.2 布尔表；均为**全新端点**（无现网先例），故不接任何钉钉通知派发——
   //   W12 红线是"不改既有触发点"，新端点没有既有触发点可改，通知/群同步接线属未来 commit（已在交付汇报列明）。
+  //   [#207] 群同步已接线：POST dev-assignees 新增 / 复活成员提交后走 syncSysChatAddDevs（通知仍未接）。
   // ============================================================
 
   // ── POST /sys-issues/:id/dev-assignees：加人/复活（协调人）──────────
@@ -8351,6 +8359,8 @@ module.exports = (deps) => {
         try { await sysRollback(); } catch (_) { /* ignore */ }
         throw txErr;
       }
+      // [#207] 新增协作开发（含 re-add）提交后若已建群则加群（best-effort，绝不抛）
+      await syncSysChatAddDevs(id, addResult.addedUserIds);
       const devAssignees = await fetchActiveDevAssignees(id);
       res.json({
         id, added_dev_assignee_ids: addResult.added, skipped_user_ids: addResult.skipped,
@@ -8560,15 +8570,53 @@ module.exports = (deps) => {
   // bug 流 Commit ③：真钉钉建群（POST /sys-issues/:id/create-chat）
   //   §5：复刻 correction create-chat 范式（一次成型 chat/create + 双 WHERE 守卫 + CRITICAL 落库失败处理 + requester_phone 反查降级）。
   //   bug 流增量 vs correction：
-  //     ① 无额外成员多选、无排除名单（成员=固定底座：群主示例用户A + 建单人 + 指派开发 + 发起人；对接人待 Commit ④ 放开）
+  //     ① 成员=固定底座（#207 起见 planSysChatBase：建单人[群主] + 对接人 + 全部在册开发 + 发起人；建单人是管理员时加示例用户A）+ ④b-2 多选
   //     ② 描述必填 chat_desc（用户 2026-07-03 拍板存列 dingtalk_chat_desc 真留痕，§5「留痕:描述」；写库 + 欢迎卡片）
-  //     ③ 状态门槛 = 指派后非终态（处理中/待验证/待上线）
+  //     ③ 状态门槛 = 显式允许名单 SYS_CHAT_ALLOWED_STATUSES（#207 起：除已归档/已作废外全部状态，四类单子通用）
   //     ④ 钉钉调用走 callDingtalkWithTokenRetry（token 过期重试，对齐 collab/issue create-chat，§5 [审:#7]）
   //   幂等锚点 = dingtalk_open_conversation_id IS NULL；旁路 UPDATE 6 群字段，不走 sysIssueTransition/不动 status/不写 timeline
-  //   （拉群非状态流转；钉钉无服务端解散 API，用完由群主示例用户A在客户端手动解散，D2 沿用 correction 收口）。
+  //   （拉群非状态流转；钉钉无服务端解散 API，用完由群主在客户端手动解散——#207 前群主恒为示例用户A，之后为建单人）。
   //   ⚠️ 并发：单条原子 UPDATE + 双 WHERE 守卫（open_conversation_id IS NULL）已足，不需 sysTxnMutex（非多语句 BEGIN IMMEDIATE 事务）。
   // ============================================================
-  const SYS_CHAT_ALLOWED_STATUSES = ['处理中', '待验证', '待上线'];   // 指派后非终态可拉群（排 待处理[未指派] / 已上线·已拒绝·已作废[终态]）
+  // [#207·2026-11-04] 拉群范围放开：四类单子都可拉群，状态上除「已关闭」（展示名「已归档」）与「已作废」外全部允许。
+  //   依据状态机（transitions.js）：已上线可归档或派生、已拒绝可恢复、已暂缓可恢复，仍有后续讨论价值；已作废没有出边；
+  //   已归档重新打开后回到开发中 / 处理中，沿用原群（一单一群，幂等锚点不变）。
+  //   ⚠️ 用独立的显式允许 / 排除名单，**不复用** status-families.js 的 TERMINAL 族（附件、冻结等规则在用，口径不同）。
+  //   守卫 verify-sys-create-chat.js [0] 断言「允许 ∪ 排除 = transitions.ALLOWED_STATUSES 全部状态」且两表不相交——
+  //   新增状态时两表必须表态，否则判红。前端镜像 SI_CHAT_STATUSES（Sys_Iteration.html）须与本表逐值一致。
+  const SYS_CHAT_ALLOWED_STATUSES = ['待受理', '待修改', '待指派', '待处理', '已暂缓', '开发中', '处理中', '待对接测试', '待验证', '待上线', '已上线', '已拒绝'];
+  const SYS_CHAT_EXCLUDED_STATUSES = ['已关闭', '已作废'];
+  // [#207] 拉群发起人 = 管理员 ∪ 本单在册开发（removed_at IS NULL，含 excused；与「开发不分主次」规则一致，
+  //   不再按单个 assigned_to 判）。可见性闸同步按在册判。
+  async function isSysChatRosterDev(issueId, userId) {
+    if (!Number.isSafeInteger(userId) || userId <= 0) return false;
+    const r = await dbGetAsync('SELECT 1 AS x FROM sys_issue_dev_assignees WHERE issue_id = ? AND user_id = ? AND removed_at IS NULL LIMIT 1', [issueId, userId]);
+    return !!r;
+  }
+  async function listSysChatRosterDevIds(issueId) {
+    const rows = await dbAllAsync('SELECT DISTINCT user_id FROM sys_issue_dev_assignees WHERE issue_id = ? AND removed_at IS NULL', [issueId]);
+    return rows.map(r => Number(r.user_id));
+  }
+  // [#207·用户 2026-11-04 拍板] 固定入群成员（chat-candidates 展示与 create-chat 建群同一来源）：
+  //   建单人 + 本单对接人（intake_liaison_id）+ 本单全部在册开发 + 发起人；建单人是管理员（users.role='admin'）时
+  //   另拉示例用户A（COLLAB_CHAT_ADMIN_ID）。不再无条件拉示例用户A，也不再按 assigned_to 单人拉开发（代表本就在册内）。
+  //   群主 = 建单人；建单人是管理员且其钉钉号解析不到时由示例用户A接任（ownerOrder 顺序；用户 11-04 定：发起人不接任群主，
+  //   普通建单人解析不到即 409 OWNER_NOT_RESOLVABLE，codex 600 MED-2）。c 须含 created_by / intake_liaison_id。
+  async function planSysChatBase(c, initiatorId) {
+    const creatorId = Number(c.created_by);
+    const creator = (Number.isSafeInteger(creatorId) && creatorId > 0)
+      ? await dbGetAsync('SELECT id, role FROM users WHERE id = ?', [creatorId]) : null;
+    const creatorIsAdmin = !!(creator && creator.role === 'admin');
+    const baseIdSet = new Set();
+    addSysChatMember(baseIdSet, c.created_by);
+    if (creatorIsAdmin) addSysChatMember(baseIdSet, COLLAB_CHAT_ADMIN_ID);
+    addSysChatMember(baseIdSet, c.intake_liaison_id);
+    for (const rid of await listSysChatRosterDevIds(c.id)) addSysChatMember(baseIdSet, rid);
+    addSysChatMember(baseIdSet, initiatorId);
+    const ownerOrder = [creatorId, ...(creatorIsAdmin ? [COLLAB_CHAT_ADMIN_ID] : [])]
+      .filter(x => Number.isSafeInteger(x) && x > 0);
+    return { baseIdSet, ownerOrder, creatorIsAdmin };
+  }
   // sys 专用成员入口——只排无效/占位 id（≤0/NaN/非安全整数），**不排 id=1**（sys 同 users 表，id=1=真实 admin，对齐 correction M-2）
   function addSysChatMember(memberSet, rawId) {
     const uid = Number(rawId);
@@ -8617,6 +8665,22 @@ module.exports = (deps) => {
       return { synced: false, reason: 'exception' };
     }
   }
+  // [#207] 新入册开发批量加群：首次指派（/assign）、新增协作开发（POST dev-assignees）、改派新增成员（/reassign）
+  //   三处在事务提交后调用——否则「先拉群、后指派」时群里没有开发。逐人走 syncSysChatAddDev（best-effort、绝不抛）；
+  //   无群时首查即返回，不触达钉钉。
+  async function syncSysChatAddDevs(issueId, devIds) {
+    const ids = [...new Set((devIds || []).map(Number).filter(n => Number.isSafeInteger(n) && n > 0))];
+    const results = [];
+    try {
+      if (!ids.length) return results;
+      const chatRow = await dbGetAsync('SELECT dingtalk_open_conversation_id FROM sys_issues WHERE id = ?', [issueId]);
+      if (!chatRow || !chatRow.dingtalk_open_conversation_id) return results;
+      for (const devId of ids) results.push({ devId, ...(await syncSysChatAddDev(issueId, devId)) });
+    } catch (err) {
+      logger.warn(`[sys-chat-sync] 迭代单 #${issueId} 批量加群异常（不影响主流程）：${err && err.message}`);
+    }
+    return results;
+  }
 
   // ── ④b-2 GET /sys-issues/:id/chat-candidates：拉群成员多选候选（前端拉群弹框打开时拉取）──────────
   //   候选 = active 非 viewer 且有合法手机号的系统用户（排固定底座）∪ 当前单据报障人（用户 7/3 拍板）。
@@ -8627,21 +8691,17 @@ module.exports = (deps) => {
     const userId = Number(req.user.id);
     const role = req.user.role;
     try {
-      const c = await dbGetAsync('SELECT id, type, created_by, assigned_to, requester_name, requester_phone FROM sys_issues WHERE id = ?', [id]);
+      const c = await dbGetAsync('SELECT id, type, created_by, assigned_to, intake_liaison_id, requester_name, requester_phone FROM sys_issues WHERE id = ?', [id]);
       if (!c) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
       const isAdmin = role === 'admin';
       const isCreator = Number(c.created_by) === userId && userId > 0;
-      const isAssignee = Number(c.assigned_to) === userId && userId > 0;
-      if (!isAdmin && !isCreator && !isAssignee) return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
-      if (!isAdmin && !isAssignee) return res.status(403).json({ error: '仅管理员或被指派开发本人可发起拉群讨论', code: 'NOT_ALLOWED_TO_CREATE_CHAT' });
-      if (c.type !== 'bug') return res.status(409).json({ error: '拉群讨论目前仅用于 BUG 类迭代单', code: 'CHAT_ONLY_FOR_BUG' });
+      // [#207] 可见性 / 发起权按「本单在册开发」判（原按单个 assigned_to）；四类单子都可拉群（原 CHAT_ONLY_FOR_BUG 已删）
+      const isRosterDev = await isSysChatRosterDev(id, userId);
+      if (!isAdmin && !isCreator && !isRosterDev) return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
+      if (!isAdmin && !isRosterDev) return res.status(403).json({ error: '仅管理员或本单在册开发可发起拉群讨论', code: 'NOT_ALLOWED_TO_CREATE_CHAT' });
 
-      // 固定底座（展示用，前端标"自动入群，无需勾选"）：群主示例用户A + 建单人 + 指派开发 + 发起人
-      const baseIdSet = new Set();
-      addSysChatMember(baseIdSet, COLLAB_CHAT_ADMIN_ID);
-      addSysChatMember(baseIdSet, c.created_by);
-      addSysChatMember(baseIdSet, c.assigned_to);
-      addSysChatMember(baseIdSet, userId);
+      // 固定底座（展示用，前端标"自动入群，无需勾选"）：与 create-chat 同源 planSysChatBase（#207）
+      const { baseIdSet } = await planSysChatBase(c, userId);
       const baseIds = [...baseIdSet];
       const nameRows = baseIds.length ? await dbAllAsync(`SELECT id, display_name, username FROM users WHERE id IN (${baseIds.map(() => '?').join(',')})`, baseIds) : [];
       const nameMap = new Map(nameRows.map(u => [u.id, u.display_name || u.username || `user#${u.id}`]));
@@ -8668,12 +8728,12 @@ module.exports = (deps) => {
     }
     try {
       const c = await dbGetAsync(
-        // [S13-b·观察项核实] 补 derive_root_id/derive_seq——本端点限定 type='bug'（下方 CHAT_ONLY_FOR_BUG
-        //   闸），派生单同样是 bug 类型，可达此路径；欢迎卡片标题 cardTitle 需要这两列经 sysIssueDisplayNo
+        // [S13-b·观察项核实] 补 derive_root_id/derive_seq——派生单可达此路径（#207 起四类单子都可拉群，
+        //   原 CHAT_ONLY_FOR_BUG 闸已删）；欢迎卡片标题 cardTitle 需要这两列经 sysIssueDisplayNo
         //   取子编号（见下方 cardTitle 定义处）。⚠️ 与 dingtalk_chat_name/rawName 那条持久群名不同——群名
         //   一次性固化+外部一致性约束（钉钉客户端里群名一旦定下用户会拿它辨认群，不宜因派生单概念改名），
         //   本次刻意不动；欢迎卡片是建群后一次性 best-effort 消息，无固化/外部依赖，可安全接子编号。
-        `SELECT id, status, type, title, created_by, assigned_to, requester_name, requester_phone,
+        `SELECT id, status, type, title, created_by, assigned_to, intake_liaison_id, requester_name, requester_phone,
                 dingtalk_chat_id, dingtalk_open_conversation_id, dingtalk_chat_name,
                 derive_root_id, derive_seq
            FROM sys_issues WHERE id = ?`, [id]);
@@ -8682,20 +8742,16 @@ module.exports = (deps) => {
       // ── ① 校验顺序（M-6 第一步）：可见性鉴权 + 拉群权限（均 403，均在幂等/门槛之前，防泄露历史群）──
       const isAdmin = role === 'admin';
       const isCreator = Number(c.created_by) === userId && userId > 0;
-      const isAssignee = Number(c.assigned_to) === userId && userId > 0;
-      if (!isAdmin && !isCreator && !isAssignee) {
+      // [#207] 在册开发（removed_at IS NULL）替代单个 assigned_to 判定，可见性闸与发起权同步
+      const isRosterDev = await isSysChatRosterDev(id, userId);
+      if (!isAdmin && !isCreator && !isRosterDev) {
         return res.status(403).json({ error: '无权查看此迭代单', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
-      // 拉群发起权：admin 或被指派开发本人（对接人白名单 = Commit ④ 再放开）
-      if (!isAdmin && !isAssignee) {
-        return res.status(403).json({ error: '仅管理员或被指派开发本人可发起拉群讨论', code: 'NOT_ALLOWED_TO_CREATE_CHAT' });
+      // 拉群发起权：管理员 ∪ 本单在册开发
+      if (!isAdmin && !isRosterDev) {
+        return res.status(403).json({ error: '仅管理员或本单在册开发可发起拉群讨论', code: 'NOT_ALLOWED_TO_CREATE_CHAT' });
       }
-
-      // 拉群 = bug 流特性（§5 属 bug流_方案）。防泄漏：待验证/待上线两态 bug/change 共用，仅靠状态门槛会漏放 feature/improvement，
-      //   故显式 type='bug' 兜底（前端按钮亦 type==='bug' 才出）。将来若要放开到全类型：去此 guard + 状态门槛加 '开发中'。
-      if (c.type !== 'bug') {
-        return res.status(409).json({ error: '拉群讨论目前仅用于 BUG 类迭代单', code: 'CHAT_ONLY_FOR_BUG' });
-      }
+      // [#207] 原 type='bug' 闸（CHAT_ONLY_FOR_BUG）已删：四类单子都可拉群，状态门槛见下方 ④（显式允许名单）。
 
       // ── ② 幂等（M-1）：已建群直接返回现有群信息（先于描述/状态门槛——已建群无需再填议题，graceful 取历史群入口，对齐 correction）──
       if (c.dingtalk_open_conversation_id) {
@@ -8711,10 +8767,11 @@ module.exports = (deps) => {
       if (!chatDesc) return res.status(400).json({ error: '请填写拉群议题（讨论内容）后再发起', code: 'CHAT_DESC_REQUIRED' });
       if (chatDesc.length > 500) return res.status(400).json({ error: '拉群议题不超过 500 字', code: 'CHAT_DESC_TOO_LONG' });
 
-      // ── ④ 状态门槛（仅未建群才校验）：仅指派后非终态可新建群 ──
+      // ── ④ 状态门槛（仅未建群才校验）：除已归档（库值「已关闭」）/ 已作废外都可新建群 ──
       if (!SYS_CHAT_ALLOWED_STATUSES.includes(c.status)) {
+        const shown = c.status === '已关闭' ? '已归档' : c.status;
         return res.status(409).json({
-          error: `当前状态（${c.status}）不可发起拉群：未指派或已为终态`,
+          error: `当前状态（${shown}）不可发起拉群：已归档或已作废的单不再拉群（已归档单重新打开后可拉）`,
           code: 'CHAT_NOT_ALLOWED_IN_STATUS'
         });
       }
@@ -8729,12 +8786,8 @@ module.exports = (deps) => {
       try { token = await dingtalkNotify.getAccessToken(appKey, appSecret); }
       catch (err) { const cls = dingtalkNotify.classifyError(err); return res.status(502).json({ error: cls.hint, errcode: cls.errcode, errmsg: cls.errmsg, reason: cls.reason, code: 'GETTOKEN_FAILED' }); }
 
-      // ── 成员构成：固定底座（不排 id=1）：群主示例用户A + 建单人 + 指派开发 + 发起人 ──
-      const baseIdSet = new Set();
-      addSysChatMember(baseIdSet, COLLAB_CHAT_ADMIN_ID);
-      addSysChatMember(baseIdSet, c.created_by);
-      addSysChatMember(baseIdSet, c.assigned_to);
-      addSysChatMember(baseIdSet, userId);
+      // ── 成员构成：固定底座（不排 id=1）= planSysChatBase（#207：建单人 + 对接人 + 全部在册开发 + 发起人；建单人是管理员时加示例用户A）──
+      const { baseIdSet, ownerOrder } = await planSysChatBase(c, userId);
 
       // ④b-2 额外选中成员（多选下拉，候选=系统用户有手机号；用户 7/3 拍板手动挑）：parsePositiveId 校验 + 去重(排 base) + 上限 30 防滥用。
       //   钉钉解析/存在性/active/viewer 校验在下方 selected 解析循环做（optional 成员：无效即跳过记 skipped，不阻断建群）。
@@ -8772,22 +8825,26 @@ module.exports = (deps) => {
       // [codex29 L-2] 元素 = { user_id, display_name } 对象数组（**非纯 id**），逐字复刻 correction create-chat 契约；
       //   字段名 missing_required_member_ids 保持与 correction 一致（降迁移认知负担），前端只取 .length 使用。
       const missingRequiredMemberIds = [];       // 固定底座缺钉钉号（strong warning，不阻断）
+      const baseDingByUid = new Map();           // [codex 600 MED-3] 底座每人解析到的钉钉号（去重前），群主按钉钉号选，不受同号去重影响
       for (const bid of baseIdSet) {
         const u = userMap.get(bid);
         if (!u) { missingRequiredMemberIds.push({ user_id: bid, display_name: `user#${bid}` }); continue; }   // 账号丢失（脏数据）
         const ding = await resolveDing(u);
         if (!ding) { missingRequiredMemberIds.push({ user_id: bid, display_name: u.display_name || `user#${bid}` }); continue; }
+        baseDingByUid.set(bid, ding);
         if (!seenDing.has(ding)) { seenDing.add(ding); memberDingList.push({ userId: bid, dingtalk_user_id: ding, display_name: u.display_name || `user#${bid}` }); }
       }
 
       // ④b-2 选中成员解析（optional：不存在/非 active/viewer/无钉钉 → 跳过记 selectedSkipped，不阻断建群；dedup 钉钉，与底座/报障人同号视为已在群）
       const selectedAdded = [];
       const selectedSkipped = [];
+      const selectedInGroupUids = new Set();   // [codex 600-R MED] 选中且实际进群（含同号视为已在群）的人，供落库后追补求差集
       for (const sid of selectedIdSet) {
         const u = userMap.get(sid);
         if (!u || u.status !== 'active' || u.role === 'viewer') { selectedSkipped.push({ user_id: sid, reason: 'invalid_or_inactive' }); continue; }
         const ding = await resolveDing(u);
         if (!ding) { selectedSkipped.push({ user_id: sid, display_name: u.display_name || `user#${sid}`, reason: 'no_ding' }); continue; }
+        selectedInGroupUids.add(sid);
         if (seenDing.has(ding)) continue;   // 与底座/其他选中同钉钉 → 已在群，静默跳过
         seenDing.add(ding);
         memberDingList.push({ userId: sid, dingtalk_user_id: ding, display_name: u.display_name || `user#${sid}` });
@@ -8824,14 +8881,23 @@ module.exports = (deps) => {
         }
       }
 
-      // 群主 = 示例用户A（COLLAB_CHAT_ADMIN_ID）。未解析到（理论不发生，id=3 生产恒有）→ 无群主无法建群，硬失败
-      const owner = memberDingList.find(m => m.userId === COLLAB_CHAT_ADMIN_ID);
+      // [#207] 群主 = 建单人；建单人是管理员且钉钉号解析不到时由示例用户A接任（ownerOrder）。发起人不接任（用户 11-04 定）。
+      //   [codex 600 MED-3] 按 baseDingByUid 取群主钉钉号（去重前记录），同钉钉号被去重的那一条也能当群主；
+      //   该钉钉号必在 memberDingList 里（去重保留的是同号第一条）。全部解析不到 → 409，提示先绑定。
+      let owner = null;
+      for (const oid of ownerOrder) {
+        const od = baseDingByUid.get(oid);
+        if (od) { owner = { userId: oid, dingtalk_user_id: od, display_name: nameOf(oid) }; break; }
+      }
       if (!owner) {
-        return res.status(500).json({
-          error: '群主（示例用户A）钉钉账号未解析到，无法建群，请联系管理员',
+        return res.status(409).json({
+          error: ownerOrder.length > 1
+            ? '群主（建单人）与示例用户A的钉钉账号都未解析到，无法建群；请先为建单人或示例用户A绑定钉钉号或手机号'
+            : '群主（建单人）钉钉账号未解析到，无法建群；请先为建单人绑定钉钉号或手机号',
           code: 'OWNER_NOT_RESOLVABLE', missing_required_member_ids: missingRequiredMemberIds
         });
       }
+      const ownerIsFallback = owner.userId !== Number(c.created_by);
       // 至少需群主 + 1 人（仅剩群主无法成群）→ 友好预检，避免钉钉返回不透明错误
       if (memberDingList.length < 2) {
         return res.status(409).json({
@@ -8892,6 +8958,19 @@ module.exports = (deps) => {
       }
       logger.info(`[sys-create-chat] 迭代单 #${id} 拉群成功 by ${userName} chatid=${newChatId}（成员 ${memberDingList.length}）`);
 
+      // [codex 600 MED-1] 建群期间入册的开发追补加群：成员快照取于钉钉建群之前，若这段时间里指派 / 改派 / 新增协作开发
+      //   已提交，它们的事务后加群因群尚未落库而跳过（syncSysChatAddDevs 首查无群即返回），之后也不会再触发。
+      //   群落库后重读在册名单，把没实际进群的在册开发补加；群落库之后才入册的由入册侧自己加，两侧不漏。
+      //   [codex 600-R MED] 差集按「实际进群」算（底座解析到钉钉号的 baseDingByUid + 选中且解析到的 selectedInGroupUids），
+      //   不按原始选中集合：选中但当时解析失败、建群期间又入册的人也要补。快照时已在册却缺钉钉号的开发会再试一次解析（无手机号即返回，不触达钉钉）。
+      //   best-effort：查询失败记日志后跳过；syncSysChatAddDevs 绝不抛。
+      const rosterNow = await listSysChatRosterDevIds(id).catch((err) => { logger.warn(`[sys-create-chat] 迭代单 #${id} 追补加群读在册名单失败（跳过追补）：${err && err.message}`); return []; });
+      const lateRosterIds = rosterNow.filter(rid => !baseDingByUid.has(rid) && !selectedInGroupUids.has(rid));
+      if (lateRosterIds.length) {
+        logger.info(`[sys-create-chat] 迭代单 #${id} 在册开发 ${lateRosterIds.join(',')} 未在建群名单内，追补加群`);
+        await syncSysChatAddDevs(id, lateRosterIds);
+      }
+
       // 发欢迎卡片（best-effort，含拉群议题 chat_desc；失败不影响建群）
       try {
         const esc = dingtalkNotify.escapeMarkdown;
@@ -8913,6 +8992,7 @@ module.exports = (deps) => {
         message: '讨论群已创建，请到钉钉客户端查看（钉钉无解散接口，使用完后由群主在客户端手动解散）',
         id, chat_id: newChatId, open_conversation_id: newOpenConvId, chat_name: chatName,
         member_count: memberDingList.length, idempotent: false,
+        owner_user_id: owner.userId, owner_name: owner.display_name, owner_is_fallback: ownerIsFallback,   // [#207] 实际群主（示例用户A接任时 fallback=true）
         missing_required_member_ids: missingRequiredMemberIds,
         requester_included: requesterIncluded,
         requester_skip_reason: requesterSkipReason,
@@ -9728,9 +9808,9 @@ module.exports = (deps) => {
       //   TO_VIEW 五类关键词）核实：本端点（详情）+ 上方列表端点已是**全部**需要"值班执行人应可见"
       //   的读面，其余含类似身份过滤的端点逐一核实为"结构性不可达"或"有意收窄，非视图可见性的第
       //   三消费面"，无遗漏需补析取——完整审计表见交付报告，结论摘要：
-      //   ① GET/POST .../chat-candidates·create-chat（:7060/:7106，仅 admin∨creator∨assignee）
-      //      ——拉群讨论是开发期协调工具，判据本就窄于本端点可见集（甚至不含 intake_liaison/
-      //      bugLiaison/roster/techLead），是独立于"能否查看详情"之外的"发起权"窄集，非同一可见性
+      //   ① GET/POST .../chat-candidates·create-chat（仅 admin∨creator∨在册开发；#207 起 assignee 改在册）
+      //      ——拉群讨论是开发期协调工具，判据本就窄于本端点可见集（不含 intake_liaison/
+      //      bugLiaison/techLead），是独立于"能否查看详情"之外的"发起权"窄集，非同一可见性
       //      概念的第三落点；值班执行人只在部署时刻参与，无需加入开发期讨论群；
       //   ② GET .../attachments/:attId/download：#78 放开 batch / fastlane 执行人附件读权，
       //      两条部署路径同等对待；上传、删除仍按原开发花名册判权。
@@ -22129,8 +22209,10 @@ module.exports = (deps) => {
     buildSysTechLeadCommentReplyMarkdown,
     // bug 流 Commit ③：真钉钉建群（verify-sys-create-chat require 真实逻辑，防漂移）
     SYS_CHAT_ALLOWED_STATUSES,
+    SYS_CHAT_EXCLUDED_STATUSES,   // [#207] verify 断言「允许 ∪ 排除 = 全部状态」
     addSysChatMember,
     syncSysChatAddDev,   // [codex29 M-1] 导出供 verify 直测真函数「绝不抛」契约
+    syncSysChatAddDevs,  // [#207] 批量加群（绝不抛）
     // bug 流 Commit ④a：对接人白名单（verify-sys-liaison require 真实逻辑，防三处字面量漂移 + 权限精判回归）
     SYS_BUG_LIAISON_USER_IDS,
     isSysBugLiaison,
