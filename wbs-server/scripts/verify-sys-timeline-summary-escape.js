@@ -215,6 +215,11 @@ const TRUSTED_HTML_CALLEE_NAMES = new Set([
     // 不是真实转义缺口（人工审计过：每个输出字段都在函数体内被 esc() 包裹），是"局部变量间接链过深"这个
     // 结构性限制。抽成具名函数、调用点只留一次函数调用，与本表其余三个既有 helper 同款处置。
     'siRenderAttachListHtml',
+    // [#208 暂缓单备注·2026-11-09] siRenderHoldNoteHtml(e, rec)（public/Sys_Iteration.html，siRenderTimeline
+    // 之前）——原备注合并显示：当前版本日期 / 正文、每个历史版本的序号 / 日期 / 正文 / 操作人 / 时间、作废原因 /
+    // 作废人 / 时间，逐字段各自 esc() 后拼接；编辑 / 作废按钮的 onclick 只拼 Number(e.id)。登记原因同上一条：
+    // 历史版本要 map 拼接列表，内联在 siRenderTimeline 里会形成多级局部变量链，超过 isLocalVarSafe 递归上限。
+    'siRenderHoldNoteHtml',
 ]);
 // ⚠️ 刻意**不**放进白名单的既有 helper（如 siFmtDT/siFmtDTSec/siStatusDisplay/
 //   siFormatReleasePublishedSummary）——grep 现场逐处核实过，fnBody 里它们的全部用法要么已被外层

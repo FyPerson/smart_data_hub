@@ -416,6 +416,16 @@
         .si-tl-withdraw-detail summary { cursor: pointer; color: #374151; }
         .si-tl-withdraw-detail summary:hover { color: #1e293b; }
         .si-tl-withdraw-detail pre { white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin: 4px 0 0; font-size: 11px; font-family: monospace; }
+        /* [#208 暂缓单备注·方案 v1.1 §4.4] 原备注合并显示：正文保留换行；作废加删除线；编辑历史展开区。 */
+        .si-hn-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+        .si-hn-date { color: #6b7280; margin-right: 4px; }
+        .si-hn-voided .si-hn-date, .si-hn-voided .si-hn-text { text-decoration: line-through; color: #9ca3af; }
+        .si-hn-void-line { color: #b45309; font-size: 12px; margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .si-hn-hist { display: block; margin-top: 2px; font-size: 12px; }
+        .si-hn-hist summary { cursor: pointer; color: #374151; display: inline; }
+        .si-hn-hist ol { margin: 4px 0 0 18px; padding: 0; }
+        .si-hn-hist li { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0; }
+        .si-hn-btn { font-size: 12px; padding: 1px 8px; margin-left: 6px; }
         /* [#83·S2·B2·时间线附件留痕_方案_20260917_v1.3 §3] 附件增删三码——一律展开区（added/replaced 全名单、
            removed 四字段），专名 class（不复用上方三个既有 details 命名，语义各不相同），外观三条规则复制自
            .si-tl-withdraw-detail；内容是 <ul><li> 列表非 <pre>，另加两条列表专属规则。 */
@@ -3992,7 +4002,10 @@
             ? `<label style="font-weight:normal;font-size:11px;color:#6b7280;margin-left:12px;cursor:pointer">
                 <input type="checkbox"${siTlHideReleaseScope ? ' checked' : ''} onchange="siToggleTlReleaseScope(this.checked)"> 隐藏批次编排与附件增删记录</label>`
             : '';
-        const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [], iss && iss.title)}</div>`;
+        // [#208 暂缓单备注] 入口按钮只看后端能力位 can_add_hold_note（单据已暂缓 + 有暂缓记录 + 建单人或管理员）。
+        const holdNoteAddBtn = (iss && iss.can_add_hold_note)
+            ? '<button type="button" class="u-btn-secondary si-hn-btn" onclick="siHoldNoteAdd()">添加暂缓备注</button>' : '';
+        const tl = `<div class="u-detail-section"><h3>演进时间线${tlFilterHtml}${holdNoteAddBtn}</h3>${siRenderTimeline(tlEvents, r.data.attachments || [], iss && iss.title)}</div>`;
 
         // 附件区
         // 附件融入（2026-07-19）：spec 已融入基本信息（info 内），delivery+screenshot 合并为「开发交付」区（Commit 记录后）。
@@ -4233,6 +4246,8 @@
         created: '建单', assign: '指派', reassign: '改派', estimate: '回填预计',
         submit: '交付', return: '打回', release: '上线', reopen: '重开', derive: '派生',
         scope_change: '范围变更', feasibility: '可行性评估', blocked: '标记受阻', unblock: '解除受阻', note: '备注',
+        // [#208 暂缓单备注] 编辑 / 作废正常合并进原备注显示，只有找不到合法原备注时才以自己的标签单独成行。
+        hold_note: '暂缓备注', hold_note_edit: '暂缓备注编辑', hold_note_void: '暂缓备注作废',
         schedule: '排期', accept: '验收通过', close: '关闭', hold: '暂缓', resume: '恢复',
         reactivate: '重新激活', issue_reject: '拒绝', void: '作废',
         // [S1c·config流激活 方案v1.0 D5/D14] 「已生效」预留态拆除——`effected` 从未有对应的后端
@@ -4350,6 +4365,7 @@
         accept: 'si-tl-green', release: 'si-tl-green', close: 'si-tl-green', unblock: 'si-tl-green', confirm_online_norelease: 'si-tl-green',
         scope_change: 'si-tl-orange',
         hold: 'si-tl-gray', resume: 'si-tl-gray', void: 'si-tl-gray', reactivate: 'si-tl-gray', note: 'si-tl-gray',
+        hold_note: 'si-tl-gray', hold_note_edit: 'si-tl-gray', hold_note_void: 'si-tl-gray',   // [#208]
         // C5a 配色（按既有四族语义就近归类，非新族）：
         //   受理类（intake_accept 通过态·resubmit_intake 受理程序内的后续步骤·change_intake_mode 管理性开关）
         //   归 indigo，与既有 schedule/assign/set_release_flag 等"程序性/准备性动作"同族；
@@ -4620,7 +4636,7 @@
     // [#83·S2·B1·时间线附件留痕_方案_20260917_v1.3 §4 B1] +attachment_added/attachment_replaced/
     //   attachment_removed（附件增删三码独立徽章；见上方 SI_TL_LABEL/SI_TL_CLS 处注释；同源纪律同上，
     //   已同步改 scripts/verify-sys-timeline-label-coverage.js 的 NOTE_OWN_LABEL_ACTION_CODES）。
-    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);
+    const SI_TL_NOTE_OWN_LABEL_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed', 'hold_note', 'hold_note_edit', 'hold_note_void']);
     // [S3·§5] fast_release_exec_online **不进本 Set**——event_type='status_change'（同 accept/release/
     //   liaison_test_pass 等既有 status_change 事件同款），走的是另一条渲染路径（直接用 action_code 查
     //   SI_TL_LABEL，不经本 Set 判定），加进来不生效，反而误导读者以为它是 note 型事件。
@@ -4931,9 +4947,170 @@
         }).join('');
         return { valid: true, html };
     }
+    // ===== #208 暂缓单备注（方案 docs/local/系统迭代/暂缓备注_方案_20261109_v1.1.md §4.1 / §4.4）=====
+    //   合法关联（M-1）：编辑 / 作废事件的 ref_id 指向本单流水里 note + hold_note + ref_id 为空的原备注。
+    //   只合并合法关联的子事件；作废只合并 id 最小的一条，其余（不该存在的重复作废）与孤立子事件一样单独成行，
+    //   不隐藏任何记录（M-5）。版本排序一律按 id（created_at 只到秒）。
+    function siHoldNoteIsOrigin(e) {
+        return !!e && e.event_type === 'note' && e.action_code === 'hold_note' && (e.ref_id === null || e.ref_id === undefined);
+    }
+    function siBuildHoldNoteIndex(list) {
+        const byOrigin = new Map();
+        const merged = new Set();
+        const sorted = (list || []).slice().sort((a, b) => Number(a.id) - Number(b.id));
+        for (const e of sorted) { if (siHoldNoteIsOrigin(e)) byOrigin.set(Number(e.id), { edits: [], voidEv: null }); }
+        for (const e of sorted) {
+            if (!e || e.event_type !== 'note') continue;
+            const rec = byOrigin.get(Number(e.ref_id));
+            if (!rec) continue;
+            if (e.action_code === 'hold_note_edit') { rec.edits.push(e); merged.add(Number(e.id)); }
+            else if (e.action_code === 'hold_note_void' && !rec.voidEv) { rec.voidEv = e; merged.add(Number(e.id)); }
+        }
+        return { byOrigin, merged };
+    }
+    function siHoldNotePayload(e) {
+        if (!e || !e.payload_json) return null;
+        try { const p = JSON.parse(e.payload_json); return (p && typeof p === 'object' && !Array.isArray(p)) ? p : null; } catch (_) { return null; }
+    }
+    function siHoldNoteVersion(e) {
+        const p = siHoldNotePayload(e);
+        return {
+            date: (p && typeof p.note_date === 'string') ? p.note_date : '',
+            content: (p && typeof p.content === 'string') ? p.content : (e.summary || ''),
+        };
+    }
+    // 孤立的编辑 / 作废事件（找不到合法原备注）单独成行时的正文——返回纯文本，由调用处 esc()。
+    function siHoldNoteOrphanText(e) {
+        const p = siHoldNotePayload(e);
+        if (e.action_code === 'hold_note_void') return (p && typeof p.reason === 'string') ? ('作废原因：' + p.reason) : (e.summary || '');
+        if (p && typeof p.content === 'string') return (typeof p.note_date === 'string' ? p.note_date + ' ' : '') + p.content;
+        return e.summary || '';
+    }
+    // 原备注一行的 HTML：当前版本 + 编辑历史 + 作废信息 + 编辑 / 作废按钮。每个动态字段各自 esc()（M-8）；
+    //   id 只经 Number() 拼进 onclick。登记在 verify-sys-timeline-summary-escape.js 的可信渲染函数白名单。
+    function siRenderHoldNoteHtml(e, rec) {
+        if (!rec) return '';
+        const iss = siDetail && siDetail.issue;
+        const editable = !!(iss && Array.isArray(iss.hold_note_editable_ids) && iss.hold_note_editable_ids.map(Number).includes(Number(e.id)));
+        const versions = [e].concat(rec.edits);
+        const cur = siHoldNoteVersion(versions[versions.length - 1]);
+        const voided = !!rec.voidEv;
+        let html = `<span class="${voided ? 'si-hn-voided' : ''}"><span class="si-hn-date">${esc(cur.date)}</span><span class="si-hn-text">${esc(cur.content)}</span></span>`;
+        if (rec.edits.length) {
+            const items = versions.map((v, i) => {
+                const ver = siHoldNoteVersion(v);
+                return `<li>${esc(i === 0 ? '原始' : '第' + i + '次编辑')}：${esc(ver.date)} ${esc(ver.content)}<span class="si-muted">（${esc(v.operator_name || '-')}，${esc(siFmtDT(v.created_at))}）</span></li>`;
+            }).join('');
+            html += `<details class="si-hn-hist"><summary>已编辑 ${esc(String(rec.edits.length))} 次，查看历史</summary><ol>${items}</ol></details>`;
+        }
+        if (voided) {
+            const vp = siHoldNotePayload(rec.voidEv);
+            const reason = (vp && typeof vp.reason === 'string') ? vp.reason : (rec.voidEv.summary || '');
+            html += `<div class="si-hn-void-line">已作废：${esc(reason)}（${esc(rec.voidEv.operator_name || '-')}，${esc(siFmtDT(rec.voidEv.created_at))}）</div>`;
+        }
+        if (editable && !voided) {
+            const nid = Number(e.id);
+            html += `<button type="button" class="u-btn-secondary si-hn-btn" onclick="siHoldNoteEdit(${nid})">编辑</button><button type="button" class="u-btn-secondary si-hn-btn" onclick="siHoldNoteVoid(${nid})">作废</button>`;
+        }
+        return html;
+    }
+    function siHoldNoteToday() {
+        const d = new Date();
+        const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
+    // 写接口返回 409（状态已变 / 已作废 / 已不是本轮）时：提示后端信息，关弹窗并刷新详情（方案 4.4）。
+    async function siHoldNoteSubmit(path, body, okMsg) {
+        const myInstance = siModalInstanceSeq;   // [codex 602 L-1] 响应回来时弹窗已换 / 已关，就不再弹提示
+        const r = await siApi(path, { method: 'POST', body });
+        if (siModalInstanceSeq !== myInstance) return false;
+        if (!r.ok) { siApiErr(r); return r.status === 409 || r.status === 404; }
+        showToast(okMsg, 'success');
+        return true;
+    }
+    function siHoldNoteValidate(v) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(v.note_date || '')) { showToast('请选择备注日期', 'error'); return null; }
+        if (v.note_date > siHoldNoteToday()) { showToast('备注日期不能晚于今天', 'error'); return null; }
+        const content = (v.content || '').trim();
+        if (!content) { showToast('请填写备注内容', 'error'); return null; }
+        if ([...content].length > 500) { showToast('备注内容不能超过 500 字', 'error'); return null; }
+        return { note_date: v.note_date, content };
+    }
+    function siHoldNoteOpenForm(title, init, onSubmit, confirmLabel) {
+        siModal(title, [
+            fDate('note_date', '备注日期 <span class="u-req">*</span>', init.date),
+            fTextarea('content', '备注内容', '', true, '最多 500 字，用来记录暂缓原因或进展')
+        ], onSubmit, confirmLabel);
+        const dateEl = document.getElementById('f_note_date');
+        if (dateEl) dateEl.max = siHoldNoteToday();
+        const contentEl = document.getElementById('f_content');
+        if (contentEl) contentEl.value = init.content || '';
+        siHoldNoteAttachCounter('f_content', 500);
+    }
+    // [codex 602 L-2] 实时字数「当前 / 上限」，与提交校验同一算法（去首尾空白后按 Unicode 字符数）。
+    function siHoldNoteAttachCounter(textareaId, max) {
+        const ta = document.getElementById(textareaId);
+        if (!ta) return;
+        const counter = document.createElement('div');
+        counter.className = 'u-hint si-hn-counter';
+        counter.id = textareaId + '_counter';
+        ta.insertAdjacentElement('afterend', counter);
+        const update = () => {
+            const n = [...ta.value.trim()].length;
+            counter.textContent = `${n} / ${max}`;
+            counter.style.color = n > max ? '#dc2626' : '';
+        };
+        ta.addEventListener('input', update);
+        update();
+    }
+    function siHoldNoteAdd() {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        const issueId = Number(iss.id);
+        siHoldNoteOpenForm('添加暂缓备注', { date: siHoldNoteToday(), content: '' }, async v => {
+            const body = siHoldNoteValidate(v);
+            if (!body) return false;
+            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes', body, '暂缓备注已添加');
+        }, '添加');
+    }
+    function siHoldNoteEdit(noteId) {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        const issueId = Number(iss.id);
+        const nid = Number(noteId);
+        const list = siCurTimeline || [];
+        const origin = list.find(e => Number(e.id) === nid && siHoldNoteIsOrigin(e));
+        if (!origin) { showToast('找不到这条备注，请刷新', 'error'); return; }
+        const rec = siBuildHoldNoteIndex(list).byOrigin.get(nid);
+        const cur = siHoldNoteVersion(rec && rec.edits.length ? rec.edits[rec.edits.length - 1] : origin);
+        siHoldNoteOpenForm('编辑暂缓备注', cur, async v => {
+            const body = siHoldNoteValidate(v);
+            if (!body) return false;
+            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes/' + nid + '/edit', body, '暂缓备注已更新');
+        }, '保存');
+    }
+    function siHoldNoteVoid(noteId) {
+        const iss = siDetail && siDetail.issue;
+        if (!iss) return;
+        const issueId = Number(iss.id);
+        const nid = Number(noteId);
+        siModal('作废暂缓备注', [
+            note('作废后这条备注仍保留在时间线上，加删除线并显示作废原因，不能再编辑。'),
+            fTextarea('reason', '作废原因', '', true, '必填，最多 200 字')
+        ], async v => {
+            const reason = (v.reason || '').trim();
+            if (!reason) { showToast('请填写作废原因', 'error'); return false; }
+            if ([...reason].length > 200) { showToast('作废原因不能超过 200 字', 'error'); return false; }
+            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes/' + nid + '/void', { reason }, '暂缓备注已作废');
+        }, '确认作废');
+        siHoldNoteAttachCounter('f_reason', 200);
+    }
+
     function siRenderTimeline(list, atts, currentTitle) {
         if (!list.length) return '<div class="si-muted">暂无演进记录</div>';
+        const siHoldIdx = siBuildHoldNoteIndex(list);   // [#208] 暂缓备注合并索引
         return '<div class="si-timeline">' + list.map(e => {
+            if (siHoldIdx.merged.has(Number(e.id))) return '';   // [#208] 已合并进原备注的编辑 / 作废事件不单独成行
             // L-1（codex 复审）：release 事件也优先识别 action_code——「确认上线·不发版」(confirm_online_norelease)
             //   与批次/hotfix 发版都写 event_type='release'，只有前者带 action_code，需区分标签保留审计可见性。
             const isReleaseScope = e.event_type === 'scope_change' && !!SI_TL_RELEASE_SCOPE_LABEL[e.action_code];
@@ -5248,6 +5425,12 @@
                     summaryHtml = baseSummaryHtml
                         + `<span class="si-muted" style="margin-left:6px">（修改明细不可用）</span>`;
                 }
+            } else if (siHoldNoteIsOrigin(e)) {
+                // [#208] 原备注：当前版本 + 编辑历史 + 作废信息 + 按钮，全部由 siRenderHoldNoteHtml 内部逐字段转义。
+                summaryHtml = siRenderHoldNoteHtml(e, siHoldIdx.byOrigin.get(Number(e.id))) || esc(e.summary || '');
+            } else if (e.event_type === 'note' && (e.action_code === 'hold_note_edit' || e.action_code === 'hold_note_void')) {
+                // [#208·M-5] 没能合并进原备注的编辑 / 作废事件，单独成行照常显示，不隐藏。
+                summaryHtml = esc(siHoldNoteOrphanText(e));
             } else if (e.event_type === 'estimate' && e.summary) {
                 // C5b 噪音折叠③：estimate 行 summary 是裸值（index.js :8022 estMin，无标签），加前缀让读者知道
                 // 这是"预计完成"时刻而非其它时间字段——存量与新行同渲染路径，一并受益，无需回填历史数据。

@@ -3355,6 +3355,10 @@ module.exports = (deps) => {
     // 场景）或先手动写响应头/部分响应体再抛错（headersSent=true 场景），验证端点 catch 按 headersSent
     // 分流、且三类记录（附件行/时间线行/文件）均已保留不回滚（persist 是事务唯一所有者，提交后无补偿）。
     beforeAttachmentResponseHook: null,
+    // [#208 暂缓单备注·方案 v1.1 §五-8] 三个备注写端点在锁外校验之后、sysBeginImmediate 之前调用，参数
+    //   {action:'add'|'edit'|'void', issueId, noteId?}。测试用它把请求停在拿锁之前，期间让另一个请求完整
+    //   提交，再放行——证明状态判定发生在拿锁之后（锁外先判再写的实现会在此判红）。
+    holdNoteBeforeLockHook: null,
   };
   let __sysTxnRelease = null;   // 当前持锁事务的 release（单持有者不变量，mutex 串行化保证）
   let __sysCurrentTxnTag = null;   // [#83·S1] 当前持锁事务归属标记，仅 persist 设置，供 onSysTxnRelease 钩子按 tag 计数
@@ -7201,6 +7205,114 @@ module.exports = (deps) => {
   }
 
   // ============================================================
+  // 二·九、#208 暂缓单备注（方案 docs/local/系统迭代/暂缓备注_方案_20261109_v1.1.md）
+  // ============================================================
+  //   存储：不建表不加列，新增 / 编辑 / 作废各追加一条 sys_issue_timeline（event_type='note'）：
+  //     hold_note      ref_id=NULL，payload {note_date, content}
+  //     hold_note_edit ref_id=原备注 id，payload {note_date, content}
+  //     hold_note_void ref_id=原备注 id，payload {reason}
+  //   流水只追加不修改（D9）。下面的判定函数是纯函数，输入 = 单据行 + 当前用户 + 该单流水数组（按 id 升序），
+  //   写接口（锁内重读的数据）与详情接口（同一次请求读出的数据）调用同一组函数（方案 4.2「共用判定」，codex 601 M-2/M-3）。
+  const HOLD_NOTE_CONTENT_MAX = 500;
+  const HOLD_NOTE_REASON_MAX = 200;
+  const HOLD_NOTE_SUMMARY_MAX = 80;
+  // 字数按 Unicode 字符数（表情算 1 个），校验 / 摘要截取 / 前端字数提示同一算法（方案 4.1，codex 601 M-7）。
+  function holdNoteCharLen(s) { return [...s].length; }
+  function holdNoteSummary(s) {
+    const chars = [...s];
+    return chars.length > HOLD_NOTE_SUMMARY_MAX ? chars.slice(0, HOLD_NOTE_SUMMARY_MAX).join('') : s;
+  }
+  // 本轮暂缓锚点（D10）：筛选条件与 resume 定位暂缓前状态逐字相同（event_type='status_change' AND
+  //   action_code='hold' AND to_status='已暂缓'，见 POST /resume）。取 id 最大者；没有返回 null，**不兜底成 0**（M-4）。
+  function findHoldAnchorId(timeline) {
+    let anchor = null;
+    for (const e of timeline || []) {
+      if (e && e.event_type === 'status_change' && e.action_code === 'hold' && e.to_status === '已暂缓') {
+        const eid = Number(e.id);
+        if (Number.isInteger(eid) && (anchor === null || eid > anchor)) anchor = eid;
+      }
+    }
+    return anchor;
+  }
+  // 合法原备注：note + hold_note + ref_id 为空（M-1）。流水数组已按 issue_id 取出，单据归属由查询保证。
+  function isHoldNoteOrigin(e) {
+    return !!e && e.event_type === 'note' && e.action_code === 'hold_note' && (e.ref_id === null || e.ref_id === undefined);
+  }
+  function holdNoteVoidedOriginIds(timeline) {
+    const originIds = new Set((timeline || []).filter(isHoldNoteOrigin).map(e => Number(e.id)));
+    const voided = new Set();
+    for (const e of timeline || []) {
+      if (e && e.event_type === 'note' && e.action_code === 'hold_note_void' && originIds.has(Number(e.ref_id))) voided.add(Number(e.ref_id));
+    }
+    return voided;
+  }
+  function holdNoteIsCreatorOrAdmin(row, actor) {
+    const aid = Number(actor && actor.id);
+    if (!(aid > 0)) return false;
+    return actor.role === 'admin' || Number(row.created_by) === aid;
+  }
+  // 新增判定：先权限（403 先于业务 409，防按错误码探知单据状态），再状态，再锚点。
+  function holdNoteAddVerdict(row, actor, timeline) {
+    if (!holdNoteIsCreatorOrAdmin(row, actor)) return { ok: false, http: 403, code: 'NOT_AUTHORIZED_FOR_HOLD_NOTE', message: '仅建单人或管理员可添加暂缓备注' };
+    if (row.status !== '已暂缓') return { ok: false, http: 409, code: 'HOLD_NOTE_INVALID_STATE', message: '仅「已暂缓」的单据可添加暂缓备注，请刷新' };
+    if (findHoldAnchorId(timeline) === null) return { ok: false, http: 409, code: 'HOLD_NOTE_NO_HOLD_ANCHOR', message: '找不到本单的暂缓记录，无法添加暂缓备注' };
+    return { ok: true };
+  }
+  // 编辑 / 作废判定（D2 / D4 / D10 / M-1 / M-4）：目标必须是本单原备注；作者本人；单据已暂缓且有锚点；
+  //   原备注 id 大于本轮锚点；未作废。轮次比较一律用原备注 id（M-4）。
+  function holdNoteModifyVerdict(row, actor, timeline, noteId) {
+    const nid = Number(noteId);
+    const origin = (timeline || []).find(e => Number(e.id) === nid && isHoldNoteOrigin(e));
+    if (!origin) return { ok: false, http: 404, code: 'HOLD_NOTE_NOT_FOUND', message: '暂缓备注不存在' };
+    const aid = Number(actor && actor.id);
+    if (!(aid > 0) || Number(origin.operator_id) !== aid) return { ok: false, http: 403, code: 'HOLD_NOTE_NOT_AUTHOR', message: '只有写这条备注的人可以编辑或作废' };
+    if (row.status !== '已暂缓') return { ok: false, http: 409, code: 'HOLD_NOTE_INVALID_STATE', message: '单据已不在暂缓中，暂缓备注已锁定，请刷新' };
+    const anchor = findHoldAnchorId(timeline);
+    if (anchor === null) return { ok: false, http: 409, code: 'HOLD_NOTE_NO_HOLD_ANCHOR', message: '找不到本单的暂缓记录，无法修改暂缓备注' };
+    if (!(nid > anchor)) return { ok: false, http: 409, code: 'HOLD_NOTE_INVALID_STATE', message: '这条备注属于以前的暂缓轮次，已锁定' };
+    if (holdNoteVoidedOriginIds(timeline).has(nid)) return { ok: false, http: 409, code: 'HOLD_NOTE_VOIDED', message: '这条备注已作废，不能再编辑或作废' };
+    return { ok: true, origin };
+  }
+  // 详情能力位（方案 4.3）：不在暂缓或无锚点时 can_add=false、editable=[]。
+  function holdNoteCapabilities(row, actor, timeline) {
+    const canAdd = holdNoteAddVerdict(row, actor, timeline).ok;
+    const editable = [];
+    if (row.status === '已暂缓' && findHoldAnchorId(timeline) !== null) {
+      for (const e of timeline || []) {
+        if (isHoldNoteOrigin(e) && holdNoteModifyVerdict(row, actor, timeline, e.id).ok) editable.push(Number(e.id));
+      }
+    }
+    return { can_add_hold_note: canAdd, hold_note_editable_ids: editable };
+  }
+  // 输入校验（锁外，纯格式）：日期必填 + 真实日历日（normalizeDeadline）；「不晚于今天」需要查库，在端点里做。
+  function parseHoldNoteContentBody(body) {
+    const b = body || {};
+    const d = normalizeDeadline(b.note_date);
+    if (!d.ok || !d.value) return { ok: false, message: '备注日期必填，格式为 YYYY-MM-DD 且须是真实日期' };
+    if (typeof b.content !== 'string') return { ok: false, message: '备注内容必填' };
+    const content = b.content.trim();
+    const len = holdNoteCharLen(content);
+    if (len < 1) return { ok: false, message: '备注内容必填' };
+    if (len > HOLD_NOTE_CONTENT_MAX) return { ok: false, message: `备注内容不能超过 ${HOLD_NOTE_CONTENT_MAX} 字` };
+    return { ok: true, note_date: d.value, content };
+  }
+  function parseHoldNoteVoidBody(body) {
+    const b = body || {};
+    if (typeof b.reason !== 'string') return { ok: false, message: '作废原因必填' };
+    const reason = b.reason.trim();
+    const len = holdNoteCharLen(reason);
+    if (len < 1) return { ok: false, message: '作废原因必填' };
+    if (len > HOLD_NOTE_REASON_MAX) return { ok: false, message: `作废原因不能超过 ${HOLD_NOTE_REASON_MAX} 字` };
+    return { ok: true, reason };
+  }
+  async function holdNoteDateIsFuture(dateStr) {
+    const todayRow = await dbGetAsync(`SELECT date('now','localtime') AS d`);
+    const todayStr = todayRow && todayRow.d;
+    if (!todayStr) throw new Error('无法取得服务器当天日期');
+    return dateStr > todayStr;
+  }
+
+  // ============================================================
   // 三、router（C2：状态机端点 + 列表/详情 + meta + sys-systems）
   // ============================================================
   // ⚠️ 挂载（§1.3）：本 router 由 server.js `app.use('/api', router)` 挂载，未匹配请求 Express 自动 next()
@@ -9889,6 +10001,10 @@ module.exports = (deps) => {
            FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`,
         [id]
       );
+      // [#208 暂缓单备注·方案 v1.1 §4.3] 能力位：只用本次请求已读出的单据行与流水数组，调用与写端点同一组
+      //   判定函数（codex 601 M-2/M-3）。流水读取仍在下方锁区之外（方案三-9，本次不挪）——极端交错下按钮可能
+      //   多显示一瞬，写端点锁内重判会返回 409。
+      Object.assign(row, holdNoteCapabilities(row, { id: uid, role }, timeline));
       // [C3b·H1 订正·2026-09-09] 附件 SELECT（delivery/screenshot/spec，仅 active）原在锁外——与写侧
       //   sysPersistAttachments 的 INSERT（同批一并改为持锁写，见该函数）不对称，"一致快照"的声称不成立
       //   （锁外读可能读到并发未提交/已回滚的中间态）。移进下方 sysTxnMutex 临界区、computeDeliveryRev
@@ -12015,6 +12131,117 @@ module.exports = (deps) => {
   router.post('/sys-issues/:id/issue-reject', authenticateToken, requireSysSchemaReady, requireIntakeLiaison, makeTransitionEndpoint('issue_reject'));
   router.post('/sys-issues/:id/void', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('void'));
   router.post('/sys-issues/:id/reopen', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reopen'));
+
+  // ── #208 暂缓单备注：新增 / 编辑 / 作废（方案 v1.1 §4.2；判定函数见「二·九」）──────────────
+  //   三个端点同一结构：锁外只做纯格式校验与「日期不晚于今天」→ 测试钩子（仅 SYS_TEST_HOOKS=1）→
+  //   sysBeginImmediate → 锁内重读单据与流水 → 共用判定 → 追加一条流水 → sysCommit。结果以拿到锁之后的
+  //   真实状态为准（M-6）：恢复先拿到锁，之后的写备注 / 编辑 / 作废 409；写备注先拿到锁则照常提交。
+  //   权限在判定函数里精判（新增=建单人或管理员，编辑 / 作废=原备注作者本人），中间件只做登录 + 就绪粗筛。
+  async function holdNoteLoadInTxn(id) {
+    const row = await dbGetAsync('SELECT id, type, status, created_by FROM sys_issues WHERE id = ?', [id]);
+    if (!row) return { row: null, timeline: [] };
+    const timeline = await dbAllAsync(
+      `SELECT id, event_type, action_code, ref_id, to_status, operator_id FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`, [id]);
+    return { row, timeline };
+  }
+  function holdNoteInputError(res, message) { return res.status(400).json({ error: message, code: 'HOLD_NOTE_INVALID_INPUT' }); }
+
+  router.post('/sys-issues/:id/hold-notes', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const parsed = parseHoldNoteContentBody(req.body);
+    if (!parsed.ok) return holdNoteInputError(res, parsed.message);
+    const actor = sysActor(req);
+    try {
+      if (await holdNoteDateIsFuture(parsed.note_date)) return holdNoteInputError(res, '备注日期不能晚于今天');
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) { await __testHooks.holdNoteBeforeLockHook({ action: 'add', issueId: id }); }
+      await sysBeginImmediate();
+      let noteId;
+      try {
+        const { row, timeline } = await holdNoteLoadInTxn(id);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        const v = holdNoteAddVerdict(row, actor, timeline);
+        if (!v.ok) { await sysRollback(); return res.status(v.http).json({ error: v.message, code: v.code }); }
+        const ins = await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'hold_note', NULL, ?, ?, ?)`,
+          [id, holdNoteSummary(parsed.content), actor.id, actor.name, JSON.stringify({ note_date: parsed.note_date, content: parsed.content })]
+        );
+        noteId = ins.lastID;
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      logger.info(`用户 ${req.user.username} 为迭代单 #${id} 添加暂缓备注 #${noteId}`);
+      res.json({ ok: true, id, note_id: noteId });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  router.post('/sys-issues/:id/hold-notes/:noteId/edit', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    const noteId = parsePositiveId(req.params.noteId);
+    if (!id || !noteId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const parsed = parseHoldNoteContentBody(req.body);
+    if (!parsed.ok) return holdNoteInputError(res, parsed.message);
+    const actor = sysActor(req);
+    try {
+      if (await holdNoteDateIsFuture(parsed.note_date)) return holdNoteInputError(res, '备注日期不能晚于今天');
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) { await __testHooks.holdNoteBeforeLockHook({ action: 'edit', issueId: id, noteId }); }
+      await sysBeginImmediate();
+      let eventId;
+      try {
+        const { row, timeline } = await holdNoteLoadInTxn(id);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        const v = holdNoteModifyVerdict(row, actor, timeline, noteId);
+        if (!v.ok) { await sysRollback(); return res.status(v.http).json({ error: v.message, code: v.code }); }
+        const ins = await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'hold_note_edit', ?, ?, ?, ?)`,
+          [id, holdNoteSummary(parsed.content), noteId, actor.id, actor.name, JSON.stringify({ note_date: parsed.note_date, content: parsed.content })]
+        );
+        eventId = ins.lastID;
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      logger.info(`用户 ${req.user.username} 编辑迭代单 #${id} 的暂缓备注 #${noteId}（事件 #${eventId}）`);
+      res.json({ ok: true, id, note_id: noteId, event_id: eventId });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
+
+  router.post('/sys-issues/:id/hold-notes/:noteId/void', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id);
+    const noteId = parsePositiveId(req.params.noteId);
+    if (!id || !noteId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    const parsed = parseHoldNoteVoidBody(req.body);
+    if (!parsed.ok) return holdNoteInputError(res, parsed.message);
+    const actor = sysActor(req);
+    try {
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) { await __testHooks.holdNoteBeforeLockHook({ action: 'void', issueId: id, noteId }); }
+      await sysBeginImmediate();
+      let eventId;
+      try {
+        const { row, timeline } = await holdNoteLoadInTxn(id);
+        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
+        const v = holdNoteModifyVerdict(row, actor, timeline, noteId);
+        if (!v.ok) { await sysRollback(); return res.status(v.http).json({ error: v.message, code: v.code }); }
+        const ins = await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'hold_note_void', ?, ?, ?, ?)`,
+          [id, holdNoteSummary(parsed.reason), noteId, actor.id, actor.name, JSON.stringify({ reason: parsed.reason })]
+        );
+        eventId = ins.lastID;
+        await sysCommit();
+      } catch (txErr) {
+        try { await sysRollback(); } catch (_) { /* ignore */ }
+        throw txErr;
+      }
+      logger.info(`用户 ${req.user.username} 作废迭代单 #${id} 的暂缓备注 #${noteId}（事件 #${eventId}）`);
+      res.json({ ok: true, id, note_id: noteId, event_id: eventId });
+    } catch (err) { sendSysTransitionError(res, err); }
+  });
 
   // ── 组 B（bug 先行上线授权，方案 v1.3 §3.1）：授权 / 撤销两个自定义端点 ──────────────────
   //   权限 = requireAdmin，**与既有 /accept 端点同一 helper**（server.js:4061 定义，`req.user.role !==
@@ -22023,6 +22250,9 @@ module.exports = (deps) => {
     // [S4a·A5·#67 六写点补齐] scope-change deadline changes 构造纯函数——供 verify-sys-timeline-trace-coverage.js
     // 直调四格（未传/同值/首次/更新），本函数不接 db、无副作用（RC-L2 防复刻漂移，同本文件既有导出先例）。
     buildScopeChangeDeadlineChanges,
+    // [#208 暂缓单备注] 纯判定函数，供 verify-sys-hold-note.js 直调（与端点、详情能力位同一实现）。
+    findHoldAnchorId, holdNoteAddVerdict, holdNoteModifyVerdict, holdNoteCapabilities,
+    parseHoldNoteContentBody, parseHoldNoteVoidBody,
     // [B·B.8·2026-09-09 方案 v1.5] 提交原地修正回滚三注入点 + 详情锁可释放屏障——仅 SYS_TEST_HOOKS=1 时
     // 生产分支才会读取，导出对象本身在任意环境下都存在（供 verify 判空/赋值），不代表生效。
     __testHooks,

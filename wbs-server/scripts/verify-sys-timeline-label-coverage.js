@@ -902,7 +902,7 @@ function extractSetLiteralStrings(text, constName) {
 //   EXPECTED_INSERT_SITE_COUNT 定义处上方旧注释，已随本次改为正式登记而删除，不留过期指令）；
 //   Sys_Iteration.html 已同步三处登记（SI_TL_LABEL/SI_TL_CLS/SI_TL_NOTE_OWN_LABEL_CODES，S2 首批），
 //   本文件同步补登记（两处必须逐字同步，见下方 [预筛 MED-5] 双向核对断言）。
-const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);
+const NOTE_OWN_LABEL_ACTION_CODES = new Set(['assign_overdue_eta', 'fast_release_authorize', 'fast_release_revoke', 'fast_release_staged', 'fast_release_exec_confirm', 'fast_release_roster_added', 'fast_release_roster_removed', 'fast_release_roster_cleared', 'post_release_accept_pass', 'post_release_accept_fail', 'eta_auto_from_deadline', 'eta_auto_sla', 'completion_overrun_reason', 'fast_release_auth_expired', 'release_info_edit', 'release_deleted', 'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed', 'hold_note', 'hold_note_edit', 'hold_note_void']);   // [#208] +3 暂缓备注码
 function computeDisplayKey(eventType, actionCode, releaseScopeKeySet) {
   const hasActionCode = actionCode !== null && actionCode !== undefined && actionCode !== '';
   if (eventType === 'status_change' || eventType === 'release') return hasActionCode ? actionCode : eventType;
@@ -1161,7 +1161,11 @@ ok(`SI_TL_RELEASE_SCOPE_LABEL 解析到 ${releaseScopeKeys.size} 个 key（\u226
 //   SI_TL_NOTE_OWN_LABEL_CODES，双向核对断言见下方 [预筛 MED-5]）——原 S1 遗留「刻意暂落 note 通用标签」
 //   的说明已随本次改造过期删除，不留跟实际不符的指令。三码各恰 1 个字面量站点的断言见下方
 //   ATTACHMENT_ACTION_CODES 相关 check（replaced/added 在 persist、removed 在删除端点，同方案 §4 C1）。
-const EXPECTED_INSERT_SITE_COUNT = 61;
+// [#208 暂缓单备注·2026-11-09] 61→64：新增三个端点各一条字面量 INSERT（event_type='note'，action_code=
+//   hold_note / hold_note_edit / hold_note_void，方案 docs/local/系统迭代/暂缓备注_方案_20261109_v1.1.md
+//   §4.1–4.2）。三码已登记进 SI_TL_LABEL / SI_TL_CLS / SI_TL_NOTE_OWN_LABEL_CODES 与本文件
+//   NOTE_OWN_LABEL_ACTION_CODES。
+const EXPECTED_INSERT_SITE_COUNT = 64;
 const sites = locateRealInsertSites(indexSrc);
 if (sites.length !== EXPECTED_INSERT_SITE_COUNT) {
   fail(

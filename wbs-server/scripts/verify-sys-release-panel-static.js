@@ -2607,7 +2607,12 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
             const fnAttachList = grabFnA('siRenderAttachListHtml');
             const fnAttachDisplayName = grabFnA('siTlAttachDisplayName');
             const constAttachTypeWord = (src.match(/const SI_TL_ATTACH_TYPE_WORD = \{[\s\S]*?\};/) || [''])[0];
-            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabMap('SI_TL_HIDABLE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet, constAttachTypeWord, fnAttachDisplayName, fnAttachList];
+            // [#208 暂缓单备注·2026-11-09] siRenderTimeline 起首调用 siBuildHoldNoteIndex，并在原备注 / 孤立子事件
+            //   两个分支里调用另外几个具名函数——隔离装配同样须一并注入（同上方附件三码 siRenderAttachListHtml 的处置），
+            //   否则任何经过 siRenderTimeline 的直调都会 ReferenceError。siRenderHoldNoteHtml 读 siDetail，stubs 里给 null。
+            const holdNoteFnNames = ['siHoldNoteIsOrigin', 'siBuildHoldNoteIndex', 'siHoldNotePayload', 'siHoldNoteVersion', 'siHoldNoteOrphanText', 'siRenderHoldNoteHtml'];
+            const holdNoteFns = holdNoteFnNames.map(grabFnA);
+            const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabMap('SI_TL_HIDABLE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet, constAttachTypeWord, fnAttachDisplayName, fnAttachList, ...holdNoteFns];
             check('[A 徽章前置] siRenderTimeline + siTlChangesHtml + siRenderAttachListHtml + 十二张登记表/常量 + 适配器 + 徽章常量 + siTlIsHidableScope 本体均提取成功', () => {
                 assert.ok(fnTimeline, '未提取到 siRenderTimeline');
                 assert.ok(fnChangesHtml, '未提取到 siTlChangesHtml（B4 应已抽出该共用函数）');
@@ -2619,6 +2624,7 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                     SI_TL_WGATE_LEGACY_SUMMARY: '__wgate__', SI_DEV_FAMILY_STATUSES: ['开发中', '处理中'],
                     siStatusDisplay: (s) => s, siFmtDT: (s) => s, siFmtDTSec: (s) => s, siTlHideReleaseScope: false, siOpenId: 1,
                     siFormatReleasePublishedSummary: () => ({ ok: false, brief: 'pub-brief', raw: 'raw' }), siRenderReleasePublishedCommits: () => '',
+                    siDetail: null,   // [#208] siRenderHoldNoteHtml 读 siDetail.issue.hold_note_editable_ids
                     console: { warn: () => {} },
                 };
                 // eslint-disable-next-line no-new-func
@@ -3503,9 +3509,10 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
                 check('活体变异对照组·MED-4b：从 SI_TL_NOTE_OWN_LABEL_CODES 删掉 dev_submit_done/dev_no_code 两码——上方 NOTE_OWN 断言须判红', () => {
                     // [#83·S2 续做] 尾部随附件三码登记后延长——锚点更新为含附件三码的完整现状；变异只摘掉
                     // 本条对照组关心的 dev_submit_done/dev_no_code 两码，附件三码保留不动（不是本条变异对象）。
-                    const before = "'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed']);";
+                    // [#208·2026-11-09] 尾部再随暂缓备注三码延长，锚点同步；变异仍只摘 dev_submit_done/dev_no_code。
+                    const before = "'dev_withdraw', 'release_overdue_reason', 'dev_submit_done', 'dev_no_code', 'attachment_added', 'attachment_replaced', 'attachment_removed', 'hold_note', 'hold_note_edit', 'hold_note_void']);";
                     assert.ok(src.includes(before), '变异替换未命中原文——SI_TL_NOTE_OWN_LABEL_CODES 尾部文本已漂移，需同步本条变异对照组');
-                    const mutated = src.replace(before, "'dev_withdraw', 'release_overdue_reason', 'attachment_added', 'attachment_replaced', 'attachment_removed']);");
+                    const mutated = src.replace(before, "'dev_withdraw', 'release_overdue_reason', 'attachment_added', 'attachment_replaced', 'attachment_removed', 'hold_note', 'hold_note_edit', 'hold_note_void']);");
                     const noteOwnMutatedRaw = (mutated.match(new RegExp('const SI_TL_NOTE_OWN_LABEL_CODES = new Set\\(\\[[\\s\\S]*?\\]\\);')) || [''])[0];
                     assert.ok(noteOwnMutatedRaw, '变异后仍应能提取到 SI_TL_NOTE_OWN_LABEL_CODES Set 字面量本体（否则本条对照组自身失效）');
                     const noteOwnMutated = stripComments(noteOwnMutatedRaw);
