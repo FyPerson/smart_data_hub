@@ -426,6 +426,11 @@
         .si-hn-hist ol { margin: 4px 0 0 18px; padding: 0; }
         .si-hn-hist li { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0; }
         .si-hn-btn { font-size: 12px; padding: 1px 8px; margin-left: 6px; }
+        .si-hn-attachments { margin: 4px 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+        .si-hn-download { border: 0; background: transparent; color: #b45309; padding: 0; font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+        .si-hn-change { color: #475569; font-size: 12px; overflow-wrap: anywhere; }
+        .si-hn-existing-row { display: flex; align-items: baseline; gap: 8px; margin: 6px 0; overflow-wrap: anywhere; }
+        .si-hn-existing-row > span { min-width: 0; flex: 1; }
         /* [#83·S2·B2·时间线附件留痕_方案_20260917_v1.3 §3] 附件增删三码——一律展开区（added/replaced 全名单、
            removed 四字段），专名 class（不复用上方三个既有 details 命名，语义各不相同），外观三条规则复制自
            .si-tl-withdraw-detail；内容是 <ul><li> 列表非 <pre>，另加两条列表专属规则。 */
@@ -3694,10 +3699,11 @@
     // 详情抽屉
     // ============================================================
     async function siOpenDrawer(id) {
+        siHoldNoteCloseForm();
         // P2 迭代（弹窗式）：切单时清空三块上传弹窗组件残留（防上一单未上传的选择串到本单·revoke objectURL）。
         // S4：resume-spec（重启弹窗附件）同批纳入——切单同样应清残留，避免上一单的选择串到本单。
         // [2026-09-06 决策记录 J8] accept-evidence/return-evidence 同批纳入——理由同上。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence', 'hold-note'].forEach(k => siPickerReset(k));
         siOpenId = id;
         // codex123 末次审 MED-1：切单起手即失效旧缩略图（在替换 siDBody 前 revoke + 递增代际），
         //   使"切单即失效"而非"渲染成功才失效"——否则 siRenderDrawer 请求挂起/非 403-404 失败时
@@ -3714,8 +3720,9 @@
         await siRenderDrawer(id);
     }
     function siCloseDrawer() {
+        siHoldNoteCloseForm();
         siOpenId = null; siDetail = null;
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));   // P2 迭代：关闭清理三块上传弹窗组件资源（S4 补 resume-spec，2026-09-06 决策记录 J8 补 accept/return-evidence）
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence', 'hold-note'].forEach(k => siPickerReset(k));   // #208 C3 同步清备注附件
         siRevokeAttThumbs();   // 附件融入：关抽屉 revoke 缩略图 objectURL 防内存泄漏
         document.getElementById('siOverlay').classList.remove('open');
         document.getElementById('siDrawer').classList.remove('open');
@@ -4986,6 +4993,25 @@
         if (p && typeof p.content === 'string') return (typeof p.note_date === 'string' ? p.note_date + ' ' : '') + p.content;
         return e.summary || '';
     }
+    function siHoldNoteAttachmentsAt(noteId, eventId) {
+        const rows = siDetail && Array.isArray(siDetail.hold_note_attachments) ? siDetail.hold_note_attachments : [];
+        return rows.filter(a => Number.isSafeInteger(Number(a.id)) && Number(a.id) > 0 && Number(a.note_id) === Number(noteId)
+            && Number(a.added_event_id) <= Number(eventId) && (a.removed_event_id == null || Number(a.removed_event_id) > Number(eventId)));
+    }
+    function siHoldNoteAttachmentHtml(noteId, eventId) {
+        const issueId = Number(siDetail && siDetail.issue && siDetail.issue.id);
+        if (!Number.isSafeInteger(issueId) || issueId <= 0) return '';
+        const rows = siHoldNoteAttachmentsAt(noteId, eventId);
+        return rows.length ? '<ul class="si-hn-attachments">' + rows.map(a => `<li><button type="button" class="si-hn-download" onclick="siDownloadHoldNoteAtt(${issueId},${Number(a.id)})">📎 ${esc(a.original_name || '附件')}</button></li>`).join('') + '</ul>' : '';
+    }
+    function siHoldNoteChangeHtml(e) {
+        const p = siHoldNotePayload(e);
+        if (!p) return '';
+        return [['added_attachments', '新增附件：'], ['removed_attachments', '移除了 ']].map(([key, label]) => {
+            const names = Array.isArray(p[key]) ? p[key].filter(a => a && typeof a.original_name === 'string').map(a => a.original_name) : [];
+            return names.length ? `<div class="si-hn-change">${esc(label + names.join('、'))}</div>` : '';
+        }).join('');
+    }
     // 原备注一行的 HTML：当前版本 + 编辑历史 + 作废信息 + 编辑 / 作废按钮。每个动态字段各自 esc()（M-8）；
     //   id 只经 Number() 拼进 onclick。登记在 verify-sys-timeline-summary-escape.js 的可信渲染函数白名单。
     function siRenderHoldNoteHtml(e, rec) {
@@ -4993,13 +5019,15 @@
         const iss = siDetail && siDetail.issue;
         const editable = !!(iss && Array.isArray(iss.hold_note_editable_ids) && iss.hold_note_editable_ids.map(Number).includes(Number(e.id)));
         const versions = [e].concat(rec.edits);
-        const cur = siHoldNoteVersion(versions[versions.length - 1]);
+        const curEvent = versions[versions.length - 1];
+        const cur = siHoldNoteVersion(curEvent);
         const voided = !!rec.voidEv;
         let html = `<span class="${voided ? 'si-hn-voided' : ''}"><span class="si-hn-date">${esc(cur.date)}</span><span class="si-hn-text">${esc(cur.content)}</span></span>`;
+        html += siHoldNoteAttachmentHtml(e.id, curEvent.id) + siHoldNoteChangeHtml(curEvent);
         if (rec.edits.length) {
             const items = versions.map((v, i) => {
                 const ver = siHoldNoteVersion(v);
-                return `<li>${esc(i === 0 ? '原始' : '第' + i + '次编辑')}：${esc(ver.date)} ${esc(ver.content)}<span class="si-muted">（${esc(v.operator_name || '-')}，${esc(siFmtDT(v.created_at))}）</span></li>`;
+                return `<li>${esc(i === 0 ? '原始' : '第' + i + '次编辑')}：${esc(ver.date)} ${esc(ver.content)}<span class="si-muted">（${esc(v.operator_name || '-')}，${esc(siFmtDT(v.created_at))}）</span>${siHoldNoteAttachmentHtml(e.id, v.id)}${siHoldNoteChangeHtml(v)}</li>`;
             }).join('');
             html += `<details class="si-hn-hist"><summary>已编辑 ${esc(String(rec.edits.length))} 次，查看历史</summary><ol>${items}</ol></details>`;
         }
@@ -5020,10 +5048,23 @@
         return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
     }
     // 写接口返回 409（状态已变 / 已作废 / 已不是本轮）时：提示后端信息，关弹窗并刷新详情（方案 4.4）。
-    async function siHoldNoteSubmit(path, body, okMsg) {
+    function siHoldNoteOwnerId() {
+        try {
+            const raw = getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+            const id = Number(JSON.parse(atob(raw)).id);
+            return Number.isSafeInteger(id) && id > 0 && currentUser && Number(currentUser.id) === id ? id : 0;
+        } catch (_) { return 0; }
+    }
+    function siHoldNoteCloseForm() {
+        if (document.getElementById('siHoldNoteExisting') && document.getElementById('siModalOverlay').classList.contains('open')) siCloseModal();
+    }
+    async function siHoldNoteSubmit(path, body, okMsg, isForm = false) {
         const myInstance = siModalInstanceSeq;   // [codex 602 L-1] 响应回来时弹窗已换 / 已关，就不再弹提示
-        const r = await siApi(path, { method: 'POST', body });
-        if (siModalInstanceSeq !== myInstance) return false;
+        const myIssue = Number(siOpenId);
+        const owner = siHoldNoteOwnerId();
+        if (!owner) { showToast('登录状态已变化，请刷新页面', 'error'); return false; }
+        const r = await siApi(path, { method: 'POST', body, isForm });
+        if (siModalInstanceSeq !== myInstance || siHoldNoteOwnerId() !== owner || Number(siOpenId) !== myIssue) return false;
         if (!r.ok) { siApiErr(r); return r.status === 409 || r.status === 404; }
         showToast(okMsg, 'success');
         return true;
@@ -5037,10 +5078,42 @@
         return { note_date: v.note_date, content };
     }
     function siHoldNoteOpenForm(title, init, onSubmit, confirmLabel) {
+        const key = 'hold-note', issueId = Number(siDetail && siDetail.issue && siDetail.issue.id);
+        const owner = siHoldNoteOwnerId(), removed = new Set();
+        if (!owner || !issueId) return;
+        siPickerReset(key);
+        let instance;
         siModal(title, [
             fDate('note_date', '备注日期 <span class="u-req">*</span>', init.date),
-            fTextarea('content', '备注内容', '', true, '最多 500 字，用来记录暂缓原因或进展')
-        ], onSubmit, confirmLabel);
+            fTextarea('content', '备注内容', '', true, '最多 500 字，用来记录暂缓原因或进展'),
+            { html: '<div class="u-form-group"><label>已有附件</label><div id="siHoldNoteExisting"></div><div class="u-hint">移除后历史版本仍可下载；保存前可以撤销移除。</div></div>' },
+            { html: '<div class="u-form-group"><label>本次上传</label>' + siFilePickerHtml(key, '选择附件') + '<div class="u-hint">每次最多 5 个；压缩包 50MB，其余 20MB。</div></div>' }
+        ], async v => {
+            if (siModalInstanceSeq !== instance || Number(siOpenId) !== issueId || siHoldNoteOwnerId() !== owner) return false;
+            const files = siPickerFiles(key).slice(), ids = Array.from(removed);
+            const root = document.getElementById('siHoldNoteExisting');
+            const controls = Array.from(document.querySelectorAll('#siMBody input, #siMBody textarea, #siMBody button'));
+            const disabled = controls.map(el => el.disabled);
+            root.dataset.busy = '1'; controls.forEach(el => { el.disabled = true; });
+            try { return await onSubmit(v, { files, removedIds: ids }); }
+            finally {
+                if (siModalInstanceSeq === instance && siHoldNoteOwnerId() === owner) {
+                    delete root.dataset.busy; controls.forEach((el, i) => { el.disabled = disabled[i]; });
+                }
+            }
+        }, confirmLabel);
+        instance = siModalInstanceSeq;
+        const existing = (init.attachments || []).filter(a => Number.isSafeInteger(Number(a.id)) && Number(a.id) > 0);
+        const renderExisting = () => {
+            const root = document.getElementById('siHoldNoteExisting');
+            root.innerHTML = existing.length ? existing.map(a => `<div class="si-hn-existing-row"><span>${removed.has(Number(a.id)) ? '<s>' + esc(a.original_name || '附件') + '</s>（保存后移除）' : esc(a.original_name || '附件')}</span><button type="button" class="u-btn-secondary u-btn-sm" data-hn-remove="${Number(a.id)}">${removed.has(Number(a.id)) ? '撤销移除' : '移除'}</button></div>`).join('') : '<span class="si-muted">暂无已有附件</span>';
+            root.querySelectorAll('[data-hn-remove]').forEach(btn => btn.addEventListener('click', () => {
+                const id = Number(btn.dataset.hnRemove);
+                if (removed.has(id)) removed.delete(id); else removed.add(id);
+                renderExisting();
+            }));
+        };
+        renderExisting();
         const dateEl = document.getElementById('f_note_date');
         if (dateEl) dateEl.max = siHoldNoteToday();
         const contentEl = document.getElementById('f_content');
@@ -5067,10 +5140,11 @@
         const iss = siDetail && siDetail.issue;
         if (!iss) return;
         const issueId = Number(iss.id);
-        siHoldNoteOpenForm('添加暂缓备注', { date: siHoldNoteToday(), content: '' }, async v => {
+        siHoldNoteOpenForm('添加暂缓备注', { date: siHoldNoteToday(), content: '' }, async (v, selection) => {
             const body = siHoldNoteValidate(v);
             if (!body) return false;
-            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes', body, '暂缓备注已添加');
+            const data = siHoldNoteFormData(body, selection);
+            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes', data, '暂缓备注已添加', true);
         }, '添加');
     }
     function siHoldNoteEdit(noteId) {
@@ -5083,11 +5157,44 @@
         if (!origin) { showToast('找不到这条备注，请刷新', 'error'); return; }
         const rec = siBuildHoldNoteIndex(list).byOrigin.get(nid);
         const cur = siHoldNoteVersion(rec && rec.edits.length ? rec.edits[rec.edits.length - 1] : origin);
-        siHoldNoteOpenForm('编辑暂缓备注', cur, async v => {
+        cur.attachments = (siDetail.hold_note_attachments || []).filter(a => Number(a.note_id) === nid && a.status === 'active');
+        siHoldNoteOpenForm('编辑暂缓备注', cur, async (v, selection) => {
             const body = siHoldNoteValidate(v);
             if (!body) return false;
-            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes/' + nid + '/edit', body, '暂缓备注已更新');
+            const data = siHoldNoteFormData(body, selection);
+            return siHoldNoteSubmit('/sys-issues/' + issueId + '/hold-notes/' + nid + '/edit', data, '暂缓备注已更新', true);
         }, '保存');
+    }
+    function siHoldNoteFormData(body, selection) {
+        const data = new FormData();
+        data.append('note_date', body.note_date); data.append('content', body.content);
+        data.append('remove_attachment_ids', JSON.stringify(selection.removedIds));
+        selection.files.forEach(file => data.append('files', file));
+        return data;
+    }
+    async function siDownloadHoldNoteAtt(issueId, attId) {
+        const owner = siHoldNoteOwnerId();
+        const active = () => owner && siHoldNoteOwnerId() === owner && Number(siOpenId) === Number(issueId);
+        if (!active()) return;
+        const known = siDetail && (siDetail.hold_note_attachments || []).find(a => Number(a.id) === Number(attId));
+        try {
+            const res = await authFetch('/api/sys-issues/' + Number(issueId) + '/hold-note-attachments/' + Number(attId) + '/download');
+            if (!active() || !res) return;
+            if (!res.ok) { showToast(res.status === 503 ? '系统繁忙，请稍后重试' : '下载失败，请刷新后重试', 'error'); return; }
+            const blob = await res.blob();
+            if (!active()) return;
+            let name = known && known.original_name || '';
+            if (!name) {
+                const dispo = res.headers.get('Content-Disposition') || '';
+                const encoded = /filename\*=(?:UTF-8'')?([^;\r\n]+)/i.exec(dispo);
+                if (encoded) { try { name = decodeURIComponent(encoded[1].trim().replace(/^["']|["']$/g, '')); } catch (_) {} }
+            }
+            const url = URL.createObjectURL(blob);
+            try {
+                const link = document.createElement('a'); link.href = url; link.download = name || 'attachment';
+                document.body.appendChild(link); link.click(); link.remove();
+            } finally { setTimeout(() => URL.revokeObjectURL(url), 1500); }
+        } catch (_) { if (active()) showToast('下载失败，请稍后重试', 'error'); }
     }
     function siHoldNoteVoid(noteId) {
         const iss = siDetail && siDetail.issue;
@@ -10686,6 +10793,7 @@
             ['issue_json', '被删单据整行快照'],
             ['timeline_json', '演进时间线快照'],
             ['attachments_json', '附件清单快照'],
+            ['hold_note_attachments_json', '暂缓备注附件快照'],
             ['dev_assignees_json', '开发协作名册快照'],
             ['dev_commits_json', 'Commit 记录快照'],
             ['dev_events_json', '开发事件快照'],
@@ -11920,6 +12028,7 @@
     // 通用弹框系统 + 字段构造器
     // ============================================================
     function siModal(title, fields, onConfirm, confirmLabel) {
+        siPickerReset('hold-note'); // 任意弹层替换备注弹层时释放其文件，不依赖先调 siCloseModal。
         document.getElementById('siMHead').textContent = title;
         document.getElementById('siMBody').innerHTML = fields.map(f => f.html).join('');
         const btn = document.getElementById('siMConfirm');
@@ -11987,7 +12096,7 @@
         // S4：resume-spec（重启弹窗附件，siModalResume）同批纳入——理由与上面三块逐字一致。
         // [2026-09-06 决策记录 J8] accept-evidence/return-evidence（siModalAccept/siModalReturn 两步链
         //   附件组件）同批纳入——理由与上面各块逐字一致，防 objectURL 累积/文件残留跨开关泄漏。
-        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence'].forEach(k => siPickerReset(k));
+        ['modal-spec', 'modal-delivery', 'modal-screenshot', 'resume-spec', 'accept-evidence', 'return-evidence', 'hold-note'].forEach(k => siPickerReset(k));
         // M1：若关闭的是建单弹窗，释放 spec 组件资源（取消/×关闭/建单成功收尾都经此）。提交链已用
         //   siPickerFiles('create-spec').slice() 取快照，此处清空不影响进行中的上传。
         if (siCreateModalOpen) {
@@ -12341,7 +12450,7 @@
     // picker key → 是否放开压缩包（方案 §2.1 放开面矩阵）：spec/delivery 放开，screenshot（验收凭证）不放。
     //   create-spec/resume-spec/modal-spec 归 spec；submit-delivery/modal-delivery 归 delivery；
     //   modal-screenshot/accept-evidence/return-evidence 归 screenshot（对应 fd.append('attachment_type', ...) 调用点）。
-    const SI_PICKER_ARCHIVE_KEYS = new Set(['create-spec', 'submit-delivery', 'modal-spec', 'modal-delivery', 'resume-spec']);
+    const SI_PICKER_ARCHIVE_KEYS = new Set(['create-spec', 'submit-delivery', 'modal-spec', 'modal-delivery', 'resume-spec', 'hold-note']);
     function siPickerAllowedExts(key) {
         return SI_PICKER_ARCHIVE_KEYS.has(key) ? SI_SPEC_ALLOWED_EXTS.concat(SI_ARCHIVE_EXTS) : SI_SPEC_ALLOWED_EXTS;
     }
@@ -12355,6 +12464,14 @@
         siFilePickers[key] = [];
         if (window.UPaste) UPaste.resetSeq(key);
     }
+    window.addEventListener('pagehide', () => siPickerReset('hold-note'));
+    window.addEventListener('storage', e => {
+        if (e.key === 'token' || e.key === 'user' || e.key === null) {
+            siPickerReset('hold-note');
+            if (document.getElementById('siHoldNoteExisting') && document.getElementById('siModalOverlay').classList.contains('open')) siCloseModal();
+            if (siOpenId !== null) siCloseDrawer();
+        }
+    });
     // 收集（≤5 + 扩展名/大小校验 + 去重，复刻 collectFilesInto）。去重口径=同一物理文件
     //   (name+size+lastModified 三者全同才判重复)——允许同名同大小但修改时间不同的文件并存（不同版本）。
     // S2c·R1（codex 合并轮 M）：本函数是真实拒收路径（数量上限/扩展名/大小/去重四道闸门，拒收时只
@@ -12362,6 +12479,7 @@
     //   据实提示"已粘贴 N 张"，不再对被闸门拒收的文件也谎报"已粘贴成功"（贴图 collect 回调把这个
     //   返回值原样透传给共享层，见下方 UPaste.register 的 collect）。
     function siPickerCollect(key, fileList) {
+        if (key === 'hold-note' && document.querySelector('#siHoldNoteExisting[data-busy="1"]')) return 0;
         const arr = siPickerFiles(key);
         const allowedExts = siPickerAllowedExts(key);
         let accepted = 0;

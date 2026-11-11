@@ -51,6 +51,7 @@ const EXPECTED_INDEXES = [
   'idx_sys_issues_status', 'idx_sys_issues_type', 'idx_sys_issues_system',
   'idx_sys_issues_assigned', 'idx_sys_issues_release', 'idx_sys_issues_origin',
   'idx_sys_timeline_issue', 'idx_sys_attach_issue',
+  'idx_sys_hold_note_attach_issue_note', // #208 C1
   'idx_sys_dev_assignees_issue', 'idx_sys_dev_assignee_active',   // 通知改造 C1a 新表（后者=部分唯一索引，G12）
   // ── 上线体统一重构 C0（方案 v3.4 §6.1/§6.2/§6.13，2026-07-28）新增 4 索引 ──────────
   'idx_sys_releases_assignee',       // sys_releases.release_assignee_id（旧库 ALTER 后建，见 [1a-10]）
@@ -83,6 +84,13 @@ async function main() {
   )).map(r => r.name);
   assert.strictEqual(tables.length, 5, `应有 5 表，实际 ${tables.length}: ${tables.join(',')}`);
   ok(`五表存在：${tables.sort().join(' / ')}`);
+  const holdNoteCols = (await all('PRAGMA table_info(sys_issue_hold_note_attachments)')).map(c => c.name);
+  assert.ok(I.SYS_REQUIRED_TABLES.includes('sys_issue_hold_note_attachments'));
+  assert.deepStrictEqual(holdNoteCols.filter(c => c !== 'id').sort(), I.SYS_HOLD_NOTE_ATTACHMENTS_KEY_COLS.slice().sort());
+  for (const c of ['hold_note_attachments_json', 'hold_note_attachment_count']) {
+    assert.ok(I.SYS_DELETE_AUDIT_KEY_COLS.includes(c), '#208 审计新列必须进 readiness 锚点');
+  }
+  ok('#208 C1：备注附件整表全列锚点 + 审计两新列 readiness 登记');
 
   // [1-C2a] 角色权限重构 C2a：物删审计表结构与约束（本文件是"约束漂移"的权威检查点——
   //   readiness 按既有分工只查表在/列在，CHECK/NOT NULL/UNIQUE 一律由本脚本守，见 index.js initSchema 头部注释）。

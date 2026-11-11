@@ -143,7 +143,7 @@ async function main() {
     assert.deepStrictEqual(
       { event_type: row.event_type, action_code: row.action_code, ref_id: row.ref_id, operator_id: row.operator_id, operator_name: row.operator_name, summary: row.summary, issue_id: row.issue_id },
       { event_type: 'note', action_code: 'hold_note', ref_id: null, operator_id: 1, operator_name: '管理员甲', summary: '等待业务方确认', issue_id: id }, '[1] 落库字段全等');
-    assert.deepStrictEqual(JSON.parse(row.payload_json), { note_date: d, content: '等待业务方确认' }, '[1] payload 全等（内容已去首尾空白）');
+    assert.deepStrictEqual(JSON.parse(row.payload_json), { note_date: d, content: '等待业务方确认', added_attachments: [], removed_attachments: [] }, '[1] payload 全等（内容已去首尾空白，C2 附件变动为空）');
     ok('[1] 建单人新增成功，流水 event_type / action_code / ref_id / operator / summary / payload 全等');
 
     r = await addNote(id, A2, { note_date: d, content: '管理员乙补记' });
@@ -203,8 +203,8 @@ async function main() {
     const ev = await tlRow(r.body.event_id);
     assert.deepStrictEqual({ event_type: ev.event_type, action_code: ev.action_code, ref_id: ev.ref_id, operator_id: ev.operator_id },
       { event_type: 'note', action_code: 'hold_note_edit', ref_id: nid, operator_id: 1 }, '[2] 编辑事件字段');
-    assert.deepStrictEqual(JSON.parse(ev.payload_json), { note_date: '2026-01-05', content: '第二版' }, '[2] 编辑 payload');
-    assert.deepStrictEqual(JSON.parse((await tlRow(nid)).payload_json), { note_date: d, content: '第一版' }, '[2] 原备注未被修改（只追加）');
+    assert.deepStrictEqual(JSON.parse(ev.payload_json), { note_date: '2026-01-05', content: '第二版', added_attachments: [], removed_attachments: [] }, '[2] 编辑 payload');
+    assert.deepStrictEqual(JSON.parse((await tlRow(nid)).payload_json), { note_date: d, content: '第一版', added_attachments: [], removed_attachments: [] }, '[2] 原备注未被修改（只追加）');
     r = await editNote(id, nid, A1, { note_date: d, content: '第三版' });
     expectCode(r, 200, null, '[2] 第二次编辑');
     ok('[2] 作者连续编辑两次，各追加一条 hold_note_edit（ref_id 指原备注），原备注不变');

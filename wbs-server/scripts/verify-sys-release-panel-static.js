@@ -1317,20 +1317,26 @@ check('siSystemCellHtml：trim 判空、未填占位「—」、超 4 字码点�
 });
 
 console.log('— §⑬ 对接人绑单收口（2026-08-10·isSysCoordinator 消费面钉死）—');
-check('后端 isSysCoordinator 仅存 2 个读路径调用点（防新写端点误引重新引入 [13] 全局写权）', () => {
+check('后端 isSysCoordinator 仅由附件读 helper 消费，三读入口共用（#208 C1，写路径仍禁用）', () => {
     const indexJsPath = path.join(__dirname, '..', 'routes', 'sys-iteration', 'index.js');
-    const indexJsSrc = fs.readFileSync(indexJsPath, 'utf8');
-    // 消费面登记表（codex 332 risks 建议落地）：定义 1 + 调用 2 = 恰 3 处 `isSysCoordinator(`。
-    //   两个合法调用点均为**读路径可见性**（详情附件列表可见 / 附件下载），且都叠加了 isBoundLiaisonOrAdmin
-    //   增量；附件上传/删除两写路径已改 isBoundLiaisonEligibleOrAdmin 绑单精判（指派族 C10 已改）。
+    const indexJsSrc = fs.readFileSync(indexJsPath, 'utf8').replace(/\r\n/g, '\n');
+    // #208 C1：原两个读端抽为一个共用 helper，并增备注下载；不放宽写路径的禁用约束。
     //   本断言红了 = 有人新增/删除了 isSysCoordinator 调用——新增写端点引用它会静默复活「白名单[13] 全局
     //   写权」，先来这里对齐口径再动。
     const calls = (indexJsSrc.match(/isSysCoordinator\(/g) || []).length;
-    assert.strictEqual(calls, 3, `isSysCoordinator( 出现次数应恰 3（定义1+读路径调用2），实得 ${calls}——新增调用须先核对绑单收口口径（写路径禁用本函数）`);
-    assert.ok(/isSysCoordinator\(attActor, row\.type\) \|\| isBoundLiaisonOrAdmin\(attActor, row\)/.test(indexJsSrc),
-        '详情附件可见性应为「isSysCoordinator ∨ isBoundLiaisonOrAdmin」增量式（读路径保留[13]+绑定本人）');
-    assert.ok(/isSysCoordinator\(actor, row\.type\) \|\| isBoundLiaisonOrAdmin\(actor, row\)/.test(indexJsSrc),
-        '附件下载应为「isSysCoordinator ∨ isBoundLiaisonOrAdmin」增量式（同上）');
+    assert.strictEqual(calls, 2, `定义1+共用读 helper 内调用1，实得 ${calls}`);
+    // 本文件的 extractFunctionBody 交叉验证面是前端脚本；后端函数在它自己的 AST 中定位。
+    const backendAst = acorn.parse(indexJsSrc, { ecmaVersion: 'latest' });
+    const helpers = [];
+    walkAllAcornNodes(backendAst, node => {
+        if (node.type === 'FunctionDeclaration' && node.id && node.id.name === 'sysCanReadIssueAttachments') helpers.push(node);
+    });
+    assert.strictEqual(helpers.length, 1, '后端读 helper 必须恰有一个真实函数声明');
+    const readHelper = indexJsSrc.slice(helpers[0].body.start, helpers[0].body.end);
+    assert.ok(/isSysCoordinator\(actor, row\.type\) \|\| isBoundLiaisonOrAdmin\(actor, row\)/.test(readHelper),
+        '唯一协调判据须在共用读 helper 中，保持[13]+绑定本人');
+    assert.strictEqual((indexJsSrc.match(/sysCanReadIssueAttachments\(/g) || []).length, 4,
+        'helper 定义1+详情/既有下载/备注下载各1；不得给写路径新增长出读放行');
 });
 check('前端 isSiBoundLiaison 判据存在且 per-issue 操作权已断开白名单（isSiIntakeLiaison 仅存 release 级+读路径 8 消费点）', () => {
     assert.ok(/function isSiBoundLiaison\(iss\)/.test(src), '应定义 isSiBoundLiaison(iss) per-issue 绑单镜像判据');
@@ -2610,7 +2616,7 @@ check('[A] index.js edit_in_revision INSERT 落 payload_json（JSON.stringify({ 
             // [#208 暂缓单备注·2026-11-09] siRenderTimeline 起首调用 siBuildHoldNoteIndex，并在原备注 / 孤立子事件
             //   两个分支里调用另外几个具名函数——隔离装配同样须一并注入（同上方附件三码 siRenderAttachListHtml 的处置），
             //   否则任何经过 siRenderTimeline 的直调都会 ReferenceError。siRenderHoldNoteHtml 读 siDetail，stubs 里给 null。
-            const holdNoteFnNames = ['siHoldNoteIsOrigin', 'siBuildHoldNoteIndex', 'siHoldNotePayload', 'siHoldNoteVersion', 'siHoldNoteOrphanText', 'siRenderHoldNoteHtml'];
+            const holdNoteFnNames = ['siHoldNoteIsOrigin', 'siBuildHoldNoteIndex', 'siHoldNotePayload', 'siHoldNoteVersion', 'siHoldNoteOrphanText', 'siHoldNoteAttachmentsAt', 'siHoldNoteAttachmentHtml', 'siHoldNoteChangeHtml', 'siRenderHoldNoteHtml'];
             const holdNoteFns = holdNoteFnNames.map(grabFnA);
             const parts = [grabConst('SI_TL_LABEL'), grabConst('SI_TL_CLS'), grabSet('SI_TL_NOTE_OWN_LABEL_CODES'), grabConst('SI_TL_RELEASE_SCOPE_LABEL'), grabConst('SI_TL_RELEASE_SCOPE_CLS'), grabMap('SI_TL_CHANGE_CODES'), grabMap('SI_TL_HIDABLE_CODES'), exemptSet, legacyAdapter, fnHidable, badgeConsts, attachMap, eligibleSet, constAttachTypeWord, fnAttachDisplayName, fnAttachList, ...holdNoteFns];
             check('[A 徽章前置] siRenderTimeline + siTlChangesHtml + siRenderAttachListHtml + 十二张登记表/常量 + 适配器 + 徽章常量 + siTlIsHidableScope 本体均提取成功', () => {

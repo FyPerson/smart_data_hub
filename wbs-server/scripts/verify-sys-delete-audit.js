@@ -15,10 +15,10 @@
 // 覆盖（每组都同时断"该发生的发生了"与"不该发生的没发生"）：
 //   [S] schema：审计表进 SYS_REQUIRED_TABLES + 关键列全（**从 _internals 常量派生，不手抄第二份**）
 //       + **不带 issue_id 外键**（它必须活得比业务行久）+ reason DB 层 CHECK
-//   [V] reason 契约：缺失 / 空白 / 超长(201) → 400 VALIDATION，且**七表一行不少**（负例无副作用）
-//   [D] 正常删除：200 + **七表全清** + 审计行落库，**八份快照可还原**且与计数逐一交叉一致
+//   [V] reason 契约：缺失 / 空白 / 超长(201) → 400 VALIDATION，且**八张子表一行不少**（负例无副作用）
+//   [D] 正常删除：200 + **八张子表全清** + 审计行落库，**九份快照可还原**且与计数逐一交叉一致
 //       （含 dev 名册的软删历史行与逐人 notify_sent_by、commit 留痕、开发侧事件链、先行上线两步化执行人软删历史行）
-//   [R] ⭐ 故障注入：审计 INSERT 失败 → **整体 rollback**，七表一行不少、审计表零行
+//   [R] ⭐ 故障注入：审计 INSERT 失败 → **整体 rollback**，八张子表一行不少、审计表零行
 //       （"删了但没记"在 sys 模块内被结构性排除；跨模块事务纠缠属 P3 架构债，见端点注释）
 //   [G] 守卫拒删路径（派生子单 409 / 已挂批次 409 / 不存在 404）→ **不留审计行**（拒绝不是删除）
 //   [P] 审计行不随业务级联删：删 A 后再删 B，A 的审计行仍在（本表不进任何级联清单）
@@ -118,7 +118,7 @@ const create = (extra) => call('POST', '/api/sys-issues', adminTok,
 //   建表 commit 补了 DELETE 级联，但本文件的残留计数口径没跟着扩，级联删得对不对**零测试覆盖**，
 //   违反 index.js DELETE 端点头部"⛔ 三件套契约"（快照读/DELETE/verify 残留断言必须同步）。现补齐第 7 项。
 async function bizRows(id) {
-  const [issue, tl, att, dev, commits, events, snaps, fastExec] = await Promise.all([
+  const [issue, tl, att, dev, commits, events, snaps, fastExec, holdNoteAtt] = await Promise.all([
     get('SELECT COUNT(*) c FROM sys_issues WHERE id=?', [id]),
     get('SELECT COUNT(*) c FROM sys_issue_timeline WHERE issue_id=?', [id]),
     get('SELECT COUNT(*) c FROM sys_issue_attachments WHERE issue_id=?', [id]),
@@ -127,13 +127,14 @@ async function bizRows(id) {
     get('SELECT COUNT(*) c FROM sys_issue_dev_events WHERE issue_id=?', [id]),
     get('SELECT COUNT(*) c FROM sys_issue_release_commit_snapshots WHERE issue_id=?', [id]),
     get('SELECT COUNT(*) c FROM sys_fast_release_executors WHERE issue_id=?', [id]),
+    get('SELECT COUNT(*) c FROM sys_issue_hold_note_attachments WHERE issue_id=?', [id]),
   ]);
   return { issue: issue.c, timeline: tl.c, att: att.c, dev: dev.c,
-    commits: commits.c, events: events.c, snaps: snaps.c, fastExec: fastExec.c };
+    commits: commits.c, events: events.c, snaps: snaps.c, fastExec: fastExec.c, holdNoteAtt: holdNoteAtt.c };
 }
 const auditCount = async (id) => (await get('SELECT COUNT(*) c FROM sys_issue_delete_audit WHERE issue_id=?', [id])).c;
 
-// 造一张"有料"的单：七张 issue_id 子表**全部**塞进可识别内容，使快照与级联都有可验证的对象。
+// 造一张"有料"的单：八张 issue_id 子表**全部**塞进可识别内容，使快照与级联都有可验证的对象。
 //   ⭐ 对抗审 F1/F7 收口：原来只塞 timeline/附件/**一条** dev_assignees，于是
 //   "dev 名册没进快照""commits/events 既没删也没断言"两个缺口都被夹具的贫瘠一起盖住了
 //   （[[feedback_test_assertion_self_error]] 的"夹具规模不足"形态：夹具造不出的东西，断言就测不到）。
@@ -141,6 +142,21 @@ async function makeRichIssue(title) {
   const r = await create({ title });
   assert.strictEqual(r.status, 201, `建单 201（实际 ${r.status}：${JSON.stringify(r.body)}）`);
   const id = r.body.id;
+  const noteOrigin = await run(`INSERT INTO sys_issue_timeline
+    (issue_id,event_type,action_code,operator_id,operator_name,payload_json)
+    VALUES (?,'note','hold_note',1,'管理员','{"note_date":"2026-01-01","content":"原备注"}')`, [id]);
+  const noteEdit = await run(`INSERT INTO sys_issue_timeline
+    (issue_id,event_type,action_code,ref_id,operator_id,operator_name,payload_json)
+    VALUES (?,'note','hold_note_edit',?,1,'管理员','{"note_date":"2026-01-01","content":"移除附件"}')`, [id,noteOrigin.lastID]);
+  // #208 C1：active 与 removed 都必须快照、删除；包含行全字段的逐项核对见 [D]。
+  for (const state of ['active', 'removed']) {
+    await run(`INSERT INTO sys_issue_hold_note_attachments
+      (issue_id,note_id,added_event_id,file_name,original_name,file_size,status,uploaded_by,uploaded_by_name,
+       removed_at,removed_by,removed_by_name,removed_event_id) VALUES (?,?,?,?,?,12,?,1,'管理员',?,?,?,?)`,
+      [id, noteOrigin.lastID, noteOrigin.lastID, 'note-' + id + '-' + state + '.txt', state + '.txt', state,
+       state === 'removed' ? '2026-01-01 00:00:00' : null, state === 'removed' ? 1 : null,
+       state === 'removed' ? '管理员' : null, state === 'removed' ? noteEdit.lastID : null]);
+  }
   await run(`INSERT INTO sys_issue_timeline (issue_id, event_type, from_status, to_status, summary, action_code, operator_id, operator_name)
              VALUES (?,?,?,?,?,?,?,?)`, [id, 'note', null, null, '这条 note 是审计链的可识别内容', 'audit_probe', 1, '管理员']);
   await run(`INSERT INTO sys_issue_attachments (issue_id, attachment_type, file_name, original_name, file_size, mime_type, uploaded_by, uploaded_by_name)
@@ -244,8 +260,8 @@ async function main() {
   {
     const id = await makeRichIssue('V-reason 契约');
     const before = await bizRows(id);
-    assert.deepStrictEqual(before, { issue: 1, timeline: 2, att: 1, dev: 3, commits: 1, events: 1, snaps: 0, fastExec: 2 },
-      '前置：单据 + 2 条 timeline + 附件 + **3 行协作开发（含 1 软删历史行）** + commit + dev event' +
+    assert.deepStrictEqual(before, { issue: 1, timeline: 4, att: 1, dev: 3, commits: 1, events: 1, snaps: 0, fastExec: 2, holdNoteAtt: 2 },
+      '前置：单据 + 4 条 timeline + 普通附件 + 2 备注附件 + **3 行协作开发（含 1 软删历史行）** + commit + dev event' +
       ' + **2 行先行上线两步化执行人（含 1 软删历史行）** 各就位' +
       '（夹具自检：夹具造不出的东西断言就测不到，F1/F7 两个洞正是被贫瘠夹具盖住的；fastExec 同理是 S1 收口批 H1 补的洞）');
 
@@ -259,7 +275,7 @@ async function main() {
       const r = await call('DELETE', '/api/sys-issues/' + id, adminTok, body);
       assert.strictEqual(r.status, 400, `${label} → 400（实际 ${r.status}）`);
       assert.strictEqual(r.body.code, 'VALIDATION', `${label} → code=VALIDATION`);
-      assert.deepStrictEqual(await bizRows(id), before, `${label}：**业务七表一行不少**（负例无副作用）`);
+      assert.deepStrictEqual(await bizRows(id), before, `${label}：**业务八张子表一行不少**（负例无副作用）`);
       assert.strictEqual(await auditCount(id), 0, `${label}：不写审计行（没删就不该有删除记录）`);
     }
     // 边界正例：恰好 200 字应放行（防把边界写反）——放在最后，它会真删掉这张单
@@ -267,7 +283,7 @@ async function main() {
     assert.strictEqual(r200.status, 200, 'reason 恰 200 字 → 放行（边界含右端）');
     assert.strictEqual((await bizRows(id)).issue, 0, '边界正例确实删掉了（不是被别的分支挡下）');
     assert.strictEqual((await get('SELECT length(reason) n FROM sys_issue_delete_audit WHERE issue_id=?', [id])).n, 200, '审计行 reason 原样落 200 字');
-    ok('[V] reason 契约：缺失/空串/纯空白/非字符串/201 字 五形态全 400 且业务**七表**零副作用；**200 字边界放行**');
+    ok('[V] reason 契约：缺失/空串/纯空白/非字符串/201 字 五形态全 400 且业务**八张子表**零副作用；**200 字边界放行**');
   }
 
   // ═══ [D] 正常删除：业务行清干净 + 审计快照可还原 ═══
@@ -276,17 +292,20 @@ async function main() {
     const id = await makeRichIssue('D-正常删除');
     firstDeletedId = id;
     const issueBefore = await get('SELECT * FROM sys_issues WHERE id=?', [id]);
+    const noteAttsBefore = await all('SELECT * FROM sys_issue_hold_note_attachments WHERE issue_id=? ORDER BY id', [id]);
     // ⭐ 用 admin2 删 admin1 建的单——这正是 C2a 要回答的问题（6 个 admin 里到底是谁删的）
     const r = await call('DELETE', '/api/sys-issues/' + id, admin2Tok, { reason: '清理测试脏单' });
     assert.strictEqual(r.status, 200, `删除 200（实际 ${r.status}：${JSON.stringify(r.body)}）`);
 
-    assert.deepStrictEqual(await bizRows(id), { issue: 0, timeline: 0, att: 0, dev: 0, commits: 0, events: 0, snaps: 0, fastExec: 0 },
-      '⭐ **七张 issue_id 子表全清**（对抗审 F7：dev_commits/dev_events 此前从不被删，留永久孤儿行；' +
+    assert.deepStrictEqual(await bizRows(id), { issue: 0, timeline: 0, att: 0, dev: 0, commits: 0, events: 0, snaps: 0, fastExec: 0, holdNoteAtt: 0 },
+      '⭐ **八张 issue_id 子表全清**（对抗审 F7：dev_commits/dev_events 此前从不被删，留永久孤儿行；' +
       'fastExec=0 若 index.js 的 DELETE FROM sys_fast_release_executors 那行不存在，本条会红——若该行只删了' +
       '在册行、漏删软删历史行，fastExec 会残留 1 而非 0，同样会红：断言覆盖的是"全量"而非"当前代次"）');
 
     const a = await get('SELECT * FROM sys_issue_delete_audit WHERE issue_id=?', [id]);
     assert.ok(a, '审计行存在');
+    assert.deepStrictEqual(JSON.parse(a.hold_note_attachments_json), noteAttsBefore, '#208 C1 新表全部行/字段快照全等');
+    assert.strictEqual(a.hold_note_attachment_count, 2, '#208 C1 active + removed 数量全等');
     assert.strictEqual(a.operator_id, 2, '⭐ operator_id=2（**删的人**，不是建单人 1）——多 admin 归属正是本片存在的理由');
     assert.strictEqual(a.operator_name, '第二管理员', 'operator_name 落显示名');
     assert.strictEqual(a.reason, '清理测试脏单', 'reason 原样落库');
@@ -305,7 +324,7 @@ async function main() {
     assert.ok(Object.keys(ij).length > 30, `issue_json 是**整行**快照（SELECT * ·实际 ${Object.keys(ij).length} 列），非挑几列`);
     assert.strictEqual(a.timeline_count, tj.length, 'timeline_count 与 timeline_json 长度交叉一致');
     assert.strictEqual(a.attachment_count, aj.length, 'attachment_count 与 attachments_json 长度交叉一致');
-    assert.strictEqual(tj.length, 2, 'timeline 两条（建单事件 + probe）全部进快照');
+    assert.strictEqual(tj.length, 4, 'timeline 四条（建单、原备注、编辑、probe）全部进快照');
     assert.ok(tj.some(t => t.summary === '这条 note 是审计链的可识别内容' && t.action_code === 'audit_probe'),
       '⭐ 被 DELETE 抹掉的 timeline **内容**真在快照里（只记条数=知道有过证据但不知道是什么）');
     assert.ok(tj.every(t => t.operator_id != null && t.created_at), 'timeline 快照保留操作者与时刻（审计链的关键两列）');
@@ -355,7 +374,7 @@ async function main() {
       '同 dev_assignees 软删历史行同一断言精神，"这单曾安排过谁执行"不因物删而说不清');
     const feCols = (await all(`PRAGMA table_info(sys_fast_release_executors)`)).map(c => c.name);
     for (const c of feCols) assert.ok(c in fej[0], `先行上线两步化执行人快照缺列 ${c} —— 快照必须是整行（SELECT *），否则加列即漏证`);
-    ok('[D] 正常删除：**七表清空** + 审计行含 operator/reason + **八份 JSON 快照可还原、与计数逐一交叉一致**（含 dev 名册/软删历史行/commit/events/先行上线两步化执行人软删历史行）（admin2 删 admin1 的单，归属分得清）');
+    ok('[D] 正常删除：**八张子表清空** + 审计行含 operator/reason + **九份 JSON 快照可还原、与计数逐一交叉一致**（含 dev 名册/软删历史行/commit/events/先行上线两步化执行人软删历史行）（admin2 删 admin1 的单，归属分得清）');
   }
 
   // ═══ [R] ⭐ 故障注入：审计写失败 → 整体 rollback ═══
@@ -369,7 +388,7 @@ async function main() {
       '⭐ 故障**确实注入了**（若为 false 说明 SQL 片段没匹配上 —— 那本组等于没测，是典型的静默假绿）');
     assert.strictEqual(r.status, 500, `审计写失败 → 500（实际 ${r.status}：${JSON.stringify(r.body)}）`);
     assert.deepStrictEqual(await bizRows(id), before,
-      '⭐⭐ 业务七表**一行不少** —— "删了但没记"被事务结构性排除，而不是靠"审计写应该不会失败"');
+      '⭐⭐ 业务八张子表**一行不少** —— "删了但没记"被事务结构性排除，而不是靠"审计写应该不会失败"');
     assert.strictEqual(await auditCount(id), 0, '审计表零行（回滚把半截审计行也带走了）');
     injectFailureOnSql = null;
     // 同一张单重试：这次审计写成功 → 正常删掉（证明失败是可恢复的，没把单据锁死）
@@ -377,7 +396,7 @@ async function main() {
     assert.strictEqual(r2.status, 200, '故障复位后重试 → 200（失败不留后遗症）');
     assert.strictEqual((await bizRows(id)).issue, 0, '重试后单据确实删掉');
     assert.strictEqual(await auditCount(id), 1, '重试后恰 1 条审计行（失败那次没留残行）');
-    ok('[R] ⭐ 审计写失败 → 整体 rollback：业务七表零变化 + 审计零行 + 故障复位后可重试删成（含"故障真被注入"自证）');
+    ok('[R] ⭐ 审计写失败 → 整体 rollback：业务八张子表零变化 + 审计零行 + 故障复位后可重试删成（含"故障真被注入"自证）');
   }
 
   // ═══ [R2] ⭐ 反向故障：审计已写成功、随后的业务 DELETE 失败 → 审计行必须一并回滚 ═══
@@ -392,7 +411,7 @@ async function main() {
     const r = await call('DELETE', '/api/sys-issues/' + id, adminTok, { reason: '审计写成功但业务删失败' });
     assert.strictEqual(injectFailureFired, true, '⭐ 故障确实注入（false = 本组空跑）');
     assert.strictEqual(r.status, 500, `业务 DELETE 失败 → 500（实际 ${r.status}）`);
-    assert.deepStrictEqual(await bizRows(id), before, '业务七表一行不少（删除整体失败）');
+    assert.deepStrictEqual(await bizRows(id), before, '业务八张子表一行不少（删除整体失败）');
     assert.strictEqual(await auditCount(id), 0,
       '⭐⭐ 审计行**也被回滚** —— 不允许留下"记了删除、单据却还在"的误导性审计行');
     injectFailureOnSql = null;

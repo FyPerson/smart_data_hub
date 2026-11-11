@@ -121,7 +121,9 @@
     {"label":"test-sys-detail-ux-playwright","rel":"scripts/test-sys-detail-ux-playwright.js","needsService":true,"timeoutMs":1200000},
     {"label":"test-sys-commit-cols-playwright","rel":"scripts/test-sys-commit-cols-playwright.js","needsService":true,"timeoutMs":1200000},
     {"label":"test-badge-computed-playwright","rel":"scripts/test-badge-computed-playwright.js","exclusive":true,"timeoutMs":1200000},
-    {"label":"run-badge-computed-with-pf-fixture","rel":"scripts/run-badge-computed-with-pf-fixture.js","exclusive":true,"timeoutMs":1800000}
+    {"label":"run-badge-computed-with-pf-fixture","rel":"scripts/run-badge-computed-with-pf-fixture.js","exclusive":true,"timeoutMs":1800000},
+    {"label":"test-sys-hold-note-playwright","rel":"scripts/test-sys-hold-note-playwright.js","exclusive":true,"timeoutMs":1200000},
+    {"label":"test-sys-hold-note-mutations-playwright","rel":"scripts/test-sys-hold-note-mutations-playwright.js","exclusive":true,"timeoutMs":1200000}
   ],
   "excluded": {
     "verify-html-fingerprint-e2e.js": "已是 FAMILY 的需服务成员（run-verify-family.js 的 SERVICE_MEMBERS 登记，共享实例、只读），随 FAMILY 全量运行，不在验收批跑里重复起一遍实例（#106 S6b）。",

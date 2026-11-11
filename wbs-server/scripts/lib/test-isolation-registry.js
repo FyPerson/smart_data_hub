@@ -20,6 +20,8 @@
  * 未登记：verify-issue-lite-void-migration.js / verify-periodic-push.js（没有 ready，按各自现有分类处理）；verify-issue-notify-v1740.js（纯函数、无 I/O）/ test-collab-resume.js（直接调启动器、不经 test-env）落「其他」类，须 Tier-1 零命中。
  */
 const MIGRATED = Object.freeze({
+    'test-sys-hold-note-playwright.js': Object.freeze({}), // #208 C3：test-env 实例身份先行
+    'test-sys-hold-note-mutations-playwright.js': Object.freeze({}), // C3 私有 HTML 副本、共享临时实例
     'test-codex-perm-e2e.js': Object.freeze({}),
     'test-requester-done-creator-visibility-playwright.js': Object.freeze({}),
     'test-sys-config-hide-playwright.js': Object.freeze({}),

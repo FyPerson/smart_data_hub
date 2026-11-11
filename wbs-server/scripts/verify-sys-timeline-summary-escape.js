@@ -197,6 +197,7 @@ function walkAstNodes(node, visit) {
 //   外的任意调用（含 String/join/其它未来新增的 helper）一律"打开参数继续查"——参数里若含裸 rawRefs
 //   或未证明安全的局部变量，一样判红，不因为套了一层不认识的函数调用就蒙混过关。
 const TRUSTED_HTML_CALLEE_NAMES = new Set([
+    'siHoldNoteAttachmentHtml', 'siHoldNoteChangeHtml', // #208 C3：每个文件名/变动名称 esc，按钮只传数值 id
     // siRenderReleasePublishedCommits(commits)（public/Sys_Iteration.html :4529 一带）——内部逐字段
     // esc(devName)/组件标签走 SI_COMMIT_COMPONENT_LABEL 白名单或 esc(c.component)/esc(refText)/
     // esc(siFmtDT(...))，返回值全程转义拼接后再 join，commitsTable 靠它才安全。

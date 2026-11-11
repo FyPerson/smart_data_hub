@@ -160,7 +160,7 @@ async function main() {
     // 摘要字段齐全 + 不含大 JSON（列表不应把详情才有的快照字段带出来）
     // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——删除审计双记（子编号+真实 id）的
     // 列表端数据源，轻量摘要列同 issue_created_by 一类，非快照 JSON，纳入摘要字段集合合理。
-    const expectedKeys = ['id', 'issue_id', 'issue_type', 'issue_status', 'issue_title', 'issue_derive_root_id', 'issue_derive_seq', 'operator_id', 'operator_name', 'reason', 'deleted_at'];
+    const expectedKeys = ['id', 'issue_id', 'issue_type', 'issue_status', 'issue_title', 'issue_derive_root_id', 'issue_derive_seq', 'hold_note_attachment_count', 'operator_id', 'operator_name', 'reason', 'deleted_at'];
     assert.deepStrictEqual(Object.keys(item).sort(), expectedKeys.sort(), '列表行字段应恰为摘要字段集合（不含 issue_json 等大字段）');
     ok('[L] admin 列表 200 + 含刚删除的单 + 摘要字段齐全且不含大 JSON 快照字段');
   }
@@ -177,6 +177,7 @@ async function main() {
     const P_DEV_ASSIGNEE = '13800000008';
     const P_DEV_COMMIT = '13800000009';
     const P_DEV_EVENT = '13800000010';
+    const P_HOLD_NOTE_ATTACHMENT = '13800000011';
     // 专用 admin token：display_name 里带手机号，才能测 operator_name 脱敏（不用全局 adminTok，
     //   避免污染其他组对 operator_name 的假设）。
     const maskingAdminTok = jwt.sign({ id: 1, username: 'admin', display_name: `管理员${P_OPERATOR}`, role: 'admin' }, SECRET);
@@ -200,6 +201,12 @@ async function main() {
     await run(`INSERT INTO sys_issue_dev_events (issue_id, dev_assignee_id, action, operator_id, reason, created_at)
                VALUES (?,?,?,?,?,datetime('now','localtime'))`, [id, da.lastID, 'add', 13, `事件备注含号码${P_DEV_EVENT}`]);
 
+    const hn = await run(`INSERT INTO sys_issue_timeline
+      (issue_id,event_type,action_code,operator_id,operator_name,payload_json)
+      VALUES (?,'note','hold_note',1,'管理员','{"content":"备注","note_date":"2026-01-01"}')`, [id]);
+    await run(`INSERT INTO sys_issue_hold_note_attachments
+      (issue_id,note_id,added_event_id,file_name,original_name,file_size,uploaded_by,uploaded_by_name)
+      VALUES (?,?,?,?,?,12,1,'管理员')`, [id,hn.lastID,hn.lastID,'hold-query-probe.txt',`备注_${P_HOLD_NOTE_ATTACHMENT}.txt`]);
     const dr = await del(id, `脱敏组测试删除${P_REASON}`, maskingAdminTok);
     assert.strictEqual(dr.status, 200, `删除应 200, got ${dr.status} ${JSON.stringify(dr.body)}`);
     const auditRow = await get('SELECT id FROM sys_issue_delete_audit WHERE issue_id=?', [id]);
@@ -221,6 +228,7 @@ async function main() {
       { label: 'dev_assignees_json', respField: 'dev_assignees_json', phone: P_DEV_ASSIGNEE },
       { label: 'dev_commits_json', respField: 'dev_commits_json', phone: P_DEV_COMMIT },
       { label: 'dev_events_json', respField: 'dev_events_json', phone: P_DEV_EVENT },
+      { label: 'hold_note_attachments_json', respField: 'hold_note_attachments_json', phone: P_HOLD_NOTE_ATTACHMENT },
     ];
     for (const { label, respField, phone } of FIELD_CASES) {
       const val = String(d[respField] == null ? '' : d[respField]);
@@ -231,14 +239,15 @@ async function main() {
     // release_snapshots_json 恒为空数组（守卫②"已挂批次拒删"使正常路径下已发布单删不掉，本组不测它）。
     assert.strictEqual(d.release_snapshots_json, '[]', 'release_snapshots_json 正常路径下恒为空数组');
 
-    // 库内原文完好：直接查表，绕过响应序列化，全部十列应保留原文手机号。
+    // 库内原文完好：直接查表，绕过响应序列化，全部相应列应保留原文手机号。
     const rawRow = await get(`SELECT issue_title, operator_name, reason, issue_json, timeline_json,
-        attachments_json, dev_assignees_json, dev_commits_json, dev_events_json
+        attachments_json, dev_assignees_json, dev_commits_json, dev_events_json, hold_note_attachments_json
       FROM sys_issue_delete_audit WHERE id=?`, [auditRow.id]);
     const RAW_FIELD_MAP = {
       issue_title: P_TITLE, operator_name: P_OPERATOR, reason: P_REASON,
       issue_json: [P_REQ_PHONE, P_DESCRIPTION], timeline_json: P_TIMELINE, attachments_json: P_ATTACHMENT,
       dev_assignees_json: P_DEV_ASSIGNEE, dev_commits_json: P_DEV_COMMIT, dev_events_json: P_DEV_EVENT,
+      hold_note_attachments_json: P_HOLD_NOTE_ATTACHMENT,
     };
     for (const [col, phones] of Object.entries(RAW_FIELD_MAP)) {
       const val = String(rawRow[col] == null ? '' : rawRow[col]);
@@ -281,7 +290,7 @@ async function main() {
       assert.strictEqual(parsedSep.related_correction_no, '12345678901234567890', '解析后 20 位 OA 号应原样保留（防误伤）');
     }
 
-    ok('[M] 逐字段脱敏：title/operator_name/reason + issue_json(双号)/timeline/attachments/dev_assignees/dev_commits/dev_events 共 10 处手机号，响应层全脱敏、库内原文全完好 + 分隔符格式（-键值整值标准化/空格自由文本保留分隔符）+ 20 位 OA 号防误伤负例');
+    ok('[M] 逐字段脱敏：title/operator_name/reason + issue_json(双号)/timeline/attachments/dev_assignees/dev_commits/dev_events 共 11 处手机号（含备注附件），响应层全脱敏、库内原文全完好 + 分隔符格式（-键值整值标准化/空格自由文本保留分隔符）+ 20 位 OA 号防误伤负例');
   }
 
   // ═══ [MN] 数字型 phone 键：issue_json 内某手机号字段是 JSON 数字（非字符串） ═══

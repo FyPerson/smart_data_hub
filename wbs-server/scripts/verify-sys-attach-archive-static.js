@@ -41,11 +41,11 @@ function main() {
   assert.ok(keysMatch, 'SI_PICKER_ARCHIVE_KEYS 声明必须存在于 Sys_Iteration.html');
   const archiveKeys = keysMatch[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
   const screenshotKeys = ['modal-screenshot', 'accept-evidence', 'return-evidence'];
-  const archiveOpenKeys = ['create-spec', 'submit-delivery', 'modal-spec', 'modal-delivery', 'resume-spec'];
+  const archiveOpenKeys = ['create-spec', 'submit-delivery', 'modal-spec', 'modal-delivery', 'resume-spec', 'hold-note'];
   for (const k of screenshotKeys) assert.ok(!archiveKeys.includes(k), `SI_PICKER_ARCHIVE_KEYS 不应含 screenshot 系 key「${k}」（验收凭证不放压缩包，方案 §2.1）：实际=${JSON.stringify(archiveKeys)}`);
   for (const k of archiveOpenKeys) assert.ok(archiveKeys.includes(k), `SI_PICKER_ARCHIVE_KEYS 应含 spec/delivery 系 key「${k}」：实际=${JSON.stringify(archiveKeys)}`);
   assert.strictEqual(archiveKeys.length, archiveOpenKeys.length, `SI_PICKER_ARCHIVE_KEYS 不应含枚举之外的多余 key：实际=${JSON.stringify(archiveKeys)}`);
-  ok(`accept 派生对 screenshot 系 3 个 key 不含压缩包，spec/delivery 系 5 个 key 均含（SI_PICKER_ARCHIVE_KEYS=${JSON.stringify(archiveKeys)}）`);
+  ok(`accept 派生对 screenshot 系 3 个 key 不含压缩包，含备注附件的 ${archiveOpenKeys.length} 个允许 key 均包含（SI_PICKER_ARCHIVE_KEYS=${JSON.stringify(archiveKeys)}）`);
 
   // ③b siPickerAllowedExts 函数本体存在（防重命名后本守卫失效却仍绿）
   assert.ok(/function\s+siPickerAllowedExts\s*\(key\)/.test(html), 'siPickerAllowedExts(key) 函数须存在（accept 与 collect 真闸同源）');

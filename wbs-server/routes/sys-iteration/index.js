@@ -94,6 +94,7 @@ module.exports = (deps) => {
   const SYS_SCHEMA_STATE = { ready: false, error: null };
 
   const SYS_REQUIRED_TABLES = ['sys_releases', 'sys_issues', 'sys_issue_timeline', 'sys_issue_attachments', 'sys_issue_dev_assignees',
+    'sys_issue_hold_note_attachments', // #208 C1：备注附件独立表
     // ← C0（多开发协作与 commit 留痕重构 v2.9 §9/附录C）新增 3 表：sys_issue_dev_commits / sys_issue_dev_events / sys_issue_release_commit_snapshots
     'sys_issue_dev_commits', 'sys_issue_dev_events', 'sys_issue_release_commit_snapshots',
     // ← C1（受理与排期改造 §12）迁移完成标记表：迁移事务写标记的落点，须存在（否则迁移无处写标记→无限重跑）
@@ -258,6 +259,10 @@ module.exports = (deps) => {
   const SYS_TIMELINE_KEY_COLS = ['event_type', 'from_status', 'to_status', 'action_code', 'ref_id', 'round_no',
     'payload_json'];   // ← [codex 291 号 H-2 收口] liaison_test_pass 写点热读列（2026-09-06 起 accept/return 亦写值·决策记录 J6），同 §156 一带"整组入锚"哲学
   const SYS_ATTACHMENTS_KEY_COLS = ['attachment_type', 'round_no', 'status'];
+  // #208 C1：一次性建全的新表，全部非 id 列进入 readiness，不用抽样列锚点。
+  const SYS_HOLD_NOTE_ATTACHMENTS_KEY_COLS = ['issue_id', 'note_id', 'added_event_id', 'file_name',
+    'original_name', 'file_size', 'mime_type', 'status', 'uploaded_by', 'uploaded_by_name', 'created_at',
+    'removed_at', 'removed_by', 'removed_by_name', 'removed_event_id'];
   // ← 通知改造 C1a 新表锚点（bug流通知改造_方案_20260703_v1.5.md §4.1）。sys_issue_dev_assignees 是**一次性
   //   CREATE TABLE（无 ALTER 路径）**——要么整表建全要么不存在，故 readiness 用"结构全列在"模型（非 sys_issues 那种
   //   ALTER 演进表的抽样锚点）：缺任一结构列=建表未完整→[2] 判 ready=false。**列集 = [1c] 迁移依赖全列（SELECT+INSERT
@@ -300,7 +305,7 @@ module.exports = (deps) => {
     // ← [S13-b·B3·矩阵行12] 删除审计双记轻量摘要列（issue_json 整行快照本已含，这两列服务列表端点不返回
     //   快照 JSON 时仍能显示子编号），与 issue_created_by/issue_created_at 同类"摘要字段"非 json+count 配对。
     'issue_derive_root_id', 'issue_derive_seq',
-    'attachment_count', 'timeline_count',
+    'attachment_count', 'timeline_count', 'hold_note_attachment_count', 'hold_note_attachments_json',
     // ← 对抗审 F1/F2/F7 收口：四张子表的快照与计数（按 issue_id 子表统一枚举，非"挑三张"）
     'dev_assignee_count', 'dev_commit_count', 'dev_event_count', 'release_snapshot_count',
     // ← [S1 收口批增量·终裁=补] 第 5 张 issue_id 子表（先行上线两步化执行人集合）的配套 count 列——
@@ -1013,6 +1018,34 @@ module.exports = (deps) => {
       )`, recordSysErr('sys_issue_attachments'));
       db.run(`CREATE INDEX IF NOT EXISTS idx_sys_attach_issue ON sys_issue_attachments(issue_id)`, recordSysErr('idx_sys_attach_issue'));
 
+      // #208 C1：不扩既有 attachment_type CHECK；归属由写端点核实，整单删除显式清理本表。
+      db.run(`CREATE TABLE IF NOT EXISTS sys_issue_hold_note_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id INTEGER NOT NULL CHECK (typeof(issue_id) = 'integer' AND issue_id > 0),
+        note_id INTEGER NOT NULL CHECK (typeof(note_id) = 'integer' AND note_id > 0),
+        added_event_id INTEGER NOT NULL CHECK (typeof(added_event_id) = 'integer' AND added_event_id > 0),
+        file_name TEXT NOT NULL UNIQUE,
+        original_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL CHECK (typeof(file_size) = 'integer' AND file_size >= 0),
+        mime_type TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','removed')),
+        uploaded_by INTEGER NOT NULL CHECK (typeof(uploaded_by) = 'integer' AND uploaded_by > 0),
+        uploaded_by_name TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        removed_at TEXT,
+        removed_by INTEGER,
+        removed_by_name TEXT,
+        removed_event_id INTEGER,
+        CHECK ((status = 'active' AND removed_at IS NULL AND removed_by IS NULL
+                  AND removed_by_name IS NULL AND removed_event_id IS NULL)
+          OR (status = 'removed' AND removed_at IS NOT NULL AND removed_by IS NOT NULL
+                  AND typeof(removed_by) = 'integer' AND removed_by > 0 AND removed_by_name IS NOT NULL
+                  AND removed_event_id IS NOT NULL AND typeof(removed_event_id) = 'integer'
+                  AND removed_event_id > added_event_id))
+      )`, recordSysErr('sys_issue_hold_note_attachments'));
+      db.run(`CREATE INDEX IF NOT EXISTS idx_sys_hold_note_attach_issue_note
+        ON sys_issue_hold_note_attachments(issue_id, note_id, id)`, recordSysErr('idx_sys_hold_note_attach_issue_note'));
+
       // ── 2.5 sys_issue_dev_assignees（多开发协作子表，通知改造 Commit C1a，
       //   bug流通知改造_方案_20260703_v1.5.md §4.1，内容 v1.6 定稿）──────────
       //   主开发 assigned_to（DRI，写在 sys_issues）+ 协作开发（本表 is_primary=0）；
@@ -1124,6 +1157,8 @@ module.exports = (deps) => {
         issue_derive_seq INTEGER,
         attachment_count INTEGER NOT NULL DEFAULT 0,
         timeline_count INTEGER NOT NULL DEFAULT 0,
+        hold_note_attachment_count INTEGER NOT NULL DEFAULT 0,
+        hold_note_attachments_json TEXT NOT NULL DEFAULT '[]',
         -- ⭐ 对抗审 F1/F2/F7 收口：**按 issue_id 子表统一枚举**，不再是"挑三张"。
         --   初版只快照 issue/timeline/attachments 三份，而带 issue_id 的子表实为 6 张 ——
         --   dev_assignees 被删却没快照（协作开发名册 + 每人的 C2b notify_sent_by 一起消失，
@@ -2142,6 +2177,10 @@ module.exports = (deps) => {
         ['fast_release_executors_json', "TEXT NOT NULL DEFAULT '[]'"],
         ['fast_release_executors_count', "INTEGER NOT NULL DEFAULT 0"],
       ], 'S1 收口批·Opus 预筛 M2（+增量终裁补 count）·补第 5 张 issue_id 子表快照（先行上线两步化执行人集合）');
+      await alterAddMissingCols('sys_issue_delete_audit', [
+        ['hold_note_attachments_json', "TEXT NOT NULL DEFAULT '[]'"],
+        ['hold_note_attachment_count', 'INTEGER NOT NULL DEFAULT 0'],
+      ], '#208 C1 备注附件快照与计数（新旧库定义一致）');
       // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——「删除审计」是矩阵唯一双记例外
       //   （子编号+括号真实 id 都留），理由=删除是子编号失去反查能力的唯一场景，审计须留真实锚点（用户
       //   2026-08-13 裁定）。issue_json 快照本已含这两列（SELECT * 整行快照天然带出），但列表端点出于
@@ -2364,6 +2403,7 @@ module.exports = (deps) => {
         ['sys_issue_release_commit_snapshots', SYS_RELEASE_COMMIT_SNAPSHOTS_KEY_COLS],
         // ← C2a 物删审计表（角色权限重构）：结构全列在才放行——审计列缺失 = 删除留不下证据，fail-closed 到 503。
         ['sys_issue_delete_audit', SYS_DELETE_AUDIT_KEY_COLS],
+        ['sys_issue_hold_note_attachments', SYS_HOLD_NOTE_ATTACHMENTS_KEY_COLS],
         // ← 上线体统一重构 C0（方案 v3.4 §6.2）：排班表，结构全列在模型（同 dev_assignees/delete_audit 首版）。
         ['sys_release_duty_roster', SYS_DUTY_ROSTER_KEY_COLS],
         // ← 先行上线两步化 S1（方案 20260813_v1.8 §3）：值班执行人集合子表，结构全列在模型（同上）。
@@ -3359,6 +3399,13 @@ module.exports = (deps) => {
     //   {action:'add'|'edit'|'void', issueId, noteId?}。测试用它把请求停在拿锁之前，期间让另一个请求完整
     //   提交，再放行——证明状态判定发生在拿锁之后（锁外先判再写的实现会在此判红）。
     holdNoteBeforeLockHook: null,
+    // #208 C1 / 604-R R-L1：仅测试期，详情在锁内读出 timeline 后注入畸形 payload。
+    // 不接受请求参数，生产关闭 SYS_TEST_HOOKS 时赋值也不会生效。
+    holdNoteAfterTimelineReadHook: null,
+    // #208 C2 / 604-R R-L2：无客户端参数，测试专用 UUID 替换；生产始终 crypto.randomUUID。
+    holdNoteUuidHook: null,
+    holdNoteAfterPersistHook: null, // 已写事件、移动/INSERT/移除之后，测试实际补偿与落库重验
+    holdNoteBeforeResponseHook: null, // 提交后异常不再回滚或删正式文件
   };
   let __sysTxnRelease = null;   // 当前持锁事务的 release（单持有者不变量，mutex 串行化保证）
   let __sysCurrentTxnTag = null;   // [#83·S1] 当前持锁事务归属标记，仅 persist 设置，供 onSysTxnRelease 钩子按 tag 计数
@@ -7284,6 +7331,19 @@ module.exports = (deps) => {
     }
     return { can_add_hold_note: canAdd, hold_note_editable_ids: editable };
   }
+  // #208 C1 / 604 M-1/M-2：只裁备注附件两字段，含孤立子事件；不修改库行或既有附件流水。
+  function sysProjectHoldNoteTimeline(timeline, canReadAttachments) {
+    if (canReadAttachments) return timeline;
+    return timeline.map(e => {
+      if (e.event_type !== 'note' || !['hold_note', 'hold_note_edit'].includes(e.action_code)) return e;
+      let payload;
+      try { payload = JSON.parse(e.payload_json); } catch (_) { payload = null; }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ...e, payload_json: null };
+      delete payload.added_attachments;
+      delete payload.removed_attachments;
+      return { ...e, payload_json: JSON.stringify(payload) };
+    });
+  }
   // 输入校验（锁外，纯格式）：日期必填 + 真实日历日（normalizeDeadline）；「不晚于今天」需要查库，在端点里做。
   function parseHoldNoteContentBody(body) {
     const b = body || {};
@@ -9995,16 +10055,8 @@ module.exports = (deps) => {
       // [codex 395 预筛 NEW-3] 投影补 payload_json——completion_overrun_reason 行结构化存
       // {gap_days,reason_code,reason_note}，前端 kv 优先读这一列，不必解析 summary 文本（该列本就
       // 已在 liaison_test_pass 结构化留痕场景消费，本次是"同一列，新增一类消费方"，非新开列）。
-      const timeline = await dbAllAsync(
-        `SELECT id, event_type, from_status, to_status, summary, action_code, ref_id, round_no,
-                operator_id, operator_name, created_at, payload_json
-           FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`,
-        [id]
-      );
-      // [#208 暂缓单备注·方案 v1.1 §4.3] 能力位：只用本次请求已读出的单据行与流水数组，调用与写端点同一组
-      //   判定函数（codex 601 M-2/M-3）。流水读取仍在下方锁区之外（方案三-9，本次不挪）——极端交错下按钮可能
-      //   多显示一瞬，写端点锁内重判会返回 409。
-      Object.assign(row, holdNoteCapabilities(row, { id: uid, role }, timeline));
+      // #208 C1：timeline 与备注附件在下方已有读锁内一起读取；主行仍在锁外，
+      // 能力位可能短暂陈旧，写端点继续锁内重判，不宣称整份详情为一致快照。
       // [C3b·H1 订正·2026-09-09] 附件 SELECT（delivery/screenshot/spec，仅 active）原在锁外——与写侧
       //   sysPersistAttachments 的 INSERT（同批一并改为持锁写，见该函数）不对称，"一致快照"的声称不成立
       //   （锁外读可能读到并发未提交/已回滚的中间态）。移进下方 sysTxnMutex 临界区、computeDeliveryRev
@@ -10018,8 +10070,8 @@ module.exports = (deps) => {
       //   计算 rev 前后各读一次。**只持锁、不 BEGIN 事务**——sysBeginImmediate/sysCommit/sysRollback 是
       //   "锁+事务"打包语义，这里只要锁，直接调 sysTxnMutex.acquire 并在 finally 释放，不写
       //   __sysTxnRelease（该模块级变量专属"当前持有写事务的锁"，与本处纯读锁的生命周期不同，混用会让
-      //   某个 sysCommit/sysRollback 误释放这里的锁）。timeline/issue 主行均非"交付内容"的一部分，
-      //   不入锁（已在上方读取）；附件面的"一致"依赖上传/删除端点均已改持锁写（见 H1 写侧订正），本处
+      //   某个 sysCommit/sysRollback 误释放这里的锁）。issue 主行仍在锁外；#208 C1 起 timeline
+      //   也在本临界区读，以对应备注附件版本。附件面的"一致"依赖上传/删除均持锁写（见 H1），本处
       //   锁内读到的即为已提交的最终态，accept 事务内另有 computeDeliveryRev 重算兜底二次校验。
       let deliveryLockRelease;
       try {
@@ -10027,8 +10079,20 @@ module.exports = (deps) => {
       } catch (lockErr) {
         throw new SysTransitionError(503, 'SYS_BUSY', '系统繁忙（并发处理中），请稍后重试');
       }
-      let devAssignees, devCommits, noCodeRecords, bugCauseRecords = [], deliveryRev, attachments;
+      let devAssignees, devCommits, noCodeRecords, bugCauseRecords = [], deliveryRev, attachments, timeline, holdNoteAttachments;
       try {
+      timeline = await dbAllAsync(
+        `SELECT id, event_type, from_status, to_status, summary, action_code, ref_id, round_no,
+                operator_id, operator_name, created_at, payload_json
+           FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`, [id]);
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteAfterTimelineReadHook) {
+        await __testHooks.holdNoteAfterTimelineReadHook({ issueId: id, timeline });
+      }
+      Object.assign(row, holdNoteCapabilities(row, { id: uid, role }, timeline));
+      holdNoteAttachments = await dbAllAsync(
+        `SELECT id, note_id, added_event_id, removed_event_id, original_name, file_size, mime_type,
+                status, uploaded_by, uploaded_by_name, created_at, removed_at
+           FROM sys_issue_hold_note_attachments WHERE issue_id = ? ORDER BY id`, [id]);
       // [B·B.8] 可释放屏障——测试在发出并发请求后主动 resolve 该 Promise（脚本内建兜底 1.5s 自动
       // resolve，防用例遗漏导致本请求死等），生产路径 SYS_TEST_HOOKS_ENABLED 为 false 时整行短路。
       if (SYS_TEST_HOOKS_ENABLED && __testHooks.detailHoldHook) { await __testHooks.detailHoldHook(); }
@@ -10366,13 +10430,10 @@ module.exports = (deps) => {
       //     不读库·不叠 eligibility——与决策4 读路径宽松口径对称；[13] 保留不收窄）。row 为详情主 SELECT 行，
       //     含 intake_liaison_id（前端 iss.intake_liaison_id 即出自它）。
       const attActor = sysActor(req);
-      const attIsCoordinator = attActor.role === 'admin' || isSysCoordinator(attActor, row.type) || isBoundLiaisonOrAdmin(attActor, row);
-      const attRoster = attIsCoordinator ? null : await sysAttachmentRosterState(id, attActor.id);
-      const canSeeAttachmentList = attIsCoordinator || !!(attRoster && (attRoster.active || attRoster.historical))
-        || isReleaseExecutor || isFastReleaseExecutor || await sysAttachmentExecutorCanRead(row, attActor.id);
+      const canSeeAttachmentList = await sysCanReadIssueAttachments(row, attActor);
       // #78：附件可读身份覆盖详情身份中的执行人，单独的技术负责人身份不授予附件权。
-      // isFastReleaseExecutor 有详情早退优化，兼任技术负责人/assigned_to 时可能为 false；
-      // 上面最后一项补查真实执行关系。不要把读权限并入 sysAttachmentRosterState（四个写点也消费它）。
+      // 共用 helper 补查真实执行关系，不依赖详情可见性早退时的执行人变量。
+      // 不要把读权限并入 sysAttachmentRosterState（四个写点也消费它）。
       const outAttachments = canSeeAttachmentList ? attachments : [];
       const outSpecAttachments = canSeeAttachmentList ? specAttachments : [];
       // [执行人入口批·codex 审 MED-1 收口] release_brief 条件下发：单据可读集（建单人/在册成员/技术负责人等）
@@ -10380,7 +10441,7 @@ module.exports = (deps) => {
       //   （admin ∨ 对接人 ∨ 本批次执行人），其余读者拿 null。前端 siCanOpenRelease 以"brief 非空"为唯一
       //   判据（数据即权限，前端不复算四分支），写读同源单点在此。
       const canSeeReleaseBrief = isAdmin || isIntakeLiaisonUser || isReleaseExecutor;
-      res.json({ issue: row, timeline, attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, derive_family: deriveFamily, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null, fast_release_executors: fastReleaseExecutors, fast_release_exec_progress: fastReleaseExecProgress });
+      res.json({ issue: row, timeline: sysProjectHoldNoteTimeline(timeline, canSeeAttachmentList), hold_note_attachments: canSeeAttachmentList ? holdNoteAttachments : [], attachments: outAttachments, specAttachments: outSpecAttachments, hasSpecAttachment: outSpecAttachments.length > 0, origin_issue: originIssue, derived_issues: derivedIssues, derive_family: deriveFamily, related_correction: relatedCorrection, dev_assignees: devAssignees, dev_commits: devCommits, no_code_records: noCodeRecords, bug_cause_records: bugCauseRecords, release_brief: canSeeReleaseBrief ? releaseBrief : null, fast_release_executors: fastReleaseExecutors, fast_release_exec_progress: fastReleaseExecProgress });
     } catch (err) {
       // [B·B.5·2026-09-09 方案 v1.5，C3b·L2 复用既有 helper 订正] 详情端 SysTransitionError 从固定 500
       // 改为按 status 透传——锁超时（503 SYS_BUSY）等须让前端拿到可操作信息而非"未知详情查询失败"。
@@ -12132,7 +12193,8 @@ module.exports = (deps) => {
   router.post('/sys-issues/:id/void', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('void'));
   router.post('/sys-issues/:id/reopen', authenticateToken, requireSysSchemaReady, requireAdmin, makeTransitionEndpoint('reopen'));
 
-  // ── #208 暂缓单备注：新增 / 编辑 / 作废（方案 v1.1 §4.2；判定函数见「二·九」）──────────────
+  // ── #208 暂缓单备注：新增 / 编辑 / 作废（方案 v1.3；判定函数见「二·九」）──────────────
+  //   C2 新增/编辑支持 multipart，由 sysPersistHoldNote 独占五态事务与文件补偿；作废仍走原文字事务。
   //   三个端点同一结构：锁外只做纯格式校验与「日期不晚于今天」→ 测试钩子（仅 SYS_TEST_HOOKS=1）→
   //   sysBeginImmediate → 锁内重读单据与流水 → 共用判定 → 追加一条流水 → sysCommit。结果以拿到锁之后的
   //   真实状态为准（M-6）：恢复先拿到锁，之后的写备注 / 编辑 / 作废 409；写备注先拿到锁则照常提交。
@@ -12146,70 +12208,153 @@ module.exports = (deps) => {
   }
   function holdNoteInputError(res, message) { return res.status(400).json({ error: message, code: 'HOLD_NOTE_INVALID_INPUT' }); }
 
-  router.post('/sys-issues/:id/hold-notes', authenticateToken, requireSysSchemaReady, async (req, res) => {
-    const id = parsePositiveId(req.params.id);
-    if (!id) return res.status(400).json({ error: '无效的迭代单 ID', code: 'INVALID_SYS_ISSUE_ID' });
-    const parsed = parseHoldNoteContentBody(req.body);
-    if (!parsed.ok) return holdNoteInputError(res, parsed.message);
-    const actor = sysActor(req);
+  function holdNoteIdGuard(req, res, next) {
+    if (req.params.noteId !== undefined && !parsePositiveId(req.params.noteId)) {
+      return res.status(400).json({ error: '无效的备注 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    }
+    next();
+  }
+  function parseHoldNoteRemovalIds(value, multipart) {
+    if (value === undefined) return { ok: true, ids: [] };
+    let ids = value;
+    if (typeof ids === 'string') { if (!multipart) return { ok: false }; try { ids = JSON.parse(ids); } catch (_) { return { ok: false }; } }
+    if (!Array.isArray(ids) || ids.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length) return { ok: false };
+    return { ok: true, ids };
+  }
+  // #208 C2 五态唯一事务所有者。端点只清本次 pending；已提交/回滚未确认时不删正式文件。
+  async function sysPersistHoldNote(issueId, originId, parsed, files, removeIds, actor) {
+    const editing = originId !== null;
+    const movedPaths = [], added = [];
+    let state = 'idle', rollbackError;
     try {
-      if (await holdNoteDateIsFuture(parsed.note_date)) return holdNoteInputError(res, '备注日期不能晚于今天');
-      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) { await __testHooks.holdNoteBeforeLockHook({ action: 'add', issueId: id }); }
-      await sysBeginImmediate();
-      let noteId;
-      try {
-        const { row, timeline } = await holdNoteLoadInTxn(id);
-        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        const v = holdNoteAddVerdict(row, actor, timeline);
-        if (!v.ok) { await sysRollback(); return res.status(v.http).json({ error: v.message, code: v.code }); }
-        const ins = await dbRunAsync(
-          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
-           VALUES (?, 'note', ?, 'hold_note', NULL, ?, ?, ?)`,
-          [id, holdNoteSummary(parsed.content), actor.id, actor.name, JSON.stringify({ note_date: parsed.note_date, content: parsed.content })]
-        );
-        noteId = ins.lastID;
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
-      }
-      logger.info(`用户 ${req.user.username} 为迭代单 #${id} 添加暂缓备注 #${noteId}`);
-      res.json({ ok: true, id, note_id: noteId });
-    } catch (err) { sendSysTransitionError(res, err); }
-  });
-
-  router.post('/sys-issues/:id/hold-notes/:noteId/edit', authenticateToken, requireSysSchemaReady, async (req, res) => {
-    const id = parsePositiveId(req.params.id);
-    const noteId = parsePositiveId(req.params.noteId);
-    if (!id || !noteId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
-    const parsed = parseHoldNoteContentBody(req.body);
-    if (!parsed.ok) return holdNoteInputError(res, parsed.message);
-    const actor = sysActor(req);
-    try {
-      if (await holdNoteDateIsFuture(parsed.note_date)) return holdNoteInputError(res, '备注日期不能晚于今天');
-      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) { await __testHooks.holdNoteBeforeLockHook({ action: 'edit', issueId: id, noteId }); }
-      await sysBeginImmediate();
-      let eventId;
-      try {
-        const { row, timeline } = await holdNoteLoadInTxn(id);
-        if (!row) { await sysRollback(); return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' }); }
-        const v = holdNoteModifyVerdict(row, actor, timeline, noteId);
-        if (!v.ok) { await sysRollback(); return res.status(v.http).json({ error: v.message, code: v.code }); }
-        const ins = await dbRunAsync(
+      await sysBeginImmediate(); state = 'inTxn';
+      const loaded = await holdNoteLoadInTxn(issueId);
+      if (!loaded.row) throw new SysTransitionError(404, 'SYS_ISSUE_NOT_FOUND', '迭代单不存在');
+      const verdict = editing ? holdNoteModifyVerdict(loaded.row, actor, loaded.timeline, originId) : holdNoteAddVerdict(loaded.row, actor, loaded.timeline);
+      if (!verdict.ok) throw new SysTransitionError(verdict.http, verdict.code, verdict.message);
+      const prior = editing ? await dbAllAsync('SELECT * FROM sys_issue_hold_note_attachments WHERE issue_id = ? AND note_id = ? ORDER BY id', [issueId, originId]) : [];
+      const removing = prior.filter(a => removeIds.includes(a.id) && a.status === 'active');
+      if (removing.length !== removeIds.length) throw new SysTransitionError(409, 'HOLD_NOTE_ATTACHMENT_CONFLICT', '待移除的附件已变化，请刷新重试');
+      const payload = { note_date: parsed.note_date, content: parsed.content,
+        added_attachments: files.map(f => ({ original_name: sanitizeSysOriginalName(f.originalname), file_size: f.size })),
+        removed_attachments: removing.map(a => ({ id: a.id, original_name: a.original_name })) };
+      const payloadJson = JSON.stringify(payload), summary = holdNoteSummary(parsed.content);
+      let event;
+      if (editing) {
+        event = await dbRunAsync(
           `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
            VALUES (?, 'note', ?, 'hold_note_edit', ?, ?, ?, ?)`,
-          [id, holdNoteSummary(parsed.content), noteId, actor.id, actor.name, JSON.stringify({ note_date: parsed.note_date, content: parsed.content })]
-        );
-        eventId = ins.lastID;
-        await sysCommit();
-      } catch (txErr) {
-        try { await sysRollback(); } catch (_) { /* ignore */ }
-        throw txErr;
+          [issueId, summary, originId, actor.id, actor.name, payloadJson]);
+      } else {
+        event = await dbRunAsync(
+          `INSERT INTO sys_issue_timeline (issue_id, event_type, summary, action_code, ref_id, operator_id, operator_name, payload_json)
+           VALUES (?, 'note', ?, 'hold_note', NULL, ?, ?, ?)`,
+          [issueId, summary, actor.id, actor.name, payloadJson]);
       }
-      logger.info(`用户 ${req.user.username} 编辑迭代单 #${id} 的暂缓备注 #${noteId}（事件 #${eventId}）`);
-      res.json({ ok: true, id, note_id: noteId, event_id: eventId });
-    } catch (err) { sendSysTransitionError(res, err); }
-  });
+      const eventId = event.lastID, noteId = editing ? originId : eventId;
+      // L-1：目录不以可能回滚复用的 noteId 分组，归属只认新表行。
+      const finalDir = path.join(SYS_UPLOAD_BASE, String(issueId), 'hold-notes');
+      for (const f of files) {
+        const rule = validateSysAttachmentRule('spec', f.originalname, f.size);
+        if (!rule.ok) throw new SysTransitionError(400, 'HOLD_NOTE_ATTACHMENT_INVALID', rule.error);
+        // R-L2：仅测试开关生效；UUID 和路径不接受任何客户端文件名/路径/UUID 参数。
+        const uuid = SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteUuidHook ? await __testHooks.holdNoteUuidHook() : crypto.randomUUID();
+        if (typeof uuid !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(uuid)) {
+          throw new SysTransitionError(500, 'HOLD_NOTE_UUID_CONTRACT', '附件文件名生成失败');
+        }
+        fs.mkdirSync(finalDir, { recursive: true });
+        const finalName = uuid + rule.normalizedExt, finalPath = path.join(finalDir, finalName);
+        // L-2：Windows rename 会覆盖；碰撞失败、不换名重试，旧文件从不进本请求补偿名单。
+        if (fs.existsSync(finalPath)) throw new SysTransitionError(500, 'HOLD_NOTE_FILE_COLLISION', '附件存储冲突，请重试');
+        fs.renameSync(f.path, finalPath); movedPaths.push(finalPath);
+        const data = { issue_id: issueId, note_id: noteId, added_event_id: eventId,
+          file_name: path.join('sys-iteration', String(issueId), 'hold-notes', finalName).replace(/\\/g, '/'),
+          original_name: sanitizeSysOriginalName(f.originalname), file_size: f.size,
+          mime_type: typeof f.mimetype === 'string' && f.mimetype.trim() ? f.mimetype : null,
+          status: 'active', uploaded_by: actor.id, uploaded_by_name: actor.name,
+          removed_at: null, removed_by: null, removed_by_name: null, removed_event_id: null };
+        const ins = await dbRunAsync(`INSERT INTO sys_issue_hold_note_attachments
+          (issue_id,note_id,added_event_id,file_name,original_name,file_size,mime_type,uploaded_by,uploaded_by_name)
+          VALUES (?,?,?,?,?,?,?,?,?)`, [data.issue_id,data.note_id,data.added_event_id,data.file_name,data.original_name,data.file_size,data.mime_type,data.uploaded_by,data.uploaded_by_name]);
+        added.push({ id: ins.lastID, ...data });
+      }
+      let removedAt = null;
+      if (removeIds.length) {
+        removedAt = (await dbGetAsync("SELECT datetime('now','localtime') AS n")).n;
+        const changed = await dbRunAsync(`UPDATE sys_issue_hold_note_attachments
+          SET status='removed',removed_at=?,removed_by=?,removed_by_name=?,removed_event_id=?
+          WHERE issue_id=? AND note_id=? AND status='active' AND id IN (${removeIds.map(() => '?').join(',')})`,
+          [removedAt,actor.id,actor.name,eventId,issueId,noteId,...removeIds]);
+        if (changed.changes !== removeIds.length) throw new SysTransitionError(409, 'HOLD_NOTE_ATTACHMENT_CONFLICT', '附件移除失败，请刷新重试');
+      }
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteAfterPersistHook) {
+        await __testHooks.holdNoteAfterPersistHook({ issueId, noteId, eventId, addedIds: added.map(a => a.id) });
+      }
+      const current = await holdNoteLoadInTxn(issueId);
+      const recheck = current.row && (editing ? holdNoteModifyVerdict(current.row, actor, current.timeline, originId) : holdNoteAddVerdict(current.row, actor, current.timeline));
+      if (!recheck || !recheck.ok) throw new SysTransitionError(recheck ? recheck.http : 404, recheck ? recheck.code : 'SYS_ISSUE_NOT_FOUND', recheck ? recheck.message : '迭代单不存在');
+      const stored = await dbAllAsync('SELECT * FROM sys_issue_hold_note_attachments WHERE issue_id = ? AND note_id = ? ORDER BY id', [issueId,noteId]);
+      const expected = prior.map(a => removeIds.includes(a.id) ? { ...a, status: 'removed', removed_at: removedAt, removed_by: actor.id, removed_by_name: actor.name, removed_event_id: eventId } : a).concat(added);
+      const storedEvent = await dbGetAsync('SELECT * FROM sys_issue_timeline WHERE id = ? AND issue_id = ?', [eventId,issueId]);
+      const eventFields = { event_type: 'note', action_code: editing ? 'hold_note_edit' : 'hold_note', ref_id: editing ? originId : null,
+        summary, operator_id: actor.id, operator_name: actor.name, payload_json: payloadJson };
+      const rowsMatch = stored.length === expected.length && expected.every(want => {
+        const row = stored.find(a => a.id === want.id);
+        return row && Object.keys(want).every(k => row[k] === want[k]) && typeof row.created_at === 'string' && row.created_at.length > 0;
+      });
+      if (!rowsMatch || !storedEvent || !Object.keys(eventFields).every(k => storedEvent[k] === eventFields[k])) {
+        throw new SysTransitionError(500, 'HOLD_NOTE_PERSIST_MISMATCH', '备注保存核验失败，请重试');
+      }
+      await dbRunAsync('COMMIT'); state = 'committed'; releaseSysTxn();
+      return { ok: true, id: issueId, note_id: noteId, event_id: eventId,
+        added_attachments: stored.filter(a => added.some(n => n.id === a.id)).map(a => ({ id: a.id, original_name: a.original_name, file_size: a.file_size })),
+        removed_attachment_ids: removeIds };
+    } catch (err) {
+      if (state === 'inTxn') {
+        try { await dbRunAsync('ROLLBACK'); state = 'rolledBack'; }
+        catch (rb) { state = 'rollbackUnconfirmed'; rollbackError = rb; }
+        releaseSysTxn();
+      }
+      if (state === 'rollbackUnconfirmed') {
+        try { logger.error('[系统迭代] 备注附件回滚未确认', { issueId, movedPaths, cause: err.message, rollback: rollbackError.message }); } catch (_) {}
+        throw new SysTransitionError(500, 'TXN_ROLLBACK_UNCONFIRMED', '备注保存回滚未确认，请联系管理员核查');
+      }
+      if (state === 'rolledBack') for (const file of movedPaths) {
+        try { fs.unlinkSync(file); } catch (unlinkError) { try { logger.warn('[系统迭代] 备注附件补偿清理失败', { issueId, file, error: unlinkError.message }); } catch (_) {} }
+      }
+      throw err;
+    }
+  }
+  async function holdNoteSaveEndpoint(req, res, editing) {
+    const id = parsePositiveId(req.params.id), noteId = editing ? parsePositiveId(req.params.noteId) : null;
+    try {
+      const parsed = parseHoldNoteContentBody(req.body);
+      if (!parsed.ok) return holdNoteInputError(res, parsed.message);
+      const removals = parseHoldNoteRemovalIds(req.body && req.body.remove_attachment_ids, !!req.is('multipart/form-data'));
+      if (!removals.ok || (!editing && removals.ids.length)) return holdNoteInputError(res, '移除附件列表须为不重复的正整数数组，新增备注不能移除附件');
+      const files = Array.isArray(req.files) ? req.files : [];
+      for (const f of files) {
+        const verdict = validateSysAttachmentRule('spec', f.originalname, f.size);
+        if (!verdict.ok) return res.status(400).json({ code: 'HOLD_NOTE_ATTACHMENT_INVALID', error: verdict.error });
+      }
+      if (await holdNoteDateIsFuture(parsed.note_date)) return holdNoteInputError(res, '备注日期不能晚于今天');
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeLockHook) {
+        await __testHooks.holdNoteBeforeLockHook({ action: editing ? 'edit' : 'add', issueId: id, ...(editing ? { noteId } : {}) });
+      }
+      const saved = await sysPersistHoldNote(id, noteId, parsed, files, removals.ids, sysActor(req));
+      if (SYS_TEST_HOOKS_ENABLED && __testHooks.holdNoteBeforeResponseHook) await __testHooks.holdNoteBeforeResponseHook(res);
+      res.json(saved);
+    } catch (err) {
+      if (res.headersSent) { sysFinishBrokenResponse(res); return; }
+      sendSysTransitionError(res, err);
+    } finally { sysCleanupOrphanFiles(req, id); }
+  }
+
+  router.post('/sys-issues/:id/hold-notes', authenticateToken, requireSysSchemaReady, sysIdGuard,
+    sysUploadMw('files', 5, true), (req, res) => holdNoteSaveEndpoint(req, res, false));
+
+  router.post('/sys-issues/:id/hold-notes/:noteId/edit', authenticateToken, requireSysSchemaReady, sysIdGuard, holdNoteIdGuard,
+    sysUploadMw('files', 5, true), (req, res) => holdNoteSaveEndpoint(req, res, true));
 
   router.post('/sys-issues/:id/hold-notes/:noteId/void', authenticateToken, requireSysSchemaReady, async (req, res) => {
     const id = parsePositiveId(req.params.id);
@@ -14202,7 +14347,7 @@ module.exports = (deps) => {
   });
 
   // ── DELETE /sys-issues/:id：物理删除迭代单（admin 专用·不可逆·2026-07-07）──────────
-  //   场景：清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + **七张 issue_id 子表**全清 + 附件磁盘文件。
+  //   场景：清理测试/脏单。物理删除（非 void 软删）——sys_issues 主表 + **八张 issue_id 子表**全清 + 附件磁盘文件。
   //   ⚠️ 原文写"admin **单人**清理"是单 admin 时代的化石（生产实为 6 个 active admin）；
   //     "三张子表"同样是化石（C0 后带 issue_id 的子表已达 6 张，先行上线两步化 S1 起再加 1 张=7 张）
   //     ——均已按事实更正。
@@ -14249,7 +14394,7 @@ module.exports = (deps) => {
       //   所有 sys 写路径（建单/派生/挂批次/传附件）都走同一模块级全局锁（见本文件 sysBeginImmediate 注释），
       //   持锁期间无写路径能插入，把「读到无派生/无批次 + 附件清单」与「删除」收进同一持锁窗口 → TOCTOU 窗口归零
       //   （否则读后删前可能被插入派生子单/挂 release_id → 悬空母单；或被传新附件 → 删库不删盘的孤儿文件）。
-      let atts = [];
+      let atts = [], holdNoteAtts = [];
       let titleForLog = '';
       await sysBeginImmediate();
       try {
@@ -14270,6 +14415,8 @@ module.exports = (deps) => {
         //   下方磁盘删除仍只读 `a.file_name`，审计则拿到整行。三份快照口径统一为"整行"，理由见下方 timeline 段。
         atts = await dbAllAsync(
           `SELECT * FROM sys_issue_attachments WHERE issue_id = ? ORDER BY id`, [id]);
+        holdNoteAtts = await dbAllAsync(
+          `SELECT * FROM sys_issue_hold_note_attachments WHERE issue_id = ? ORDER BY id`, [id]);
 
         // ⭐ C2a 审计快照（必须在 DELETE 之前读——删完就没有了）：单据整行（上方 row）+ 附件清单（上方 atts）
         //   + 下面这**五张 issue_id 子表**的整行快照。
@@ -14281,12 +14428,12 @@ module.exports = (deps) => {
         //   同款疏漏——建表时只补了 DELETE 一行，快照读/INSERT/KEY_COLS 三处都漏了，S1 收口批 M2 补齐）：
         //   初版快照三份（issue/timeline/attachments）、DELETE 三张（dev_assignees/attachments/timeline），
         //   两份清单**互不相同且都不完整** —— dev_assignees 删了没快照、dev_commits/dev_events 既没删也没快照。
-        //   带 issue_id 的子表实为 **7 张**（timeline / attachments / dev_assignees / dev_commits /
-        //   dev_events / release_commit_snapshots / fast_release_executors）。加表的人只往
+        //   带 issue_id 的子表现为 **8 张**（timeline / attachments / dev_assignees / dev_commits /
+        //   dev_events / release_commit_snapshots / fast_release_executors / hold_note_attachments）。加表的人只往
         //   SYS_REQUIRED_TABLES 和 readiness 里加，没人回头看"删除端点是不是也要跟着删、审计是不是也要
         //   跟着快照"——这就是"多份清单必然漂移"在级联场景的实例，且不是一次性教训（S1 又犯了一次）。
         //   ⛔ **以后再加带 issue_id 的表，必须同时改这里的快照读、下方的 DELETE、sys_issue_delete_audit
-        //   的 DDL/ALTER/INSERT/KEY_COLS、以及 verify 的七表残留断言与快照断言——六处，不是四处。**
+        //   的 DDL/ALTER/INSERT/KEY_COLS、以及 verify 的八表残留断言与快照断言——六处，不是四处。**
         const timelineRows = await dbAllAsync(
           `SELECT * FROM sys_issue_timeline WHERE issue_id = ? ORDER BY id`, [id]);
         const devAssigneeRows = await dbAllAsync(
@@ -14312,16 +14459,18 @@ module.exports = (deps) => {
           `INSERT INTO sys_issue_delete_audit
              (issue_id, issue_type, issue_status, issue_title, issue_created_by, issue_created_at,
               issue_derive_root_id, issue_derive_seq,
-              attachment_count, timeline_count, dev_assignee_count, dev_commit_count, dev_event_count,
+              attachment_count, timeline_count, hold_note_attachment_count, hold_note_attachments_json,
+              dev_assignee_count, dev_commit_count, dev_event_count,
               release_snapshot_count, fast_release_executors_count,
               issue_json, timeline_json, attachments_json,
               dev_assignees_json, dev_commits_json, dev_events_json, release_snapshots_json,
               fast_release_executors_json,
               operator_id, operator_name, reason, deleted_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))`,
           [id, row.type, row.status, row.title, row.created_by, row.created_at,
            row.derive_root_id, row.derive_seq,
-           atts.length, timelineRows.length, devAssigneeRows.length, devCommitRows.length,
+           atts.length, timelineRows.length, holdNoteAtts.length, JSON.stringify(holdNoteAtts),
+           devAssigneeRows.length, devCommitRows.length,
            devEventRows.length, releaseSnapshotRows.length, fastReleaseExecRows.length,
            JSON.stringify(row), JSON.stringify(timelineRows), JSON.stringify(atts),
            JSON.stringify(devAssigneeRows), JSON.stringify(devCommitRows),
@@ -14329,7 +14478,7 @@ module.exports = (deps) => {
            JSON.stringify(fastReleaseExecRows),
            actor.id, actor.name, reason]);
 
-        // 删**全部七张** issue_id 子表，再删主表。
+        // 删**全部八张** issue_id 子表，再删主表。
         //   ⚠️ **顺序按依赖从叶子到根**（收口审 MED）：`dev_commits`/`dev_events` 通过 `dev_assignee_id`
         //   引用 `dev_assignees`，故先删前两者。当前 `PRAGMA foreign_keys` 未开启，顺序不影响执行；
         //   但一旦将来开启，反过来的顺序会直接违反外键约束 —— 让顺序与真实依赖一致是零成本的未来兼容。
@@ -14348,6 +14497,7 @@ module.exports = (deps) => {
         await dbRunAsync('DELETE FROM sys_fast_release_executors WHERE issue_id = ?', [id]);       // 叶：先行上线两步化执行人集合（S1）
         await dbRunAsync('DELETE FROM sys_issue_dev_assignees WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_attachments WHERE issue_id = ?', [id]);
+        await dbRunAsync('DELETE FROM sys_issue_hold_note_attachments WHERE issue_id = ?', [id]);
         await dbRunAsync('DELETE FROM sys_issue_timeline WHERE issue_id = ?', [id]);
         const del = await dbRunAsync('DELETE FROM sys_issues WHERE id = ?', [id]);
         if (!del || del.changes !== 1) {
@@ -14372,7 +14522,7 @@ module.exports = (deps) => {
       //     故 codex 原议「在 catch 里记 warn」抓不到——改为按返回值判定：返回 false（含"文件本就不存在"这类既有脏态
       //     与"删除受阻"）时记一条带 issue id 的 warn，给 admin 留人工核对线索（不改接口 200 语义）。
       let fileDelFailed = 0;
-      for (const a of atts) {
+      for (const a of atts.concat(holdNoteAtts)) {
         if (!safeDeleteFileSync(a.file_name, UPLOAD_DIR)) {
           fileDelFailed++;
           logger.warn(`[系统迭代] 物理删除 #${id} 附件文件未删除（可能已不存在或删除受阻，留待人工核对）：${a.file_name}`);
@@ -14383,7 +14533,7 @@ module.exports = (deps) => {
       //   ⚠️ reason 是管理员自由输入，进日志前**单行化 + 截断**（codex C2a 审 LOW）：换行会把一条日志
       //   撕成多行、破坏按行 grep，也让日志可被输入内容"伪造成多条记录"。审计表存完整原文，日志只求可读。
       const reasonForLog = reason.replace(/[\r\n\t]+/g, ' ').slice(0, 120);
-      logger.info(`用户 ${req.user.username} 物理删除迭代单 #${id}（${titleForLog}）+ ${atts.length} 个附件${fileDelFailed ? `（其中 ${fileDelFailed} 个文件未删除，见 warn）` : ''}·原因：${reasonForLog}`);
+      logger.info(`用户 ${req.user.username} 物理删除迭代单 #${id}（${titleForLog}）+ ${atts.length + holdNoteAtts.length} 个附件${fileDelFailed ? `（其中 ${fileDelFailed} 个文件未删除，见 warn）` : ''}·原因：${reasonForLog}`);
       return res.json({ ok: true, id });
     } catch (err) {
       if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);   // SYS_BUSY 等保 503
@@ -14444,7 +14594,7 @@ module.exports = (deps) => {
         // [S13-b·B3·矩阵行12] 补 issue_derive_root_id/issue_derive_seq——列表卡片子编号展示需要（不返回
         //   体积较大的 issue_json，见本端点头注），两列均是轻量 INTEGER，加入列表 SELECT 零性能顾虑。
         `SELECT id, issue_id, issue_type, issue_status, issue_title, issue_derive_root_id, issue_derive_seq,
-                operator_id, operator_name, reason, deleted_at
+                hold_note_attachment_count, operator_id, operator_name, reason, deleted_at
            FROM sys_issue_delete_audit ${where}
           ORDER BY id DESC
           LIMIT ?`,
@@ -15858,7 +16008,10 @@ module.exports = (deps) => {
     //   使真实边界落在"50MB 通过 / 50MB+1 字节拒绝"（V2b 断言即按此核实）。
     limits: { fileSize: ARCHIVE_MAX_SIZE + 1, files: 5 },
     fileFilter: function (req, file, cb) {
+      // #208 C2：备注整批拒绝后禁止后续 part 再落盘，防 multer abort 回调之后留下迟到文件。
+      if (req.__sysHoldNoteStrictUpload && req.__sysHoldNoteUploadRejected) return cb(null, false);
       const ext = normalizeAttachmentExt(file.originalname);
+      if (req.__sysHoldNoteStrictUpload && (!ext || !SYS_ALLOWED_EXTS.includes(ext))) req.__sysHoldNoteUploadRejected = true;
       if (!ext) return cb(new Error('文件名为空或包含非法字符'));
       // fileFilter 早于 attachment_type 解析（multipart 字段顺序不保证），拿不到类型；消息按 BASE + 压缩包限定说准，
       //   不把「仅允许 …/.zip」原样吐给 screenshot 上传者（Opus 预筛 L2·与方案 D9 issueUpload 同一原则）。
@@ -15872,10 +16025,12 @@ module.exports = (deps) => {
     next();
   }
   // multer 错误 → JSON 包装（MulterError 走 Express error flow，handler try/catch 接不到，故手动 invoke + 清理）
-  function sysUploadMw(field, maxCount) {
+  function sysUploadMw(field, maxCount, strictBatch = false) {
     return (req, res, next) => {
+      if (strictBatch) { req.__sysHoldNoteStrictUpload = true; req.__sysHoldNoteUploadRejected = false; }
       sysUpload.array(field, maxCount)(req, res, (err) => {
         if (!err) return next();
+        if (strictBatch) req.__sysHoldNoteUploadRejected = true;
         const isMulterErr = err && err.name === 'MulterError';
         const code = isMulterErr ? err.code : 'UPLOAD_ERROR';
         try { sysCleanupOrphanFiles(req, req.params.id); } catch (_) { /* ignore */ }
@@ -16285,6 +16440,51 @@ module.exports = (deps) => {
       `SELECT 1 FROM sys_fast_release_executors fe WHERE ${sysFastReleaseExecActiveWhere('fe')} AND fe.user_id = ? LIMIT 1`,
       [row.id, uid]));
   }
+  // #208 C1 / 604 L-3/L-4：两种附件下载和详情投影共用；先验证行契约，再按角色短路。
+  // 必需自有列 id/type/intake_liaison_id/release_id/release_assignee_id；后三列允许显式 NULL。
+  async function sysCanReadIssueAttachments(row, actor) {
+    const cols = ['id', 'type', 'intake_liaison_id', 'release_id', 'release_assignee_id'];
+    if (!row || cols.some(c => !Object.prototype.hasOwnProperty.call(row, c) || row[c] === undefined)
+        || !Number.isInteger(row.id) || row.id <= 0 || typeof row.type !== 'string' || !row.type.trim()) {
+      throw new SysTransitionError(500, 'SYS_ATTACHMENT_ROW_CONTRACT', '附件权限判定缺少完整单据行');
+    }
+    if (actor.role === 'admin' || isSysCoordinator(actor, row.type) || isBoundLiaisonOrAdmin(actor, row)) return true;
+    const roster = await sysAttachmentRosterState(row.id, actor.id);
+    return roster.active || roster.historical || await sysAttachmentExecutorCanRead(row, actor.id);
+  }
+
+  // #208 C1：备注附件保留 removed 行下载；不增加暂缓/作废门，不与既有附件表混用 id。
+  router.get('/sys-issues/:id/hold-note-attachments/:attId/download', authenticateToken, requireSysSchemaReady, async (req, res) => {
+    const id = parsePositiveId(req.params.id), attId = parsePositiveId(req.params.attId);
+    if (!id || !attId) return res.status(400).json({ error: '无效的 ID', code: 'INVALID_SYS_ISSUE_ID' });
+    let noteReadRelease;
+    try {
+      // 与 C2 写锁同源，不把同一 sqlite 连接上尚未提交的新行暴露给下载。
+      try { noteReadRelease = await sysTxnMutex.acquire(5000); }
+      catch (_) { throw new SysTransitionError(503, 'SYS_BUSY', '系统繁忙，请稍后重试'); }
+      const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id, release_id, release_assignee_id FROM sys_issues WHERE id = ?', [id]);
+      if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
+      if (!await sysCanReadIssueAttachments(row, sysActor(req))) return res.status(403).json({ error: '无权下载此附件', code: 'NOT_AUTHORIZED_TO_VIEW' });
+      const att = await dbGetAsync(
+        `SELECT a.id, a.file_name, a.original_name FROM sys_issue_hold_note_attachments a
+         JOIN sys_issue_timeline n ON n.id = a.note_id AND n.issue_id = a.issue_id
+           AND n.event_type = 'note' AND n.action_code = 'hold_note' AND n.ref_id IS NULL
+         WHERE a.id = ? AND a.issue_id = ?`, [attId, id]);
+      if (!att) return res.status(404).json({ error: '备注附件不存在', code: 'HOLD_NOTE_ATTACHMENT_NOT_FOUND' });
+      const sysBase = path.resolve(SYS_UPLOAD_BASE), absPath = path.resolve(UPLOAD_DIR, att.file_name);
+      if (!(absPath === sysBase || absPath.startsWith(sysBase + path.sep))) {
+        return res.status(403).json({ error: '非法文件路径', code: 'ILLEGAL_FILE_PATH' });
+      }
+      if (!fs.existsSync(absPath)) return res.status(404).json({ error: '文件已丢失', code: 'FILE_NOT_FOUND' });
+      return res.download(absPath, att.original_name || path.basename(absPath));
+    } catch (err) {
+      if (err instanceof SysTransitionError) return sendSysTransitionError(res, err);
+      logger.error('[系统迭代] 备注附件下载失败:', err && err.message);
+      return res.status(500).json({ error: '备注附件下载失败' });
+    } finally {
+      if (noteReadRelease) noteReadRelease();
+    }
+  });
   // ── GET /sys-issues/:id/attachments/:attId/download：下载（C5 + #78：admin∨对接人∨在册∨历史参与∨执行人；
   //   下载列本身无状态限定——不再单独判"已作废非 admin 403"，契约裁定点见完成报告）+ ALLOWED_FILE_DIRS 白名单 + 二次 WHERE active ──
   router.get('/sys-issues/:id/attachments/:attId/download', authenticateToken, requireSysSchemaReady, async (req, res) => {
@@ -16294,13 +16494,7 @@ module.exports = (deps) => {
     try {
       const row = await dbGetAsync('SELECT id, type, status, intake_liaison_id, release_id, release_assignee_id FROM sys_issues WHERE id = ?', [id]);
       if (!row) return res.status(404).json({ error: '迭代单不存在', code: 'SYS_ISSUE_NOT_FOUND' });
-      const actor = sysActor(req);
-      const isAdmin = actor.role === 'admin';
-      // ⭐ [对接人绑单收口 2026-08-10] 下载=读路径**增量放行**绑定对接人（[13] 保留·决策4 宽松口径·同详情
-      //   附件列表可见性判据方向，两读端不长出"列表能看见、下载 403"的不一致）。SELECT 补 intake_liaison_id。
-      const isCoordinator = isSysCoordinator(actor, row.type) || isBoundLiaisonOrAdmin(actor, row);
-      const roster = await sysAttachmentRosterState(id, actor.id);
-      if (!isAdmin && !isCoordinator && !roster.active && !roster.historical && !await sysAttachmentExecutorCanRead(row, actor.id)) {
+      if (!await sysCanReadIssueAttachments(row, sysActor(req))) {
         return res.status(403).json({ error: '无权下载此附件', code: 'NOT_AUTHORIZED_TO_VIEW' });
       }
       // 二次 WHERE：附件须属本单且 active
@@ -20670,11 +20864,11 @@ module.exports = (deps) => {
   //   两个端点各自手写脱敏字段清单，只脱敏了 reason，漏了 issue_title/operator_name（同样是用户可控的
   //   自由文本，同样可能夹带手机号），违反用户拍板口径的字面意思（"展示层手机号脱敏"没有限定只脱 reason）。
   //   集中一处，列表/详情共用，杜绝以后再有第三处各写一份脱敏字段清单。
-  //   withSnapshots=false（列表用）只处理三个自由文本摘要字段；true（详情用）额外处理七份快照 JSON
+  //   withSnapshots=false（列表用）只处理三个自由文本摘要字段；true（详情用）额外处理已登记快照 JSON
   //   （用 hasOwnProperty 判断，天然兼容"列表 SELECT 没有这些列"的情形，不需要按调用方传参再分叉一次）。
   const SYS_AUDIT_TEXT_MASK_COLS = ['issue_title', 'operator_name', 'reason'];
   const SYS_AUDIT_SNAPSHOT_JSON_COLS = ['issue_json', 'timeline_json', 'attachments_json',
-    'dev_assignees_json', 'dev_commits_json', 'dev_events_json', 'release_snapshots_json'];
+    'dev_assignees_json', 'dev_commits_json', 'dev_events_json', 'release_snapshots_json', 'hold_note_attachments_json'];
   function serializeAuditRow(row, { withSnapshots } = {}) {
     const out = { ...row };
     for (const col of SYS_AUDIT_TEXT_MASK_COLS) {
@@ -22292,6 +22486,9 @@ module.exports = (deps) => {
     SYS_RELEASES_KEY_COLS,
     SYS_TIMELINE_KEY_COLS,
     SYS_ATTACHMENTS_KEY_COLS,
+    SYS_HOLD_NOTE_ATTACHMENTS_KEY_COLS,
+    sysCanReadIssueAttachments,
+    sysProjectHoldNoteTimeline,
     SYS_DEV_ASSIGNEES_KEY_COLS,   // 通知改造 C1a 新表锚点（C0 起追加 dev_status 四态 4 列）
     // C0（多开发协作与 commit 留痕重构 v2.9）新增 3 表锚点（verify-sys-multidev-schema 等 require 真实逻辑）
     SYS_DEV_COMMITS_KEY_COLS,
