@@ -1,0 +1,23 @@
+# 3002 只读服务源码来源
+
+来源为主工作区 docs/local/系统建设记录/临时服务 的既有 server.cjs、server-client.js、offline.html。本目录是基于这些原件制作的只读服务副本，没有修改主目录原件或服务器。
+
+原件指纹用于核对实际安装版本；部署时若与原件基准不一致，先核对差异。本版指纹用于核验待部署文件。真实只读部署、最终导出、停删服务仍须用户在场单独执行，操作顺序见上级部署前准备手册。
+
+原件 SHA-256（修改前）：
+
+- server.cjs：356fabb505deb53f83681979b22c939af2a28867da7bfbcadcff3cf7ba5bbd5f
+- server-client.js：a7e17f14d0fb5b1243b15a1d7fd84f6f14003c7f04d863eb6bab8e542b8bc21c
+- offline.html：0acc29eb40cf20b303ca834f96031032a261b4c81b8b6c3231693a22305b1be3
+
+本版 SHA-256：
+
+- server.cjs：89950c537f8e46a7fa10fbd36c92a72dba8d3795f34b88629e0316c878b5a262
+- server-client.js：7cce92dfd08089ffebac38d439d875c1bc713f54322c41127f1c2ca3a58d570d
+- offline.html：0a4b6417d8b81ff20de0f22f783a9e3a0667dbe9fe10485357c389ecc2316287
+- package.json：13923fdd4ba8e2f5238336a3bfbe60366100330a9ed64ed5558ab15f9147ff1d
+- ecosystem.config.cjs：a5fbd7c73e9d9b2533728fe75e202b73974d5f26d31968401cd0a545808ed613
+
+本版 offline.html 已由编辑工具移除1个非演示内嵌项目，只保留2个明确标记为虚拟的示例，并清空初始草稿。其余代码保持同源；编辑工具补了文件末尾换行。
+
+服务仍读取既有数据目录的工作区；静态种子清理不筛掉工作区中已有的非演示项目。原目录文件没有修改，原内嵌业务记录不进入正式工具包。

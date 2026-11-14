@@ -1,0 +1,169 @@
+param([string]$Source, [string]$InputFile, [string]$GuardFile)
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$text = [IO.File]::ReadAllText($Source, [Text.Encoding]::UTF8)
+$tokens = $null; $parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Prepared deployment script is not parseable' }
+$names = @('Test-Ok', 'Get-LastLine', 'Read-Protocol', 'New-FakeProc', 'Resolve-SysbuildMigrationOutcome', 'Resolve-SysbuildModuleState', 'Resolve-SysbuildLedgerState')
+foreach ($name in $names) {
+    $defs = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true))
+    if ($defs.Count -ne 1) { throw ('Expected exactly one pure helper: ' + $name) }
+    foreach ($command in @($defs[0].FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true))) {
+        if (@('Test-Ok','Get-LastLine','Read-Protocol','Where-Object','ConvertFrom-Json') -notcontains $command.GetCommandName()) { throw 'Unexpected command in protocol helper' }
+    }
+    . ([scriptblock]::Create($defs[0].Extent.Text))
+}
+function Assert-Commands($node, $allowed) {
+    foreach ($command in @($node.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true))) {
+        if ($allowed -notcontains $command.GetCommandName()) { throw ('Unmocked command: ' + $command.GetCommandName()) }
+    }
+}
+$flows = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.Contains("Write-Step '6b/9'") }, $true))
+$preflights = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($script:SysbuildMigrationRequested)') -and $n.Extent.Text.Contains("'NO_SYSBUILD_MIGRATION_TOOL'") }, $true))
+$probes = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($script:SysbuildMigrationRequested)') -and $n.Extent.Text.Contains('SYSBUILD_MIGRATION_PROCESS_SCAN_OK') }, $true))
+if ($flows.Count -ne 1 -or $preflights.Count -ne 1 -or $probes.Count -ne 1) { throw ('Expected isolated blocks: ' + $flows.Count + '/' + $preflights.Count + '/' + $probes.Count) }
+Assert-Commands $flows[0] @('Write-Step','Invoke-RemoteWrite','New-FakeProc','ConvertTo-Json','Resolve-SysbuildMigrationOutcome','Set-Stage','Add-Route','Write-RollbackGuide','Exit-Deploy','Write-Info')
+Assert-Commands $preflights[0] @('Invoke-Git','Test-Ok','Stop-BeforeStop','Write-Info')
+Assert-Commands $probes[0] @('Write-Host')
+$ledgerGates = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.Contains("'SYSBUILD_MIGRATION_REQUIRED'") -and $n.Extent.Text.Contains("'SYSBUILD_LEDGER_PROBE_FAILED'") }, $true))
+if ($ledgerGates.Count -ne 1 -or $ledgerGates[0].Extent.EndOffset -gt $text.IndexOf("Write-Step '3/9'")) { throw 'Expected one ledger gate before production writes' }
+Assert-Commands $ledgerGates[0] @('Stop-BeforeStop','New-FakeProc','Invoke-RemoteRead','Resolve-SysbuildLedgerState','Write-Info')
+$moduleAssignments = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -ceq 'moduleProbe' }, $true))
+$moduleStates = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -ceq 'moduleState' }, $true))
+$moduleRejects = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.Contains("'SYSBUILD_MODULE_PROBE_FAILED'") }, $true))
+if ($moduleAssignments.Count -ne 1 -or $moduleStates.Count -ne 1 -or $moduleRejects.Count -ne 1) { throw 'Expected unique module probe, resolver assignment and rejection block' }
+if ($moduleAssignments[0].Extent.EndOffset -gt $moduleStates[0].Extent.StartOffset -or $moduleStates[0].Extent.EndOffset -gt $moduleRejects[0].Extent.StartOffset -or $moduleRejects[0].Extent.EndOffset -gt $ledgerGates[0].Extent.StartOffset) { throw 'Module probe/resolver/rejection order is unsafe' }
+$moduleCode = $text.Substring($moduleAssignments[0].Extent.StartOffset, $ledgerGates[0].Extent.EndOffset - $moduleAssignments[0].Extent.StartOffset)
+$moduleAst = [Management.Automation.Language.Parser]::ParseInput($moduleCode, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0 -or $moduleAst.EndBlock.Statements.Count -ne 4) { throw 'Expected exactly four isolated module-gate statements' }
+Assert-Commands $moduleAst @('Invoke-Git','Resolve-SysbuildModuleState','Stop-BeforeStop','New-FakeProc','Invoke-RemoteRead','Resolve-SysbuildLedgerState','Write-Info')
+if ($flows[0].Extent.StartOffset -lt $text.IndexOf("Set-Stage -Stage 'code_updated'") -or $flows[0].Extent.EndOffset -gt $text.IndexOf("Write-Step '7/9'")) { throw 'Migration block is outside checkout/start boundary' }
+if ($preflights[0].Extent.EndOffset -gt $text.IndexOf("Write-Step '3/9'")) { throw 'Tool existence check must precede production writes' }
+$guardEnd = $text.IndexOf('$script:DryRun = [bool]$DryRun', [StringComparison]::Ordinal)
+$firstFunction = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) | Sort-Object { $_.Extent.StartOffset })[0].Extent.StartOffset
+if ($guardEnd -le $ast.ParamBlock.Extent.EndOffset -or $guardEnd -gt $firstFunction) { throw 'Unsafe parameter-prefix boundary' }
+foreach ($parameter in $ast.ParamBlock.Parameters) {
+    $default = $parameter.DefaultValue
+    if ($null -ne $default -and $default -isnot [Management.Automation.Language.ConstantExpressionAst] -and $default -isnot [Management.Automation.Language.StringConstantExpressionAst]) { throw 'Executable parameter default is not allowed in fixture' }
+}
+$prefix = $ast.ParamBlock.Extent.Text + "`r`n" + $text.Substring($ast.ParamBlock.Extent.EndOffset, $guardEnd - $ast.ParamBlock.Extent.EndOffset)
+$guardAst = [Management.Automation.Language.Parser]::ParseInput($prefix, [ref]$tokens, [ref]$parseErrors)
+Assert-Commands $guardAst @('Write-Host','Test-Path')
+if (Test-Path -LiteralPath $GuardFile) { throw 'Refuse to overwrite a generated guard fixture' }
+$guardText = $prefix + "`r`n" + '[Console]::WriteLine((ConvertTo-Json -InputObject @{ requested = [bool]$script:SysbuildMigrationRequested; from = $SysbuildMigrationFromVersion } -Compress))'
+[IO.File]::WriteAllText($GuardFile, $guardText, [Text.UTF8Encoding]::new($true))
+$data = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($InputFile, [Text.Encoding]::UTF8))
+$protocols = @()
+foreach ($case in $data) {
+    $resolved = Resolve-SysbuildMigrationOutcome -Res $case.proc -ExpectedFromVersion $case.from -ExpectedReport $case.report
+    $protocols += [pscustomobject]@{ name = $case.name; expected = $case.expected; actual = $resolved.Outcome }
+}
+$script:Tape = @(); $script:ToolExists = $true
+function Write-Step { param($Number, $Message) }
+function Write-Info { param($Message, $Color) }
+function Write-Host { param($Object, $ForegroundColor) $script:Tape += ('PRINT ' + $Object) }
+function Add-Route { param($Text) $script:Tape += ('ROUTE ' + $Text) }
+function Set-Stage { param($Stage, $Result, $Note) $script:Tape += ('STAGE ' + $Stage) }
+function Invoke-RemoteWrite { param($Command, $TimeoutSec) $script:Tape += ('COMMAND ' + $Command); if ($script:FlowReal) { return $script:RealMigrationRes }; return [pscustomobject]@{ DryRun = $true } }
+function Invoke-RemoteRead { param($Command, $TimeoutSec) $script:Tape += ('READ ' + $Command); return $script:LedgerReadRes }
+function Write-RollbackGuide { param($Reason) $script:Tape += 'MANUAL_RECOVERY' }
+function Exit-Deploy { param($Code) $script:UnitExit = $Code; throw 'UNIT_CONTROL_EXIT' }
+function Invoke-Git { param($ArgList, $TimeoutSec) $script:Tape += ('GIT ' + ($ArgList -join ' ') + ' TIMEOUT ' + $TimeoutSec); if ($script:ModuleGateMode) { return $script:ModuleProbeRes }; return (New-FakeProc -ExitCode $(if ($script:ToolExists) { 0 } else { 1 })) }
+function Stop-BeforeStop { param($Reason, $Note) $script:UnitExit = 1; $script:Tape += 'BEFORE_STOP'; throw 'UNIT_CONTROL_EXIT' }
+$flowResults = @()
+foreach ($mode in @('off', 'ok', 'sysbuild_migration_fail', 'sysbuild_migration_unknown', 'real_ok', 'real_fail', 'real_unknown', 'real_missing', 'real_committed_failure', 'real_noop')) {
+    $script:Tape = @(); $script:UnitExit = $null; $script:SysbuildMigrationRequested = $mode -ne 'off'; $script:Id = 'unit'; $script:NewCommit = 'a' * 40
+    $RemoteRepo = 'E:\fixture repo'; $RemoteDb = 'E:\fixture db\module.sqlite'; $RemoteTmpDir = 'E:\fixture tmp'; $RemoteSqlite3 = 'E:\fixture repo\wbs-server\node_modules\sqlite3'
+    $SysbuildMigrationFromVersion = $(if ($mode -eq 'real_noop') { '6' } else { '0' }); $DryRunFailAt = $(if ($mode -like 'sysbuild_*') { $mode } else { '' })
+    $script:FlowReal = $mode.StartsWith('real_')
+    $realData = @{ fromVersion=[int]$SysbuildMigrationFromVersion; toVersion=6; applied=$true; outcome='committed'; contractSha256='b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7'; compatibilityIssues=0; report="$RemoteTmpDir\sysbuild_migration_unit.json"; reportSha256=('b'*64); backup=@{ verified=$true; path="$RemoteTmpDir\before.sqlite"; sha256=('a'*64) } }
+    $realTag = 'SYSBUILD_MIGRATION_OK'; $realExit = 0
+    if ($mode -eq 'real_fail') { $realData.applied=$false; $realData.outcome='rolled_back'; $realTag='SYSBUILD_MIGRATION_FAIL'; $realExit=1 }
+    if ($mode -eq 'real_committed_failure') { $realTag='SYSBUILD_MIGRATION_FAIL'; $realExit=1 }
+    if ($mode -eq 'real_noop') { $realData.applied=$false; $realData.outcome='noop'; $realData.backup=$null }
+    $script:RealMigrationRes = New-FakeProc -ExitCode $realExit -Stdout ($realTag + ' ' + (ConvertTo-Json -InputObject $realData -Compress -Depth 8) + "`n")
+    if ($mode -eq 'real_unknown') { $script:RealMigrationRes = New-FakeProc -TimedOut $true }
+    if ($mode -eq 'real_missing') { $script:RealMigrationRes = New-FakeProc -Stdout "ordinary output`n" }
+    try { . ([scriptblock]::Create($flows[0].Extent.Text)) } catch { if ($_.Exception.Message -ne 'UNIT_CONTROL_EXIT') { throw } }
+    $flowResults += [pscustomobject]@{ name = $mode; exitCode = $script:UnitExit; tape = @($script:Tape) }
+}
+$knownModuleLF = '100644 blob ' + ('a' * 40) + "`twbs-server/routes/sysbuild/schema.js`n"
+$moduleResults = @()
+foreach ($case in @(
+    @{ name='present_lf'; state='present'; stdout=$knownModuleLF },
+    @{ name='present_crlf'; state='present'; stdout=$knownModuleLF.Replace("`n", "`r`n") },
+    @{ name='present_executable_lf'; state='present'; stdout=$knownModuleLF.Replace('100644', '100755') },
+    @{ name='present_executable_crlf'; state='present'; stdout=$knownModuleLF.Replace('100644', '100755').Replace("`n", "`r`n") },
+    @{ name='absent'; state='absent'; stdout='' },
+    @{ name='null_stdout'; state='unknown'; stdout=''; rawStdout=$null },
+    @{ name='nonstring_stdout'; state='unknown'; stdout=''; rawStdout=0 },
+    @{ name='query_fail_empty'; state='unknown'; stdout=''; exitCode=128 },
+    @{ name='query_fail_valid'; state='unknown'; stdout=$knownModuleLF; exitCode=128 },
+    @{ name='query_fail_one'; state='unknown'; stdout=''; exitCode=1 },
+    @{ name='timeout'; state='unknown'; stdout=$knownModuleLF; timeout=$true },
+    @{ name='start_error'; state='unknown'; stdout=$knownModuleLF; startError='fixture launch failure' },
+    @{ name='missing_newline'; state='unknown'; stdout=$knownModuleLF.TrimEnd("`n") },
+    @{ name='truncated'; state='unknown'; stdout=('100644 blob ' + ('a' * 39) + "`twbs-server/routes/sysbuild/schema.js`n") },
+    @{ name='bad_mode'; state='unknown'; stdout=$knownModuleLF.Replace('100644', '100664') },
+    @{ name='bad_type'; state='unknown'; stdout=$knownModuleLF.Replace(' blob ', ' commit ') },
+    @{ name='bad_path'; state='unknown'; stdout=$knownModuleLF.Replace('schema.js', 'schema-old.js') },
+    @{ name='bad_hash_case'; state='unknown'; stdout=$knownModuleLF.Replace(('a' * 40), ('A' * 40)) },
+    @{ name='junk'; state='unknown'; stdout="unexpected output`n" },
+    @{ name='prefixed_junk'; state='unknown'; stdout=("unexpected output`n" + $knownModuleLF) },
+    @{ name='extra_entry'; state='unknown'; stdout=($knownModuleLF + $knownModuleLF) },
+    @{ name='trailing_junk'; state='unknown'; stdout=($knownModuleLF + 'junk') }
+)) {
+    $script:Tape=@(); $script:UnitExit=$null; $script:SysbuildMigrationRequested=$false; $script:NewCommit='a' * 40
+    $script:RemoteStateMode=$false; $script:ModuleGateMode=$true
+    $script:ModuleProbeRes=New-FakeProc -Stdout $case.stdout -ExitCode $(if ($case.exitCode) { $case.exitCode } else { 0 }) -TimedOut ([bool]$case.timeout) -StartError $case.startError
+    if ($case.ContainsKey('rawStdout')) { $script:ModuleProbeRes.Stdout=$case.rawStdout }
+    $script:LedgerReadRes=New-FakeProc -Stdout "SYSBUILD_LEDGER_STATE present`n"
+    $moduleState=$null
+    try { . ([scriptblock]::Create($moduleCode)) } catch { if ($_.Exception.Message -ne 'UNIT_CONTROL_EXIT') { throw } }
+    $moduleResults += [pscustomobject]@{ name=$case.name; expectedState=$case.state; state=$moduleState; exitCode=$script:UnitExit; tape=@($script:Tape) }
+}
+$ledgerResults = @()
+foreach ($case in @(
+    @{ name='absent_no_flag'; value='absent'; requested=$false; expectedExit=1 },
+    @{ name='present_no_flag'; value='present'; requested=$false; expectedExit=$null },
+    @{ name='absent_with_flag'; value='absent'; requested=$true; expectedExit=$null },
+    @{ name='present_with_flag'; value='present'; requested=$true; expectedExit=$null },
+    @{ name='failed_query'; value='present'; requested=$false; expectedExit=1; exitCode=1 },
+    @{ name='timeout'; value='present'; requested=$false; expectedExit=1; timeout=$true },
+    @{ name='truncated'; value='present'; requested=$false; expectedExit=1; truncated=$true },
+    @{ name='unknown'; value='unexpected'; requested=$false; expectedExit=1 },
+    @{ name='fake_absent'; value='absent'; requested=$false; expectedExit=1; fake=$true },
+    @{ name='fake_present'; value='present'; requested=$false; expectedExit=$null; fake=$true },
+    @{ name='fake_missing'; value='missing'; requested=$false; expectedExit=1; fake=$true },
+    @{ name='fake_string'; value='string'; requested=$false; expectedExit=1; fake=$true }
+)) {
+    $script:Tape=@(); $script:UnitExit=$null; $script:SysbuildMigrationRequested=$case.requested
+    $script:ModuleGateMode=$true; $script:NewCommit='a' * 40
+    $script:ModuleProbeRes=New-FakeProc -Stdout $knownModuleLF
+    $script:RemoteStateMode=[bool]$case.fake
+    $st=[pscustomobject]@{}
+    if ($case.value -eq 'present' -or $case.value -eq 'absent') { $st | Add-Member -NotePropertyName sysbuildLedgerPresent -NotePropertyValue ([bool]($case.value -eq 'present')) }
+    if ($case.value -eq 'string') { $st | Add-Member -NotePropertyName sysbuildLedgerPresent -NotePropertyValue 'false' }
+    $probeText='SYSBUILD_LEDGER_STATE '+$case.value+$(if ($case.truncated) { '' } else { "`n" })
+    $script:LedgerReadRes=New-FakeProc -Stdout $probeText -ExitCode $(if ($case.exitCode) { $case.exitCode } else { 0 }) -TimedOut ([bool]$case.timeout)
+    try { . ([scriptblock]::Create($moduleCode)) } catch { if ($_.Exception.Message -ne 'UNIT_CONTROL_EXIT') { throw } }
+    $ledgerResults += [pscustomobject]@{ name=$case.name; expectedExit=$case.expectedExit; exitCode=$script:UnitExit; tape=@($script:Tape) }
+}
+$script:RemoteStateMode=$false
+$script:ModuleGateMode=$false
+$preflightResults = @()
+foreach ($exists in @($true, $false)) {
+    $script:Tape = @(); $script:UnitExit = $null; $script:SysbuildMigrationRequested = $true; $script:ToolExists = $exists; $SysbuildMigrationFromVersion = '1'
+    try { . ([scriptblock]::Create($preflights[0].Extent.Text)) } catch { if ($_.Exception.Message -ne 'UNIT_CONTROL_EXIT') { throw } }
+    $preflightResults += [pscustomobject]@{ exists = $exists; exitCode = $script:UnitExit; tape = @($script:Tape) }
+}
+$script:Tape = @(); $target = 'fixture@example.invalid'; $script:SysbuildMigrationRequested = $true
+. ([scriptblock]::Create($probes[0].Extent.Text))
+$probePrint = @($script:Tape)
+$probeMatch = [regex]::Match(($probePrint -join "`n"), '(?m)^PRINT[ \t]+(try \{[^\r\n]+\})[ \t]*$')
+if (-not $probeMatch.Success) { throw 'Missing process probe command' }
+$displayed = $probeMatch.Groups[1].Value
+$null = [Management.Automation.Language.Parser]::ParseInput($displayed, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -ne 0) { throw 'Displayed process probe is not parseable' }
+[Console]::WriteLine((ConvertTo-Json -InputObject @{ protocols = $protocols; flows = $flowResults; modules = $moduleResults; ledger = $ledgerResults; preflights = $preflightResults; probe = $displayed; probePrint = $probePrint } -Depth 12 -Compress))

@@ -1,0 +1,1302 @@
+{
+  "format": "sysbuild-schema-history-fixture",
+  "schemaVersion": 1,
+  "sourcePath": "wbs-server/routes/sysbuild/schema.js",
+  "objects": [
+    {
+      "type": "table",
+      "name": "sysbuild_projects",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_projects (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    system_name TEXT NOT NULL,\n    phase_name TEXT,\n    build_type TEXT NOT NULL CHECK (build_type IN ('outsource','procurement','inhouse')),\n    goal TEXT,\n    oa_number TEXT CHECK (oa_number IS NULL OR (oa_number GLOB '[0-9]*' AND oa_number NOT GLOB '*[^0-9]*' AND length(oa_number) BETWEEN 1 AND 20)),\n    initiated_on DATE CHECK (initiated_on IS NULL OR (initiated_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(initiated_on,'+0 days') IS NOT NULL AND date(initiated_on,'+0 days') = initiated_on AND initiated_on BETWEEN '2000-01-01' AND '2099-12-31')),\n    pm_user_id INTEGER NOT NULL,\n    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','terminated','closed')),\n    history_window TEXT NOT NULL DEFAULT 'never' CHECK (history_window IN ('never','open','closed')),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_parties",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_parties (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    side TEXT NOT NULL CHECK (side IN ('demand','dev')),\n    name TEXT NOT NULL,\n    sort_order INTEGER NOT NULL DEFAULT 0,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_members",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_members (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    party_id INTEGER,\n    user_id INTEGER,\n    person_name TEXT,\n    joined_at DATETIME,\n    removed_at DATETIME,\n    removed_reason TEXT,\n    added_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (user_id IS NOT NULL OR (person_name IS NOT NULL AND length(trim(person_name)) > 0)),\n    CHECK ((removed_at IS NULL) = (removed_reason IS NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_appointments",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_appointments (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    party_id INTEGER NOT NULL,\n    member_id INTEGER NOT NULL,\n    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','rejected','ended','withdrawn')),\n    proposed_by INTEGER NOT NULL,\n    effective_at DATETIME,\n    ended_at DATETIME,\n    end_reason TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status NOT IN ('active','ended') OR effective_at IS NOT NULL),\n    CHECK (status IN ('active','ended') OR effective_at IS NULL),\n    CHECK ((status = 'ended') = (ended_at IS NOT NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_delegations",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_delegations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    party_id INTEGER NOT NULL,\n    member_id INTEGER NOT NULL,\n    appointment_id INTEGER NOT NULL,\n    status TEXT NOT NULL DEFAULT 'pending_owner' CHECK (status IN ('pending_owner','pending_accept','active','rejected','revoked','withdrawn')),\n    proposed_by INTEGER NOT NULL,\n    effective_at DATETIME,\n    revoked_at DATETIME,\n    revoke_reason TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status NOT IN ('active','revoked') OR effective_at IS NOT NULL),\n    CHECK (status IN ('active','revoked') OR effective_at IS NULL),\n    CHECK ((status = 'revoked') = (revoked_at IS NOT NULL)),\n    CHECK (revoked_at IS NULL OR (revoke_reason IS NOT NULL AND length(trim(revoke_reason)) > 0))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_invitations",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_invitations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    member_id INTEGER NOT NULL,\n    kind TEXT NOT NULL CHECK (kind IN ('join','appointment')),\n    appointment_id INTEGER,\n    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined','withdrawn')),\n    invited_by INTEGER NOT NULL,\n    responded_at DATETIME,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((kind = 'appointment') = (appointment_id IS NOT NULL)),\n    CHECK ((status = 'pending') = (responded_at IS NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_batches",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_batches (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    seq INTEGER NOT NULL CHECK (seq >= 1),\n    name TEXT NOT NULL,\n    is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0,1)),\n    status TEXT NOT NULL DEFAULT 'planning' CHECK (status IN ('planning','active','live','transferred','superseded')),\n    superseded_by INTEGER,\n    transfer_change_id INTEGER,\n    dev_assignee_member_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((status = 'transferred') = (transfer_change_id IS NOT NULL)),\n    CHECK ((status = 'superseded') = (superseded_by IS NOT NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_nodes",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_nodes (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    batch_id INTEGER,\n    template_key TEXT,\n    name TEXT NOT NULL,\n    g_stage TEXT,\n    sort_order INTEGER NOT NULL,\n    is_golive_milestone INTEGER NOT NULL DEFAULT 0 CHECK (is_golive_milestone IN (0,1)),\n    status TEXT NOT NULL DEFAULT 'not_started' CHECK (status IN ('not_started','in_progress','closed','cancelled')),\n    opened_at DATETIME,\n    closed_at DATETIME,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (is_golive_milestone = 0 OR (batch_id IS NOT NULL AND status <> 'cancelled')),\n    CHECK ((status = 'closed') = (closed_at IS NOT NULL)),\n    CHECK (status NOT IN ('in_progress','closed') OR opened_at IS NOT NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_node_schedule_records",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_node_schedule_records (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    node_id INTEGER NOT NULL,\n    kind TEXT NOT NULL CHECK (kind IN ('baseline','plan_change','actual_start','actual_end','actual_correct')),\n    planned_start DATE CHECK (planned_start IS NULL OR (planned_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(planned_start,'+0 days') IS NOT NULL AND date(planned_start,'+0 days') = planned_start AND planned_start BETWEEN '2000-01-01' AND '2099-12-31')),\n    planned_end DATE CHECK (planned_end IS NULL OR (planned_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(planned_end,'+0 days') IS NOT NULL AND date(planned_end,'+0 days') = planned_end AND planned_end BETWEEN '2000-01-01' AND '2099-12-31')),\n    actual_date DATE CHECK (actual_date IS NULL OR (actual_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(actual_date,'+0 days') IS NOT NULL AND date(actual_date,'+0 days') = actual_date AND actual_date BETWEEN '2000-01-01' AND '2099-12-31')),\n    corrects_kind TEXT,\n    reason TEXT,\n    source_party_id INTEGER,\n    dev_key_entry_id INTEGER,\n    package_version_id INTEGER,\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (kind NOT IN ('baseline','plan_change') OR (planned_start IS NOT NULL AND planned_end IS NOT NULL AND planned_start <= planned_end AND actual_date IS NULL)),\n    CHECK (kind IN ('baseline','plan_change') OR (actual_date IS NOT NULL AND planned_start IS NULL AND planned_end IS NULL)),\n    CHECK (kind <> 'baseline' OR package_version_id IS NOT NULL),\n    CHECK (kind NOT IN ('plan_change','actual_correct') OR (reason IS NOT NULL AND length(trim(reason)) > 0)),\n    CHECK ((kind = 'actual_correct') = (corrects_kind IS NOT NULL)),\n    CHECK (corrects_kind IS NULL OR corrects_kind IN ('actual_start','actual_end')),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_modules",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_modules (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    name TEXT NOT NULL,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_items",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_items (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    code TEXT NOT NULL CHECK (code GLOB 'R-[0-9]*' AND substr(code,3) NOT GLOB '*[^0-9]*'),\n    module_id INTEGER,\n    replaces_item_id INTEGER,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_item_versions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_item_versions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    item_id INTEGER NOT NULL,\n    version_no INTEGER NOT NULL CHECK (version_no >= 1),\n    content TEXT NOT NULL,\n    quote_text TEXT,\n    proposer_name TEXT,\n    proposer_member_id INTEGER,\n    proposer_party_id INTEGER,\n    occasion TEXT,\n    proposed_on DATE CHECK (proposed_on IS NULL OR (proposed_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(proposed_on,'+0 days') IS NOT NULL AND date(proposed_on,'+0 days') = proposed_on AND proposed_on BETWEEN '2000-01-01' AND '2099-12-31')),\n    proposer_status TEXT NOT NULL DEFAULT 'pending' CHECK (proposer_status IN ('pending','confirmed','proxy_confirmed','denied')),\n    deny_reason TEXT,\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (proposer_member_id IS NOT NULL OR (proposer_name IS NOT NULL AND length(trim(proposer_name)) > 0)),\n    CHECK (proposer_status <> 'denied' OR (deny_reason IS NOT NULL AND length(trim(deny_reason)) > 0)),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_packages",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_packages (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    batch_id INTEGER,\n    type TEXT NOT NULL CHECK (type IN ('initiation','overall','batch_req','overall_batch_req','batch_accept','change','closing')),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (type NOT IN ('batch_req','overall_batch_req','batch_accept') OR batch_id IS NOT NULL),\n    CHECK (type NOT IN ('initiation','overall','closing') OR batch_id IS NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_package_versions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_package_versions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    package_id INTEGER NOT NULL,\n    version_no INTEGER NOT NULL CHECK (version_no >= 1),\n    parent_overall_version_id INTEGER,\n    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','pending','effective','superseded')),\n    effective_at DATETIME,\n    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status <> 'effective' OR effective_at IS NOT NULL),\n    CHECK (status NOT IN ('draft','pending') OR effective_at IS NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_package_item_revisions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_package_item_revisions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    package_version_id INTEGER NOT NULL,\n    item_version_id INTEGER NOT NULL,\n    committed_batch_id INTEGER,\n    op TEXT NOT NULL CHECK (op IN ('add','remove')),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_materials",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_materials (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    node_id INTEGER NOT NULL,\n    material_key TEXT NOT NULL,\n    name TEXT NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_material_versions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_material_versions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    material_id INTEGER NOT NULL,\n    version_no INTEGER NOT NULL CHECK (version_no >= 1),\n    body TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_entries",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_entries (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    node_id INTEGER,\n    type TEXT NOT NULL CHECK (type IN ('note','material','lesson','benefit','correction','feedback','issue')),\n    purpose TEXT NOT NULL DEFAULT 'general' CHECK (purpose IN ('general','dev_note','deliverable')),\n    commitment_flag INTEGER NOT NULL DEFAULT 0 CHECK (commitment_flag IN (0,1)),\n    commitment_flag_source TEXT CHECK (commitment_flag_source IS NULL OR commitment_flag_source IN ('submitter','pm')),\n    is_risk INTEGER NOT NULL DEFAULT 0 CHECK (is_risk IN (0,1)),\n    source_party_id INTEGER,\n    source_name TEXT,\n    operator_user_id INTEGER NOT NULL,\n    operator_identity_snapshot TEXT NOT NULL CHECK (json_valid(operator_identity_snapshot)),\n    period TEXT NOT NULL CHECK (period IN ('process','supplement')),\n    days_after_close INTEGER,\n    business_date DATE CHECK (business_date IS NULL OR (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(business_date,'+0 days') IS NOT NULL AND date(business_date,'+0 days') = business_date AND business_date BETWEEN '2000-01-01' AND '2099-12-31')),\n    title TEXT NOT NULL,\n    body TEXT NOT NULL,\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    routing_json TEXT CHECK (routing_json IS NULL OR json_valid(routing_json)),\n    from_comment_id INTEGER,\n    parent_entry_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((commitment_flag = 1) = (commitment_flag_source IS NOT NULL)),\n    CHECK ((period = 'supplement') = (days_after_close IS NOT NULL)),\n    CHECK (days_after_close IS NULL OR days_after_close >= 0),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_entry_items",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_entry_items (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    entry_id INTEGER NOT NULL,\n    item_id INTEGER NOT NULL,\n    item_version_id INTEGER NOT NULL,\n    assigned_by_action_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_entry_actions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_entry_actions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    entry_id INTEGER NOT NULL,\n    action TEXT NOT NULL CHECK (action IN ('conclude','for_reference','correct','void','link_change','link_sys_issue','assign_items','split','escalate','mark_commitment','adjudicate')),\n    conclusion_kind TEXT CHECK (conclusion_kind IS NULL OR conclusion_kind IN ('handled','adopted','not_adopted','deferred','to_change','to_sys_iteration','no_further','project_terminated')),\n    basis_kind TEXT CHECK (basis_kind IS NULL OR basis_kind IN ('dev_note_version','pm_verify')),\n    basis_ref INTEGER,\n    text TEXT,\n    sys_issue_no TEXT,\n    assignee_text TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((action IN ('conclude','adjudicate')) = (conclusion_kind IS NOT NULL)),\n    CHECK (basis_kind IS NULL OR basis_ref IS NOT NULL OR basis_kind = 'pm_verify'),\n    CHECK (action <> 'link_sys_issue' OR (sys_issue_no IS NOT NULL AND length(trim(sys_issue_no)) > 0))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_changes",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_changes (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    title TEXT NOT NULL,\n    body TEXT NOT NULL,\n    affects_json TEXT NOT NULL CHECK (json_valid(affects_json)),\n    package_version_id INTEGER,\n    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','pending','effective','withdrawn')),\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status <> 'effective' OR package_version_id IS NOT NULL),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_confirm_tasks",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_confirm_tasks (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    object_type TEXT NOT NULL CHECK (object_type IN ('package_version','item_version','invitation','delegation','dev_entry','conclusion','adjudication','handover')),\n    object_id INTEGER NOT NULL,\n    object_version_id INTEGER NOT NULL,\n    purpose TEXT NOT NULL CHECK (purpose IN ('package_confirm','proposer_confirm','accept_invitation','delegation_grant','delegation_accept','dev_key_confirm','conclusion_confirm','adjudicate','handover_accept')),\n    party_id INTEGER,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (object_type NOT IN ('invitation','delegation') OR object_version_id = object_id)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_confirm_task_revisions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_confirm_task_revisions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_id INTEGER NOT NULL,\n    rev_no INTEGER NOT NULL CHECK (rev_no >= 1),\n    required_member_id INTEGER NOT NULL,\n    basis_appointment_id INTEGER,\n    basis_delegation_id INTEGER,\n    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','objected','rejected','invalid','superseded')),\n    status_reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status NOT IN ('invalid','superseded') OR (status_reason IS NOT NULL AND length(trim(status_reason)) > 0))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_confirmations",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_confirmations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_revision_id INTEGER,\n    object_type TEXT NOT NULL CHECK (object_type IN ('package_version','item_version','invitation','delegation','dev_entry','conclusion','adjudication','handover')),\n    object_version_id INTEGER NOT NULL,\n    actor_user_id INTEGER,\n    actual_confirmer TEXT,\n    identity_basis TEXT,\n    method TEXT NOT NULL CHECK (method IN ('platform','card','proxy','history')),\n    decision TEXT NOT NULL CHECK (decision IN ('confirm','object','reject')),\n    checkbox_text TEXT,\n    reason TEXT,\n    view_id INTEGER,\n    external_date DATE CHECK (external_date IS NULL OR (external_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(external_date,'+0 days') IS NOT NULL AND date(external_date,'+0 days') = external_date AND external_date BETWEEN '2000-01-01' AND '2099-12-31')),\n    proxy_by INTEGER,\n    card_instance_id INTEGER,\n    dingtalk_user_id TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((method = 'history') = (task_revision_id IS NULL)),\n    CHECK (method <> 'platform' OR (actor_user_id IS NOT NULL AND view_id IS NOT NULL AND checkbox_text IS NOT NULL AND length(trim(checkbox_text)) > 0)),\n    CHECK (method <> 'card' OR (actor_user_id IS NOT NULL AND card_instance_id IS NOT NULL AND dingtalk_user_id IS NOT NULL)),\n    CHECK (method NOT IN ('proxy','history') OR (external_date IS NOT NULL AND actual_confirmer IS NOT NULL AND length(trim(actual_confirmer)) > 0 AND identity_basis IS NOT NULL AND length(trim(identity_basis)) > 0 AND view_id IS NULL AND checkbox_text IS NULL)),\n    CHECK (method NOT IN ('proxy','history') OR proxy_by IS NOT NULL),\n    CHECK (decision = 'confirm' OR (reason IS NOT NULL AND length(trim(reason)) > 0))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_views",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_views (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id INTEGER NOT NULL,\n    object_type TEXT NOT NULL CHECK (object_type IN ('package_version','item_version','invitation','delegation','dev_entry','conclusion','adjudication','handover')),\n    object_version_id INTEGER NOT NULL,\n    source TEXT NOT NULL CHECK (source IN ('page','self_submit','card_render')),\n    card_instance_id INTEGER,\n    frozen_attachment_set TEXT NOT NULL CHECK (json_valid(frozen_attachment_set)),\n    opened_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((source = 'card_render') = (card_instance_id IS NOT NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_golive_events",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_golive_events (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    batch_id INTEGER NOT NULL,\n    kind TEXT NOT NULL CHECK (kind IN ('golive','revoke','regolive')),\n    handover_snapshot_json TEXT CHECK (handover_snapshot_json IS NULL OR json_valid(handover_snapshot_json)),\n    reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (kind <> 'revoke' OR (reason IS NOT NULL AND length(trim(reason)) > 0)),\n    CHECK (kind = 'revoke' OR handover_snapshot_json IS NOT NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_notices",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_notices (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    kind TEXT NOT NULL CHECK (kind IN ('schedule_change','for_reference')),\n    ref_type TEXT NOT NULL,\n    ref_id INTEGER NOT NULL,\n    recipient_member_id INTEGER NOT NULL,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_notice_attempts",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_notice_attempts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    notice_id INTEGER NOT NULL,\n    channel TEXT NOT NULL CHECK (channel IN ('dingtalk','platform')),\n    result TEXT NOT NULL CHECK (result IN ('sent','failed')),\n    response_code TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_notice_receipts",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_notice_receipts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    attempt_id INTEGER NOT NULL,\n    read_status TEXT NOT NULL CHECK (read_status IN ('unknown','read','unread')),\n    checked_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_comments",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_comments (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    object_type TEXT NOT NULL CHECK (object_type IN ('entry','item','package_version','node')),\n    object_id INTEGER NOT NULL,\n    author_user_id INTEGER NOT NULL,\n    body TEXT NOT NULL,\n    mentions_json TEXT CHECK (mentions_json IS NULL OR json_valid(mentions_json)),\n    upgraded_entry_id INTEGER,\n    voided_at DATETIME,\n    void_reason TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((voided_at IS NULL) = (void_reason IS NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_attachments",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_attachments (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    file_name TEXT NOT NULL UNIQUE,\n    original_name TEXT NOT NULL,\n    mime_type TEXT,\n    size INTEGER NOT NULL CHECK (size >= 0),\n    sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),\n    is_image INTEGER NOT NULL DEFAULT 0 CHECK (is_image IN (0,1)),\n    supersedes_attachment_id INTEGER,\n    uploaded_by INTEGER NOT NULL,\n    staged_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    deleted_at DATETIME,\n    deleted_by INTEGER,\n    masked_at DATETIME,\n    masked_by INTEGER,\n    mask_reason TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((deleted_at IS NULL) = (deleted_by IS NULL)),\n    CHECK ((masked_at IS NULL) = (masked_by IS NULL)),\n    CHECK (masked_at IS NULL OR (mask_reason IS NOT NULL AND length(trim(mask_reason)) > 0))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_attachment_bindings",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_attachment_bindings (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    attachment_id INTEGER NOT NULL UNIQUE,\n    owner_type TEXT NOT NULL CHECK (owner_type IN ('entry','item_version','material_version','confirmation','change','golive_event','history_import','comment','schedule_record','package_version','event')),\n    owner_id INTEGER NOT NULL,\n    bound_by INTEGER NOT NULL,\n    bound_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_frozen_attachments",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_frozen_attachments (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    object_type TEXT NOT NULL CHECK (object_type IN ('package_version','item_version','entry','material_version','change')),\n    object_version_id INTEGER NOT NULL,\n    attachment_id INTEGER NOT NULL,\n    sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_batch_relations",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_batch_relations (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    from_batch_id INTEGER NOT NULL,\n    to_batch_id INTEGER,\n    kind TEXT NOT NULL CHECK (kind IN ('split','merge','replace','transfer')),\n    change_package_version_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (kind = 'transfer' OR (to_batch_id IS NOT NULL AND to_batch_id <> from_batch_id))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_routing_snapshots",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_routing_snapshots (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    entry_id INTEGER NOT NULL,\n    part_no INTEGER NOT NULL CHECK (part_no >= 1),\n    overall_package_version_id INTEGER,\n    item_version_id INTEGER,\n    committed_batch_id INTEGER,\n    golive_event_id INTEGER,\n    decided_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    trigger_action_id INTEGER,\n    route TEXT NOT NULL CHECK (route IN ('project','sys_iteration','pending')),\n    CHECK (route = 'pending' OR (overall_package_version_id IS NOT NULL AND item_version_id IS NOT NULL AND committed_batch_id IS NOT NULL)),\n    CHECK (route <> 'sys_iteration' OR golive_event_id IS NOT NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_history_imports",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_history_imports (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    object_type TEXT NOT NULL,\n    object_id INTEGER NOT NULL,\n    fact_type TEXT NOT NULL CHECK (fact_type IN ('appointment','delegation','package_effective','node_closed','golive')),\n    actual_confirmer TEXT NOT NULL CHECK (length(trim(actual_confirmer)) > 0),\n    identity_basis TEXT NOT NULL CHECK (length(trim(identity_basis)) > 0),\n    original_date DATE NOT NULL CHECK (original_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(original_date,'+0 days') IS NOT NULL AND date(original_date,'+0 days') = original_date AND original_date BETWEEN '2000-01-01' AND '2099-12-31'),\n    imported_by INTEGER NOT NULL,\n    imported_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_send_intents",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_send_intents (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    purpose TEXT NOT NULL,\n    ref_type TEXT NOT NULL,\n    ref_id INTEGER NOT NULL,\n    recipient_user_id INTEGER NOT NULL,\n    channel TEXT NOT NULL DEFAULT 'dingtalk' CHECK (channel IN ('dingtalk','platform')),\n    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed')),\n    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),\n    last_error TEXT,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_card_instances",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_card_instances (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_revision_id INTEGER NOT NULL,\n    recipient_user_id INTEGER NOT NULL,\n    dingtalk_user_id TEXT NOT NULL,\n    rendered_object_version_id INTEGER NOT NULL,\n    rendered_snapshot_json TEXT NOT NULL CHECK (json_valid(rendered_snapshot_json)),\n    out_track_id TEXT NOT NULL UNIQUE,\n    status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','updated','expired')),\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_guide_state",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_guide_state (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    user_id INTEGER NOT NULL,\n    guide_key TEXT NOT NULL,\n    seen_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    UNIQUE (user_id, guide_key)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_events",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_events (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER,\n    object_type TEXT NOT NULL,\n    object_id INTEGER,\n    event_type TEXT NOT NULL CHECK (event_type GLOB '[a-z]*' AND event_type NOT GLOB '*[^a-z_]*'),\n    payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),\n    operator_id INTEGER NOT NULL,\n    operator_name TEXT NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_projects_pm",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_projects_pm ON sysbuild_projects(pm_user_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_parties_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_parties_project ON sysbuild_parties(project_id, side)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_parties_one_dev",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_parties_one_dev ON sysbuild_parties(project_id) WHERE side = 'dev'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_members_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_members_project ON sysbuild_members(project_id, party_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_members_user",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_members_user ON sysbuild_members(user_id, project_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_members_active_user",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_members_active_user ON sysbuild_members(project_id, user_id) WHERE user_id IS NOT NULL AND removed_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_appointments_party",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_appointments_party ON sysbuild_appointments(party_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_appointments_active",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_appointments_active ON sysbuild_appointments(party_id) WHERE status = 'active'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_delegations_party",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_delegations_party ON sysbuild_delegations(party_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_delegations_active",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_delegations_active ON sysbuild_delegations(party_id) WHERE status = 'active'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_invitations_member",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_invitations_member ON sysbuild_invitations(member_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_batches_seq",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_batches_seq ON sysbuild_batches(project_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_batches_default",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_batches_default ON sysbuild_batches(project_id) WHERE is_default = 1"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_nodes_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_nodes_project ON sysbuild_nodes(project_id, batch_id, sort_order)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_nodes_golive",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_nodes_golive ON sysbuild_nodes(batch_id) WHERE is_golive_milestone = 1"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_schedule_node",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_schedule_node ON sysbuild_node_schedule_records(node_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_schedule_baseline",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_schedule_baseline ON sysbuild_node_schedule_records(node_id) WHERE kind = 'baseline'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_modules_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_modules_project ON sysbuild_modules(project_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_items_code",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_items_code ON sysbuild_items(project_id, code)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_item_versions_no",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_item_versions_no ON sysbuild_item_versions(item_id, version_no)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_packages_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_packages_project ON sysbuild_packages(project_id, type, batch_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_package_versions_no",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_package_versions_no ON sysbuild_package_versions(package_id, version_no)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_package_versions_effective",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_package_versions_effective ON sysbuild_package_versions(package_id) WHERE status = 'effective'"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_package_versions_pending",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_package_versions_pending ON sysbuild_package_versions(package_id) WHERE status = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_pkg_item_rev_version",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_pkg_item_rev_version ON sysbuild_package_item_revisions(package_version_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_materials_key",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_materials_key ON sysbuild_materials(node_id, material_key)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_material_versions_no",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_material_versions_no ON sysbuild_material_versions(material_id, version_no)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_entries_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_entries_project ON sysbuild_entries(project_id, node_id, period)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_entries_type",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_entries_type ON sysbuild_entries(project_id, type)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_entry_items_entry",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_entry_items_entry ON sysbuild_entry_items(entry_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_entry_items_item",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_entry_items_item ON sysbuild_entry_items(item_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_entry_actions_entry",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_entry_actions_entry ON sysbuild_entry_actions(entry_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_changes_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_changes_project ON sysbuild_changes(project_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_confirm_tasks_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_confirm_tasks_project ON sysbuild_confirm_tasks(project_id, object_type, object_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_task_revisions_no",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_task_revisions_no ON sysbuild_confirm_task_revisions(task_id, rev_no)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_task_revisions_pending",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_task_revisions_pending ON sysbuild_confirm_task_revisions(task_id) WHERE status = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_task_revisions_member",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_task_revisions_member ON sysbuild_confirm_task_revisions(required_member_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_confirmations_revision",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_confirmations_revision ON sysbuild_confirmations(task_revision_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_confirmations_object",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_confirmations_object ON sysbuild_confirmations(object_type, object_version_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_views_user_object",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_views_user_object ON sysbuild_views(user_id, object_type, object_version_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_golive_batch",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_golive_batch ON sysbuild_golive_events(batch_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_notices_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_notices_project ON sysbuild_notices(project_id, recipient_member_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_notice_attempts_notice",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_notice_attempts_notice ON sysbuild_notice_attempts(notice_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_notice_receipts_attempt",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_notice_receipts_attempt ON sysbuild_notice_receipts(attempt_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_comments_object",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_comments_object ON sysbuild_comments(project_id, object_type, object_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_attachments_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_attachments_project ON sysbuild_attachments(project_id, uploaded_by)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_bindings_owner",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_bindings_owner ON sysbuild_attachment_bindings(owner_type, owner_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_frozen",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_frozen ON sysbuild_frozen_attachments(object_type, object_version_id, attachment_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_frozen_attachment",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_frozen_attachment ON sysbuild_frozen_attachments(attachment_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_batch_relations_from",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_batch_relations_from ON sysbuild_batch_relations(from_batch_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_batch_relations_to",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_batch_relations_to ON sysbuild_batch_relations(to_batch_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_routing_part",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_routing_part ON sysbuild_routing_snapshots(entry_id, part_no, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_routing_batch",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_routing_batch ON sysbuild_routing_snapshots(committed_batch_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_history_imports_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_history_imports_project ON sysbuild_history_imports(project_id, object_type, object_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_send_intents_status",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_send_intents_status ON sysbuild_send_intents(status, project_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_card_instances_revision",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_card_instances_revision ON sysbuild_card_instances(task_revision_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_events_project",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_events_project ON sysbuild_events(project_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_events_object",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_events_object ON sysbuild_events(object_type, object_id)"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_packages",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_packages (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    batch_id INTEGER,\n    type TEXT NOT NULL CHECK (type IN ('initiation','overall','batch_req','batch_accept','change','closing')),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (type NOT IN ('batch_req','batch_accept') OR batch_id IS NOT NULL),\n    CHECK (type NOT IN ('initiation','overall','closing') OR batch_id IS NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_package_versions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_package_versions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    package_id INTEGER NOT NULL,\n    version_no INTEGER NOT NULL CHECK (version_no >= 1),\n    parent_overall_version_id INTEGER,\n    form TEXT CHECK (form IS NULL OR form IN ('overall','overall_batch_req')),\n    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','pending','effective','superseded')),\n    effective_at DATETIME,\n    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status <> 'effective' OR effective_at IS NOT NULL),\n    CHECK (status NOT IN ('draft','pending') OR effective_at IS NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_attachment_refs",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_attachment_refs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    attachment_id INTEGER NOT NULL,\n    owner_type TEXT NOT NULL CHECK (owner_type IN ('entry','item_version','material_version','confirmation','change','golive_event','history_import','comment','schedule_record','package_version','event')),\n    owner_id INTEGER NOT NULL,\n    ref_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime'))\n  )"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_modules_name",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_modules_name ON sysbuild_modules(project_id, name)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_packages_project_single",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_packages_project_single ON sysbuild_packages(project_id, type) WHERE type IN ('initiation','overall','closing')"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_packages_batch_single",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_packages_batch_single ON sysbuild_packages(batch_id, type) WHERE type IN ('batch_req','batch_accept')"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_package_versions_draft",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_package_versions_draft ON sysbuild_package_versions(package_id) WHERE status = 'draft'"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_attachment_refs",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_attachment_refs ON sysbuild_attachment_refs(attachment_id, owner_type, owner_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_sysbuild_attachment_refs_owner",
+      "sql": "CREATE INDEX IF NOT EXISTS idx_sysbuild_attachment_refs_owner ON sysbuild_attachment_refs(owner_type, owner_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_confirmations_revision",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_confirmations_revision ON sysbuild_confirmations(task_revision_id) WHERE task_revision_id IS NOT NULL"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_entries",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_entries (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    node_id INTEGER,\n    type TEXT NOT NULL CHECK (type IN ('note','material','lesson','benefit','correction','feedback','issue')),\n    purpose TEXT NOT NULL DEFAULT 'general' CHECK (purpose IN ('general','dev_note','deliverable')),\n    commitment_flag INTEGER NOT NULL DEFAULT 0 CHECK (commitment_flag IN (0,1)),\n    commitment_flag_source TEXT CHECK (commitment_flag_source IS NULL OR commitment_flag_source IN ('submitter','pm')),\n    is_risk INTEGER NOT NULL DEFAULT 0 CHECK (is_risk IN (0,1)),\n    source_party_id INTEGER,\n    source_name TEXT,\n    operator_user_id INTEGER NOT NULL,\n    operator_identity_snapshot TEXT NOT NULL CHECK (json_valid(operator_identity_snapshot)),\n    period TEXT NOT NULL CHECK (period IN ('process','supplement')),\n    days_after_close INTEGER,\n    business_date DATE CHECK (business_date IS NULL OR (business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(business_date,'+0 days') IS NOT NULL AND date(business_date,'+0 days') = business_date AND business_date BETWEEN '2000-01-01' AND '2099-12-31')),\n    title TEXT NOT NULL,\n    body TEXT NOT NULL,\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    routing_json TEXT CHECK (routing_json IS NULL OR json_valid(routing_json)),\n    from_comment_id INTEGER,\n    parent_entry_id INTEGER,\n    objects_entry_id INTEGER,\n    revision_of_entry_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((parent_entry_id IS NOT NULL) + (objects_entry_id IS NOT NULL) + (revision_of_entry_id IS NOT NULL) <= 1),\n    CHECK ((commitment_flag = 1) = (commitment_flag_source IS NOT NULL)),\n    CHECK ((period = 'supplement') = (days_after_close IS NOT NULL)),\n    CHECK (days_after_close IS NULL OR days_after_close >= 0),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_entry_actions",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_entry_actions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    entry_id INTEGER NOT NULL,\n    action TEXT NOT NULL CHECK (action IN ('conclude','for_reference','correct','void','link_change','link_sys_issue','assign_items','split','escalate','mark_commitment','adjudicate','unmark_commitment','mark_risk','unmark_risk')),\n    conclusion_kind TEXT CHECK (conclusion_kind IS NULL OR conclusion_kind IN ('handled','adopted','not_adopted','deferred','to_change','to_sys_iteration','no_further','project_terminated')),\n    basis_kind TEXT CHECK (basis_kind IS NULL OR basis_kind IN ('dev_note_version','pm_verify')),\n    basis_ref INTEGER,\n    text TEXT,\n    sys_issue_no TEXT,\n    assignee_text TEXT,\n    change_id INTEGER,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((action IN ('conclude','adjudicate')) = (conclusion_kind IS NOT NULL)),\n    CHECK (basis_kind IS NULL OR basis_ref IS NOT NULL OR basis_kind = 'pm_verify'),\n    CHECK (action <> 'link_sys_issue' OR (sys_issue_no IS NOT NULL AND length(trim(sys_issue_no)) > 0)),\n    CHECK (change_id IS NULL OR action IN ('conclude','link_change')),\n    CHECK (action <> 'conclude' OR ((conclusion_kind = 'to_change') = (change_id IS NOT NULL))),\n    CHECK (action <> 'link_change' OR change_id IS NOT NULL)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_changes",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_changes (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    package_id INTEGER NOT NULL,\n    title TEXT NOT NULL,\n    body TEXT NOT NULL,\n    affects_json TEXT NOT NULL CHECK (json_valid(affects_json)),\n    package_version_id INTEGER,\n    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','pending','effective','withdrawn')),\n    no_written_evidence INTEGER NOT NULL DEFAULT 0 CHECK (no_written_evidence IN (0,1)),\n    no_evidence_reason TEXT,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    updated_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (status <> 'effective' OR package_version_id IS NOT NULL),\n    CHECK (no_written_evidence = 0 OR (no_evidence_reason IS NOT NULL AND length(trim(no_evidence_reason)) >= 10))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_notice_objections",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_notice_objections (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    notice_id INTEGER NOT NULL,\n    actor_user_id INTEGER NOT NULL,\n    member_id INTEGER NOT NULL,\n    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),\n    mode TEXT NOT NULL CHECK (mode IN ('return_to_handling','supplement_entry')),\n    objection_entry_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((mode = 'supplement_entry') = (objection_entry_id IS NOT NULL))\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_routing_snapshots",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_routing_snapshots (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    entry_id INTEGER NOT NULL,\n    part_no INTEGER NOT NULL CHECK (part_no >= 1),\n    overall_package_version_id INTEGER,\n    item_version_id INTEGER,\n    committed_batch_id INTEGER,\n    golive_event_id INTEGER,\n    decided_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    trigger_action_id INTEGER,\n    route TEXT NOT NULL CHECK (route IN ('project','sys_iteration','pending')),\n    basis_category TEXT NOT NULL CHECK (basis_category IN ('in_plan','planned_detail','out_of_plan','undetermined')),\n    CHECK ((route = 'pending') = (basis_category = 'undetermined')),\n    CHECK (basis_category <> 'undetermined' OR (overall_package_version_id IS NULL AND item_version_id IS NULL AND committed_batch_id IS NULL AND golive_event_id IS NULL)),\n    CHECK (basis_category <> 'in_plan' OR (overall_package_version_id IS NOT NULL AND item_version_id IS NOT NULL AND route IN ('project', 'sys_iteration')\n      AND (route <> 'project' OR committed_batch_id IS NOT NULL) AND (route <> 'sys_iteration' OR golive_event_id IS NOT NULL))),\n    CHECK (basis_category <> 'planned_detail' OR (item_version_id IS NOT NULL AND route = 'project')),\n    CHECK (basis_category <> 'out_of_plan' OR (item_version_id IS NULL AND route IN ('sys_iteration', 'project')))\n  )"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_changes_package",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_changes_package ON sysbuild_changes(package_id)"
+    },
+    {
+      "type": "index",
+      "name": "uq_sysbuild_notice_objections",
+      "sql": "CREATE UNIQUE INDEX IF NOT EXISTS uq_sysbuild_notice_objections ON sysbuild_notice_objections(notice_id)"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_confirm_tasks",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_confirm_tasks (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    project_id INTEGER NOT NULL,\n    object_type TEXT NOT NULL CHECK (object_type IN ('package_version','item_version','invitation','delegation','dev_entry','conclusion','adjudication','handover')),\n    object_id INTEGER NOT NULL,\n    object_version_id INTEGER NOT NULL,\n    purpose TEXT NOT NULL CHECK (purpose IN ('package_confirm','proposer_confirm','accept_invitation','delegation_grant','delegation_accept','dev_key_confirm','conclusion_confirm','adjudicate','handover_accept','handover_accept_issue','handover_no_further')),\n    party_id INTEGER,\n    created_by INTEGER NOT NULL,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK (object_type NOT IN ('invitation','delegation') OR object_version_id = object_id)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "sysbuild_notice_objections",
+      "sql": "CREATE TABLE IF NOT EXISTS sysbuild_notice_objections (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    notice_id INTEGER NOT NULL,\n    actor_user_id INTEGER NOT NULL,\n    member_id INTEGER NOT NULL,\n    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),\n    mode TEXT NOT NULL CHECK (mode IN ('return_to_handling','supplement_entry','to_pm')),\n    objection_entry_id INTEGER,\n    created_at DATETIME NOT NULL DEFAULT (datetime('now','localtime')),\n    CHECK ((mode = 'supplement_entry') = (objection_entry_id IS NOT NULL))\n  )"
+    }
+  ],
+  "versions": [
+    {
+      "version": 1,
+      "knownCommit": "204bb3e6",
+      "commit": "204bb3e6c7851c51972d63edda4693d924b77247",
+      "schemaBlobSha1": "6993624fc6746917d08eecc07097f6d26e6b1bca",
+      "schemaSourceSha256": "0b2ed8e3f695e2c556e1b166683fb19082269d0dd15a6ed77066db22dfa2358e",
+      "digest": "f38f94bc8bb9c6b82105b5b2fe87b64580c4a1c22df9bc287b8fe53ee681b598",
+      "tableCount": 40,
+      "objectCount": 98,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "version": 2,
+      "knownCommit": "2822af79",
+      "commit": "2822af795f12b716a0dee9da29adb4a45224f8fe",
+      "schemaBlobSha1": "20df6553a5f1587060ce80c35c488548f413869f",
+      "schemaSourceSha256": "f4f8da0937084140c0885c64b03dd6ce540ef0b0d7e9712015b803a58773aa02",
+      "digest": "95537c016da55079608085e942c866bd4da4caeea63dd34656f4f2d421ef0980",
+      "tableCount": 41,
+      "objectCount": 105,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        98,
+        99,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        100,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        101,
+        58,
+        59,
+        60,
+        102,
+        103,
+        61,
+        62,
+        63,
+        104,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        105,
+        106,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "version": 3,
+      "knownCommit": "5a988b8c",
+      "commit": "5a988b8c3d5cc71e8ddc8a64501748d7a9b47a03",
+      "schemaBlobSha1": "1e3bdbd1a45ecc3495973ea5ed0425f93f672c6c",
+      "schemaSourceSha256": "3d72327f4b6d888db84dc1aaa611e4269d885aa2c2daa25fda09e385c3e4c147",
+      "digest": "e25f10b47025e8184f9903c5e5c4f99de079ade904734fea623d68785a55f7de",
+      "tableCount": 41,
+      "objectCount": 106,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        98,
+        99,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        100,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        101,
+        58,
+        59,
+        60,
+        102,
+        103,
+        61,
+        62,
+        63,
+        104,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        107,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        105,
+        106,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "version": 4,
+      "knownCommit": "66831372",
+      "commit": "66831372d14f007eefc692a0b6416e5281da4cce",
+      "schemaBlobSha1": "fef471519bef1e5fa91d3a2c2cbae70053f594a8",
+      "schemaSourceSha256": "e1c0f21eeae1c81d9abc07226b0592a172647a962664736f73799d85a9d53a91",
+      "digest": "1ab09f7baf3da294d4e6d859015579037987fde747b1c85db37e36bedab37731",
+      "tableCount": 42,
+      "objectCount": 109,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        98,
+        99,
+        14,
+        15,
+        16,
+        108,
+        18,
+        109,
+        110,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        111,
+        29,
+        30,
+        31,
+        100,
+        32,
+        33,
+        112,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        101,
+        58,
+        59,
+        60,
+        102,
+        103,
+        61,
+        62,
+        63,
+        104,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        113,
+        73,
+        74,
+        75,
+        76,
+        77,
+        107,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        114,
+        84,
+        85,
+        86,
+        105,
+        106,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "version": 5,
+      "knownCommit": "1c590228",
+      "commit": "1c59022808a2f9918e6432031f2f7d8d71435614",
+      "schemaBlobSha1": "350a17b069ac8b9aea70b304fecb39cac85cbcb5",
+      "schemaSourceSha256": "574f298d2e50941b9179775f1e7f308c44b4ed97b75481b573ab7bb74ad992ee",
+      "digest": "ee74d8f6bfd8bd494738b117c149ce2b810a6f3b729f3bf87d9982e348f8cd6a",
+      "tableCount": 42,
+      "objectCount": 109,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        98,
+        99,
+        14,
+        15,
+        16,
+        108,
+        18,
+        109,
+        110,
+        115,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        111,
+        29,
+        30,
+        31,
+        100,
+        32,
+        33,
+        112,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        101,
+        58,
+        59,
+        60,
+        102,
+        103,
+        61,
+        62,
+        63,
+        104,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        113,
+        73,
+        74,
+        75,
+        76,
+        77,
+        107,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        114,
+        84,
+        85,
+        86,
+        105,
+        106,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    },
+    {
+      "version": 6,
+      "knownCommit": "8bbc6e78",
+      "commit": "8bbc6e78bffa0ef9e939417af192640decc1e9e9",
+      "schemaBlobSha1": "bba7993b1d1e0700f7aa4ffe19b41e722006d409",
+      "schemaSourceSha256": "2ba3c7259aeb30ffd9704fa68bd41c2a9892c2ca63113583b1fb9e8d6adc00f0",
+      "digest": "b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7",
+      "tableCount": 42,
+      "objectCount": 109,
+      "objectRefs": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        98,
+        99,
+        14,
+        15,
+        16,
+        108,
+        18,
+        109,
+        110,
+        115,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        116,
+        29,
+        30,
+        31,
+        100,
+        32,
+        33,
+        112,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        101,
+        58,
+        59,
+        60,
+        102,
+        103,
+        61,
+        62,
+        63,
+        104,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        113,
+        73,
+        74,
+        75,
+        76,
+        77,
+        107,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        114,
+        84,
+        85,
+        86,
+        105,
+        106,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97
+      ]
+    }
+  ]
+}

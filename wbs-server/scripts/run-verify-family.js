@@ -82,6 +82,16 @@ function buildFamilyMembers(root, serviceMembers) {
   // C12: all ledger invariants/actions share one explicitly registered FAMILY member.
   add('verify-it-ledger --matrix', path.join('scripts', 'verify-it-ledger.js'), ['--matrix']);
   add('verify-it-reconcile', path.join('scripts', 'verify-it-reconcile.js'));
+  // #113 C1–C9：生产基线之外仅追加项目管理模块的九个成员；阶段变异自检单独运行。
+  add('verify-sysbuild-db', scripts('verify-sysbuild-db'));
+  add('verify-sysbuild-schema', scripts('verify-sysbuild-schema'));
+  add('verify-sysbuild-attachments', scripts('verify-sysbuild-attachments'));
+  add('verify-sysbuild-static', scripts('verify-sysbuild-static'));
+  add('verify-sysbuild-static --self-test', scripts('verify-sysbuild-static'), ['--self-test']);
+  add('verify-sysbuild-e2e', scripts('verify-sysbuild-e2e'));
+  add('verify-sysbuild-api', scripts('verify-sysbuild-api'));
+  add('verify-sysbuild-browser', scripts('verify-sysbuild-browser'));
+  add('verify-sysbuild-predeploy', scripts('verify-sysbuild-predeploy'));
   // #95: loopback fixtures must bind through scripts/lib/listen-safe-port.js (helper self-check + static no-listen(0) guard).
   for (const name of ['verify-listen-safe-port', 'verify-no-listen-zero']) add(name, scripts(name));
   // #106 S4-x：test-env 收尾助手 finish(code) 的自检（进程内接缝 + 父进程假服务 / 临时库的真实子进程，不起测试实例、不碰业务库，约 10 秒）。

@@ -17,6 +17,7 @@
 
 /**
  * 已迁移：S3b 的 8 个代表脚本（前 8 个）+ S4b1 的 12 个（e4fc425a）+ S4b2a 的 5 个（fa1dfc14）+ S4b2b 的 2 个（G2 / G3）+ S4c-1 的 27 个 + S4c-2 的 4 个（c2288509）+ S4d-1 的 17 个（43e461be）+ S4d-2 的 15 个（92e4350f）+ S4d-3 的 11 个（a88c1c2f）+ S4d-4 的 12 个（9e5df4f8）+ S4d-5 的 10 个，共 123 个；S6b 追加 verify-html-fingerprint-e2e.js 1 个，共 124 个。
+ * 当前候选：生产基线另含 #208 C3 两项，共126；仅追加 #113 C1c / C2a / C7 / C9 四项后为130。EXEMPT45、INFRA20、SELF_ISOLATED6维持生产集合。
  * 未登记：verify-issue-lite-void-migration.js / verify-periodic-push.js（没有 ready，按各自现有分类处理）；verify-issue-notify-v1740.js（纯函数、无 I/O）/ test-collab-resume.js（直接调启动器、不经 test-env）落「其他」类，须 Tier-1 零命中。
  */
 const MIGRATED = Object.freeze({
@@ -157,6 +158,11 @@ const MIGRATED = Object.freeze({
     'test-unify-visual-playwright.js': Object.freeze({}),
     // S6b（1）：页面缓存串注入的实例级检查（只读，经 test-env 起隔离实例；同时是 FAMILY 的需服务成员，不进验收批跑，见 lib/test-acceptance-batch.json 的 excluded）
     'verify-html-fingerprint-e2e.js': Object.freeze({}),
+    // #113 C1c / C2a / C7 / C9：仅追加本模块必需的四个 test-env 入口。
+    'verify-sysbuild-e2e.js': Object.freeze({}),
+    'verify-sysbuild-api.js': Object.freeze({}),
+    'verify-sysbuild-browser.js': Object.freeze({}),
+    'verify-sysbuild-predeploy.js': Object.freeze({}),
 });
 
 /** 已迁移脚本里「豁免必须调用 ready()」的（显式列出，附理由；理由本身由分析器核对：这类脚本不得有任何网络 / 库 / 进程 I/O）。原在 verify-test-env-suite.js，S4a 搬来 */

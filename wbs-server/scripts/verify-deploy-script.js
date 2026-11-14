@@ -531,9 +531,14 @@ function staticChecks(buf) {
   const gitWrapper = functionBody(code, 'Invoke-Git') || '';
   check('S11 Invoke-Git 带 -WorkDir 仓库根，且仓库根没确定时拒绝起 git', /-WorkDir \$script:RepoRoot/.test(gitWrapper) && gitWrapper.indexOf('IsNullOrEmpty($script:RepoRoot)') >= 0 && gitWrapper.indexOf('IsNullOrEmpty($script:RepoRoot)') < gitWrapper.indexOf('Invoke-Local'));
   check('S11 ready-check 的 --repo 与回滚指引里的脚本路径都用仓库根 / 脚本自身位置', /'--repo', \$script:RepoRoot/.test(code) && !/node scripts\/deploy/.test(code));
-  // 第 5 / 8 步的判定：真实与 DryRun 都只经 Resolve-* 纯函数
+  // 第5/6b/8步的判定：真实与DryRun都只经独立Resolve-*纯函数；位置白名单精确，不只数总数。
   const step8 = regions['8'] || '';
-  check('S12 Resolve-BackupOutcome / Resolve-ReadyOutcome 各一个定义，协议判定 Read-Protocol 只在这两个函数与第 2 步预检里被调用', (code.match(/function Resolve-BackupOutcome\b/g) || []).length === 1 && (code.match(/function Resolve-ReadyOutcome\b/g) || []).length === 1 && occurrences(/Read-Protocol -Res/g, code) === 3, String(occurrences(/Read-Protocol -Res/g, code)));
+  const protocolOwners = ['Resolve-BackupOutcome', 'Resolve-ReadyOutcome', 'Resolve-SysbuildMigrationOutcome'];
+  const protocolCounts = protocolOwners.map((name) => occurrences(/Read-Protocol -Res/g, functionBody(code, name) || ''));
+  check('S12 三类Resolve分类器各一个定义，Read-Protocol精确位于各分类器一次和第2步预检一次',
+    protocolOwners.every((name) => (code.match(new RegExp('function ' + name + '\\b', 'g')) || []).length === 1)
+    && protocolCounts.every((n) => n === 1) && occurrences(/Read-Protocol -Res/g, regions['2'] || '') === 1
+    && occurrences(/Read-Protocol -Res/g, code) === 4, JSON.stringify({ owners: protocolCounts, total: occurrences(/Read-Protocol -Res/g, code) }));
   check('S12 第 8 步只经 Resolve-ReadyOutcome 判定（没有直接的协议解析）；DryRun 与真实路径喂同一个函数', step8.includes('$ro = Resolve-ReadyOutcome $rres') && !step8.includes('Read-Protocol') && occurrences(/Resolve-ReadyOutcome/g, step8) === 1 && step8.includes('New-FakeProc'));
   check('S12 第 5 步 DryRun 构造假的子进程结果（New-FakeProc）再喂 Resolve-BackupOutcome，不再直接合成结论', step5.includes('New-FakeProc') && step5.indexOf('New-FakeProc') < step5.indexOf('$bo = Resolve-BackupOutcome'));
   check('S12 Resolve-BackupOutcome 只看 stdout 协议行（不用退出码）', !/ExitCode/.test(functionBody(code, 'Resolve-BackupOutcome') || 'ExitCode') && !/ExitCode/.test(functionBody(code, 'Resolve-ReadyOutcome') || 'ExitCode') && !/ExitCode/.test(functionBody(code, 'Read-Protocol') || 'ExitCode'));
@@ -2011,6 +2016,15 @@ const MUTATIONS = [
   { name: '修复批 1c M2：Test-BackupSizeMatch 不比较两边大小（不相等也通过）', find: 'if ($a -ne $e) {', replace: 'if ($false) {', expect: ['U20', 'S24'], only: ['unit'] },
   { name: '修复批 1c M2：Test-BackupSizeMatch 期望大小读不到时放行（0 对 0、null 对任何值）', find: 'if ($null -eq $Expected -or -not [long]::TryParse([string]$Expected, [ref]$e) -or $e -le 0) {', replace: 'if ($false) {', expect: ['U20'], only: ['unit'] },
   { name: '混入裸 LF', transform: (buf) => Buffer.from(buf.toString('utf8').replace(`${CRLF}param(`, `\nparam(`), 'utf8'), expect: ['S2'], staticOnly: true },
+  { name: 'C9 迁移协议分类器重复定义', transform: (buf) => {
+    const fn = psFunctionText(stripBom(buf.toString('utf8')).replace(/\r/g, ''), 'Resolve-SysbuildMigrationOutcome');
+    return fn ? Buffer.from(buf.toString('utf8') + CRLF + fn.replace(/\n/g, CRLF) + CRLF, 'utf8') : buf;
+  }, expect: ['S12'], staticOnly: true },
+  { name: 'C9 迁移协议解析挪出分类器但总次数不变', transform: (buf) => {
+    const from = "$p = Read-Protocol -Res $Res -Prefixes @('SYSBUILD_MIGRATION_OK', 'SYSBUILD_MIGRATION_FAIL', 'SYSBUILD_MIGRATION_UNKNOWN')";
+    const text = buf.toString('utf8');
+    return text.split(from).length === 2 ? Buffer.from(text.replace(from, '$p = $null') + CRLF + "Read-Protocol -Res $null -Prefixes @('SYSBUILD_MIGRATION_OK')" + CRLF, 'utf8') : buf;
+  }, expect: ['S12'], staticOnly: true },
 ];
 
 /**

@@ -1,0 +1,7 @@
+{
+  "name": "sysbuild-pm-temp",
+  "version": "0.8.0-readonly.2",
+  "private": true,
+  "description": "Internal temporary PM system-build tracker with read-only archive access",
+  "scripts": { "start": "node server.cjs" }
+}

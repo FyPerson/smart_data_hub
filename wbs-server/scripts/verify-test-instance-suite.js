@@ -746,7 +746,7 @@ async function setup() {
         //   （首启之后留下的模板库里表都已建好，后面所有用例都从模板拷贝出发，不再有这些失败）
         warm = await startReal('预热', Object.assign({ sourceDbPath: emptySrc, sourceEncryptionKey: null, readyTimeoutMs: 90000, modules: EXPECTED_MODULES.filter((m) => m !== 'core') }, realServerOpts(), { nodeArgs: [...GUARD_ARGS, '--require', NOEXIT] }));
         startedHandles.push(warm);
-        check('S.1', '预热：空来源库经启动器起真服务（合成检出里的 server.js），除 core 外的 10 个模块全部就绪（空库首启的既有竞态让 core 如实报未就绪，不影响模板建表）', warm.modules && Object.keys(warm.modules).length === 11 && Object.entries(warm.modules).every(([n, m]) => n === 'core' || m.ready === true), warm.modules);
+        check('S.1', '预热：空来源库经启动器起真服务（合成检出里的 server.js），除 core 外的 11 个模块全部就绪（空库首启的既有竞态让 core 如实报未就绪，不影响模板建表）', warm.modules && Object.keys(warm.modules).length === 12 && Object.entries(warm.modules).every(([n, m]) => n === 'core' || m.ready === true), warm.modules);
         TEMPLATE = path.join(PRIV, 'template.db');
         await withDb(warm.dbPath, RO, (d) => new Promise((res, rej) => d.run('VACUUM INTO ?', [TEMPLATE], (e) => (e ? rej(e) : res()))));
         let warmStopErr = null;
@@ -814,7 +814,7 @@ async function sectionG() {
 }
 
 // ---------------------------------------------------------------- 节 A：正常启动 / 就绪接口 / 实例库 / 资源 / 停止
-const EXPECTED_MODULES = ['collab_dualcheck', 'core', 'correction', 'issue', 'issue_lite', 'issue_v1750', 'it_ledger', 'legacy_archive', 'periodic', 'quick_log', 'sys_iteration'];
+const EXPECTED_MODULES = ['collab_dualcheck', 'core', 'correction', 'issue', 'issue_lite', 'issue_v1750', 'it_ledger', 'legacy_archive', 'periodic', 'quick_log', 'sys_iteration', 'sysbuild'];
 
 async function sectionA() {
     console.log('\n== 节 A：正常启动 / 汇总就绪接口 / 实例库 / 资源复制 / 停止 ==');
@@ -849,9 +849,9 @@ async function sectionA() {
     const h = await httpJson(A.port, 'GET', '/api/health/ready');
     const names = h.json && h.json.modules ? Object.keys(h.json.modules).sort() : [];
     check('A2.1', '/api/health/ready 未登录 200，结构 { ok, instance, mode, modules }', h.status === 200 && h.json && JSON.stringify(Object.keys(h.json).sort()) === JSON.stringify(['instance', 'mode', 'modules', 'ok']) && h.json.instance === A.instance && h.json.mode === 'isolated' && h.json.ok === true, h);
-    check('A2.2', '模块名全集（11 个）', JSON.stringify(names) === JSON.stringify(EXPECTED_MODULES), names);
-    check('A2.3', '每个模块 { ready: true, code: null } 且 ok 与各模块一致（含 core：正常启动时 ALTER 的 duplicate column 幂等失败不算失败）', names.length === 11 && names.every((n) => h.json.modules[n].ready === true && h.json.modules[n].code === null && JSON.stringify(Object.keys(h.json.modules[n]).sort()) === '["code","ready"]') && h.json.ok === names.every((n) => h.json.modules[n].ready));
-    check('A2.4', '启动器返回的 modules 就是就绪时的汇总（全部 ready）', A.modules && Object.keys(A.modules).length === 11 && Object.values(A.modules).every((m) => m.ready === true));
+    check('A2.2', '模块名全集（12 个）', JSON.stringify(names) === JSON.stringify(EXPECTED_MODULES), names);
+    check('A2.3', '每个模块 { ready: true, code: null } 且 ok 与各模块一致（含 core：正常启动时 ALTER 的 duplicate column 幂等失败不算失败）', names.length === 12 && names.every((n) => h.json.modules[n].ready === true && h.json.modules[n].code === null && JSON.stringify(Object.keys(h.json.modules[n]).sort()) === '["code","ready"]') && h.json.ok === names.every((n) => h.json.modules[n].ready));
+    check('A2.4', '启动器返回的 modules 就是就绪时的汇总（全部 ready）', A.modules && Object.keys(A.modules).length === 12 && Object.values(A.modules).every((m) => m.ready === true));
 
     // ---- A3 实例库
     const idc = await instanceDb.checkInstanceIdentity(A.dbPath, { expectedInstance: A.instance, expectedParent: EXPECTED_PARENT });
@@ -987,7 +987,7 @@ async function sectionE() {
     check('E1.2', '.env 里的 SYS_TEST_HOOKS=1 / WEBHOOK_SECRET / DB_ENCRYPTION_KEY 没有回灌：子进程里三个键存在且实际值为空串；.env 里其余**每个**非白名单键（TI_ENV_FILE_MARKER / DINGTALK_APP_SECRET / GITHUB_TOKEN …）同样存在且为空串（观测的是子进程 process.env，不是 buildChildEnv 的返回对象）',
         late && late.own && Object.values(late.own).every((x) => x === true) && Object.values(late.e3).every((v) => v === '') && late.nonwl && ENV_NONWL_KEYS.filter((k) => k !== 'JWT_SECRET').every((k) => late.nonwl[k] === ''), late);
     check('E1.3', 'JWT_SECRET 仍是启动器给的（.env 里的不生效）：晚探针哈希 = 返回的 jwtSecret 的哈希', late && late.jwtSha === sha256(E.jwtSecret));
-    check('E1.4', 'DB_ENCRYPTION_KEY 为空串时隔离模式 server.js 正常启动：全部 11 个模块就绪，/api/version 为隔离模式', E.modules && Object.keys(E.modules).length === 11 && Object.values(E.modules).every((m) => m.ready === true) && (await httpJson(E.port, 'GET', '/api/version')).json.mode === 'isolated', E.modules);
+    check('E1.4', 'DB_ENCRYPTION_KEY 为空串时隔离模式 server.js 正常启动：全部 12 个模块就绪，/api/version 为隔离模式', E.modules && Object.keys(E.modules).length === 12 && Object.values(E.modules).every((m) => m.ready === true) && (await httpJson(E.port, 'GET', '/api/version')).json.mode === 'isolated', E.modules);
     const snapE = serverSnap(E.dataDir, E.pid);
     const leaksE = envValueLeaks(snapE);
     check('E1.5', '子进程快照与日志里没有 .env 的合成密钥；全部环境值的 sha256 里没有来源键 / 钉钉真值 / 外部库口令 / 合成 .env 非白名单值（含 .env 里 Path / TEMP / TMP / tz 的值）', leaksE !== null && leaksE.length === 0 && !JSON.stringify(readSnapshots(E.dataDir)).includes(ENV_FILE_KEY) && !fs.readFileSync(E.logFile, 'utf8').includes(ENV_FILE_KEY), leaksE);
@@ -1670,7 +1670,10 @@ async function sectionU() {
         && tm({ core: okm, issue: okm }, 'all').length === 0
         && tm({ issue: TERM('INIT_FAILED'), it_ledger: TERM('LEDGER_UNAVAILABLE') }, 'all').join() === 'issue,it_ledger'
         && tm({ issue: TERM('INIT_FAILED'), quick_log: TERM('NOT_READY') }, ['issue']).join() === 'issue'
-        && tm({ issue: TERM('INIT_FAILED'), quick_log: TERM('NOT_READY') }, ['issue', 'quick_log']).length === 0);
+        && tm({ issue: TERM('INIT_FAILED'), quick_log: TERM('NOT_READY') }, ['issue', 'quick_log']).length === 0
+        // #113 C1b 预筛 M6：sysbuild 初始化中（SYSBUILD_SCHEMA_INITIALIZING）不是终态；初始化确定失败（SCHEMA_NOT_READY）是终态
+        && tm({ core: TERM('SQLITE_BUSY'), sysbuild: TERM('SYSBUILD_SCHEMA_INITIALIZING') }, 'all').length === 0
+        && tm({ core: okm, sysbuild: TERM('SYSBUILD_SCHEMA_NOT_READY') }, 'all').join() === 'sysbuild');
     const cls = ti._internals.classifyStartupRace;
     const scan = ti._internals.scanRaceEvidence;
     const RE = (o) => Object.assign(new Error('x'), o);
@@ -1716,9 +1719,10 @@ async function sectionU() {
         core: 'healthReady.summarizeState(CORE_INIT_STATE)', issue: 'healthReady.summarizeState(ISSUE_SCHEMA_STATE)', issue_v1750: 'healthReady.summarizeState(ISSUE_V1750_SCHEMA_STATE)', issue_lite: 'healthReady.summarizeState(ISSUE_LITE_SCHEMA_STATE)',
         quick_log: 'healthReady.summarizeState(QUICK_LOG_SCHEMA_STATE)', collab_dualcheck: 'healthReady.summarizeState(COLLAB_QUALITY_DUALCHECK_SCHEMA_STATE)',
         correction: 'correctionModule.getReadiness()', sys_iteration: 'sysIterModule.getReadiness()', periodic: 'periodicFetchModule.getReadiness()', legacy_archive: 'legacyArchiveModule.getReadiness()', it_ledger: 'itLedgerModule.getReadiness()',
+        sysbuild: 'sysbuildModule.getReadiness()',
     };
     const wiringBad = Object.keys(wiring).filter((n) => !handler.includes(`${n}: () => ${wiring[n]},`));
-    check('U4.3', '汇总的 11 个模块各自接对来源（名字 → 自己的状态对象 / 自己模块的 getReadiness），一个不多一个不少', wiringBad.length === 0 && (handler.match(/^\s{12}[a-z_0-9]+: \(\) =>/gm) || []).length === 11, wiringBad);
+    check('U4.3', '汇总的 12 个模块各自接对来源（名字 → 自己的状态对象 / 自己模块的 getReadiness），一个不多一个不少', wiringBad.length === 0 && (handler.match(/^\s{12}[a-z_0-9]+: \(\) =>/gm) || []).length === 12, wiringBad);
     const modFiles = {
         'routes/corrections.js': 'CORRECTION_SCHEMA_STATE', 'routes/sys-iteration/index.js': 'SYS_SCHEMA_STATE', 'routes/periodic-fetch/index.js': 'PERIODIC_SCHEMA_STATE', 'routes/legacy-archive/index.js': 'LEGACY_ARCHIVE_SCHEMA_STATE',
     };

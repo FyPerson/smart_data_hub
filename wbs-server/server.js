@@ -1042,7 +1042,7 @@ function uploadsResolveReal(p, strict) {
     return { failClosed: true };
   }
 }
-const UPLOADS_PROTECTED_DIRS = ['issue-lite', 'quick-log', 'legacy-archive']
+const UPLOADS_PROTECTED_DIRS = ['issue-lite', 'quick-log', 'legacy-archive', 'sysbuild']
   .map(m => uploadsResolveReal(path.join(UPLOAD_DIR, m), false).real.toLowerCase());
 app.use('/uploads', (req, res, next) => {
   let decodedPath;
@@ -1102,6 +1102,8 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
         //   自行 new sqlite3.Database(DB_FILE) 另开一个连接，故此处调用不依赖本回调的 db 对象，
         //   只是沿用与上方四先例同位置同时序的惯例（紧跟 legacy-archive 之后）。
         itLedgerModule.initSchema();
+        // 项目管理（系统建设记录，#113）：同 it-ledger 自开独立连接，沿用同位置惯例（紧跟其后）。
+        sysbuildModule.initSchema();
         // #77 C2b-2：实现对象启动序列（等 model_impl_objects 建好 → norm_v1 幂等重算 → 排定每日 07:30 核验）。
         //   implObjectsModule 在文件后部实例化（本回调异步晚于顶层同步执行，同上方各模块先例）；失败只记日志，不阻断服务。
         implObjectsModule.startBackground();
@@ -4683,7 +4685,7 @@ app.get('/api/version', (req, res) => {
 });
 
 // [#106 S3a] 汇总就绪接口（无需认证、只读、不写库、不触发任何初始化）：W3 临时实例启动器据此等「测试所需模块全部就绪」，W10 部署后核对复用。
-//   模块名（稳定小写短名）：core / issue / issue_v1750 / issue_lite / quick_log / collab_dualcheck / correction / sys_iteration / periodic / legacy_archive / it_ledger。
+//   模块名（稳定小写短名）：core / issue / issue_v1750 / issue_lite / quick_log / collab_dualcheck / correction / sys_iteration / periodic / legacy_archive / it_ledger / sysbuild。
 //   每项 { ready, code }：就绪 code=null；未就绪 code 只取错误对象上形态合法的 code，否则 INIT_FAILED（状态对象里的 error 多为中文长句，原文不出）/ 无错误则 NOT_READY；
 //   it_ledger 沿用 LEDGER_DRAINING / LEDGER_UNAVAILABLE / LEDGER_NOT_READY。全部就绪 200，否则 503（同样带 JSON 体）。
 //   各模块的访问函数是只读折算（utils/health-ready.js），不改它们现有的中间件与 503 行为。
@@ -4704,6 +4706,7 @@ app.get('/api/health/ready', (req, res) => {
             periodic: () => periodicFetchModule.getReadiness(),
             legacy_archive: () => legacyArchiveModule.getReadiness(),
             it_ledger: () => itLedgerModule.getReadiness(),
+            sysbuild: () => sysbuildModule.getReadiness(),
         },
     });
     res.set('Cache-Control', 'no-store');
@@ -22379,6 +22382,15 @@ const itLedgerModule = require('./routes/it-ledger')({
   } : {}),
 });
 app.use('/api', itLedgerModule.router);
+
+// 项目管理（系统建设记录，#113）：独立连接 + 模块锁，deps 不注入共享连接助手；路由只注册 /sysbuild*。
+const sysbuildModule = require('./routes/sysbuild')({
+  logger, DB_FILE, authenticateToken, UPLOAD_DIR, normalizeAttachmentExt, safeDeleteFileSync, COLLAB_ALLOWED_EXTS_UNION,
+  READONLY_LEADER_IDS, WRITE_ALLOWED_ROLES,
+  // C6b 通知：钉钉模块对象与配置读取（readSystemConfig 解密 system_configs）；backgroundJobs = 后台任务开关为 on 时模块就绪后才扫描补发（隔离实例默认 off）
+  dingtalkNotify, readSystemConfig, backgroundJobs: INSTANCE_CONFIG.background === 'on',
+});
+app.use('/api', sysbuildModule.router);
 
 // ============================================================
 // MCP Demo - 数仓对话查询

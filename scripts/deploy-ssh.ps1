@@ -48,6 +48,7 @@
 #
 # 第 5 步（备份结果）与第 8 步（就绪结果）的判定各由一个纯函数完成（Resolve-BackupOutcome / Resolve-ReadyOutcome，返回 OK / FAIL / UNKNOWN）；
 # 真实路径与 -DryRun 都只经它们：DryRun 构造假的子进程结果（stdout、退出码、超时、启动错误）喂进去，不直接合成结论。
+# 显式启用的第6b步迁移只经 Resolve-SysbuildMigrationOutcome，协议解析不散落到控制流程里。
 #
 # 所有 ssh / scp 只经 Invoke-RemoteRead（只读）与 Invoke-RemoteWrite（会改生产或落本机文件）两个函数；
 # -DryRun 下 Invoke-RemoteWrite 只打印「[DRYRUN] 将执行：<命令>」，不发出。远端命令按 cmd 语法写。
@@ -84,7 +85,8 @@ param(
     [string]$RemoteStateFile = '',
     [switch]$SkipPushCheck,
     [int]$ReadyTimeoutSec = 180,
-    [string]$PushTimeoutSec = '1800'
+    [string]$PushTimeoutSec = '1800',
+    [string]$SysbuildMigrationFromVersion = ''
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -100,7 +102,7 @@ if (-not $DryRun) {
         exit 2
     }
 }
-$validFailAt = @('backup', 'backup_noline', 'code', 'start', 'ready', 'ready_commit_null', 'restart_loop', 'ready_stopped', 'ready_errored', 'ready_init_failed', 'push_landed', 'push_failed', 'stop_listen', 'ready_orphan')
+$validFailAt = @('backup', 'backup_noline', 'code', 'start', 'ready', 'ready_commit_null', 'restart_loop', 'ready_stopped', 'ready_errored', 'ready_init_failed', 'push_landed', 'push_failed', 'stop_listen', 'ready_orphan', 'sysbuild_migration_fail', 'sysbuild_migration_unknown')
 if ($DryRunFailAt -ne '' -and ($validFailAt -notcontains $DryRunFailAt)) {
     Write-Host "[REFUSED] -DryRunFailAt 取值只能是：$($validFailAt -join ' / ')" -ForegroundColor Red
     exit 2
@@ -119,6 +121,15 @@ if ($PushTimeoutSec -notmatch '^[0-9]{1,5}$' -or [int]$PushTimeoutSec -lt 60 -or
     exit 2
 }
 $script:PushTimeoutSec = [int]$PushTimeoutSec
+$script:SysbuildMigrationRequested = $PSBoundParameters.ContainsKey('SysbuildMigrationFromVersion')
+if ($script:SysbuildMigrationRequested -and $SysbuildMigrationFromVersion -notmatch '^[0-6]$') {
+    Write-Host '[REFUSED] -SysbuildMigrationFromVersion requires the reviewed source schema version 0-6.' -ForegroundColor Red
+    exit 2
+}
+if ($DryRunFailAt.StartsWith('sysbuild_migration_') -and -not $script:SysbuildMigrationRequested) {
+    Write-Host '[REFUSED] Migration failure simulation requires -SysbuildMigrationFromVersion.' -ForegroundColor Red
+    exit 2
+}
 
 $script:DryRun = [bool]$DryRun
 $script:RemoteStateMode = ($RemoteStateFile -ne '')
@@ -370,6 +381,49 @@ function Resolve-BackupOutcome($Res) {
     if ($p.Kind -eq 'BACKUP_FAIL') { return [pscustomobject]@{ Outcome = 'FAIL'; Json = $p.Json } }
     if ($p.Json.out -isnot [string] -or $p.Json.out -eq '') { return [pscustomobject]@{ Outcome = 'UNKNOWN'; Json = $null } }
     return [pscustomobject]@{ Outcome = 'OK'; Json = $p.Json }
+}
+
+# 停服前的模块存在性判定：仅成功的完整树条目或真实空字符串可确认，其余未知。
+function Resolve-SysbuildModuleState($Res) {
+    if (-not (Test-Ok $Res) -or $Res.Stdout -isnot [string]) { return 'unknown' }
+    $listing = [string]$Res.Stdout
+    if ($listing -ceq '') { return 'absent' }
+    if ($listing -cmatch '\A100(?:644|755) blob [0-9a-f]{40}\twbs-server/routes/sysbuild/schema[.]js\r?\n\z') { return 'present' }
+    return 'unknown'
+}
+
+function Resolve-SysbuildLedgerState($Res) {
+    if (-not (Test-Ok $Res) -or -not ([string]$Res.Stdout).EndsWith("`n")) { return 'unknown' }
+    $line = Get-LastLine ([string]$Res.Stdout)
+    if ($line -ceq 'SYSBUILD_LEDGER_STATE present') { return 'present' }
+    if ($line -ceq 'SYSBUILD_LEDGER_STATE absent') { return 'absent' }
+    return 'unknown'
+}
+
+function Resolve-SysbuildMigrationOutcome {
+    param($Res, [int]$ExpectedFromVersion, [string]$ExpectedReport)
+    $p = Read-Protocol -Res $Res -Prefixes @('SYSBUILD_MIGRATION_OK', 'SYSBUILD_MIGRATION_FAIL', 'SYSBUILD_MIGRATION_UNKNOWN')
+    $unknown = [pscustomobject]@{ Outcome = 'UNKNOWN'; Json = $null; Why = 'Migration state is not confirmed.' }
+    if ($null -eq $p) { return $unknown }
+    $j = $p.Json
+    $unknown.Json = $j
+    foreach ($name in @('fromVersion', 'toVersion')) {
+        $property = $j.PSObject.Properties[$name]
+        if ($null -eq $property -or ($property.Value -isnot [int] -and $property.Value -isnot [long])) { return $unknown }
+    }
+    if ($j.fromVersion -ne $ExpectedFromVersion -or $j.toVersion -ne 6 -or $j.report -isnot [string] -or -not [string]::Equals($j.report, $ExpectedReport, [StringComparison]::OrdinalIgnoreCase)) { return $unknown }
+    if ($p.Kind -eq 'SYSBUILD_MIGRATION_UNKNOWN' -or $null -eq $j.PSObject.Properties['applied'] -or $j.applied -isnot [bool]) { return $unknown }
+    if ($p.Kind -eq 'SYSBUILD_MIGRATION_FAIL') {
+        if ($Res.ExitCode -eq 0 -or @('not_started', 'rolled_back', 'committed', 'noop') -notcontains $j.outcome) { return $unknown }
+        return [pscustomobject]@{ Outcome = 'FAIL'; Json = $j; Why = 'Migration reported a failure; do not start services.' }
+    }
+    if (-not (Test-Ok $Res)) { return $unknown }
+    if (($j.applied -and $j.outcome -ne 'committed') -or (-not $j.applied -and ($j.outcome -ne 'noop' -or $ExpectedFromVersion -ne 6))) { return $unknown }
+    $issueProperty = $j.PSObject.Properties['compatibilityIssues']
+    if ($null -eq $issueProperty -or ($issueProperty.Value -isnot [int] -and $issueProperty.Value -isnot [long]) -or $j.compatibilityIssues -ne 0) { return $unknown }
+    if ($j.contractSha256 -ne 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7' -or $j.reportSha256 -isnot [string] -or $j.reportSha256 -cnotmatch '^[a-f0-9]{64}$') { return $unknown }
+    if ($j.applied -and ($null -eq $j.backup -or $j.backup.verified -isnot [bool] -or -not $j.backup.verified -or $j.backup.path -isnot [string] -or $j.backup.path -eq '' -or $j.backup.sha256 -cnotmatch '^[a-f0-9]{64}$')) { return $unknown }
+    return [pscustomobject]@{ Outcome = 'OK'; Json = $j; Why = '' }
 }
 
 # 第 8 步判定（纯函数，真实与 DryRun 都只经它）：OK / FAIL（带 Hint：json 顶层 hint 为 COMMIT_NULL 时记下）/ UNKNOWN（没收到协议行，包括退出码 0 但没有协议行）
@@ -687,6 +741,12 @@ function Write-PreChecks {
     Write-Host "      ssh $target ""wmic process get name,processid,commandline | findstr /i /r backup-db-[0-9]""" -ForegroundColor White
     Write-Host "      新版 Windows 可能没有 wmic，登录远端 PowerShell 后改用下面这条，看命令行里有没有 backup-db-<数字>：" -ForegroundColor Gray
     Write-Host "      Get-CimInstance Win32_Process -Filter ""Name='node.exe'"" | Select-Object ProcessId,CommandLine" -ForegroundColor White
+    if ($script:SysbuildMigrationRequested) {
+        $migrationProbe = 'try { $items = @(Get-CimInstance Win32_Process -Filter "Name=''node.exe''" -ErrorAction Stop | Where-Object { $_.CommandLine -match ''deploy-prestart[.]cjs'' }); Write-Output (''SYSBUILD_MIGRATION_PROCESS_SCAN_OK count='' + $items.Count); $items | Select-Object ProcessId,CreationDate,CommandLine | Format-List } catch { Write-Error $_; exit 1 }'
+        Write-Host '      Log in to remote PowerShell and run this read-only migration process query:' -ForegroundColor Gray
+        Write-Host ('      ' + $migrationProbe) -ForegroundColor White
+        Write-Host '      Require successful query and SYSBUILD_MIGRATION_PROCESS_SCAN_OK count=0. Otherwise stop recovery.' -ForegroundColor Yellow
+    }
     Write-Host "      task-pool 状态：" -ForegroundColor Gray
     Write-Host "      ssh $target ""pm2 ls""" -ForegroundColor White
     Write-Host "      远端 HEAD（间隔 10 秒读两次，必须一致）：" -ForegroundColor Gray
@@ -826,6 +886,11 @@ function Write-RollbackGuide {
     Write-Host "      判据：必须等于 $($script:PrevCommit)，不等就停下。" -ForegroundColor Gray
     Write-Host ""
     Write-Host "[回滚 5/7] 是否恢复数据库（人工判断；此时服务是停着的）" -ForegroundColor Cyan
+    if ($script:SysbuildMigrationRequested) {
+        Write-Host '      This deployment explicitly requested sysbuild schema migration. Inspect applied/outcome, the migration receipt and both backup references before deciding database compatibility.' -ForegroundColor Yellow
+        Write-Host "      Migration receipt: E:\Task_Pool_deploy_tmp\sysbuild_migration_$($script:Id).json" -ForegroundColor White
+        Write-Host '      Empty legacy business tables can still have changed definitions. A zero keyword scan does not establish rollback compatibility.' -ForegroundColor Yellow
+    }
     $schema = Get-SchemaChanges
     if (-not $schema.Ok) {
         Write-Host "      无法在本机计算 $($script:PrevCommit) 到 $($script:NewCommit) 的差异（$($schema.Error)）；请人工核对：" -ForegroundColor Yellow
@@ -1078,6 +1143,33 @@ Write-Info '[OK] 新提交的 server.js 含就绪接口路由与 commit 字段' 
 Add-Route "2 读远端现状：通过；PrevCommit=$($script:PrevCommit)；发布记录已 init"
 Write-Host ""
 
+if ($script:SysbuildMigrationRequested) {
+    $migrationTool = Invoke-Git -ArgList @('cat-file', '-e', "$($script:NewCommit):scripts/sysbuild-predeploy/deploy-prestart.cjs") -TimeoutSec 30
+    if (-not (Test-Ok $migrationTool)) { Stop-BeforeStop 'New commit does not contain the reviewed sysbuild migration step.' 'NO_SYSBUILD_MIGRATION_TOOL' }
+    Write-Info "[PLAN] Explicit sysbuild migration $SysbuildMigrationFromVersion -> 6 after code checkout and before service start. Real-sample dry-run approval is required."
+}
+
+# 首发硬门：只读探测成功且账本不存在时，必须明确指定经过真实样本核对的迁移来源。
+# ls-tree 成功且输出为空才表示没有模块；查询失败（含 cat-file 缺路径时的128）不能当作没有模块。
+$moduleProbe = Invoke-Git -ArgList @('ls-tree', '--full-tree', $script:NewCommit, '--', 'wbs-server/routes/sysbuild/schema.js') -TimeoutSec 30
+$moduleState = Resolve-SysbuildModuleState $moduleProbe
+if ($moduleState -eq 'unknown') { Stop-BeforeStop '无法确认新提交是否包含项目管理模块，停止发布。' 'SYSBUILD_MODULE_PROBE_FAILED' }
+if ($moduleState -eq 'present') {
+    if ($script:RemoteStateMode) {
+        if ($null -eq $st.PSObject.Properties['sysbuildLedgerPresent'] -or $st.sysbuildLedgerPresent -isnot [bool]) { Stop-BeforeStop '假远端记录缺少布尔型sysbuildLedgerPresent，不能推断已有账本。' 'SYSBUILD_LEDGER_PROBE_FAILED' }
+        $ledgerProbeRes = New-FakeProc -Stdout ('SYSBUILD_LEDGER_STATE ' + $(if ($st.sysbuildLedgerPresent) { 'present' } else { 'absent' }) + "`n")
+    } else {
+        $ledgerDbJs = $RemoteDb.Replace('\', '/').Replace("'", "\'")
+        $ledgerSqliteJs = $RemoteSqlite3.Replace('\', '/').Replace("'", "\'")
+        $ledgerProbeJs = "const sqlite3=require('$ledgerSqliteJs');const db=new sqlite3.Database('$ledgerDbJs',sqlite3.OPEN_READONLY,(e)=>{if(e){console.error('SYSBUILD_LEDGER_PROBE_ERROR');process.exitCode=1;return;}db.get('SELECT COUNT(*) AS n FROM sqlite_master WHERE type=? AND name=?',['table','sysbuild_schema_migrations'],(e,r)=>{if(e){console.error('SYSBUILD_LEDGER_PROBE_ERROR');process.exitCode=1;}else if(r && (r.n===0 || r.n===1)){console.log('SYSBUILD_LEDGER_STATE '+(r.n===1?'present':'absent'));}else{console.error('SYSBUILD_LEDGER_PROBE_ERROR');process.exitCode=1;}db.close(e=>{if(e)process.exitCode=1;});});});"
+        $ledgerProbeRes = Invoke-RemoteRead -Command ('node -e "' + $ledgerProbeJs + '"') -TimeoutSec 30
+    }
+    $ledgerState = Resolve-SysbuildLedgerState $ledgerProbeRes
+    if ($ledgerState -eq 'unknown') { Stop-BeforeStop '项目管理版本账本只读核对未成功，不能继续部署。' 'SYSBUILD_LEDGER_PROBE_FAILED' }
+    if ($ledgerState -eq 'absent' -and -not $script:SysbuildMigrationRequested) { Stop-BeforeStop '新提交包含项目管理模块，远端尚无版本账本。须先核真实样本，并显式传入-SysbuildMigrationFromVersion，不能以应用启动建表替代维护迁移。' 'SYSBUILD_MIGRATION_REQUIRED' }
+    Write-Info ("[OK] 项目管理版本账本只读核对：$ledgerState；显式迁移：$($script:SysbuildMigrationRequested)") 'Green'
+}
+
 # ================================================================ STEP 3 上传备份脚本
 Write-Step '3/9' '上传备份脚本到生产临时目录并预取新提交'
 $RemoteBackupJs = "$RemoteTmpDir\backup-db-$($script:Id).js"
@@ -1326,6 +1418,36 @@ if (-not $codeOk) {
 Set-Stage -Stage 'code_updated'
 Add-Route '6 换代码：完成（阶段 code_updated）'
 Write-Host ""
+
+# ================================================================ STEP 6b explicit sysbuild migration (opt-in only)
+if ($script:SysbuildMigrationRequested) {
+    Write-Step '6b/9' "Sysbuild schema migration $SysbuildMigrationFromVersion -> 6 (explicit opt-in)"
+    $migrationReport = "$RemoteTmpDir\sysbuild_migration_$($script:Id).json"
+    $migrationCmd = "cd /d `"$RemoteRepo`" && node scripts\sysbuild-predeploy\deploy-prestart.cjs --db `"$RemoteDb`" --backup-dir `"$RemoteTmpDir`" --from-version $SysbuildMigrationFromVersion --to-version 6 --report `"$migrationReport`" --maintenance-confirmed"
+    $migrationRes = Invoke-RemoteWrite -Command $migrationCmd -TimeoutSec 600
+    if ($migrationRes.DryRun) {
+        $fakeMigration = @{ fromVersion = [int]$SysbuildMigrationFromVersion; toVersion = 6; applied = $true; outcome = 'committed'; contractSha256 = 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7'; compatibilityIssues = 0; report = $migrationReport; reportSha256 = ('b' * 64); backup = @{ verified = $true; path = 'E:\Task_Pool_deploy_tmp\sysbuild-migrate-dryrun\before.sqlite'; sha256 = ('a' * 64) } }
+        if ($DryRunFailAt -eq 'sysbuild_migration_unknown') { $migrationRes = New-FakeProc -TimedOut $true }
+        elseif ($DryRunFailAt -eq 'sysbuild_migration_fail') {
+            $fakeMigration.applied = $false; $fakeMigration.outcome = 'rolled_back'
+            $migrationRes = New-FakeProc -ExitCode 1 -Stdout ('SYSBUILD_MIGRATION_FAIL ' + (ConvertTo-Json -InputObject $fakeMigration -Compress -Depth 8) + "`n")
+        } else { $migrationRes = New-FakeProc -Stdout ('SYSBUILD_MIGRATION_OK ' + (ConvertTo-Json -InputObject $fakeMigration -Compress -Depth 8) + "`n") }
+    }
+    $migrationOutcome = Resolve-SysbuildMigrationOutcome -Res $migrationRes -ExpectedFromVersion ([int]$SysbuildMigrationFromVersion) -ExpectedReport $migrationReport
+    if ($migrationOutcome.Outcome -ne 'OK') {
+        $migrationDiagnostic = if ($null -ne $migrationOutcome.Json) { ConvertTo-Json -InputObject $migrationOutcome.Json -Compress -Depth 8 } else { 'No complete protocol received.' }
+        Write-Info ('[MIGRATION DIAGNOSTIC] ' + $migrationDiagnostic) 'Yellow'
+        $migrationNote = 'SYSBUILD_MIGRATION_' + $migrationOutcome.Outcome + ' report=' + $migrationReport + ' details=' + $migrationDiagnostic
+        if ($migrationNote.Length -gt 1800) { $migrationNote = $migrationNote.Substring(0, 1800) }
+        Set-Stage -Stage 'failed' -Result 'failed' -Note $migrationNote
+        Add-Route ('6b Sysbuild migration: ' + $migrationOutcome.Outcome + ' -> stopped for manual audit; no automatic restart or rollback')
+        Write-RollbackGuide -Reason ('Sysbuild migration ' + $migrationOutcome.Outcome + ': ' + $migrationOutcome.Why + ' Report: ' + $migrationReport)
+        Exit-Deploy 1
+    }
+    Set-Stage -Stage 'code_updated' -Note ('SYSBUILD_MIGRATION_OK report=' + $migrationReport)
+    Add-Route '6b Sysbuild migration: confirmed -> continue to start'
+    Write-Info ('[OK] Sysbuild migration confirmed; receipt: ' + $migrationReport) 'Green'
+}
 
 # ================================================================ STEP 7 起服务
 Write-Step '7/9' '起服务（pm2 start task-pool）'

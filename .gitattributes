@@ -6,3 +6,10 @@ wbs-server/public/assets/vendor/** -text
 #   CRLF 后匹配失配，守卫按「不许静默通过」fail-closed 判红（实测 11046/2 ↔ LF 下 11073/0）。
 #   与上面 vendor 那条同源——都是 autocrlf 破坏字节级/行尾敏感比对。
 wbs-server/routes/it-ledger/*.js text eol=lf
+
+# sysbuild 只读服务按已审原字节交付；rebase及发布克隆后仍须核对SOURCE.md的5个SHA。
+scripts/sysbuild-predeploy/temp-service/server.cjs -text
+scripts/sysbuild-predeploy/temp-service/server-client.js -text
+scripts/sysbuild-predeploy/temp-service/offline.html -text
+scripts/sysbuild-predeploy/temp-service/package.json -text
+scripts/sysbuild-predeploy/temp-service/ecosystem.config.cjs -text

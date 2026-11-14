@@ -802,6 +802,22 @@ async function loadTaskTips() {
 function adjustNavbarForRole() {
     if (!currentUser) return;
 
+    // #113 C7：项目管理面向所有登录用户。项目与写动作的可见性仍由 sysbuild 接口决定。
+    const projectNav = document.querySelector('.navbar .nav-right');
+    if (projectNav && !projectNav.querySelector('a[href="/Sys_Build.html"], a[href="Sys_Build.html"]')) {
+        const projectLink = document.createElement('a');
+        projectLink.className = 'nav-item';
+        projectLink.href = '/Sys_Build.html';
+        projectLink.textContent = '项目管理';
+        if (window.location.pathname === '/Sys_Build.html') {
+            projectLink.classList.add('active');
+            projectLink.setAttribute('aria-current', 'page');
+        }
+        const iterationLink = projectNav.querySelector('a[href="/Sys_Iteration.html"], a[href="Sys_Iteration.html"]');
+        if (iterationLink) iterationLink.insertAdjacentElement('afterend', projectLink);
+        else projectNav.insertBefore(projectLink, projectNav.firstChild);
+    }
+
     if (currentUser.role === 'viewer') {
         // 隐藏导航栏中的"我的工作台"链接
         document.querySelectorAll('a[href*="My_Workspace"]').forEach(el => {

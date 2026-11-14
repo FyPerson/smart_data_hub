@@ -107,7 +107,7 @@ const CRASH_TAIL_LINES = 80;
 /** 形态 ① 里允许出现的「未就绪模块码」：模块把 BUSY 折成 INIT_FAILED / LEDGER_UNAVAILABLE，core 直接带 sqlite 的 code（SQLITE_BUSY） */
 const RACE_MODULE_CODES = Object.freeze(['INIT_FAILED', 'LEDGER_UNAVAILABLE', 'SQLITE_BUSY']);
 /** 模块还在初始化中的码（非终态）；其余未就绪码视为不会自愈的终态 */
-const NON_TERMINAL_CODES = Object.freeze(['NOT_READY', 'LEDGER_NOT_READY']);
+const NON_TERMINAL_CODES = Object.freeze(['NOT_READY', 'LEDGER_NOT_READY', 'SYSBUILD_SCHEMA_INITIALIZING']);
 /** 终态码要持续这么久才提前结束等待（防个别模块先记错后清除而误判） */
 const TERMINAL_STABLE_MS = 1500;
 

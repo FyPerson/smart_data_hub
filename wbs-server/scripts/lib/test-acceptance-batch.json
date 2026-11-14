@@ -127,6 +127,10 @@
   ],
   "excluded": {
     "verify-html-fingerprint-e2e.js": "已是 FAMILY 的需服务成员（run-verify-family.js 的 SERVICE_MEMBERS 登记，共享实例、只读），随 FAMILY 全量运行，不在验收批跑里重复起一遍实例（#106 S6b）。",
+    "verify-sysbuild-e2e.js": "已是 FAMILY 的普通成员（run-verify-family.js 的 buildFamilyMembers 登记，#113 C1c），自己经 test-env 起临时实例跑端到端，随 FAMILY 全量运行，不在验收批跑里重复起一遍实例。",
+    "verify-sysbuild-api.js": "已是 FAMILY 的普通成员（run-verify-family.js 的 buildFamilyMembers 登记，#113 C2a），自己经 test-env 起临时实例跑项目端点，随 FAMILY 全量运行，不在验收批跑里重复起一遍实例。",
+    "verify-sysbuild-browser.js": "#113 C7 项目管理 Playwright，已登记为 FAMILY 普通成员，经 test-env 自起独立临时实例；不在验收批跑里重复执行。浏览器变异 --self-test 在阶段边界单独运行。",
+    "verify-sysbuild-predeploy.js": "#113 C9 部署前工具普通模式已登记为FAMILY成员，经test-env协调私有SQLite、文件和HTTP演练，不在验收批跑重复执行；迁移、归档、只读与部署接入的变异自检留阶段边界单独运行。",
     "test-unify-visual-playwright.js": "视觉回归基线 harness，不进验收批跑（S4d-5 主会话 Q4 裁定：只迁移环境层）：拍图模式两次各自起一个隔离实例，列表态截图含来源库的既有行、统计卡计数与分页，来源库在两次之间变化就不能逐像素比对；需要对比基线时由人在同一份来源库快照下成对运行。--compare 模式只读两个已有截图目录做像素比对，不访问被测服务。"
   },
   "envProvidedBy": {
