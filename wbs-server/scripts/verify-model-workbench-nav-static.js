@@ -33,7 +33,7 @@ const WORKBENCH_LABEL = '模型配置台';
 const EXPECTED_PAGES = [
   'Asset_Center.html', 'Dashboard.html', 'Data_Collab.html', 'Data_Correction.html', 'Issue_Lite.html', 'Issue_Tracker.html', 'IT_Ledger.html',
   'Legacy_Archive.html', 'Metrics.html', 'Model_Center.html', 'My_Workspace.html', 'Periodic_Fetch.html', 'Quick_Log.html', 'Statistics.html',
-  'Sys_Iteration.html', 'Task_Pool.html', 'Model_Workbench.html',
+  'Sys_Build.html', 'Sys_Iteration.html', 'Task_Pool.html', 'Model_Workbench.html',
 ];
 /** 「数据中心」下拉触发器带高亮的页面：资产中心 / 建设总览 / 指标中心 / 模型中心 / 模型配置台这五页属于该分组（现状如此，写进清单锁住） */
 const TRIGGER_HIGHLIGHT_PAGES = ['Asset_Center.html', 'Dashboard.html', 'Metrics.html', 'Model_Center.html', 'Model_Workbench.html'];

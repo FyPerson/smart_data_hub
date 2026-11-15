@@ -25,6 +25,10 @@ const FRONT_MUTATIONS = [
     { id: 'new-project-capability', file: 'sysbuild-page.js', from: 'if (data.actions && data.actions.create === true) ops.appendChild', to: 'if (true) ops.appendChild', expect: '只读账号的入口', expectFailure: '[readonly-create]' },
     { id: 'pending-join-label', file: 'sysbuild-members.js', from: "pending: '待本人接受'", to: "pending: '已生效'", expect: '成员加入与任职分开', expectFailure: '[pending-join]' },
     { id: 'platform-nav', file: 'app.js', from: "projectLink.textContent = '项目管理';", to: "projectLink.textContent = '错误入口';", expect: '平台导航入口', expectFailure: '[platform-nav]' },
+    // 动态入口的图标：两行必须一起替换，只删第一行会让第二行对 null 取属性而抛错，入口插不进去，失败会落到 [platform-nav]。
+    { id: 'platform-nav-icon', file: 'app.js', from: "projectLink.insertAdjacentHTML('afterbegin', SVG_ICONS.clipboard);\n        projectLink.firstElementChild.setAttribute('aria-hidden', 'true');", to: 'void 0;', expect: '平台导航入口', expectFailure: '[platform-nav-icon]' },
+    // 去重判据失效：静态入口之外再插一份动态入口，项目管理页的平台导航里会有两个同名链接。
+    { id: 'platform-nav-duplicate', file: 'app.js', from: `if (projectNav && !projectNav.querySelector('a[href="/Sys_Build.html"], a[href="Sys_Build.html"]')) {`, to: 'if (projectNav) {', expect: '平台导航入口', expectFailure: '[platform-nav-selected]' },
     { id: 'delegation-submit-target', file: 'sysbuild-members.js', from: "save('/parties/' + p.id + '/' + kind, { member_id: A.id(v.member_id) }, c)", to: "save('/parties/' + p.id + '/appointments', { member_id: A.id(v.member_id) }, c)", expect: '任职与授权完整链', expectFailure: '[delegation-submitted]' },
     { id: 'proxy-drop-evidence', file: 'sysbuild-ui.js', from: 'ids.push(result.attachment.id);', to: 'void result.attachment.id;', expect: '无账号任职代录', expectFailure: '[proxy-appointment-active]' },
     { id: 'empty-role-as-waiting', file: 'sysbuild-members.js', from: "member ? member.name : '暂无生效记录'", to: "member ? member.name : '等待本人接受'", expect: '成员加入与任职分开', expectFailure: '没有任职提议时不得伪造等待本人接受' },
@@ -200,8 +204,27 @@ async function run(options) {
             const nav = page.getByRole('navigation').getByRole('link', { name: '项目管理', exact: true });
             await target('platform-nav', () => nav.waitFor());
             assert.ok((await nav.getAttribute('href')).endsWith('/Sys_Build.html'), '[platform-nav] 项目管理入口须指向模块页面');
+            // 动态入口：恰好一个图标，且对读屏隐藏（先断言个数，再读属性，避免 0 个时等到超时而丢掉目标标记）。
+            assert.strictEqual(await nav.locator('svg').count(), 1, '[platform-nav-icon] 动态项目管理入口内须恰好一个 svg 图标');
+            assert.strictEqual(await nav.locator('svg').first().getAttribute('aria-hidden'), 'true', '[platform-nav-icon] 图标须带 aria-hidden="true"');
             await nav.click();
             await page.getByRole('heading', { name: '我参与的项目', exact: true }).waitFor();
+            // 项目管理页：静态入口。要守的性质是「adjustNavbarForRole() 在本页不会多插一份入口」，所以直接显式调用它再数，不依赖任何加载期信号：
+            //   页面自己那次调用（app.js 的 DOMContentLoaded 链，要先 await loadTaskTips() 与 checkAuth()）可能已发生也可能没发生，没有可靠的信号能区分——
+            //   sysbuild-ui.js 的 init() 与 app.js 各有一条 checkAuth() 链，头像区在 adjustNavbarForRole 之前就已填好；app.js 顶层还有一次 loadTasks()，/api/pool 同样更早出现。
+            //   显式调用之后：去重判据正确时，不论页面自己那次是否已发生，再调一次都不会多插；判据失效时，这一次调用必然多插（页面自己那次若也发生则更多）。
+            //   先决条件必须先核对：adjustNavbarForRole 在 currentUser 为空时直接返回，那样变异会存活。标题出现说明 sysbuild-ui.js 的 checkAuth() 已完成，
+            //   它与 app.js 共用顶层 let currentUser，所以此时 currentUser 已赋值；任一条不满足就判失败，不静默继续。
+            //   先决条件用独立标记 [platform-nav-precondition]，不包进目标标记：变异运行里它若失败，应被判成「变异异常」，不能冒充目标断言把变异「判红」。
+            const precondition = await page.evaluate(() => ({ fn: typeof adjustNavbarForRole === 'function', user: typeof currentUser !== 'undefined' && !!currentUser }));
+            assert.ok(precondition.fn, '[platform-nav-precondition] 全局没有 adjustNavbarForRole 函数');
+            assert.ok(precondition.user, '[platform-nav-precondition] 全局 currentUser 为空，adjustNavbarForRole 会直接返回');
+            await target('platform-nav-selected', () => page.evaluate(() => { adjustNavbarForRole(); }));
+            const platform = page.getByRole('navigation', { name: '平台导航', exact: true });
+            const own = platform.getByRole('link', { name: '项目管理', exact: true });
+            assert.strictEqual(await own.count(), 1, '[platform-nav-selected] 平台导航里「项目管理」链接须恰好一个，不得重复');
+            assert.strictEqual(await own.getAttribute('aria-current'), 'page', '[platform-nav-selected] 项目管理页的入口须标 aria-current="page"');
+            assert.strictEqual(await own.locator('svg').count(), 1, '[platform-nav-selected] 项目管理页的入口内须恰好一个 svg 图标');
         }],
         ['新建三步保存与恢复', async (page) => {
             await visit(page);

@@ -78,6 +78,15 @@
 //   S10 前端：Sys_Build.html 与 sysbuild-*.js 的直接 HTML 注入 / 动态代码出口由 lib/sysbuild-frontend-static.js 扫描。
 //     硬门含任意对象 write / writeln、成员 eval / Function、字符串计时器、非字面量计算属性写入、HTML Blob 与注入方法 call / apply；每类均有正反例。
 //       只管本模块直接 DOM 写法，不做污点分析，不证明共享 app.js 或反射调用安全。
+//   S11 导航（lib/sysbuild-frontend-static.js 的 scanNav）：Sys_Build.html 手抄的平台导航，对 Legacy_Archive.html 的标准导航只做三项归一
+//     （去 aria-label="平台导航"、LOGO 渐变 id 换成参照页的、摘掉「项目管理」入口）后去空白逐字全等；被摘掉的入口另断言：恰好 1 个、紧跟「系统迭代」、
+//     起始标签与 `<a href="/Sys_Build.html" class="nav-item active" aria-current="page" style="color:#d97706; font-weight:600;">` 逐字全等
+//     （分项报 aria-current / 选中样式缺失，全等不成立另报）、恰好 1 个带 aria-hidden 的 svg 且去掉 aria-hidden 后与 app.js 里 SVG_ICONS.clipboard 字面量逐字相同
+//     （取不到常量判红）、文字「项目管理」，以及入口整段（去空白）与「约定起始标签 + 带 aria-hidden 的图标 + 文字 + </a>」全等（只在前面各分项都没报问题时才另报）。
+//     另查 assets/css/sysbuild.css：去掉 /* */ 注释后不得出现 .navbar / .nav-item / .nav-right / .nav-left / .nav-title /
+//     .nav-logo / .nav-divider / .nav-dropdown(-*) / .fixed-header 类选择器（按点号开头的完整类名判，.sbui-nav-item 不误伤；文件读不到判红，命中给行号与该行内容；
+//     类名黑名单，已知限制见 lib 里 navCssHits 的注释）。
+//     自测对真实 HTML / css 在内存里做变异（不落盘）：HTML 反例必须真的改动内容（没改动就抛错）并命中预期失败信息；样式表反例断言命中的类名与条数（绿例为 0 条）。
 //
 // ── 自检 --self-test ───────────────────────────────────────────────────────────────────
 //   ① 真实 routes/sysbuild/ 基线必须全绿；② 分类器自检：追加非法 JavaScript 的守卫副本必须判「异常」而不是检出；
@@ -114,6 +123,7 @@ const RULES = [
   ['S8', 'schema.js 只含 DDL'],
   ['S9', 'SQL 字符串不得含注释（/* 与 --）'],
   ['S10', '本模块前端采用 DOM / textContent，不直接写可执行 HTML 或动态代码'],
+  ['S11', '项目管理页导航 = Legacy_Archive.html 的标准导航 + 「项目管理」一项（紧跟系统迭代、入口起始标签逐字全等、入口整段去空白全等、图标与 SVG_ICONS.clipboard 逐字相同）；sysbuild.css 不覆盖平台导航类名'],
 ];
 
 // ── 文件清单与解析 ─────────────────────────────────────────────────────────────────────
@@ -624,6 +634,7 @@ function report(root) {
   const { findings, rels } = scan(root);
   const front = frontendStatic.scan(path.join(__dirname, '..', 'public'));
   findings.push(...front.findings);
+  findings.push(...frontendStatic.scanNav(path.join(__dirname, '..', 'public')));
   console.log(`扫描 ${root}（${rels.length} 个文件: ${rels.join(', ')}）`);
   let passed = 0;
   for (const [id, title] of RULES) {
@@ -915,6 +926,7 @@ function selfTest() {
       removeTree(d);
     }
     for (const entry of frontendStatic.selfTest().results) check(entry.ok, `S10 前端正反例：${entry.name}`);
+    for (const entry of frontendStatic.navSelfTest(path.join(__dirname, '..', 'public'))) check(entry.ok, entry.name);
   } finally {
     try { removeTree(tmpRoot); } catch (e) { console.error(`  [清理] 临时目录未删除（保留现场）: ${tmpRoot} — ${e.message}`); }
   }

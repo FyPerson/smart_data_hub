@@ -809,9 +809,16 @@ function adjustNavbarForRole() {
         projectLink.className = 'nav-item';
         projectLink.href = '/Sys_Build.html';
         projectLink.textContent = '项目管理';
+        // 固定 SVG 常量，与平台其它导航项同用共享尺寸和颜色，不拼接用户数据。
+        projectLink.insertAdjacentHTML('afterbegin', SVG_ICONS.clipboard);
+        projectLink.firstElementChild.setAttribute('aria-hidden', 'true');
+        // Sys_Build.html 自带静态入口并已写好选中样式，正常情况下上面的去重会跳过整段插入，这个分支走不到；
+        // 它只在该页静态导航缺少入口时兜底。
         if (window.location.pathname === '/Sys_Build.html') {
             projectLink.classList.add('active');
             projectLink.setAttribute('aria-current', 'page');
+            projectLink.style.color = '#d97706';
+            projectLink.style.fontWeight = '600';
         }
         const iterationLink = projectNav.querySelector('a[href="/Sys_Iteration.html"], a[href="Sys_Iteration.html"]');
         if (iterationLink) iterationLink.insertAdjacentElement('afterend', projectLink);
