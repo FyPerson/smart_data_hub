@@ -129,7 +129,7 @@ function createChangeRoutes(ctx) {
     return { change, access, pkg };
   }
   const listVersions = (q, pkgId) => q.all(
-    'SELECT id, version_no, status, form, parent_overall_version_id, effective_at, created_at FROM sysbuild_package_versions WHERE package_id = ? ORDER BY version_no, id', [pkgId]
+    'SELECT id, version_no, status, form, parent_overall_version_id, snapshot_json, effective_at, created_at FROM sysbuild_package_versions WHERE package_id = ? ORDER BY version_no, id', [pkgId]
   );
   async function attachmentsOfChange(q, changeId) {
     const rows = await q.all(
@@ -175,7 +175,7 @@ function createChangeRoutes(ctx) {
     const current = draft || pending || effective || (versions.length > 0 ? versions[versions.length - 1] : null);
     const actions = {
       submit: draft !== null && rules.opAllowed('package_version_submit', access, access.project, packages.versionTarget(draft, pkg, undefined, await packages.versionFactsOf(q, pkg, draft))),
-      withdraw: pending !== null && rules.opAllowed('package_version_withdraw', access, access.project, packages.versionTarget(pending, pkg, undefined)),
+      withdraw: (pending || draft) !== null && rules.opAllowed('package_version_withdraw', access, access.project, packages.versionTarget(pending || draft, pkg, undefined)),
       new_version: rules.opAllowed('change_new_version', access, access.project, await newVersionFacts(q, change, pkg, versions)),
       // 变更包版本的草稿编辑（snapshot / 集合修订）沿用内容包端点：有草稿且 PM 可改时为真
       edit_draft: draft !== null && rules.opAllowed('package_version_edit', access, access.project, packages.versionTarget(draft, pkg, undefined)),

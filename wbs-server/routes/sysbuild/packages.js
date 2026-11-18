@@ -135,6 +135,12 @@ async function versionFactsOf(q, pkg, ver) {
     facts.initiationEffective = (await effectiveInitiationVersionId(q, pkg.project_id)) !== null;
     facts.planMissing = await confirmCore.planMissingNodes(q, pkg.project_id, (await computeFormAndParent(q, pkg)).form);
   }
+  if (pkg.type === 'initiation') {
+    // L2 initiation: submit actions and transaction share the same submission-scope fact.
+    const basis = await require('./submission-scope').initiationBasisOf(q, pkg, ver);
+    facts.initiationBasis = basis.fact;
+    facts.scopeRejection = basis.scopeRejection || null;
+  }
   if (pkg.type === 'change') {
     const ch = await q.get('SELECT id, status, no_written_evidence, no_evidence_reason FROM sysbuild_changes WHERE package_id = ?', [pkg.id]);
     facts.changeStatus = ch ? ch.status : undefined;
@@ -155,6 +161,11 @@ async function versionFactsOf(q, pkg, ver) {
       [pkg.project_id, pkg.id]
     );
     facts.otherChangePending = !!other;
+    // L1：提交与读接口 actions.submit 共用开发评估事实；取数异常由助手按 unknown 拒绝。
+    //   送审内容本身被拒（集合重核、材料不可用）时另给 scopeRejection，规则先报原始原因，不当作评估不可读（51 号 HIGH-1）。
+    const assessment = await require('./submission-scope').devAssessmentOf(q, pkg, ver);
+    facts.devAssessment = assessment.fact;
+    facts.scopeRejection = assessment.scopeRejection || null;
   }
   return facts;
 }
@@ -328,6 +339,13 @@ function createPackageRoutes(ctx) {
       new_version: rules.opAllowed('package_version_create', access, access.project, newVersionTarget(versions, pkg, batchStatus)),
     };
   }
+  // 55 号 D1（用户 2026-11-16 定 A）：草稿不能提交时的原因，与 actions.submit 同一个判定（opAllowed = checkOp 为 null）、同一个 target 构造。
+  //   只对草稿给；无权限（403）不给原因，交由按钮不显示即可；其余拒绝原样给出 code 与文案，前端只展示、不据此另判。
+  function submitBlockOf(access, ver, pkg, batchStatus, facts) {
+    if (ver.status !== 'draft') return null;
+    const v = rules.checkOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, facts));
+    return v && v.status !== 403 ? { code: v.code, message: v.message } : null;
+  }
   function parseSnapshot(text) {
     try { return JSON.parse(text); } catch (_) { return {}; }
   }
@@ -453,6 +471,8 @@ function createPackageRoutes(ctx) {
     const out = await db.withWriteTxn(async (q) => {
       const { ver, pkg, access, batchStatus } = await loadVersionCtx(q, vid, user);
       rules.assertOp('package_version_edit', access, access.project, versionTarget(ver, pkg, batchStatus));
+      // L2 initiation: validate a supplied declaration before saving the draft snapshot.
+      if (pkg.type === 'initiation') require('./submission-scope').readNoWrittenBasisReason(snap);
       await materialsCore.selectedMaterials(q, pkg.project_id, snap, { usable: true });
       // 条件更新（schema.CONDITIONAL_UPDATES）：WHERE 带 status = 'draft'，影响行数 0 → 409。
       const r = await q.run("UPDATE sysbuild_package_versions SET snapshot_json = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'", [text, vid]);
@@ -581,6 +601,7 @@ function createPackageRoutes(ctx) {
         history_confirmations: await confirmCore.historyConfirmationsOf(q, pkg.project_id, 'package_version', vid),
         history_imports: await confirmCore.historyImportsOf(q, pkg.project_id, 'package_version', vid),
         actions: versionActions(access, ver, pkg, versions, batchStatus, facts),
+        submit_block: submitBlockOf(access, ver, pkg, batchStatus, facts),
       };
     });
     res.json(out);

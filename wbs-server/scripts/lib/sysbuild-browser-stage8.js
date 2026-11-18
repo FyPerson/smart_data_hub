@@ -54,7 +54,16 @@ function defineCases(T) {
     async function initiation(pid) {
         const pk = (await api(people.pm, 'POST', '/projects/' + pid + '/packages', { type: 'initiation' }, 201)).package.id;
         const vid = (await api(people.pm, 'POST', '/packages/' + pk + '/versions', {}, 201)).version.id;
-        await api(people.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { text: '浏览器核对的立项全文_' + suffix } });
+        // L3：用于旧确认链的立项声明也经过实际界面输入，不由API夹具补写。
+        const editor = await pageFor(people.pm, options.mutation);
+        try {
+            await visit(editor.page, '#project=' + pid + '&tab=setup&step=3');
+            await editor.page.locator('[name="text"]').fill('浏览器核对的立项全文_' + suffix);
+            await editor.page.locator('[name="no_written_basis"]').check();
+            await editor.page.locator('[name="no_written_basis_reason"]').fill('本浏览器夹具的立项依据为线下讨论，尚无书面原件');
+            await editor.page.getByRole('button', { name: '保存本版立项内容', exact: true }).click();
+            await editor.page.locator('form[data-submitting="true"]').waitFor({ state: 'detached' });
+        } finally { await editor.context.close(); }
         await api(people.pm, 'POST', '/package-versions/' + vid + '/submit', {});
         const tasks = await api(people.pm, 'GET', '/package-versions/' + vid + '/confirm-tasks');
         return { pk, vid, task: tasks.tasks[0] };
@@ -451,6 +460,8 @@ function defineCases(T) {
             const vid = (await api(people.pm, 'POST', '/packages/' + pk + '/versions', {}, 201)).version.id;
             await api(people.pm, 'POST', '/package-versions/' + vid + '/submit', {}); await confirmVersion(s.pid, vid);
             for (const n of (await api(people.pm, 'GET', '/projects/' + s.pid + '/plan')).nodes.filter((n) => n.batch_id === s.batch && !n.is_golive_milestone && n.status !== 'closed')) {
+                // L2 fixture：这个 inhouse 批次的开发节点已有计划，开始前由 PM 显式登记节奏；不改 start 请求包装器。
+                if (n.status === 'not_started' && n.template_key === 'b_dev') await api(people.pm, 'POST', '/projects/' + s.pid + '/entries', { node_id: n.id, form: { kind: 'report_cycle', cycle: 'weekly', first_due_on: n.current_plan.start, note: '浏览器上线夹具的开发汇报节奏' } }, 201);
                 if (n.status === 'not_started') await api(people.pm, 'POST', '/nodes/' + n.id + '/start', {});
                 await api(people.pm, 'POST', '/nodes/' + n.id + '/close', {});
             }

@@ -48,6 +48,26 @@ function readText(raw, field, label, max, required) {
   return v;
 }
 
+function readGoliveAttachmentIds(raw) {
+  if (raw === undefined || raw === null) return [];
+  // L2 golive: at most ten evidence attachments per event.
+  if (!Array.isArray(raw) || raw.length > 10) throw invalid('上线事件附件须为至多 10 个编号的列表', 'attachment_ids');
+  const ids = raw.map((value) => {
+    const id = rules.parseId(value);
+    if (!id) throw invalid('附件编号不合法', 'attachment_ids');
+    return id;
+  });
+  if (new Set(ids).size !== ids.length) throw invalid('附件编号重复', 'attachment_ids');
+  return ids;
+}
+
+// L2：批次视图与上线操作响应共用；旧事件自然返回空附件列表，遮蔽名称沿用统一附件视图。
+async function goliveEventView(q, event) {
+  if (!event) return null;
+  const bound = await q.all("SELECT b.attachment_id AS attachment_id, a.sha256 AS sha256 FROM sysbuild_attachment_bindings b JOIN sysbuild_attachments a ON a.id = b.attachment_id WHERE b.owner_type = 'golive_event' AND b.owner_id = ? ORDER BY b.id", [event.id]);
+  return Object.assign({}, event, { attachment_ids: bound.map((item) => item.attachment_id), attachments: await core.attachmentView(q, bound) });
+}
+
 function createGoliveRoutes(ctx) {
   for (const k of ['db', 'logger', 'attachmentHelpers']) {
     if (ctx[k] === undefined) throw new Error('routes/sysbuild/golive 缺参数: ' + k);
@@ -55,6 +75,7 @@ function createGoliveRoutes(ctx) {
   if (!(Array.isArray(ctx.readonlyIds) || ctx.readonlyIds instanceof Set)) throw new Error('routes/sysbuild/golive 参数 readonlyIds 必须是数组或 Set');
   if (!(Array.isArray(ctx.writeRoles) || ctx.writeRoles instanceof Set)) throw new Error('routes/sysbuild/golive 参数 writeRoles 必须是数组或 Set');
   if (typeof ctx.attachmentHelpers.freezeAttachmentSet !== 'function') throw new Error('routes/sysbuild/golive 参数 attachmentHelpers 必须带 freezeAttachmentSet');
+  if (typeof ctx.attachmentHelpers.bindStagedAttachments !== 'function') throw new Error('routes/sysbuild/golive 参数 attachmentHelpers 必须带 bindStagedAttachments');
   const { db, logger, attachmentHelpers } = ctx;
   const router = express.Router();
   const accessOpts = () => ({ readonlyIds: ctx.readonlyIds, writeRoles: ctx.writeRoles });
@@ -107,7 +128,7 @@ function createGoliveRoutes(ctx) {
   }
   async function batchView(q, batch) {
     const info = await golive.goliveInfoOf(q, batch.id);
-    return { id: batch.id, seq: batch.seq, name: batch.name, status: batch.status, live: info.live, last_golive_event: info.last_event };
+    return { id: batch.id, seq: batch.seq, name: batch.name, status: batch.status, live: info.live, last_golive_event: await goliveEventView(q, info.last_event) };
   }
   // 交接集合每项的视图：判定 + 任务（补参与方名）+ 逐项 actions.handover_request（与发起端点同一个 target 构造 + 同一条 OBJECT_OPS 判定）。
   async function itemViews(q, access, batch, view) {
@@ -200,7 +221,9 @@ function createGoliveRoutes(ctx) {
   //   里程碑节点 → 已收口（记实际结束，写节点事件）、事件。上线事件时刻 = 此刻；「已正式上线」从严格晚于该时刻起算（P106）。
   router.post('/sysbuild/batches/:bid/golive', parseJsonBody, handle(async (req, res) => {
     const bid = readIdParam(req.params.bid, 'bid', '批次编号');
-    onlyKeys(bodyOf(req), []);
+    const body = bodyOf(req);
+    onlyKeys(body, ['attachment_ids']);
+    const attachmentIds = readGoliveAttachmentIds(body.attachment_ids);
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
       const { batch, access } = await loadBatchCtx(q, bid, user);
@@ -215,8 +238,10 @@ function createGoliveRoutes(ctx) {
       const rec = await golive.recordGolive(q, user, {
         batch, kind, snapshotJson: golive.snapshotOf(view), dateStr: today(), createdAt: null, milestoneAt: null, via: 'golive',
       });
+      // L2 golive: binding failure rolls back the event and the existing state transitions together.
+      await attachmentHelpers.bindStagedAttachments(q, { projectId: batch.project_id, userId: Number(user.id), attachmentIds, ownerType: 'golive_event', ownerId: rec.goliveEventId, operatorName: core.operatorNameOf(user) });
       const fresh = await q.get('SELECT id, project_id, seq, name, is_default, status FROM sysbuild_batches WHERE id = ?', [batch.id]);
-      return { batch: await batchView(q, fresh), golive_event: { id: rec.goliveEventId, kind }, milestone_node_id: rec.milestoneNodeId, summary: view.summary };
+      return { batch: await batchView(q, fresh), golive_event: await goliveEventView(q, { id: rec.goliveEventId, kind }), milestone_node_id: rec.milestoneNodeId, summary: view.summary };
     });
     res.json(out);
   }));
@@ -227,7 +252,8 @@ function createGoliveRoutes(ctx) {
   router.post('/sysbuild/batches/:bid/revoke-golive', parseJsonBody, handle(async (req, res) => {
     const bid = readIdParam(req.params.bid, 'bid', '批次编号');
     const body = bodyOf(req);
-    onlyKeys(body, ['reason']);
+    onlyKeys(body, ['reason', 'attachment_ids']);
+    const attachmentIds = readGoliveAttachmentIds(body.attachment_ids);
     const reason = readText(body.reason, 'reason', '撤销原因', REASON_MAX, true);
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
@@ -235,8 +261,10 @@ function createGoliveRoutes(ctx) {
       const v = rules.checkOp('revoke_golive', access, access.project, { batchStatus: batch.status, closingPending: await golive.closingPendingOf(q, batch.project_id) });
       if (v) throw errorOf(v);
       const rec = await golive.recordRevoke(q, user, batch, reason);
+      // L2 revoke: evidence is appended in the same transaction as the revoke event.
+      await attachmentHelpers.bindStagedAttachments(q, { projectId: batch.project_id, userId: Number(user.id), attachmentIds, ownerType: 'golive_event', ownerId: rec.goliveEventId, operatorName: core.operatorNameOf(user) });
       const fresh = await q.get('SELECT id, project_id, seq, name, is_default, status FROM sysbuild_batches WHERE id = ?', [batch.id]);
-      return { batch: await batchView(q, fresh), golive_event: { id: rec.goliveEventId, kind: 'revoke' }, milestone_node_id: rec.milestoneNodeId };
+      return { batch: await batchView(q, fresh), golive_event: await goliveEventView(q, { id: rec.goliveEventId, kind: 'revoke' }), milestone_node_id: rec.milestoneNodeId };
     });
     res.json(out);
   }));
@@ -244,4 +272,4 @@ function createGoliveRoutes(ctx) {
   return { router };
 }
 
-module.exports = { createGoliveRoutes };
+module.exports = { createGoliveRoutes, goliveEventView };

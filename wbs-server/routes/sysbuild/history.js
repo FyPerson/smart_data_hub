@@ -419,7 +419,8 @@ function createHistoryRoutes(ctx) {
     const batchStatus = batchRow ? batchRow.status : undefined;
     // P56：照 C4a 提交的事务内前置核对（草稿 + 类型 + 批次未冻结 + 立项前置 + 计划齐全），**不要求确认人齐全**（confirmersMissing 置 null）；历史互斥对象就是它自己，historyConflict 置 null。
     const facts = await packages.versionFactsOf(q, pkg);
-    const target = packages.versionTarget(ver, pkg, batchStatus, Object.assign({}, facts, { confirmersMissing: null, historyConflict: null }));
+    // L2 §4.1/§9：历史生效导入不追溯立项依据门；原材料校验与冻结仍由 applyPackage 执行。
+    const target = packages.versionTarget(ver, pkg, batchStatus, Object.assign({}, facts, { confirmersMissing: null, historyConflict: null }, pkg.type === 'initiation' ? { initiationBasis: 'ok', scopeRejection: null } : {}));
     const st = rules.OBJECT_OPS.package_version_submit.state(target);
     if (st) return { block: typeof st === 'string' ? st : st.message };
     // P68 ④：总体规划包的原日期不得早于立项包生效日（立项通过之后总体范围才生效，§2.3）。

@@ -124,6 +124,7 @@ const RULES = [
   ['S9', 'SQL 字符串不得含注释（/* 与 --）'],
   ['S10', '本模块前端采用 DOM / textContent，不直接写可执行 HTML 或动态代码'],
   ['S11', '项目管理页导航 = Legacy_Archive.html 的标准导航 + 「项目管理」一项（紧跟系统迭代、入口起始标签逐字全等、入口整段去空白全等、图标与 SVG_ICONS.clipboard 逐字相同）；sysbuild.css 不覆盖平台导航类名'],
+  ['S12', '表单存储列只允许出现在 schema.js、entries-core.js、entry-forms.js'],
 ];
 
 // ── 文件清单与解析 ─────────────────────────────────────────────────────────────────────
@@ -424,6 +425,13 @@ function scan(root) {
   const rels = listJsFiles(root);
   const files = [];
   for (const rel of rels) {
+    // L1：列名出现位置采用源码文件白名单，含注释，新增读取必须经表单助手。
+    if (!['schema.js', 'entries-core.js', 'entry-forms.js'].includes(rel)) {
+      const source = fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n');
+      source.split('\n').forEach((line, i) => {
+        if (line.includes('routing_json')) add('S12', rel, i + 1, '表单存储列必须经 entry-forms.js 读取');
+      });
+    }
     const f = parseFile(root, rel);
     if (f.error) add('S0', rel, f.line, `无法解析: ${f.error}`);
     else files.push(f);
@@ -653,6 +661,7 @@ const HEAD = "'use strict';\n";
 
 // 注入文件 / 锚点替换。create：在副本里新建文件；from/to：对已有文件做唯一锚点替换。
 const MUTATIONS = [
+  { id: 'L1 S12 白名单外出现表单存储列', rule: 'S12', edits: [{ create: 'zz_mut.js', text: "'use strict';\nmodule.exports = (row) => row.routing_json;\n" }] },
   { id: 'S0 语法错误的文件', rule: 'S0', edits: [{ create: 'zz_bad.js', text: `${HEAD}module.exports = (;\n` }] },
   { id: 'S1 UPDATE 未登记列', rule: 'S1', edits: [{ create: 'zz_mut.js', text: `${HEAD}module.exports = (q) => q.run("UPDATE sysbuild_projects SET created_by = ? WHERE id = ?", [1, 2]);\n` }] },
   { id: 'S1 UPDATE 未登记表', rule: 'S1', edits: [{ create: 'zz_mut.js', text: `${HEAD}module.exports = (q) => q.run("UPDATE sysbuild_events SET payload_json = ? WHERE id = ?", [1, 2]);\n` }] },
@@ -898,6 +907,14 @@ function selfTest() {
     }
 
     const fresh = () => { const d = fs.mkdtempSync(path.join(tmpRoot, 'copy-')); copyTree(DEFAULT_ROOT, d); return d; };
+    // L1 正对照：三个白名单文件分别出现列名均不应被 S12 拦截。
+    for (const name of ['schema.js', 'entries-core.js', 'entry-forms.js']) {
+      const d = fresh();
+      fs.appendFileSync(path.join(d, name), '\n// routing_json 白名单正对照\n');
+      const r = runGuard(__filename, ['--root', d]);
+      check(r.kind === 'green', `L1 S12 白名单 ${name} 出现列名应绿（${r.kind}: ${r.detail}）`);
+      removeTree(d);
+    }
     for (const c of CONTROLS) {
       const d = fresh();
       fs.writeFileSync(path.join(d, 'zz_ok.js'), c.text);

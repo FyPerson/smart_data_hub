@@ -330,6 +330,7 @@ function definePlanCases(T) {
     const design = await idOf(pid, 'b_design');
     const dev = await idOf(pid, 'b_dev');
     const uat = await idOf(pid, 'b_uat');
+    await T.confirm.prepareDevStart(pid, dev); // L2 §10：暂停矩阵仅测项目状态，显式备好开发开始门。
     assert.strictEqual((await startNode(U.pm, design)).status, 200);
     assert.strictEqual((await setStatus(pid, 'paused')).status, 200);
     expectErr(await closeNode(U.pm, design), 409, 'SYSBUILD_PROJECT_READONLY', '暂停时收口');
@@ -363,6 +364,7 @@ function definePlanCases(T) {
       const idle = await idOf(pid, 'b_uat');
       assert.strictEqual((await startNode(U.pm, closedNode)).status, 200);
       assert.strictEqual((await closeNode(U.pm, closedNode)).status, 200);
+      await T.confirm.prepareDevStart(pid, running);
       assert.strictEqual((await startNode(U.pm, running)).status, 200);
       const batchId = await defaultBatchId(pid);
       if (final === 'terminated') assert.strictEqual((await setStatus(pid, 'terminated')).status, 200);
@@ -460,11 +462,12 @@ function definePlanCases(T) {
     await ensureEffective(pid3, 'overall'); // 计划之外的另一个前置：总体规划包已生效（H-1：提交前计划齐全，生产路径助手把批次层节点也补成了计划）
     r = await closeNode(U.pm, overall3.id);
     assert.strictEqual(r.status, 200, `总体规划包生效后放行: ${r.text}`);
-    // 其他节点缺计划不阻塞普通节点（p_initiation 没有计划之外的前置）
+    // L2 §10：普通节点缺计划仍可收口；开发节点现在有开始门，改用无 G3 的普通自定义节点保留此断言的判别力。
     const pid2 = await newProject('inhouse');
-    const dev = await idOf(pid2, 'b_dev');
-    assert.strictEqual((await startNode(U.pm, dev)).status, 200);
-    assert.strictEqual((await closeNode(U.pm, dev)).status, 200, '普通节点缺计划不阻塞');
+    const ordinary = await post(U.pm, `/sysbuild/batches/${await defaultBatchId(pid2)}/nodes`, { name: '无计划普通节点' });
+    assert.strictEqual(ordinary.status, 201, ordinary.text);
+    assert.strictEqual((await startNode(U.pm, ordinary.body.node.id)).status, 200);
+    assert.strictEqual((await closeNode(U.pm, ordinary.body.node.id)).status, 200, '普通节点缺计划不阻塞');
     // 单批自研：b_req 前置覆盖里程碑节点
     const req2 = await idOf(pid2, 'b_req');
     assert.strictEqual((await startNode(U.pm, req2)).status, 200);
@@ -527,6 +530,7 @@ function definePlanCases(T) {
     assert.strictEqual((await startNode(U.pm, sibOverall)).status, 200);
     assert.strictEqual((await closeNode(U.pm, sibOverall)).status, 200);
     for (const k of ['b_req', 'b_design', 'b_dev', 'b_test']) {
+      if (k === 'b_dev') await T.confirm.prepareDevStart(pid, id(k));
       assert.strictEqual((await startNode(U.pm, id(k))).status, 200, k);
       assert.strictEqual((await closeNode(U.pm, id(k))).status, 200, `${k} 收口`);
     }
@@ -577,6 +581,7 @@ function definePlanCases(T) {
     const dev = await idOf(pid, 'b_dev');
     const mile = await idOf(pid, 'b_golive');
     for (const nid of [req, dev]) {
+      if (nid === dev) await T.confirm.prepareDevStart(pid, dev);
       assert.strictEqual((await startNode(U.pm, nid)).status, 200);
       assert.strictEqual((await closeNode(U.pm, nid)).status, 200);
     }
@@ -671,6 +676,7 @@ function definePlanCases(T) {
     expectErr(await patch(U.pm, `/sysbuild/nodes/${uat}`, { name: '改名' }), 409, 'SYSBUILD_STATE', '取消后改名');
     expectErr(await startNode(U.pm, uat), 409, 'SYSBUILD_STATE', '取消后开始');
     expectErr(await cancelNode(U.pm, uat, '再取消'), 409, 'SYSBUILD_STATE', '重复取消');
+    await T.confirm.prepareDevStart(pid, dev);
     assert.strictEqual((await startNode(U.pm, dev)).status, 200);
     expectErr(await cancelNode(U.pm, dev, '进行中取消'), 409, 'SYSBUILD_STATE', '进行中取消');
     assert.strictEqual((await nodeRow(dev)).status, 'in_progress', '被拒的取消不改节点');
@@ -803,6 +809,7 @@ function definePlanCases(T) {
     const today = await serverToday();
     r = await setPlan(U.pm, dev, addDays(today, -10), addDays(today, -3));
     assert.strictEqual(r.body.node.overdue_days, 3, '未开始且计划止早于今天 3 天');
+    await T.confirm.prepareDevStart(pid, dev);
     assert.strictEqual((await startNode(U.pm, dev)).body.node.overdue_days, 3, '进行中同样逾期');
     r = await setPlan(U.pm, dev, addDays(today, -2), today);
     assert.strictEqual(r.body.node.overdue_days, 0, '计划止 = 今天不算逾期');
@@ -1092,6 +1099,7 @@ function definePlanCases(T) {
     assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_parties WHERE project_id = ?', [pid])).n, beforeParties, '数组请求体不得建参与方');
     assert.strictEqual((await sqlGet('SELECT goal FROM sysbuild_projects WHERE id = ?', [pid])).goal, null);
     // 无请求体照常（按空对象）：start 不需要任何字段
+    await T.confirm.prepareDevStart(pid, dev);
     const none = await api(U.pm, 'POST', `/sysbuild/nodes/${dev}/start`);
     assert.strictEqual(none.status, 200, none.text);
     const empty = await post(U.pm, `/sysbuild/nodes/${await idOf(pid, 'b_test')}/start`, {});
@@ -1113,6 +1121,7 @@ function definePlanCases(T) {
     const design = keyOf(plan, 'b_design').id;
     const order = (await sqlAll('SELECT id FROM sysbuild_nodes WHERE batch_id = ? ORDER BY sort_order, id', [batchId])).map((r) => r.id);
     assert.strictEqual((await startNode(U.pm, design)).status, 200, '准备：一个进行中节点');
+    await T.confirm.prepareDevStart(pid, dev); // L2 §10：权限负例保留，PM 正向标志满足新门。
     const writes = (uid) => [
       ['开始', () => startNode(uid, dev)], ['收口', () => closeNode(uid, design)], ['重开', () => reopenNode(uid, design, '原因')], ['取消', () => cancelNode(uid, dev, '原因')],
       ['改名', () => patch(uid, `/sysbuild/nodes/${dev}`, { name: '改名' })], ['新增', () => post(uid, `/sysbuild/batches/${batchId}/nodes`, { name: '新节点' })],
@@ -1217,6 +1226,7 @@ function definePlanCases(T) {
       const named = await idOf(pid, 'b_test');
       assert.strictEqual((await startNode(U.pm, closedNode)).status, 200);
       assert.strictEqual((await closeNode(U.pm, closedNode)).status, 200);
+      await T.confirm.prepareDevStart(pid, running);
       assert.strictEqual((await startNode(U.pm, running)).status, 200);
       if (frozen === 'transferred') await sqlRun("UPDATE sysbuild_batches SET status = 'transferred', transfer_change_id = 1 WHERE id = ?", [batchId]);
       else await sqlRun("UPDATE sysbuild_batches SET status = 'superseded', superseded_by = ? WHERE id = ?", [batchId + 100000, batchId]);

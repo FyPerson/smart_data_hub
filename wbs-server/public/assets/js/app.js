@@ -808,7 +808,7 @@ function adjustNavbarForRole() {
         const projectLink = document.createElement('a');
         projectLink.className = 'nav-item';
         projectLink.href = '/Sys_Build.html';
-        projectLink.textContent = '项目管理';
+        projectLink.textContent = '项目管理（开发中）';
         // 固定 SVG 常量，与平台其它导航项同用共享尺寸和颜色，不拼接用户数据。
         projectLink.insertAdjacentHTML('afterbegin', SVG_ICONS.clipboard);
         projectLink.firstElementChild.setAttribute('aria-hidden', 'true');

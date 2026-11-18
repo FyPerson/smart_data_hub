@@ -231,14 +231,15 @@ function selfTest(sheetSource) {
 // 对项目管理页的导航切片做且只做三项归一后与参照页去空白全等：① 去掉 <nav> 起始标签上的 aria-label="平台导航"；
 // ② LOGO 渐变 id 换成参照页的 id（url(#…) 与 <linearGradient id> 两处）；③ 摘掉「项目管理」这一个 <a> 元素。
 // 被摘掉的元素另行断言：整个切片恰好 1 个、紧跟在「系统迭代」链接之后、起始标签与约定写法逐字全等（含 class / aria-current / 选中样式，不许多出 target / hidden 等属性）、
-// 恰好 1 个 svg 且带 aria-hidden="true"、去掉 aria-hidden 后与 app.js 里 SVG_ICONS.clipboard 的字面量逐字相同、文字为「项目管理」；
+// 恰好 1 个 svg 且带 aria-hidden="true"、去掉 aria-hidden 后与 app.js 里 SVG_ICONS.clipboard 的字面量逐字相同、文字与 NAV_ENTRY_LABEL 完全一致；
 // 以上都通过后，入口整段（去空白）还须与「约定起始标签 + 带 aria-hidden 的图标 + 文字 + </a>」全等（入口里多出别的元素只有这一条能抓到）。
 // 另查 assets/css/sysbuild.css：去掉注释后不得出现平台导航的类选择器（.navbar / .nav-item 等），防止本模块样式覆盖共享顶栏。
 // 威胁模型：防手抄导航悄悄漂移（漏项 / 错序 / 改字 / 改图标 / 用平台导航类名做的样式覆盖），不防刻意绕过（动态改导航由浏览器用例看）。
 const NAV_PAGE = 'Sys_Build.html';
 const NAV_REF = 'Legacy_Archive.html';
 const NAV_LOGO_ID = 'logo-gradient-sb';
-const NAV_ENTRY_LABEL = '项目管理';
+// 2026-11-18（用户定）：流程简化并入第二期之前，入口文字带「（开发中）」，避免能看到入口的登录用户误以为功能已正式启用。
+const NAV_ENTRY_LABEL = '项目管理（开发中）';
 const NAV_ENTRY_STYLE = 'style="color:#d97706; font-weight:600;"';
 const NAV_ENTRY_OPEN = '<a href="/Sys_Build.html" class="nav-item active" aria-current="page" ' + NAV_ENTRY_STYLE + '>';
 const NAV_CSS = 'assets/css/sysbuild.css';
@@ -367,6 +368,7 @@ function navSelfTest(publicDir) {
         if (out === html) throw new Error('变异没有改动内容：' + re);
         return out;
     };
+    // 下面两条改入口文字的变异，锚点写当前文字的字面量，不取 NAV_ENTRY_LABEL：页面与常量若同时改成别的文字，锚点找不到，自证会因「变异没有改动内容」判失败（59 号审 LOW-1）。
     const cases = [
         ['未变异的项目管理页导航应绿', (h) => h, null],
         ['删掉项目管理入口里的 svg 应红', (h) => change(h, entryRe, (e) => e.replace(/<svg\b[\s\S]*?<\/svg>/, '')), '入口内 svg 应恰好 1 个'],
@@ -380,7 +382,7 @@ function navSelfTest(publicDir) {
         ['复制一份项目管理入口应红', (h) => change(h, entryRe, (e) => e + '\n            ' + e), '入口（href="/Sys_Build.html"）应恰好 1 个'],
         ['项目管理入口去掉 aria-current 应红', (h) => change(h, entryRe, (e) => e.replace(' aria-current="page"', '')), '应带 aria-current="page"'],
         ['项目管理入口去掉选中样式应红', (h) => change(h, entryRe, (e) => e.replace(' ' + NAV_ENTRY_STYLE, '')), '应带选中样式'],
-        ['项目管理入口文字改名应红', (h) => change(h, entryRe, (e) => e.replace('项目管理</a>', '项目管理台</a>')), '入口文字应为'],
+        ['项目管理入口文字改名应红', (h) => change(h, entryRe, (e) => e.replace('项目管理（开发中）</a>', '项目管理</a>')), '入口文字应为'],
         ['导航起始标签去掉 aria-label 应红', (h) => change(h, /<nav class="navbar fixed-header" aria-label="平台导航">/, () => '<nav class="navbar fixed-header">'), '导航起始标签应为'],
         ['LOGO 渐变 id 改名应红', (h) => {
             const out = h.split(NAV_LOGO_ID).join('logo-gradient-x');
@@ -394,7 +396,7 @@ function navSelfTest(publicDir) {
         ['项目管理入口换掉图标的 path 应红', (h) => change(h, entryRe, (e) => e.replace('<path d="M16 4h2a2', '<path d="M16 4h3a2')), '与 app.js 的 SVG_ICONS.clipboard 不逐字相等'],
         ['项目管理入口的 svg 去掉 width="14" 应红', (h) => change(h, entryRe, (e) => e.replace(' width="14"', '')), '与 app.js 的 SVG_ICONS.clipboard 不逐字相等'],
         ['项目管理入口的 svg 前多一个 <i class="x"></i> 应红', (h) => change(h, entryRe, (e) => e.replace('<svg', '<i class="x"></i><svg')), '入口整段与约定写法不逐字相等'],
-        ['项目管理入口文字后多一个 <span class="badge"></span> 应红', (h) => change(h, entryRe, (e) => e.replace('项目管理</a>', '项目管理<span class="badge"></span></a>')), '入口整段与约定写法不逐字相等'],
+        ['项目管理入口文字后多一个 <span class="badge"></span> 应红', (h) => change(h, entryRe, (e) => e.replace('项目管理（开发中）</a>', '项目管理（开发中）<span class="badge"></span></a>')), '入口整段与约定写法不逐字相等'],
     ];
     const results = cases.map(([name, mutate, expect]) => {
         const label = 'S11 导航：' + name;

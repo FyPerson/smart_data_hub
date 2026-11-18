@@ -6,7 +6,7 @@
 // 夹具规则：建项走 POST /projects；登记、办理、知会异议、结论确认的打开 / 决策 / 代录 / 改发、项目状态转移全部走生产端点。只有这几类直接写库：
 //   ① 需求方 / 开发方参与方、成员、现任任职、生效授权（含无账号成员）；② 附件行（暂存）；③ 节点收口状态与时刻、项目结项状态与结项事件（结项由 C6 产生，本批没有生产路径）、
 //   任务修订创建时间回拨（代录外部日期的下限取修订创建日）；④ 授权撤销 / 任职结束（构造代表人更换）。
-// 时间：进程内夹具的「今天」固定为 2026-11-15，实例模式取真实本地日期；与「今天」有关的期望一律由 today() 推算（收口日 = 今天往前 N 天），不写死日期。
+// 时间：进程内夹具的「今天」由统一todayProvider固定注入，实例模式取真实本地日期；与「今天」有关的期望一律由 today() 推算（收口日 = 今天往前 N 天），不写死日期。
 'use strict';
 const assert = require('assert');
 
@@ -2069,7 +2069,7 @@ const ENTRY_MUTATIONS = [
   em('补交材料不要求附件', [T_EVID], 'entries.js', "if (mode === 'material' && count === 0) throw makeError(400, 'SYSBUILD_EVIDENCE_REQUIRED', '补交材料必须上传附件');", ''),
   em('涉及承诺不要求证据', [T_EVID], 'entries.js', "if (mode === 'direction' && !ev.noEvidence && count === 0) {", 'if (false) {'),
   em('无书面证据原因不核 10 字', [T_EVID], 'entries.js', 'if (ev.noEvidence && (ev.noEvidenceReason === null || Array.from(ev.noEvidenceReason).length < EVIDENCE_REASON_MIN)) {', 'if (false) {'),
-  em('证据模式一律可选', [T_EVID], 'entries.js', "input.type === 'material' ? 'material' : (input.commitment === 1 ? 'direction' : 'optional')", "'optional'"),
+  em('证据模式一律可选', [T_EVID], 'entries.js', "input.type === 'material' ? 'material' : (input.commitment === 1 || (input.form && input.form.kind === 'change_request') ? 'direction' : 'optional')", "'optional'"),
   em('附件与声明可以并存', [T_EVID], 'entries.js', "if (ev.noEvidence && count > 0) throw invalid('已附证据附件，不应再声明无书面证据', 'no_written_evidence');", ''),
   em('登记附件绑定类型写错', [T_EVID], 'entries.js', "ownerType: 'entry', ownerId: eid,", "ownerType: 'event', ownerId: eid,"),
   em('关联条目一律取最新版本', [T_ITEMS], 'entries.js', 'if (hasKey(cur.byItem, itemId)) versionId = cur.byItem[itemId].item_version_id;', 'if (false) versionId = cur.byItem[itemId].item_version_id;'),

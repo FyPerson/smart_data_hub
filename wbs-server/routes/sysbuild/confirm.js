@@ -14,14 +14,18 @@ const express = require('express');
 const rules = require('./rules');
 const { makeError } = require('./db');
 const { writeEvent } = require('./events');
-const { loadFoldedSet, setList, resolveCurrentPlan, versionTarget, versionFactsOf, rewriteFormAndParent } = require('./packages');
+const { loadFoldedSet, setList, versionTarget, versionFactsOf, rewriteFormAndParent } = require('./packages');
+const { recheckOverallSet, readSubmissionScope, devAssessmentOf, initiationBasisOf } = require('./submission-scope');
 const core = require('./confirm-core');
 const entriesCore = require('./entries-core');
 const goliveCore = require('./golive-core'); // C6a：交接确认任务（对象类型 handover）的对象分支、改发解析
 const notifyCore = require('./notify-core'); // C6b：改发 / 有异议 · 不认可 时写发送意图
+const entryForms = require('./entry-forms');
+const { submittedAssessmentView } = require('./assessment-view');
 
 const REASON_MAX = 500;
-const EVIDENCE_REASON_MIN = 10;
+// 放弃变更草稿时关闭评估认可修订的原因（改发拒绝按它给出准确文案，51 号 LOW-2）
+const CHANGE_DRAFT_ABANDONED_REASON = '变更草稿已放弃';
 const DECISIONS = Object.freeze({ confirm: 'confirmed', object: 'objected', reject: 'rejected' });
 // C4b P45：POST /confirm-tasks/:tid/proxy 能代录的任务用途；C5 S-S1a 加入办理结论确认（无账号代表人只能代录）。负责人裁定（adjudicate）不加：裁定只在平台作出（方案 §4.1「负责人裁定只在平台」）。
 //   C5 S-S1c：加入开发方关键事项认可（dev_key_confirm，无账号开发方负责人只能代录）。
@@ -299,6 +303,7 @@ function createConfirmRoutes(ctx) {
       //   这条与 rules.confirm_reissue 的「对象已不是待确认」互为两道防线（对象状态由 entries-core.loadDevTaskObject 派生），读接口 actions.reissue 与执行共用本函数。
       if (c.latest.status !== 'pending' && c.latest.status !== 'invalid') return { isDelegate: false, cur: null, blocked: '开发方负责人已作出认可 / 不认可，不能改发；不认可的出路是修订重提', historyConflict: null };
       if (c.latest.status === 'invalid') {
+        if (c.latest.status_reason === CHANGE_DRAFT_ABANDONED_REASON) return { isDelegate: false, cur: null, blocked: '该认可已随变更草稿放弃而失效，不能改发；如仍需评估，请在新的变更上重新登记开发评估', historyConflict: null };
         if (c.latest.status_reason !== core.PROJECT_TERMINATED_REASON) return { isDelegate: false, cur: null, blocked: '该认可已失效（取消涉及承诺 / 登记作废），不能改发；需要时请重新标记涉及承诺或修订重提', historyConflict: null };
         if (c.obj.de.needsDevConfirm !== true) return { isDelegate: false, cur: null, blocked: '该登记已不需要开发方负责人认可（已取消涉及承诺），不能改发', historyConflict: null };
       }
@@ -339,92 +344,16 @@ function createConfirmRoutes(ctx) {
     objectPending: c.obj.pending, // C5：办理结论 / 裁定任务的「对象仍是当前结论」判定用（entry_conclusion_reissue）
   });
 
-  // ── 提交时重核整个集合（P24 / 交接 ④）─────────────────────────────────────────────────────────────
-  async function evidenceCount(q, itemVersionId) {
-    const r = await q.get(
-      `SELECT COUNT(*) AS n FROM sysbuild_attachments a
-        WHERE a.deleted_at IS NULL
-          AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings WHERE owner_type = 'item_version' AND owner_id = ?
-                       UNION SELECT attachment_id FROM sysbuild_attachment_refs WHERE owner_type = 'item_version' AND owner_id = ?)`,
-      [itemVersionId, itemVersionId]
-    );
-    return r.n;
-  }
-  // 总体规划包版本：集合非空；每个条目版本属本项目；每条都有承诺批次；承诺批次属本项目、未转出 / 未被替代；已上线条目不能换到未上线批次；方向类证据按
-  //   「未软删除的绑定 ∪ 引用」重核。违反时按固定优先级抛第一类，文案列出条目编号。返回折叠后的集合（升序）。
-  async function recheckOverallSet(q, pkg, ver) {
-    const pid = pkg.project_id;
-    const set = setList(await loadFoldedSet(q, ver.id));
-    if (set.length === 0) throw stateError('总体规划的条目集合为空，请先添加条目');
-    const cur = await resolveCurrentPlan(q, pid);
-    const bad = { project: [], noBatch: [], batchGone: [], structure: [], liveMove: [], liveFrozen: [], evidence: [] };
-    // C5 S-S1c：第一期只有默认批次，变更包版本里承诺批次只能是默认批次——批次转出 / 拆分 / 合并（sysbuild_batch_relations、batches.transfer_change_id）第二期才开放，改变批次结构的变更 409
-    const defaultBatch = pkg.type === 'change' ? await q.get('SELECT id FROM sysbuild_batches WHERE project_id = ? AND is_default = 1', [pid]) : null;
-    const batchCache = {};
-    const batchOf = async (bid) => {
-      if (!hasKey(batchCache, bid)) batchCache[bid] = await q.get('SELECT id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [bid, pid]) || null;
-      return batchCache[bid];
-    };
-    // C6a：「已正式上线」的判据 = entriesCore.batchLiveState（与分流同一个函数），不再读 batches.status = 'live'
-    const liveCache = {};
-    const isLive = async (bid) => {
-      if (!hasKey(liveCache, bid)) liveCache[bid] = (await entriesCore.batchLiveState(q, bid)).live;
-      return liveCache[bid];
-    };
-    for (const it of set) {
-      const row = await q.get(
-        `SELECT it.code AS code, it.project_id AS project_id, iv.no_written_evidence AS no_written_evidence, iv.no_evidence_reason AS no_evidence_reason
-           FROM sysbuild_item_versions iv JOIN sysbuild_items it ON it.id = iv.item_id WHERE iv.id = ?`,
-        [it.item_version_id]
-      );
-      const label = row ? row.code : `条目版本#${it.item_version_id}`;
-      if (!row || row.project_id !== pid) { bad.project.push(label); continue; }
-      if (it.committed_batch_id === null) bad.noBatch.push(label);
-      else {
-        const batch = await batchOf(it.committed_batch_id);
-        if (!batch || rules.BATCH_FROZEN_STATUSES.includes(batch.status)) bad.batchGone.push(label);
-        else if (pkg.type === 'change' && (!defaultBatch || batch.id !== defaultBatch.id)) bad.structure.push(label);
-        else if (hasKey(cur.byItem, it.item_id)) {
-          const was = await batchOf(cur.byItem[it.item_id].committed_batch_id);
-          if (was && (await isLive(was.id)) && !(await isLive(batch.id))) bad.liveMove.push(label);
-        }
-      }
-      const n = await evidenceCount(q, it.item_version_id);
-      const reasonOk = row.no_written_evidence === 1 && typeof row.no_evidence_reason === 'string' && Array.from(row.no_evidence_reason.trim()).length >= EVIDENCE_REASON_MIN;
-      if (n === 0 && !reasonOk) bad.evidence.push(label);
-    }
-    // P163 / P169 / P170：已上线批次的承诺条目版本集合冻结。判定只有一份（entries-core.liveFreezeBreaches，变更生效时 confirm-core.applyChangeEffect 再用同一份核一次）：
-    //   frozen = 往已上线批次加条目 / 给已承诺到已上线批次的条目换版本 / 把条目移入已上线批次；removed = 现行规划里承诺到已上线批次的条目被移出（预筛 M6：上线的事实不因变更消失，
-    //   后续增强请建新条目；只对变更包）。已上线的判据 = 批次状态 live 或 batchLiveState（P170，冻结属编辑类守卫，上线后同一秒内也冻结）。
-    const breaches = await entriesCore.liveFreezeBreaches(q, cur.byItem, set);
-    const codeOfItem = async (id) => {
-      const r = await q.get('SELECT code FROM sysbuild_items WHERE id = ?', [id]);
-      return r ? r.code : `条目#${id}`;
-    };
-    for (const id of breaches.frozen) bad.liveFrozen.push(await codeOfItem(id));
-    const liveRemoved = [];
-    if (pkg.type === 'change') for (const id of breaches.removed) liveRemoved.push(await codeOfItem(id));
-    const list = (arr) => arr.join('、');
-    if (liveRemoved.length > 0 && bad.project.length === 0 && bad.noBatch.length === 0 && bad.batchGone.length === 0 && bad.structure.length === 0 && bad.liveMove.length === 0) throw stateError(`已上线条目不能移出规划，后续增强请建新条目：${list(liveRemoved)}`);
-    if (bad.project.length > 0) throw stateError(`以下条目版本不属于本项目：${list(bad.project)}`);
-    if (bad.noBatch.length > 0) throw stateError(`以下条目没有承诺批次：${list(bad.noBatch)}`);
-    if (bad.batchGone.length > 0) throw stateError(`以下条目的承诺批次已转出、被替代或不属于本项目：${list(bad.batchGone)}`);
-    if (bad.structure.length > 0) throw stateError(`第二期开放：本期变更不能改变批次结构，承诺批次只能是默认批次，以下条目的承诺批次不是默认批次：${list(bad.structure)}`);
-    if (bad.liveMove.length > 0) throw stateError(`以下条目已在已上线批次，不能换到未上线批次：${list(bad.liveMove)}`);
-    if (bad.liveFrozen.length > 0) throw stateError(`已上线批次的承诺条目版本集合已冻结，不能新增、换版本或移入，后续增强请建新条目：${list(bad.liveFrozen)}`);
-    if (bad.evidence.length > 0) throw stateError(`以下条目版本的方向类证据已不齐（附件被删除或未声明无书面证据）：${list(bad.evidence)}`);
-    return set;
-  }
   // ── POST /sysbuild/package-versions/:vid/submit、POST /sysbuild/changes/:cid/submit：提交确认（P22–P24；C5 S-S1c 变更包）──────────────────
   //   两个入口共用 submitVersion（同一个写事务体）：变更的提交 = 提交该变更当前草稿版本，前置与确认人解析同总体规划包，另在同一事务里让 changes.status draft → pending 并回填 package_version_id。
   async function submitVersion(q, user, vid) {
     {
       const { ver, pkg, access, batchStatus } = await loadVersionCtx(q, vid, user);
       // 权限 / 项目状态 / 对象状态 / 必需确认人齐全（P23）/ 立项前置（P37）全部在这一个 assertOp 里判（target 的项目级事实与读接口 actions.submit 同源，
-      //   MED-1）；下面只剩 P24 的条目集合重核（只在执行时做）。
-      rules.assertOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, await versionFactsOf(q, pkg, ver)));
+      //   MED-1）；L1 的评估事实也经同一取数函数提供给读写两端。
+      const facts = await versionFactsOf(q, pkg, ver);
+      rules.assertOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, facts));
       const pid = pkg.project_id;
-      const set = pkg.type === 'overall' || pkg.type === 'change' ? await recheckOverallSet(q, pkg, ver) : []; // 变更包版本 = 提议的下一版完整总体规划，同一套集合重核
       // 必需确认人的具体名单（assertOp 已核对齐全；同一写事务内与上面的 confirmersMissing 读到的是同一状态）。
       const required = await core.resolvePackageConfirmers(q, pid, pkg.type);
       // P32（主会话 11-01 裁定）：form / parent_overall_version_id 按提交时的项目现状重算（packages.js computeFormAndParent，与建草稿版本同一个函数），
@@ -434,23 +363,31 @@ function createConfirmRoutes(ctx) {
       //   C5 交接（主会话 11-01 裁定）：批次需求包提交时若 parent 对应的总体版本已被替代，改为 409「请基于现行规划重建草稿」，不静默回写 parent
       //   （C4a 只开放总体规划包 / 立项包提交，批次包 parent 恒为空，这里的回写实际只作用于 form）。
       //   重算与回写（packages.js rewriteFormAndParent，与历史事实导入内容包生效共用一份）；changed = 变化项（form_from / form_to / parent_from / parent_to，只在变化时）。
-      const { calc, changed } = await rewriteFormAndParent(q, pkg, ver);
+      const { changed } = await rewriteFormAndParent(q, pkg, ver);
+      // L1：评估与提交唯一的内容取数路径；回写形态后在同一写事务内重核指纹，后续冻结与事件只消费这一份结果。
+      const scope = await readSubmissionScope(q, pkg, ver);
+      if (pkg.type === 'initiation') {
+        const basis = await initiationBasisOf(q, pkg, ver, scope);
+        rules.assertOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, { ...facts, initiationBasis: basis.fact, scopeRejection: basis.scopeRejection }));
+      }
+      const set = scope.items;
+      const assessment = pkg.type === 'change' ? await devAssessmentOf(q, pkg, ver, scope) : null;
+      if (assessment) rules.assertOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, {
+        ...facts, devAssessment: assessment.fact,
+      }));
       const up = await q.run("UPDATE sysbuild_package_versions SET status = 'pending', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'", [vid]);
       if (up.changes === 0) throw stateError('版本状态已变化，请刷新后重试');
       // 冻结附件集合（不变量 9）：本版本引用的每个条目版本的附件（绑定 ∪ 引用）+ 包版本自己的材料附件，同一个冻结对象（package_version, vid）。
       const opId = Number(user.id);
       const opName = core.operatorNameOf(user);
-      for (const it of set) {
-        await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'item_version', ownerId: it.item_version_id, operatorId: opId, operatorName: opName, projectId: pid });
+      const freezeSource = (source) => attachmentHelpers.freezeAttachmentRows(q, { objectType: 'package_version', objectVersionId: vid, ownerType: source.ownerType, ownerId: source.ownerId, operatorId: opId, operatorName: opName, projectId: pid }, source.rows);
+      for (const source of scope.attachmentSources) {
+        if (source.ownerType !== 'change') await freezeSource(source);
       }
-      await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'package_version', ownerId: vid, operatorId: opId, operatorName: opName, projectId: pid });
-      await materialsCore.freezeSelectedMaterials(q, { projectId: pid, versionId: vid, operatorId: opId, operatorName: opName });
+      await materialsCore.freezeMaterialRows(q, { projectId: pid, versionId: vid, operatorId: opId, operatorName: opName }, scope.materials);
       // C5 S-S1c：变更的方向类证据（owner_type = change）随变更包版本冻结，确认人看到的就是提交时的证据清单
-      const changeRow = pkg.type === 'change' ? await q.get('SELECT id, title FROM sysbuild_changes WHERE package_id = ?', [pkg.id]) : null;
-      if (pkg.type === 'change') {
-        if (!changeRow) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：变更包没有对应的变更');
-        await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'change', ownerId: changeRow.id, operatorId: opId, operatorName: opName, projectId: pid });
-      }
+      const changeRow = scope.change;
+      for (const source of scope.attachmentSources) if (source.ownerType === 'change') await freezeSource(source);
       const frozen = await core.frozenSetOf(q, 'package_version', vid);
       const tasks = [];
       for (const e of required.entries) {
@@ -462,9 +399,9 @@ function createConfirmRoutes(ctx) {
       }
       // 总体规划包另记各未取消节点当时的当前计划（node_plans，P34）：总体排期基线是确认对象；生效时形成的基线要与它核对（confirm-core.formBaselines）。
       const payload = Object.assign({
-        package_id: pkg.id, type: pkg.type, version_no: ver.version_no, form: calc.form, item_count: set.length,
+        package_id: pkg.id, type: pkg.type, version_no: ver.version_no, form: scope.calc.form, item_count: set.length,
         task_ids: tasks.map((t) => t.task_id), frozen_attachment_ids: frozen.map((f) => f.attachment_id),
-      }, changed, pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: await core.currentNodePlans(q, pid) } : {}, changeRow ? { change_id: changeRow.id } : {});
+      }, changed, pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: scope.nodePlans } : {}, changeRow ? { change_id: changeRow.id, assessment: assessment.payload } : {});
       await emit(q, user, pid, 'package_version', vid, 'package_version_submitted', payload);
       if (changeRow) {
         // 变更：draft → pending，回填当前送审版本（条件更新，影响行数 0 → 409）
@@ -508,7 +445,10 @@ function createConfirmRoutes(ctx) {
     const out = await db.withWriteTxn(async (q) => {
       const { ver, pkg, access, batchStatus } = await loadVersionCtx(q, vid, user);
       rules.assertOp('package_version_withdraw', access, access.project, versionTarget(ver, pkg, batchStatus));
-      const up = await q.run("UPDATE sysbuild_package_versions SET status = 'superseded', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'", [vid]);
+      const abandoning = ver.status === 'draft';
+      const up = abandoning
+        ? await q.run("UPDATE sysbuild_package_versions SET status = 'superseded', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'", [ver.id])
+        : await q.run("UPDATE sysbuild_package_versions SET status = 'superseded', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'", [vid]);
       if (up.changes === 0) throw stateError('版本状态已变化，请刷新后重试');
       const revs = await q.all(
         `SELECT r.id AS id FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
@@ -516,16 +456,33 @@ function createConfirmRoutes(ctx) {
         [vid]
       );
       for (const r of revs) await core.closePendingRevision(q, r.id, 'invalid', reason);
+      const ch = pkg.type === 'change' ? await q.get('SELECT id FROM sysbuild_changes WHERE package_id = ?', [pkg.id]) : null;
+      if (pkg.type === 'change' && !ch) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：变更包没有对应的变更');
+      if (abandoning) {
+        // 草稿没有包确认任务，但已登记的评估可能仍在等待负责人认可。只关闭其当前待认可修订，保留完成记录。
+        const rows = await q.all(`SELECT ${entriesCore.ENTRY_COLS} FROM sysbuild_entries WHERE project_id = ? AND purpose = 'dev_note' ORDER BY id`, [pkg.project_id]);
+        for (const entry of rows) {
+          const read = entryForms.readEntryForm(entry);
+          if (!read.form || read.form.kind !== 'dev_assessment' || read.form.about_change_id !== ch.id) continue;
+          const pending = await q.all(
+            `SELECT r.id AS id FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
+              WHERE t.object_type = 'dev_entry' AND t.object_id = ? AND t.purpose = 'dev_key_confirm' AND r.status = 'pending'
+                AND r.rev_no = (SELECT MAX(r2.rev_no) FROM sysbuild_confirm_task_revisions r2 WHERE r2.task_id = t.id) ORDER BY r.id`, [entry.id]
+          );
+          for (const r of pending) { await core.closePendingRevision(q, r.id, 'invalid', CHANGE_DRAFT_ABANDONED_REASON); revs.push(r); }
+        }
+      }
       await emit(q, user, pkg.project_id, 'package_version', vid, 'package_version_withdrawn', {
         package_id: pkg.id, version_no: ver.version_no, reason, invalidated_revision_ids: revs.map((r) => r.id),
+        ...(abandoning ? { from_status: 'draft' } : {}),
       });
       // C5 S-S1c：变更包版本撤回 → 同一事务 changes.status → withdrawn（撤回后的变更不能再提交，要再变更就新建一条）
       if (pkg.type === 'change') {
-        const ch = await q.get('SELECT id FROM sysbuild_changes WHERE package_id = ?', [pkg.id]);
-        if (!ch) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：变更包没有对应的变更');
-        const cu = await q.run("UPDATE sysbuild_changes SET status = 'withdrawn', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'", [ch.id]);
+        const cu = abandoning
+          ? await q.run("UPDATE sysbuild_changes SET status = 'withdrawn', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'", [ch.id])
+          : await q.run("UPDATE sysbuild_changes SET status = 'withdrawn', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'", [ch.id]);
         if (cu.changes === 0) throw stateError('变更状态已变化，请刷新后重试');
-        await emit(q, user, pkg.project_id, 'change', ch.id, 'change_withdrawn', { change_id: ch.id, package_version_id: vid, reason });
+        await emit(q, user, pkg.project_id, 'change', ch.id, 'change_withdrawn', { change_id: ch.id, package_version_id: vid, reason, ...(abandoning ? { from_status: 'draft' } : {}) });
       }
       return { version: { id: vid, package_id: pkg.id, version_no: ver.version_no, status: 'superseded' }, invalidated_revision_ids: revs.map((r) => r.id) };
     });
@@ -642,6 +599,7 @@ function createConfirmRoutes(ctx) {
         type: 'package_version',
         package: { id: pkg.id, type: pkg.type, batch_id: pkg.batch_id },
         change,
+        ...(pkg.type === 'change' ? { assessment: await submittedAssessmentView(q, pkg.project_id, ver.id) } : {}),
         version: { id: ver.id, version_no: ver.version_no, form: ver.form, status: ver.status, effective_at: ver.effective_at, parent_overall_version_id: ver.parent_overall_version_id },
         snapshot_json: parseJsonOrEmpty(ver.snapshot_json),
         materials: await materialsCore.selectedMaterials(q, pkg.project_id, ver.snapshot_json, { usable: false }),

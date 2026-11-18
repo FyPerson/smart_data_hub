@@ -76,9 +76,13 @@ async function selectedMaterials(q, projectId, snapshot, options) {
 }
 // 包版本冻结不读最新材料、不重新计算已冻结附件的hash。只追加原材料版本的冻结编号与hash。
 async function freezeSelectedMaterials(q, args) {
+  const snapshot = await packageMaterialSnapshot(q, args.projectId, args.versionId);
+  const selected = await selectedMaterials(q, args.projectId, snapshot, { usable: true });
+  return freezeMaterialRows(q, args, selected);
+}
+// 提交经送审范围助手取数后只消费同一份材料与冻结散列，不再另读一次快照。
+async function freezeMaterialRows(q, args, selected) {
   const { projectId, versionId, operatorId, operatorName } = args;
-  const snapshot = await packageMaterialSnapshot(q, projectId, versionId);
-  const selected = await selectedMaterials(q, projectId, snapshot, { usable: true });
   for (const material of selected) for (const attachment of material.frozen) {
     const exists = await q.get("SELECT sha256 FROM sysbuild_frozen_attachments WHERE object_type = 'package_version' AND object_version_id = ? AND attachment_id = ?", [versionId, attachment.attachment_id]);
     if (exists) {
@@ -118,4 +122,4 @@ async function assertMaterialFreezes(q, projectId, version) {
   }
   return selected;
 }
-module.exports = { snapshotObject, materialIdsOf, selectedMaterials, freezeSelectedMaterials, assertMaterialFreezes, boundMaterialAttachments, materialVersionRecord, materialView, attachmentPublicView };
+module.exports = { snapshotObject, materialIdsOf, selectedMaterials, freezeSelectedMaterials, freezeMaterialRows, assertMaterialFreezes, boundMaterialAttachments, materialVersionRecord, materialView, attachmentPublicView };

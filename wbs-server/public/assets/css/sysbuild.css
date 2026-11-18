@@ -118,5 +118,10 @@ body:has(#sysbuildApp) {
 .sbui-confirmation .sbui-longtext { font-size: 16px; line-height: 1.9; }
 .sbui-confirmation > .sbui-panel:first-child { border-top: 3px solid var(--sbui-accent); }
 .sbui-dialog { width: min(760px, calc(100vw - 32px)); overflow: auto; }
+.sbui-dialog.sbui-create-dialog { width: min(560px, calc(100vw - 32px)); margin: auto; }
+.sbui-create-dialog > div > .sbui-panel-head { position: sticky; top: 0; z-index: 2; background: var(--sbui-paper); }
+.sbui-create-dialog .sbui-form-actions { position: sticky; bottom: -20px; margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--sbui-line); background: var(--sbui-paper); z-index: 1; }
+.sbui-step { text-decoration: none; color: var(--sbui-text); overflow-wrap: anywhere; }
+.sbui-step:focus-visible { outline: 2px solid var(--sbui-accent); outline-offset: 2px; }
 @media (max-width: 1200px) { .sbui-app { padding: 24px; } .sbui-facts { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 @media (max-width: 768px) { .sbui-app { padding: 16px; } .sbui-form-grid, .sbui-facts, .sbui-stepper, .sbui-todo { grid-template-columns: minmax(0,1fr); } .sbui-heading, .sbui-panel-head { align-items: stretch; } .sbui-table { min-width: 560px; } }

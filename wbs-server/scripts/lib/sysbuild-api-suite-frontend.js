@@ -28,6 +28,8 @@ function defineFrontendCases(T) {
         async function submitAndConfirm(type, item, batch) {
             const pkg = (await post(U.pm, '/projects/' + pid + '/packages', { type }, 201)).package.id;
             const vid = (await post(U.pm, '/packages/' + pkg + '/versions', {}, 201)).version.id;
+            // L2 fixture：此成功确认链先明确满足立项门；保留原改期知会可见性断言。
+            if (type === 'initiation') await call(U.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { no_written_basis_reason: '改期知会用例的立项来源为线下讨论，尚无书面原件' } });
             if (item) await post(U.pm, '/package-versions/' + vid + '/items', { op: 'add', item_version_id: item, committed_batch_id: batch }, 201);
             await post(U.pm, '/package-versions/' + vid + '/submit');
             const tasks = (await call(U.pm, 'GET', '/package-versions/' + vid + '/confirm-tasks')).tasks;

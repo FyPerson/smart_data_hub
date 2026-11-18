@@ -182,6 +182,7 @@ module.exports = (deps) => {
   // 通知与待办（C6b）：PM 补发 / 发送意图列表、我的待办。待办的「待我确认」「知会」两类读 confirm / entries 导出的同一取数函数（与 GET /my/confirmations、/my/notices 同源）。
   const notifyRoutes = createNotifyRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES, notifier,
+    todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined,
     myConfirmationItems: confirm.myConfirmationItems, myNoticeItems: entries.myNoticeItems, myInvitationItems: membership.myInvitationItems,
   });
   router.use(notifyRoutes.router);

@@ -30,6 +30,9 @@ const goliveCore = require('./golive-core');
 const notifyCore = require('./notify-core');
 const notifySchedule = require('./notify-schedule');
 const membership = require('./membership'); // 修订批 2（M2）：邀请 / 授权的「可操作」判定与站内入口共用
+const reports = require('./report-core');
+const { reportRecipientsOf } = require('./report-recipients');
+const { devAssessmentOf } = require('./submission-scope');
 
 const { PURPOSES, REF_TYPES, ROUTES } = notifyCore;
 const SYSTEM_OPERATOR = Object.freeze({ id: 0, display_name: '系统' }); // schema.js 约定②：系统操作人名一律「系统」
@@ -845,6 +848,46 @@ function createNotifyRoutes(ctx) {
         }
       }
       counts.routing = routing.length; items.routing = cap(routing);
+      const reportDue = [];
+      const reportOverdue = [];
+      const changeAssess = [];
+      const today = reports.todayOf(ctx.todayProvider);
+      for (const p of visible) {
+        const isPm = Number(p.pm_user_id) === uid;
+        const recipients = await reportRecipientsOf(q, p.id);
+        if (isPm || recipients.due.includes(uid)) {
+          const batches = await q.all('SELECT id FROM sysbuild_batches WHERE project_id = ? ORDER BY id', [p.id]);
+          for (const batch of batches) {
+            const node = await reports.developmentNodeOf(q, batch.id);
+            if (!node) continue;
+            const due = await reports.dueDatesOf(q, node, reports.addDays(today, 2), () => today);
+            for (const item of due) {
+              if (item.submitted) continue;
+              const base = { project_id: p.id, system_name: p.system_name, node_id: node.id, node_name: node.name, ...item, message: `${node.name}：${item.due_on} 应交进度汇报` };
+              if (recipients.due.includes(uid)) reportDue.push({ ...base, kind: 'report_due' });
+              if (isPm && item.overdue) reportOverdue.push({ ...base, kind: 'report_overdue' });
+            }
+          }
+        }
+        if (isPm || recipients.assessment.includes(uid)) {
+          const changes = await q.all("SELECT id, title, package_id FROM sysbuild_changes WHERE project_id = ? AND status = 'draft' ORDER BY id DESC", [p.id]);
+          for (const change of changes) {
+            const ver = await q.get("SELECT * FROM sysbuild_package_versions WHERE package_id = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", [change.package_id]);
+            if (!ver) continue;
+            const pkg = await q.get('SELECT id, project_id, batch_id, type FROM sysbuild_packages WHERE id = ?', [change.package_id]);
+            const assessment = await devAssessmentOf(q, pkg, ver);
+            if (!['none', 'not_approved', 'stale', 'dev_lead_vacant', 'unknown'].includes(assessment.fact)) continue;
+            const toPm = ['dev_lead_vacant', 'unknown'].includes(assessment.fact);
+            if (!(toPm ? isPm : recipients.assessment.includes(uid))) continue;
+            const messages = { none: '请登记开发评估', not_approved: '最新一份开发评估尚未获开发方负责人认可', stale: '送审内容已变化，请重新登记开发评估', dev_lead_vacant: '开发方当前没有负责人，请先补任', unknown: '有一条开发评估记录无法读取，请作废该登记或重新登记开发评估' };
+            changeAssess.push({ kind: 'change_assess', project_id: p.id, system_name: p.system_name, change_id: change.id, title: change.title, package_version_id: ver.id, fact: assessment.fact,
+              message: assessment.scopeRejection ? assessment.scopeRejection.message : messages[assessment.fact], ...(assessment.scopeRejection ? { scopeRejection: assessment.scopeRejection } : {}) });
+          }
+        }
+      }
+      counts.report_due = reportDue.length; items.report_due = cap(reportDue);
+      counts.report_overdue = reportOverdue.length; items.report_overdue = cap(reportOverdue);
+      counts.change_assess = changeAssess.length; items.change_assess = cap(changeAssess);
       counts.badge = counts.confirm + counts.accept; // P183：顶部角标 = 待我确认 + 待我接受
       return { counts, items };
     });

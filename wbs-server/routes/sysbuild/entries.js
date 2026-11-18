@@ -23,6 +23,9 @@ const { resolveCurrentPlan } = require('./packages');
 const { attachmentDisplayName } = require('./attachments');
 const core = require('./confirm-core');
 const entries = require('./entries-core');
+const forms = require('./entry-forms');
+const reports = require('./report-core');
+const { reportRecipientsOf } = require('./report-recipients');
 const routing = require('./entries-routing');
 const goliveCore = require('./golive-core'); // C6a：登记有新的办理动作后，让过期的交接确认失效（golive-core 不依赖本文件，不成环）
 const notifySchedule = require('./notify-schedule'); // C6b：改期知会的视图 / 异议资格（只依赖 events / confirm-core / notify-core，不成环）
@@ -37,7 +40,7 @@ const EVIDENCE_REASON_MIN = 10;
 const ID_LIST_MAX = 20;
 const ITEM_IDS_MAX = 50;
 const CREATE_KEYS = Object.freeze([
-  'node_id', 'type', 'purpose', 'title', 'body', 'business_date', 'commitment_flag', 'is_risk', 'source_party_id', 'item_ids', 'attachment_ids', 'no_written_evidence', 'no_evidence_reason',
+  'node_id', 'type', 'purpose', 'title', 'body', 'business_date', 'commitment_flag', 'is_risk', 'source_party_id', 'item_ids', 'attachment_ids', 'no_written_evidence', 'no_evidence_reason', 'form',
   'objects_entry_id', 'revision_of_entry_id', 'self_confirm_text',
 ]);
 // 异议登记（objects_entry_id 非空）只认这几个键：节点 / 条目 / 来源方 / 标志都由被异议的登记与提出人身份决定，不由请求指定（D34）
@@ -165,7 +168,7 @@ function createEntryRoutes(ctx) {
   const { db, logger, attachmentHelpers } = ctx;
   const router = express.Router();
   const accessOpts = () => ({ readonlyIds: ctx.readonlyIds, writeRoles: ctx.writeRoles });
-  const today = () => (typeof ctx.todayProvider === 'function' ? ctx.todayProvider() : core.localDateString(new Date()));
+  const today = () => reports.todayOf(ctx.todayProvider);
 
   function sendError(res, err) {
     if (res.headersSent) return;
@@ -249,7 +252,8 @@ function createEntryRoutes(ctx) {
     const devPartyId = await entries.devPartyIdOf(q, entry.project_id);
     const canCreate = rules.opAllowed('entry_create_process', identity, access.project, {}) || rules.opAllowed('entry_create_supplement', identity, access.project, {});
     const purposeAllowed = !rules.ENTRY_DEV_PURPOSES.includes(entry.purpose) || rules.opAllowed('entry_create_dev', identity, access.project, { devPartyId });
-    actions.revise = devConfirm.status === 'not_approved' && sourceMatches && canCreate && purposeAllowed;
+    const formView = forms.entryFormView(entry, facts.actions);
+    actions.revise = !formView.form && !formView.form_unreadable && devConfirm.status === 'not_approved' && sourceMatches && canCreate && purposeAllowed;
     return {
       id: entry.id, project_id: entry.project_id, node_id: entry.node_id, type: entry.type, purpose: entry.purpose,
       source_party_id: entry.source_party_id, source_name: entry.source_name,
@@ -270,6 +274,7 @@ function createEntryRoutes(ctx) {
       awaiting_sys_iteration: !!(facts.routing && facts.routing.route === 'sys_iteration') && !entries.entryResolved(d),
       created_at: entry.created_at,
       actions,
+      ...formView,
     };
   }
   async function attachmentsOfEntry(q, entryId) {
@@ -353,6 +358,7 @@ function createEntryRoutes(ctx) {
 
   // ── POST /sysbuild/projects/:id/entries：写登记 ───────────────────────────────────────────────
   function readCreateInput(body) {
+    body = forms.normalizeEntryRequest(body);
     // S-S1b（D34 / P97）：objects_entry_id 非空 = 对已有有效结论的登记提异议，服务端生成一条异议登记；只认 OBJECTION_KEYS，类型缺省「意见与反馈」，标题缺省按被异议登记生成
     if (body.objects_entry_id !== undefined && body.objects_entry_id !== null) {
       onlyKeys(body, OBJECTION_KEYS);
@@ -374,7 +380,8 @@ function createEntryRoutes(ctx) {
     const purpose = body.purpose === undefined || body.purpose === null ? 'general' : body.purpose;
     if (typeof purpose !== 'string' || !schema.ENUMS.entryPurpose.includes(purpose)) throw invalid(`用途必须是 ${schema.ENUMS.entryPurpose.join(' / ')} 之一`, 'purpose');
     const title = readText(body.title, 'title', '标题', TITLE_MAX, true);
-    const text = readText(body.body, 'body', '内容', BODY_MAX, true);
+    // 表单正文由已逐字段校验的原文生成，字段上限之和可达 4000，模板标题不占字段额度。
+    const text = body.form ? body.body : readText(body.body, 'body', '内容', BODY_MAX, true);
     let businessDate = null;
     if (body.business_date !== undefined && body.business_date !== null && body.business_date !== '') {
       if (!validDate(body.business_date)) throw invalid('业务日期必须是 YYYY-MM-DD 格式的有效日期（2000–2099）', 'business_date');
@@ -394,7 +401,7 @@ function createEntryRoutes(ctx) {
     // 预筛 Q2：本人提交并确认的确认文案（开发方现任负责人本人登记需认可的事项时必须带，且等于固定确认文案；不带 / 不等 → 400 在建任务处判，见 entries-core.requestDevConfirm）。这里只收类型。
     if (body.self_confirm_text !== undefined && body.self_confirm_text !== null && typeof body.self_confirm_text !== 'string') throw invalid('self_confirm_text 必须是字符串', 'self_confirm_text');
     const selfConfirmText = typeof body.self_confirm_text === 'string' ? body.self_confirm_text : null;
-    return { objectsEntryId: null, revisionOfEntryId, selfConfirmText, type, purpose, title, text, businessDate, commitment, isRisk, nodeId, sourcePartyId, itemIds, attachmentIds, ev };
+    return { objectsEntryId: null, revisionOfEntryId, selfConfirmText, type, purpose, title, text, businessDate, commitment, isRisk, nodeId, sourcePartyId, itemIds, attachmentIds, ev, form: body.form || null };
   }
 
   // 登记写入的共用部分（主端点与收口后知会异议共用）：关联需求条目 → 分流判定 → 写登记行（含自动拆分）→ 附件 → 判定快照 → 事件。
@@ -426,6 +433,7 @@ function createEntryRoutes(ctx) {
       const classified = await routing.classifyItems(q, cur, input.itemIds);
       parts = routing.planParts(classified);
       if (parts.length === 1 && parts[0].route === 'sys_iteration') throw await routing.liveRejection(q, classified);
+      if (parts.length > 1 && input.form) throw stateError('带表单的登记不能拆分，请按归属分开登记');
       if (parts.length > 1 && needsDev) {
         throw Object.assign(stateError('需要开发方负责人认可的登记不能拆分：未上线部分请单独登记，已上线部分请到系统迭代受理渠道提单'), { extra: { guide: 'sys_iteration', live_items: await routing.describeLiveItems(q, classified) } });
       }
@@ -434,7 +442,7 @@ function createEntryRoutes(ctx) {
     const eid = await entries.insertEntryRow(q, {
       projectId: pid, nodeId: input.nodeId, type: input.type, purpose: input.purpose, commitment: input.commitment, commitmentSource: input.commitment === 1 ? 'submitter' : null, isRisk: input.isRisk,
       sourcePartyId, operatorUserId: uid, snapshotJson: JSON.stringify(snapshot), period: per.period, days: per.days, businessDate: input.businessDate, title: input.title, body: input.text,
-      noEvidence: input.ev.noEvidence ? 1 : 0, noEvidenceReason: input.ev.noEvidenceReason, parentEntryId: null, objectsEntryId, revisionOfEntryId: input.revisionOfEntryId === undefined ? null : input.revisionOfEntryId,
+      noEvidence: input.ev.noEvidence ? 1 : 0, noEvidenceReason: input.ev.noEvidenceReason, parentEntryId: null, objectsEntryId, revisionOfEntryId: input.revisionOfEntryId === undefined ? null : input.revisionOfEntryId, form: input.form,
     });
     for (const r of itemRows) {
       await q.run('INSERT INTO sysbuild_entry_items (entry_id, item_id, item_version_id, assigned_by_action_id) VALUES (?, ?, ?, NULL)', [eid, r.itemId, r.versionId]);
@@ -474,10 +482,11 @@ function createEntryRoutes(ctx) {
     const pid = readIdParam(req.params.id, 'id', '项目编号');
     const body = bodyOf(req);
     onlyKeys(body, CREATE_KEYS);
-    const input = readCreateInput(body);
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
+      const input = readCreateInput(body);
       const { access, identity } = await loadProjectCtx(q, pid, user);
+      await forms.assertFormRegistrant(q, pid, input.form, identity, access.project);
       const todayStr = today();
       // 异议登记（D34）：被异议的登记须属本项目；挂靠（节点 / 项目整体）与关联条目沿用被异议登记，时段按该挂靠当前是否收口判定。
       //   被异议的登记不存在（或不属于本项目）先报 400 而不是 404：它是请求体里的引用对象，不是路径对象（路径上的项目已过可见性 404 一步）；§5.3「参数先于对象」，与 node_id 不存在同口径（预筛 L-3）。
@@ -524,15 +533,21 @@ function createEntryRoutes(ctx) {
       if (input.revisionOfEntryId !== null) {
         const old = await q.get(`SELECT ${entries.ENTRY_COLS} FROM sysbuild_entries WHERE id = ? AND project_id = ?`, [input.revisionOfEntryId, pid]);
         if (!old) throw invalid('被修订的登记不存在或不属于本项目', 'revision_of_entry_id');
+        const oldForm = forms.readEntryForm(old);
+        if (oldForm.form || oldForm.form_unreadable) throw stateError('带表单或表单不可读的登记不能修订重提，请按作废或勘误路径处理');
         if (old.purpose !== input.purpose) throw invalid('修订重提的用途必须与被修订的登记一致', 'purpose');
         if ((old.source_party_id === null || old.source_party_id === undefined ? null : old.source_party_id) !== sourcePartyId) throw invalid('修订重提的来源方必须与被修订的登记一致', 'source_party_id'); // 预筛 L3
         if ((await entries.devConfirmOf(q, old)).status !== 'not_approved') throw stateError('只有开发方负责人未认可的登记可以修订重提');
       }
       // 证据：补交材料必有附件；带「涉及承诺」标记的是方向类（附件或「无书面证据」+ 原因 ≥ 10 字）；其余可选
-      assertEvidence(input.attachmentIds.length, input.ev, input.type === 'material' ? 'material' : (input.commitment === 1 ? 'direction' : 'optional'));
+      assertEvidence(input.attachmentIds.length, input.ev, input.type === 'material' ? 'material' : (input.commitment === 1 || (input.form && input.form.kind === 'change_request') ? 'direction' : 'optional'));
+      input.form = await forms.deriveEntryForm(q, pid, input.form, { identity, project: access.project, nodeId: input.nodeId, sourcePartyId, today: todayStr });
       // 关联条目 → 分流判定 → 写登记（含自动拆分）→ 附件 → 判定快照 → 事件：见上面的 createEntryCore
       const created = await createEntryCore(q, user, access, identity, pid, { input, per, sourcePartyId, objectsEntryId: input.objectsEntryId });
-      return { entry: created.entry };
+      const response = { entry: created.entry };
+      if (input.form && input.form.kind === 'report_request' && (await reportRecipientsOf(q, pid)).due.length === 0) response.no_recipient = true;
+      if (input.form && input.form.kind === 'progress_report' && input.form.milestone_impact) response.milestone_warning = '本次汇报影响里程碑，请 PM 评估是否发起改期';
+      return response;
     });
     res.status(201).json(out);
   }));
@@ -581,7 +596,7 @@ function createEntryRoutes(ctx) {
       const sources = identity.isPm === true ? [{ id: null, label: 'PM 本人登记' }, ...(await q.all('SELECT id, name FROM sysbuild_parties WHERE project_id = ? ORDER BY sort_order, id', [pid])).map((p) => ({ id: p.id, label: '代登：' + p.name }))] : null;
       return {
         project_id: pid, entries: list,
-        registration: { types: REGISTERABLE_TYPES, purposes: schema.ENUMS.entryPurpose.filter((p) => p === 'general' || devAllowed), source_choices: sources, self_confirm: { enabled: selfConfirm, text: core.checkboxTextsOf('dev_key_confirm').confirm, purposes: rules.ENTRY_DEV_PURPOSES } },
+        registration: { types: REGISTERABLE_TYPES, purposes: schema.ENUMS.entryPurpose.filter((p) => p === 'general' || devAllowed), source_choices: sources, self_confirm: { enabled: selfConfirm, text: core.checkboxTextsOf('dev_key_confirm').confirm, purposes: rules.ENTRY_DEV_PURPOSES }, forms: forms.availableForms({ generalAllowed: rules.opAllowed('entry_create_process', identity, access.project, {}) || rules.opAllowed('entry_create_supplement', identity, access.project, {}), devAllowed, hasDevOwner: !!owner, isPm: rules.canActAsPm(identity) }) },
         actions: { create_entry: rules.opAllowed('entry_create_process', identity, access.project, {}) || rules.opAllowed('entry_create_supplement', identity, access.project, {}) },
       };
     });
@@ -670,7 +685,7 @@ function createEntryRoutes(ctx) {
       let parts = null;
       let plan = null;
       if (input.action === 'split') parts = await routing.planManualSplit(q, entry.project_id, Array.from(new Set(facts.currentItemRows.map((r) => r.item_id))), input.groups);
-      else if (input.action === 'assign_items') plan = await routing.planAssignment(q, entry.project_id, { basis: input.basis, itemIds: input.itemIds, route: input.route }, { isChild: entry.parent_entry_id !== null && entry.parent_entry_id !== undefined, noSplit: target.needsDevConfirm === true, noSplitNotApproved: target.devConfirmStatus === 'not_approved' });
+      else if (input.action === 'assign_items') plan = await routing.planAssignment(q, entry.project_id, { basis: input.basis, itemIds: input.itemIds, route: input.route }, { isChild: entry.parent_entry_id !== null && entry.parent_entry_id !== undefined, noSplit: target.needsDevConfirm === true || target.formKind !== null, noSplitNotApproved: target.devConfirmStatus === 'not_approved' });
       // S-S1c：转正式变更 / 挂靠变更的 change_id 校验（缺 400 在 readActionInput；不属本项目 / 已撤回 409）；办理依据（已认可的开发方处理说明登记）校验（不存在 400、未认可 409）。都在写任何行之前。
       if (input.changeId !== null) {
         const ch = await q.get('SELECT id, project_id, status FROM sysbuild_changes WHERE id = ?', [input.changeId]);
@@ -786,6 +801,7 @@ function createEntryRoutes(ctx) {
         action_id: actionId, action: input.action, conclusion_kind: input.kind, sys_issue_no: input.sysIssueNo, assignee_text: input.assigneeText,
         task_id: task ? task.task_id : null, notice_id: notice ? notice.id : null, closed_revision_ids: closed.concat(staleHandover),
         change_id: input.changeId, basis_ref: input.basisEntryId, dev_confirm_task_id: devRequest ? devRequest.taskId : null,
+        ...(input.action === 'void' && target.formUnreadable ? { form_unreadable: true, form_note: '表单不可读' } : {}),
       });
       // S-S1c：结论「转正式变更」同一事务写一条 link_change 办理记录（把结论与变更号挂靠在一起；结论本身照常经代表人确认）
       if (input.action === 'conclude' && input.kind === 'to_change') {
@@ -941,6 +957,7 @@ function createEntryRoutes(ctx) {
   function noticeTarget(identity, entry, facts, notice, objection, recipientMemberId, uid, recipientUserId, basis) {
     const latest = facts.latestNotice;
     return {
+      formUnreadable: forms.readEntryForm(entry).form_unreadable,
       isRecipient: recipientUserId !== null && recipientUserId !== undefined && Number(recipientUserId) === Number(uid),
       objectorBasis: basis,
       objected: !!objection,

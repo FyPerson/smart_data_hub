@@ -73,6 +73,13 @@ function makeConfirmHelpers(T) {
     assert.strictEqual(r.status, 201, r.text);
     return r.body.version.id;
   }
+  // L2 §10：旧立项正例显式补齐新门；不在 mkVersion / submit 通用包装器中隐式放行。
+  async function declareInitiationBasis(vid) {
+    const row = await sqlGet('SELECT snapshot_json FROM sysbuild_package_versions WHERE id = ?', [vid]);
+    const snapshot = JSON.parse(row.snapshot_json);
+    const r = await api(U.pm, 'PATCH', `/sysbuild/package-versions/${vid}`, { snapshot_json: { ...snapshot, no_written_basis_reason: '原确认流程用例采用口头立项依据说明' } });
+    assert.strictEqual(r.status, 200, `立项正例补依据声明: ${r.text}`);
+  }
   async function addToSet(vid, itemVersionId, batchId) {
     const r = await post(U.pm, `/sysbuild/package-versions/${vid}/items`, Object.assign({ op: 'add', item_version_id: itemVersionId }, batchId ? { committed_batch_id: batchId } : {}));
     assert.strictEqual(r.status, 201, r.text);
@@ -126,6 +133,23 @@ function makeConfirmHelpers(T) {
     }
     return n;
   }
+  // L2 §10：具体正向场景调用；只准备仍未开始的模板开发节点，不改已有计划或节奏。
+  async function prepareDevStart(pid, nid) {
+    const view = await get(U.pm, `/sysbuild/projects/${pid}/plan`);
+    assert.strictEqual(view.status, 200, view.text);
+    const node = view.body.nodes.find((n) => n.id === nid);
+    assert.ok(node, `开发节点正例准备：节点 ${nid} 存在`);
+    if (!['b_dev', 'b_config'].includes(node.template_key) || node.status !== 'not_started') return;
+    if (!node.current_plan) {
+      const evidence = node.plan_write_mode === 'reschedule' ? { reason: '旧正向用例补齐开发节点计划', ...EV } : {};
+      const r = await post(U.pm, `/sysbuild/nodes/${nid}/schedule`, { kind: 'plan', planned_start: PLAN_START, planned_end: PLAN_END, ...evidence });
+      assert.strictEqual(r.status, 201, `开发节点正例补计划: ${r.text}`);
+    }
+    if (!node.report || !node.report.current_cycle) {
+      const r = await post(U.pm, `/sysbuild/projects/${pid}/entries`, { node_id: nid, form: { kind: 'report_cycle', cycle: 'weekly', first_due_on: node.current_plan ? node.current_plan.start : PLAN_START } });
+      assert.strictEqual(r.status, 201, `开发节点正例补节奏: ${r.text}`);
+    }
+  }
   // 立项包前置（P37）：总体规划包提交前须本项目立项包已有生效版本。
   //   produceEffectiveInitiation = 生产路径（建立项包 / 草稿 / 提交 / 全部确认；项目里已有立项包则在它上面再出一个草稿版本）；
   //   seedEffectiveInitiation = 夹具（直接写一个已生效的立项包版本，不产生任务 / 浏览 / 事件）——只给「并不关心立项包」的提交用例准备前置，
@@ -134,6 +158,7 @@ function makeConfirmHelpers(T) {
     const has = await sqlGet("SELECT id FROM sysbuild_packages WHERE project_id = ? AND type = 'initiation'", [pid]);
     const pk = has ? has.id : await mkPackage(pid, 'initiation');
     const pv = await mkVersion(pk);
+    await declareInitiationBasis(pv);
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
     await confirmAll(pv);
@@ -191,6 +216,7 @@ function makeConfirmHelpers(T) {
     for (const n of nodes) {
       if (n.status === 'closed') continue;
       if (n.status === 'not_started') {
+        await prepareDevStart(pid, n.id);
         const s = await post(U.pm, `/sysbuild/nodes/${n.id}/start`);
         assert.strictEqual(s.status, 200, s.text);
       }
@@ -216,7 +242,7 @@ function makeConfirmHelpers(T) {
   }
   return {
     newProject, defaultBatchId, seedParty, stageAtt, mkItem, mkPackage, mkVersion, addToSet, tasksOf, openTask, decideBodyOf, decideRaw, openAndDecide, confirmAll,
-    planAllNodes, PLAN_START, PLAN_END, produceEffectiveInitiation, seedEffectiveInitiation, produceEffectiveOverall,
+    planAllNodes, PLAN_START, PLAN_END, declareInitiationBasis, prepareDevStart, produceEffectiveInitiation, seedEffectiveInitiation, produceEffectiveOverall,
     acceptEffective, closeBatchNodes, readyForGolive, productionGolive, productionRevoke,
   };
 }
@@ -226,7 +252,7 @@ function defineConfirmCases(T) {
   const post = (uid, url, body) => api(uid, 'POST', url, body === undefined ? {} : body);
   const get = (uid, url) => api(uid, 'GET', url);
   const payloads = async (pid, type) => (await eventsOf(pid, type)).map((e) => JSON.parse(e.payload_json));
-  const { newProject, defaultBatchId, seedParty, stageAtt, mkItem, mkPackage, mkVersion, addToSet, tasksOf, openTask, decideBodyOf, decideRaw, openAndDecide, confirmAll, produceEffectiveInitiation, seedEffectiveInitiation, planAllNodes, PLAN_START, PLAN_END } = H;
+  const { newProject, defaultBatchId, seedParty, stageAtt, mkItem, mkPackage, mkVersion, addToSet, tasksOf, openTask, decideBodyOf, decideRaw, openAndDecide, confirmAll, declareInitiationBasis, prepareDevStart, produceEffectiveInitiation, seedEffectiveInitiation, planAllNodes, PLAN_START, PLAN_END } = H;
   const setStatus = (pid, to) => post(U.admin, `/sysbuild/projects/${pid}/status`, { to, reason: '确认用例' });
   const submit = (uid, vid) => post(uid, `/sysbuild/package-versions/${vid}/submit`);
   const withdraw = (uid, vid, reason) => post(uid, `/sysbuild/package-versions/${vid}/withdraw`, reason === undefined ? {} : { reason });
@@ -317,7 +343,7 @@ function defineConfirmCases(T) {
     const rowAllowed = { active: true, paused: true, terminated: false, closed: false };
     const pm = { isPm: true, isReadonly: false };
     // 提交的项目级事实（修订批二 MED-1）：确认人齐全（confirmersMissing = null）、立项包已生效；缺失按 fail-closed 拒绝（下面单独断言）
-    const F = { confirmersMissing: null, initiationEffective: true, planMissing: null, historyConflict: null, otherPendingPackage: null }; // 修订批三 H-1：总体规划包还要「计划齐全」（planMissing = null）；C4b Q-S2：历史互斥事实 historyConflict 缺失 fail-closed，手写目标补 null；C6a：总体规划 / 变更 / 批次验收 / 结项四类要「没有别的待确认内容包」（otherPendingPackage = null）
+    const F = { confirmersMissing: null, initiationEffective: true, initiationBasis: 'ok', planMissing: null, historyConflict: null, otherPendingPackage: null }; // L2 §10：立项正例补齐依据事实；原确认人、计划与历史互斥断言不变。
     const targets = {
       package_version_submit: Object.assign({ versionStatus: 'draft', packageType: 'overall', batchStatus: undefined }, F),
       package_version_withdraw: { versionStatus: 'pending', batchStatus: undefined },
@@ -406,7 +432,7 @@ function defineConfirmCases(T) {
     const R = T.getMods().rules;
     const pm = { isPm: true, isReadonly: false };
     const active = { status: 'active' };
-    const node = { nodeStatus: 'not_started', templateKey: 'b_dev', isMilestone: false, isProjectLayer: false, batchStatus: 'planning', hasBaseline: false, corrects: null };
+    const node = { nodeStatus: 'not_started', templateKey: 'b_dev', isMilestone: false, isProjectLayer: false, batchStatus: 'planning', hasBaseline: false, corrects: null, devStartReady: 'ok' }; // L2 §10：不测开始门的正向规则夹具显式满足新门。
     const projNode = Object.assign({}, node, { isProjectLayer: true, templateKey: 'p_overall' });
     const MSG = '总体规划待确认中，排期已随包冻结；如需修改请撤回提交';
     for (const [op, tgt] of [['node_cancel', node], ['schedule_plan', node], ['schedule_plan', projNode]]) {
@@ -508,6 +534,7 @@ function defineConfirmCases(T) {
     const B = await seedParty(pid, '乙部', U.x1, null);
     const pk = await mkPackage(pid, 'initiation');
     const pv = await mkVersion(pk);
+    await declareInitiationBasis(pv);
     const r = await submit(U.pm, pv);
     assert.strictEqual(r.status, 200, r.text);
     const tasks = await tasksOf(pv);
@@ -553,6 +580,7 @@ function defineConfirmCases(T) {
     expectErr(r4, 409, 'SYSBUILD_STATE', '缺代表人');
     assert.ok(r4.body.message.includes('甲部（缺生效代表人）'), `缺代表人提示实际 ${r4.body.message}`);
     const ini = await mkVersion(d4.ini.pk); // 立项包已存在（夹具生效版本），再出一个草稿版本
+    await declareInitiationBasis(ini);
     assert.strictEqual((await submit(U.pm, ini)).status, 200, '同一项目的立项包不需要代表人');
     // 负责人在位但成员无平台账号：C4b P44 起不再当作缺负责人（原断言 409「无账号部（缺现任负责人）」随契约改写）——无账号成员是「代录确认人」，提交成功并生成只能代录的任务
     //   （账号停用的负责人仍视为缺人：见进程内用例「C4a 确认人解析与资格同源」）；用立项包验证（它只要负责人）
@@ -561,6 +589,7 @@ function defineConfirmCases(T) {
     const mNa = (await sqlRun("INSERT INTO sysbuild_members (project_id, party_id, person_name, joined_at, added_by) VALUES (?, ?, '无账号负责人', '2026-10-01 10:00:00', ?)", [pidNa, partyNa, U.admin])).lastID;
     await addAppointment(partyNa, mNa, 'active');
     const pvNa = await mkVersion(await mkPackage(pidNa, 'initiation'));
+    await declareInitiationBasis(pvNa);
     const rNa = await submit(U.pm, pvNa);
     assert.strictEqual(rNa.status, 200, `负责人无账号：提交成功 ${rNa.text}`);
     assert.deepStrictEqual(rNa.body.tasks.map((t) => [t.party_id, t.kind, t.required_member_id, t.proxy_only]), [[partyNa, 'owner', mNa, true]], '无账号负责人的任务带 proxy_only = true');
@@ -660,6 +689,7 @@ function defineConfirmCases(T) {
     const pid = await newProject();
     await seedParty(pid, '甲部', U.own, null);
     const ini = await mkVersion(await mkPackage(pid, 'initiation'));
+    await declareInitiationBasis(ini);
     await sqlRun("UPDATE sysbuild_package_versions SET form = 'overall' WHERE id = ?", [ini]);
     assert.strictEqual((await submit(U.pm, ini)).status, 200);
     assert.strictEqual((await rowOf('sysbuild_package_versions', ini)).form, null);
@@ -681,6 +711,7 @@ function defineConfirmCases(T) {
     // 立项包只有草稿版本
     const pkIni = await mkPackage(d.pid, 'initiation');
     const iniV1 = await mkVersion(pkIni);
+    await declareInitiationBasis(iniV1);
     expectErr(await submit(U.pm, d.pv), 409, 'SYSBUILD_STATE', '立项包只有草稿');
     // 立项包待确认（已提交、未全部确认）
     assert.strictEqual((await submit(U.pm, iniV1)).status, 200);
@@ -921,6 +952,7 @@ function defineConfirmCases(T) {
     const C = await seedParty(pid, '丙部', U.ro, null);
     const pk = await mkPackage(pid, 'initiation');
     const pv = await mkVersion(pk);
+    await declareInitiationBasis(pv);
     assert.strictEqual((await submit(U.pm, pv)).status, 200);
     const [t] = await tasksOf(pv);
     assert.strictEqual(t.user_id, U.ro);
@@ -1221,6 +1253,7 @@ function defineConfirmCases(T) {
     const pid = await newProject();
     await seedParty(pid, '丙部', U.ro, null);
     const pv = await mkVersion(await mkPackage(pid, 'initiation'));
+    await declareInitiationBasis(pv);
     assert.strictEqual((await submit(U.pm, pv)).status, 200);
     const [t] = await tasksOf(pv);
     const roMember = await memberRow(pid, U.ro);
@@ -1317,6 +1350,7 @@ function defineConfirmCases(T) {
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nid}/schedule`, { kind: 'plan', planned_start: '2026-11-02', planned_end: '2026-11-10' })).status, 201);
     const pk = await mkPackage(pid, 'initiation');
     const v1 = await mkVersion(pk);
+    await declareInitiationBasis(v1);
     assert.strictEqual((await submit(U.pm, v1)).status, 200);
     const last1 = await confirmAll(v1);
     assert.deepStrictEqual([last1.body.effective, last1.body.baseline_node_ids, last1.body.superseded_version_ids], [true, [], []]);
@@ -1327,6 +1361,7 @@ function defineConfirmCases(T) {
     // 第二版：立项包不受「生效后不能建草稿」限制
     const v2 = await mkVersion(pk);
     assert.strictEqual((await api(U.pm, 'PATCH', `/sysbuild/package-versions/${v2}`, { snapshot_json: { 说明: '第二版立项文案' } })).status, 200);
+    await declareInitiationBasis(v2);
     assert.strictEqual((await submit(U.pm, v2)).status, 200);
     assert.strictEqual(await verStatus(v1), 'effective', '新版本待确认期间原版本仍生效');
     const last2 = await confirmAll(v2);
@@ -1489,6 +1524,7 @@ function defineConfirmCases(T) {
     const pidI = await newProject();
     await seedParty(pidI, '甲部', U.own, null);
     const iniV = await mkVersion(await mkPackage(pidI, 'initiation'));
+    await declareInitiationBasis(iniV);
     assert.strictEqual(await submitFlag(iniV), true);
     assert.strictEqual((await submit(U.pm, iniV)).status, 200, '立项包不要求节点计划齐全');
   });
@@ -1525,6 +1561,7 @@ function defineConfirmCases(T) {
     const p2 = await newProject();
     await seedParty(p2, '甲部', U.own, null);
     const iv = await mkVersion(await mkPackage(p2, 'initiation'));
+    await declareInitiationBasis(iv);
     assert.strictEqual((await submit(U.pm, iv)).status, 200);
     await confirmAll(iv);
     assert.strictEqual((await rowOf('sysbuild_batches', await defaultBatchId(p2))).status, 'planning');
@@ -1747,6 +1784,7 @@ function defineConfirmCases(T) {
     scope = [pid2];
     await seedParty(pid2, '丙部', U.ro, null);
     const pv2 = await mkVersion(await mkPackage(pid2, 'initiation'));
+    await declareInitiationBasis(pv2);
     assert.strictEqual((await submit(U.pm, pv2)).status, 200);
     assert.strictEqual((await mine(U.ro)).body.items.length, 1);
     assert.strictEqual((await post(U.pm, `/sysbuild/members/${await memberRow(pid2, U.ro)}/remove`, { reason: '离项' })).status, 200);
@@ -1877,7 +1915,9 @@ function defineConfirmCases(T) {
     const pidI = await newProject();
     await seedParty(pidI, '甲部', U.own, null);
     const pkI = await mkPackage(pidI, 'initiation');
-    assert.strictEqual((await submit(U.pm, await mkVersion(pkI))).status, 200);
+    const preparedInitiation = await mkVersion(pkI);
+    await declareInitiationBasis(preparedInitiation);
+    assert.strictEqual((await submit(U.pm, preparedInitiation)).status, 200);
     const nodeI = (await get(U.pm, `/sysbuild/projects/${pidI}/plan`)).body.nodes.find((n) => n.template_key === 'b_dev').id;
     assert.strictEqual((await sched(nodeI, '2026-11-03', '2026-11-04')).status, 201, '立项包待确认不冻结排期');
     const nodeO = (await get(U.pm, `/sysbuild/projects/${(await newProject())}/plan`)).body.nodes.find((n) => n.template_key === 'b_dev').id;
@@ -2028,6 +2068,7 @@ function defineConfirmCases(T) {
     await seedParty(pid, '甲部', U.own, null);
     const pkI = await mkPackage(pid, 'initiation');
     const iv = await mkVersion(pkI);
+    await declareInitiationBasis(iv);
     assert.strictEqual((await submit(U.pm, iv)).status, 200);
     expectErr(await post(U.pm, `/sysbuild/projects/${pid}/parties`, { side: 'demand', name: '乙部' }), 409, 'SYSBUILD_STATE', '立项包待确认');
     await confirmAll(iv);
@@ -2166,6 +2207,7 @@ function defineConfirmCases(T) {
     // 2 立项包：草稿 / 待确认都不算，生效后 p_initiation 放行，其余仍被挡
     const pkI = await mkPackage(pid, 'initiation');
     const iv = await mkVersion(pkI);
+    await declareInitiationBasis(iv);
     await expectBlocked('p_initiation', '立项包');
     assert.strictEqual((await submit(U.pm, iv)).status, 200);
     await expectBlocked('p_initiation', '立项包');
@@ -2347,15 +2389,15 @@ const CONFIRM_MUTATIONS = [
   { id: 'C4a 提交：类型不开放判定放开 batch_req', expect: ['C4a rules：新动作'], edits: [{ file: 'rules.js', from: "const SUBMITTABLE_PACKAGE_TYPES = Object.freeze(['overall', 'initiation', 'change', 'batch_accept', 'closing']);", to: "const SUBMITTABLE_PACKAGE_TYPES = Object.freeze(['overall', 'initiation', 'change', 'batch_accept', 'closing', 'batch_req']);" }] }, // S-S1c：清单加了 change；C6a：closing / batch_accept 已开放，锚点与目标改为放开 batch_req（第一期不建批次需求包，只有 rules 用例的类型矩阵能验）
   { id: 'C4a 提交：一般成员也能提交', expect: ['C4a 提交：权限与项目状态'], edits: [{ file: 'rules.js', from: 'package_version_submit: Object.freeze({\n    can: canActAsPm,', to: 'package_version_submit: Object.freeze({\n    can: canRegisterItem,' }] },
   { id: 'C4a 提交：项目状态类别改成 close（已暂停不能提交）', expect: ['C4a 提交：权限与项目状态', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: "package_version_submit: 'maintain',", to: "package_version_submit: 'close'," }] },
-  { id: 'C4a 提交：条目集合为空放行', expect: ['C4a 提交：失败分支'], edits: [{ file: 'confirm.js', from: "if (set.length === 0) throw stateError('总体规划的条目集合为空，请先添加条目');", to: '' }] },
-  { id: 'C4a 提交：条目没有承诺批次不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'confirm.js', from: 'if (it.committed_batch_id === null) bad.noBatch.push(label);', to: 'if (false) bad.noBatch.push(label);' }] },
-  { id: 'C4a 提交：承诺批次已转出 / 被替代不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'confirm.js', from: 'if (!batch || rules.BATCH_FROZEN_STATUSES.includes(batch.status)) bad.batchGone.push(label);', to: 'if (!batch) bad.batchGone.push(label);' }] },
-  { id: 'C4a 提交：条目版本不属本项目不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'confirm.js', from: 'if (!row || row.project_id !== pid) { bad.project.push(label); continue; }', to: 'if (!row) { bad.project.push(label); continue; }' }] },
-  { id: 'C4a 提交：承诺批次属于别的项目不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'confirm.js', from: "SELECT id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [bid, pid])", to: "SELECT id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [bid, pid]) || { id: bid, status: 'planning' }" }] },
-  { id: 'C4a 提交：已上线条目换到未上线批次不判', expect: ['C4a 提交：已上线条目'], edits: [{ file: 'confirm.js', from: 'if (was && (await isLive(was.id)) && !(await isLive(batch.id))) bad.liveMove.push(label);', to: '' }] },
-  { id: 'C4a 提交：方向类证据不重核', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'confirm.js', from: 'if (n === 0 && !reasonOk) bad.evidence.push(label);', to: '' }] },
-  { id: 'C4a 提交：方向类证据只数绑定不数引用', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'confirm.js', from: "UNION SELECT attachment_id FROM sysbuild_attachment_refs WHERE owner_type = 'item_version' AND owner_id = ?)", to: "UNION SELECT attachment_id FROM sysbuild_attachment_bindings WHERE owner_type = 'item_version' AND owner_id = ?)" }] },
-  { id: 'C4a 提交：方向类证据把已软删除的附件也数进去', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'confirm.js', from: 'WHERE a.deleted_at IS NULL\n          AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings', to: 'WHERE 1 = 1\n          AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings' }] },
+  { id: 'C4a 提交：条目集合为空放行', expect: ['C4a 提交：失败分支'], edits: [{ file: 'submission-scope.js', from: "if (set.length === 0) throw stateError('总体规划的条目集合为空，请先添加条目');", to: '' }] },
+  { id: 'C4a 提交：条目没有承诺批次不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'submission-scope.js', from: 'if (it.committed_batch_id === null) bad.noBatch.push(label);', to: 'if (false) bad.noBatch.push(label);' }] },
+  { id: 'C4a 提交：承诺批次已转出 / 被替代不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'submission-scope.js', from: 'if (!batch || rules.BATCH_FROZEN_STATUSES.includes(batch.status)) bad.batchGone.push(label);', to: 'if (!batch) bad.batchGone.push(label);' }] },
+  { id: 'C4a 提交：条目版本不属本项目不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'submission-scope.js', from: 'if (!row || row.project_id !== pid) { bad.project.push(label); continue; }', to: 'if (!row) { bad.project.push(label); continue; }' }] },
+  { id: 'C4a 提交：承诺批次属于别的项目不判', expect: ['C4a 提交：失败分支'], edits: [{ file: 'submission-scope.js', from: "SELECT id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [bid, pid])", to: "SELECT id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [bid, pid]) || { id: bid, status: 'planning' }" }] },
+  { id: 'C4a 提交：已上线条目换到未上线批次不判', expect: ['C4a 提交：已上线条目'], edits: [{ file: 'submission-scope.js', from: 'if (was && (await isLive(was.id)) && !(await isLive(batch.id))) bad.liveMove.push(label);', to: '' }] },
+  { id: 'C4a 提交：方向类证据不重核', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'submission-scope.js', from: 'if (n === 0 && !reasonOk) bad.evidence.push(label);', to: '' }] },
+  { id: 'C4a 提交：方向类证据只数绑定不数引用', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'submission-scope.js', from: "UNION SELECT attachment_id FROM sysbuild_attachment_refs WHERE owner_type = 'item_version' AND owner_id = ?)", to: "UNION SELECT attachment_id FROM sysbuild_attachment_bindings WHERE owner_type = 'item_version' AND owner_id = ?)" }] },
+  { id: 'C4a 提交：方向类证据把已软删除的附件也数进去', expect: ['C4a 提交：方向类证据'], edits: [{ file: 'submission-scope.js', from: 'WHERE a.deleted_at IS NULL\n        AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings', to: 'WHERE 1 = 1\n        AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings' }] },
   // P32：form / parent 提交时重算并回写。「回写的旧状态条件」与规则层的草稿判定互为双重保险（同一写事务内串行），单独去掉条件观察不到，所以对应变异把规则层判定、回写条件、状态更新条件三处同时去掉
   { id: 'C4a 提交 P32：重算后不回写（沿用草稿存的值）', expect: ['C4a 提交 P32'], edits: [{ file: 'packages.js', from: 'SET form = ?, parent_overall_version_id = ?, updated_at', to: 'SET form = COALESCE(form, ?), parent_overall_version_id = COALESCE(parent_overall_version_id, ?), updated_at' }] },
   { id: 'C4a 提交 P32：回写的旧状态条件、规则层草稿判定与状态更新条件同时去掉', expect: ['C4a 提交 P32'], edits: [
@@ -2365,7 +2407,7 @@ const CONFIRM_MUTATIONS = [
   ] },
   { id: 'C4a 提交 P32：form 变化不记事件', expect: ['C4a 提交 P32'], edits: [{ file: 'packages.js', from: 'if (ver.form !== calc.form) { changed.form_from = ver.form; changed.form_to = calc.form; }', to: '' }] },
   { id: 'C4a 提交 P32：parent 变化不记事件', expect: ['C4a 提交 P32'], edits: [{ file: 'packages.js', from: 'if (ver.parent_overall_version_id !== calc.parent) { changed.parent_from = ver.parent_overall_version_id; changed.parent_to = calc.parent; }', to: '' }] },
-  { id: 'C4a 提交 P32：事件的 form 取回写前的旧值', expect: ['C4a 提交 P32'], edits: [{ file: 'confirm.js', from: 'version_no: ver.version_no, form: calc.form, item_count: set.length,', to: 'version_no: ver.version_no, form: ver.form, item_count: set.length,' }] },
+  { id: 'C4a 提交 P32：事件的 form 取回写前的旧值', expect: ['C4a 提交 P32'], edits: [{ file: 'confirm.js', from: 'version_no: ver.version_no, form: scope.calc.form, item_count: set.length,', to: 'version_no: ver.version_no, form: ver.form, item_count: set.length,' }] },
   // P37：总体规划包提交前须立项包已生效（修订批二 MED-1 起判定在 rules.js package_version_submit，事实取自 packages.js versionFactsOf / effectiveInitiationVersionId）
   { id: 'C4a 提交 P37：不核对立项包是否生效', expect: ['C4a 提交 P37'], edits: [{ file: 'rules.js', from: "if (t.packageType === 'overall' && t.initiationEffective !== true) return INITIATION_NOT_EFFECTIVE_MESSAGE;", to: '' }] },
   { id: 'C4a 提交 P37：立项包待确认也算', expect: ['C4a 提交 P37'], edits: [{ file: 'packages.js', from: "p.type = 'initiation' AND v.status = 'effective' ORDER BY v.id DESC LIMIT 1", to: "p.type = 'initiation' AND v.status IN ('effective', 'pending') ORDER BY v.id DESC LIMIT 1" }] },
@@ -2383,10 +2425,10 @@ const CONFIRM_MUTATIONS = [
   { id: 'C4a 确认人解析 M1：解析去掉账号状态条件', expect: ['C4a 确认人解析与资格同源', 'C4a 失资格'], edits: [{ file: 'confirm-core.js', from: "const CONFIRMER_ELIGIBLE_SQL = `${rules.MEMBER_ACTIVE_SQL} AND (m.user_id IS NULL OR u.status = 'active')`;", to: 'const CONFIRMER_ELIGIBLE_SQL = `${rules.MEMBER_ACTIVE_SQL}`;' }] },
   { id: 'C4a 确认人解析 M1：提出人任务生成不查账号状态', expect: ['C4a 确认人解析与资格同源'], edits: [{ file: 'confirm-core.js', from: 'const m = await eligibleMember(q, o.proposerMemberId);', to: "const m = await q.get('SELECT m.id AS id, m.party_id AS party_id FROM sysbuild_members m WHERE m.id = ? AND m.user_id IS NOT NULL AND m.removed_at IS NULL AND m.joined_at IS NOT NULL', [o.proposerMemberId]);" }] },
   { id: 'C4a 确认人解析 M1：代表人解析不查账号状态', expect: ['C4a 确认人解析与资格同源'], edits: [{ file: 'confirm-core.js', from: "WHERE d.party_id = ? AND d.status = 'active' AND ${CONFIRMER_ELIGIBLE_SQL} ORDER BY d.id DESC LIMIT 1", to: "WHERE d.party_id = ? AND d.status = 'active' AND ${rules.MEMBER_ACTIVE_SQL} ORDER BY d.id DESC LIMIT 1" }] },
-  { id: 'C4a 提交：条目附件不冻结', expect: ['C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'item_version', ownerId: it.item_version_id, operatorId: opId, operatorName: opName, projectId: pid });", to: '' }] },
-  { id: 'C4a 提交：包版本自己的材料附件不冻结', expect: ['C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'package_version', ownerId: vid, operatorId: opId, operatorName: opName, projectId: pid });", to: '' }] },
+  { id: 'C4a 提交：条目附件不冻结', expect: ['C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "if (source.ownerType !== 'change') await freezeSource(source);", to: "if (source.ownerType !== 'change' && source.ownerType !== 'item_version') await freezeSource(source);" }] },
+  { id: 'C4a 提交：包版本自己的材料附件不冻结', expect: ['C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "if (source.ownerType !== 'change') await freezeSource(source);", to: "if (source.ownerType !== 'change' && source.ownerType !== 'package_version') await freezeSource(source);" }] },
   // ── 撤回 ──
-  { id: 'C4a 撤回：已生效的版本也能撤回', expect: ['C4a 撤回：草稿 / 已生效', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: "(t.versionStatus === 'pending' ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')", to: "(t.versionStatus !== 'superseded' ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')" }] },
+  { id: 'C4a 撤回：已生效的版本也能撤回', expect: ['C4a 撤回：草稿 / 已生效', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: "(t.versionStatus === 'pending' || (t.packageType === 'change' && t.versionStatus === 'draft') ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')", to: "(t.versionStatus !== 'superseded' ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')" }] },
   { id: 'C4a 撤回：待确认修订不置失效', expect: ['C4a 撤回：待确认'], edits: [{ file: 'confirm.js', from: "for (const r of revs) await core.closePendingRevision(q, r.id, 'invalid', reason);", to: '' }] },
   { id: 'C4a 撤回：原因不必填', expect: ['C4a 撤回：待确认'], edits: [{ file: 'confirm.js', from: "readText(body.reason, 'reason', '撤回原因', REASON_MAX, true)", to: "readText(body.reason, 'reason', '撤回原因', REASON_MAX, false) || '未写'" }] },
   { id: 'C4a 撤回：非 PM 也能撤回', expect: ['C4a 撤回：待确认'], edits: [{ file: 'rules.js', from: 'package_version_withdraw: Object.freeze({\n    can: canActAsPm,', to: 'package_version_withdraw: Object.freeze({\n    can: canRegisterItem,' }] },
@@ -2474,10 +2516,10 @@ const CONFIRM_MUTATIONS = [
   { id: 'C4a P34：待确认判定取成立项包 / 别的状态（不认总体规划的待确认版本）', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'golive-core.js', from: "WHERE p.project_id = ? AND p.type IN ('overall', 'change') AND v.status = 'pending' LIMIT 1", to: "WHERE p.project_id = ? AND p.type IN ('overall', 'change') AND v.status = 'draft' LIMIT 1" }] }, // S-S1c：类型清单加了 change，锚点随之改写
   { id: 'C4a P34：待确认判定不限本项目', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'golive-core.js', from: "WHERE p.project_id = ? AND p.type IN ('overall', 'change') AND v.status = 'pending' LIMIT 1", to: "WHERE (p.project_id = ? OR 1 = 1) AND p.type IN ('overall', 'change') AND v.status = 'pending' LIMIT 1" }] },
   { id: 'C4a P34：待确认判定把立项包也算进来', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'golive-core.js', from: "WHERE p.project_id = ? AND p.type IN ('overall', 'change') AND v.status = 'pending' LIMIT 1", to: "WHERE p.project_id = ? AND p.type IN ('overall', 'change', 'initiation') AND v.status = 'pending' LIMIT 1" }] },
-  { id: 'C4a P34：读接口节点标志不带总体规划待确认', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'plan.js', from: 'nodeTarget(n, batch, recs, corrects, data.overallPending)', to: 'nodeTarget(n, batch, recs, corrects)' }] },
+  { id: 'C4a P34：读接口节点标志不带总体规划待确认', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'plan.js', from: 'nodeTarget(n, batch, recs, corrects, data.overallPending, data.devStartReady[n.id])', to: 'nodeTarget(n, batch, recs, corrects, undefined, data.devStartReady[n.id])' }] },
   { id: 'C4a P34：设计划端点的 target 不带总体规划待确认', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'plan.js', from: "rules.assertOp('schedule_plan', access, access.project, nodeTarget(node, batch, recs, null, overallPending));", to: "rules.assertOp('schedule_plan', access, access.project, nodeTarget(node, batch, recs, null));" }] },
   { id: 'C4a P34：取消端点的 target 不带总体规划待确认', expect: ['C4a P34：总体规划待确认期间'], edits: [{ file: 'plan.js', from: "rules.assertOp('node_cancel', access, access.project, nodeTarget(node, batch, recs, null, overallPending));", to: "rules.assertOp('node_cancel', access, access.project, nodeTarget(node, batch, recs, null));" }] },
-  { id: 'C4a P34：提交事件不记节点计划', expect: ['C4a P34：生效时形成的基线', 'C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: await core.currentNodePlans(q, pid) } : {}", to: '{}' }] }, // S-S1c：变更包同样记节点计划，锚点随之改写
+  { id: 'C4a P34：提交事件不记节点计划', expect: ['C4a P34：生效时形成的基线', 'C4a 提交：总体规划包成功'], edits: [{ file: 'confirm.js', from: "pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: scope.nodePlans } : {}", to: '{}' }] }, // L1：沿用取数助手的同一份计划
   { id: 'C4a P34：提交事件的节点计划含已取消节点', expect: ['C4a 生效：部分确认'], edits: [{ file: 'confirm-core.js', from: "WHERE n.project_id = ? AND n.status <> 'cancelled' ORDER BY n.id", to: 'WHERE n.project_id = ? AND 1 = 1 ORDER BY n.id' }] },
   { id: 'C4a P34：生效时基线不与提交记录核对', expect: ['C4a P34：生效时形成的基线'], edits: [{ file: 'confirm-core.js', from: 'if (!rec || rec.planned_start !== cur.planned_start || rec.planned_end !== cur.planned_end) {', to: 'if (false) {' }] },
   { id: 'C4a P34：生效时基线只核对节点有无记录、不核对日期', expect: ['C4a P34：生效时形成的基线'], edits: [{ file: 'confirm-core.js', from: 'if (!rec || rec.planned_start !== cur.planned_start || rec.planned_end !== cur.planned_end) {', to: 'if (!rec) {' }] },
@@ -2523,7 +2565,7 @@ const CONFIRM_MUTATIONS = [
   // MED-1：submit 标志与执行同源——读接口的标志忽略某个项目级事实，而执行端点仍用它（标志为真、执行 409）
   { id: 'C4a MED-1：读接口 submit 标志不看 initiationEffective（恒视为立项包已生效）', expect: ['C4a actions 与执行一致'], edits: [{ file: 'packages.js', from: 'const facts = await versionFactsOf(q, pkg, ver);', to: 'const facts = Object.assign(await versionFactsOf(q, pkg, ver), { initiationEffective: true });' }] },
   { id: 'C4a MED-1：读接口 submit 标志不看 confirmersMissing（恒视为确认人齐全）', expect: ['C4a actions 与执行一致'], edits: [{ file: 'packages.js', from: 'const facts = await versionFactsOf(q, pkg, ver);', to: 'const facts = Object.assign(await versionFactsOf(q, pkg, ver), { confirmersMissing: null });' }] },
-  { id: 'C4a MED-1：提交端点的项目级事实恒视为齐全（执行端不再核对立项前置与确认人）', expect: ['C4a 提交：失败分支', 'C4a 提交 P37', 'C4a actions 与执行一致'], edits: [{ file: 'confirm.js', from: 'versionTarget(ver, pkg, batchStatus, await versionFactsOf(q, pkg, ver))', to: "versionTarget(ver, pkg, batchStatus, { confirmersMissing: null, initiationEffective: true })" }] },
+  { id: 'C4a MED-1：提交端点的项目级事实恒视为齐全（执行端不再核对立项前置与确认人）', expect: ['C4a 提交：失败分支', 'C4a 提交 P37', 'C4a actions 与执行一致'], edits: [{ file: 'confirm.js', from: 'const facts = await versionFactsOf(q, pkg, ver);', to: "const facts = { confirmersMissing: null, initiationEffective: true };" }] },
   { id: 'C4a MED-1：提交判定的事实缺失时放行（确认人事实没取到不 fail-closed）', expect: ['C4a rules：新动作'], edits: [{ file: 'rules.js', from: "if (cm === undefined) return CONFIRMERS_UNKNOWN_MESSAGE;\n      if (cm !== null) return cm.noParty ? NO_DEMAND_PARTY_MESSAGE : `以下参与方缺少必需确认人", to: "if (cm === undefined) return null;\n      if (cm !== null) return cm.noParty ? NO_DEMAND_PARTY_MESSAGE : `以下参与方缺少必需确认人" }] }, // C6a：handover_request 里有同一句 cm === undefined，锚点带上下一行以保唯一
   { id: 'C4a MED-1：提交判定的立项事实缺失时放行（只拦明确为假）', expect: ['C4a rules：新动作'], edits: [{ file: 'rules.js', from: "t.packageType === 'overall' && t.initiationEffective !== true", to: "t.packageType === 'overall' && t.initiationEffective === false" }] },
   // LOW-1 / LOW-2：formBaselines 双向核对
@@ -2533,7 +2575,7 @@ const CONFIRM_MUTATIONS = [
   // ── 修订批三（codex 19 号：H-1 / H-2 / M-1 / M-2 / M-3；P30：过滤自检之外再跑 --self-test --full --mutation-ids <本批新增与改动的变异 id 名单>，名单见 tmp/c4a/fix4_ids_41.json；下标 558–586 只作快速定位）──
   // H-1 / P43 提交前置「计划齐全」（标志与执行同源、事实缺失 fail-closed）
   { id: 'C4a H-1：读接口 submit 标志不看 planMissing（恒视为计划齐全）', expect: ['C4a actions 与执行一致', 'C4a H-1（P43）提交前置'], edits: [{ file: 'packages.js', from: 'const facts = await versionFactsOf(q, pkg, ver);', to: 'const facts = Object.assign(await versionFactsOf(q, pkg, ver), { planMissing: null });' }] },
-  { id: 'C4a H-1：提交端点恒视为计划齐全（执行端不再核对计划）', expect: ['C4a H-1（P43）提交前置', 'C4a actions 与执行一致'], edits: [{ file: 'confirm.js', from: 'versionTarget(ver, pkg, batchStatus, await versionFactsOf(q, pkg, ver))', to: 'versionTarget(ver, pkg, batchStatus, Object.assign(await versionFactsOf(q, pkg, ver), { planMissing: null }))' }] },
+  { id: 'C4a H-1：提交端点恒视为计划齐全（执行端不再核对计划）', expect: ['C4a H-1（P43）提交前置', 'C4a actions 与执行一致'], edits: [{ file: 'confirm.js', from: 'const facts = await versionFactsOf(q, pkg, ver);', to: 'const facts = Object.assign(await versionFactsOf(q, pkg, ver), { planMissing: null });' }] },
   { id: 'C4a H-1：计划事实缺失时放行（不 fail-closed）', expect: ['C4a rules：新动作'], edits: [{ file: 'rules.js', from: 'if (t.planMissing === undefined) return PLANS_UNKNOWN_MESSAGE;', to: '' }] },
   { id: 'C4a H-1：缺计划的判定去掉（规则层）', expect: ['C4a rules：新动作', 'C4a H-1（P43）提交前置'], edits: [{ file: 'rules.js', from: 'if (t.planMissing !== null) return `${PLAN_MISSING_MESSAGE_HEAD}${t.planMissing.join(\'、\')}`;', to: '' }] },
   { id: 'C4a H-1：合并形态只要求项目层节点有计划', expect: ['C4a H-1（P43）提交前置'], edits: [{ file: 'confirm-core.js', from: "const scope = form === 'overall_batch_req' ? '' : ' AND n.batch_id IS NULL';", to: "const scope = ' AND n.batch_id IS NULL';" }] },

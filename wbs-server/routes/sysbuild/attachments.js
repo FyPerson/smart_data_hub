@@ -51,6 +51,26 @@ const IMAGE_EXT_MIME = Object.freeze({
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
 });
 
+// 冻结候选只读查询：一般附件仍按绑定与引用的并集、仅排除软删除；遮蔽不改变既有冻结口径。
+async function readAttachmentSet(q, { ownerType, ownerId, projectId }) {
+  if (!schema.ENUMS.bindingOwnerType.includes(ownerType)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：附件绑定的所属类型未登记');
+  if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');
+  const rows = await q.all(
+    `SELECT a.id AS attachment_id, a.sha256 AS sha256, a.project_id AS project_id
+       FROM sysbuild_attachments a
+      WHERE a.id IN (
+              SELECT b.attachment_id FROM sysbuild_attachment_bindings b WHERE b.owner_type = ? AND b.owner_id = ?
+              UNION
+              SELECT r.attachment_id FROM sysbuild_attachment_refs r WHERE r.owner_type = ? AND r.owner_id = ?
+            )
+        AND a.deleted_at IS NULL
+      ORDER BY a.id`,
+    [ownerType, ownerId, ownerType, ownerId]
+  );
+  for (const r of rows) if (r.project_id !== projectId) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：绑定的附件不属于该项目');
+  return rows;
+}
+
 // ── 纯函数 ────────────────────────────────────────────────────────────────────────────
 // 读文件头识别真实图片类型；识别不了返回 null。
 function sniffImageType(head) {
@@ -512,7 +532,7 @@ function createAttachmentRoutes(ctx) {
       const identity = await rules.completeIdentity(q, access, req.user);
       if (!(await visibility.attachmentVisible(q, identity, att.project_id, att.id))) throw rules.notFound();
       const frozen = await isAttachmentFrozen(q, aid);
-      const evidence = await q.get("SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1", [aid]);
+      const evidence = await q.get("SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event', 'golive_event') LIMIT 1", [aid]);
       const permitted = (can) => {
         try { rules.assertCan(access, can, { writeKind: 'attachment' }); return true; }
         catch (err) { if (err.status === 403 || err.status === 409) return false; throw err; }
@@ -586,8 +606,9 @@ function createAttachmentRoutes(ctx) {
       // C4b Q-S1 预筛 D1（不变量 9，同模式全扫 P59）：作为凭据绑定的附件——代录确认凭据（confirmation）、历史补录 / 历史事实导入凭据（history_import）、改期证据（schedule_record）——
       //   与已冻结的一样不能普通软删除（凭据一删，确认 / 改期的依据就没了），受控遮蔽仍可用。
       //   C4b Q-S2：历史补录窗口的开启 / 关闭 / 重开凭据以 owner_type = event 绑定（grep 核对：event 除这三个窗口动作外没有任何绑定用途），同属凭据，一并纳入。
+      //   L2：上线 / 撤销上线的 golive_event 绑定也是凭据；只允许遮蔽，不可普通删除。
       const evidenceBound = await q.get(
-        "SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1",
+        "SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event', 'golive_event') LIMIT 1",
         [aid]
       );
       if (evidenceBound) throw makeError(409, 'SYSBUILD_STATE', '附件已作为确认 / 改期凭据，不能删除；如需隐藏请由项目经理遮蔽');
@@ -681,23 +702,20 @@ function createAttachmentRoutes(ctx) {
   // 冻结：取该 owner「绑定 ∪ 引用」且未软删除的附件（C3b / D40：新版本沿用旧版本附件走 sysbuild_attachment_refs，冻结清单按并集生成，去重），
   //   逐个写冻结清单（含 sha256）。返回 [{ attachment_id, sha256 }]。
   async function freezeAttachmentSet(q, args) {
+    const { objectType, objectVersionId, ownerType, ownerId } = args;
+    if (!schema.ENUMS.frozenObjectType.includes(objectType)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结对象类型未登记');
+    if (!schema.ENUMS.bindingOwnerType.includes(ownerType)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：附件绑定的所属类型未登记');
+    if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');
+    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');
+    return freezeAttachmentRows(q, args, await readAttachmentSet(q, args));
+  }
+  // 提交路径传入送审范围已经读取的候选清单，禁止在这里重新查询另一个候选集合。
+  async function freezeAttachmentRows(q, args, rows) {
     const { objectType, objectVersionId, ownerType, ownerId, operatorId, operatorName, projectId } = args;
     if (!schema.ENUMS.frozenObjectType.includes(objectType)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结对象类型未登记');
     if (!schema.ENUMS.bindingOwnerType.includes(ownerType)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：附件绑定的所属类型未登记');
     if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');
     if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');
-    const rows = await q.all(
-      `SELECT a.id AS attachment_id, a.sha256 AS sha256, a.project_id AS project_id
-         FROM sysbuild_attachments a
-        WHERE a.id IN (
-                SELECT b.attachment_id FROM sysbuild_attachment_bindings b WHERE b.owner_type = ? AND b.owner_id = ?
-                UNION
-                SELECT r.attachment_id FROM sysbuild_attachment_refs r WHERE r.owner_type = ? AND r.owner_id = ?
-              )
-          AND a.deleted_at IS NULL
-        ORDER BY a.id`,
-      [ownerType, ownerId, ownerType, ownerId]
-    );
     const frozen = [];
     for (const r of rows) {
       if (r.project_id !== projectId) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：绑定的附件不属于该项目');
@@ -711,7 +729,7 @@ function createAttachmentRoutes(ctx) {
     return frozen;
   }
 
-  const helpers = { bindStagedAttachments, freezeAttachmentSet, isAttachmentFrozen };
+  const helpers = { bindStagedAttachments, freezeAttachmentSet, freezeAttachmentRows, isAttachmentFrozen };
   const _internals = {
     sniffImageType, decodeOriginalName, diskSafeName, encodeRfc5987, parseLocalDatetime, deleteUploadIfUnreferenced, UPLOAD_SUBDIR,
     stageStorage,
@@ -730,4 +748,4 @@ function createAttachmentRoutes(ctx) {
   return { router, helpers, _internals };
 }
 
-module.exports = { createAttachmentRoutes, sniffImageType, diskSafeName, decodeOriginalName, attachmentDisplayName, attachmentStateFields };
+module.exports = { createAttachmentRoutes, sniffImageType, diskSafeName, decodeOriginalName, attachmentDisplayName, attachmentStateFields, readAttachmentSet };

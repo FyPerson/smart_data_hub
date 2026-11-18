@@ -130,8 +130,66 @@
         }));
         return ops;
     }
+    function reportPanel(detail, node, registration, sourceEntries, c) {
+        const report = node.report;
+        if (!report) return null;
+        const ops = A.row();
+        const definitions = registration && registration.forms || [];
+        for (const [kind, title] of [['report_cycle', '设定汇报节奏'], ['report_request', '登记临时汇报要求'], ['progress_report', '提交进度汇报']]) {
+            const definition = definitions.find((f) => f.kind === kind);
+            if (definition && definition.allowed === true) ops.appendChild(A.command(title, () => A.openEntryForm(detail, kind, { node_id: node.id }, c), '', c));
+        }
+        const part = A.panel('进度汇报', [
+            A.hint('应交事项由服务端按当前节奏、临时要求与节点开工事实生成，截止至 ' + (report.cutoff || '无法读取') + '。'),
+            A.hint('改节奏会清掉旧节奏下未交的应交日，历史登记仍保留；影响里程碑的汇报不替代改期。'),
+            report.warning ? A.el('p', 'sbui-error', report.warning) : null,
+            report.current_cycle ? A.panel('当前汇报节奏 · 登记 #' + report.current_cycle.entry_id, [A.entryFormView(report.current_cycle), A.link('查看节奏登记', { project: detail.project.id, tab: 'entries', entry: report.current_cycle.entry_id })]) : A.hint('当前没有可读的汇报节奏。'),
+        ], ops);
+        const body = A.el('div', 'sbui-panel-body');
+        // 55 号 LOW-1（用户 2026-11-17 定）：同一来源的勘误在本面板只整段显示一次（「当前汇报节奏」或该来源首次出现的行），其后的行只给标记。
+        // 57 号 MEDIUM：节奏面板（/plan）与来源行（/entries）是两次读取，按每条勘误的 action_id 记已显示，来源里有未显示过的勘误就整段显示。
+        const shownCorrectionIds = new Set();
+        const correctionIds = (entry) => (entry.corrections || []).map((r) => Number(r.action_id)).filter(Number.isSafeInteger);
+        if (report.current_cycle) correctionIds(report.current_cycle).forEach((x) => shownCorrectionIds.add(x));
+        const sourceCorrections = (id) => {
+            const entry = sourceEntries.get(id);
+            if (!entry) return A.hint('该来源登记的勘误信息未能读取，请打开原登记核对。');
+            const ids = correctionIds(entry);
+            if (!ids.length && entry.has_correction !== true) return null;
+            if (ids.length && ids.every((x) => shownCorrectionIds.has(x))) return A.hint('有勘误说明，见上方登记 #' + id + ' 处。');
+            const fresh = (entry.corrections || []).filter((r) => !shownCorrectionIds.has(Number(r.action_id)));
+            ids.forEach((x) => shownCorrectionIds.add(x));
+            return A.entryCorrectionsView(ids.length ? Object.assign({}, entry, { corrections: fresh }) : entry);
+        };
+        const source = (item) => A.append(A.el('div'), (item.sources || []).map((s) => A.append(A.el('div', 'sbui-report-source'), [
+            A.link((s.kind === 'cycle' ? '周期要求' : '临时要求') + ' #' + s.entry_id, { project: detail.project.id, tab: 'entries', entry: s.entry_id }), s.reason ? A.hint(s.reason) : null,
+            sourceCorrections(Number(s.entry_id)),
+        ])));
+        body.appendChild(A.table(['应交日', '全部来源', '提交情况', '汇报登记'], (report.due_items || []).map((item) => [
+            item.due_on, source(item), item.submitted ? '已交' : item.overdue ? '逾期未交' : '待交',
+            A.row(...(item.report_entry_ids || []).map((id) => A.link('汇报 #' + id, { project: detail.project.id, tab: 'entries', entry: id }))),
+        ])));
+        if (!(report.due_items || []).length) body.appendChild(A.hint('当前没有应交事项；主动汇报仍按服务端登记条件处理。'));
+        for (const [key, title] of [['unreadable_request_ids', '无法读取的临时汇报要求'], ['unreadable_report_ids', '无法读取的进度汇报'], ['unreadable_entry_ids', '无法读取的登记']]) {
+            if ((report[key] || []).length) body.appendChild(A.panel(title, [A.hint(key === 'unreadable_request_ids' ? '无法确定应交日，本次不生成提醒；可查看原登记。' : key === 'unreadable_report_ids' ? '不可读汇报不计为已交，请核对原登记。' : '请核对登记原文；节奏未知时可新登一条节奏恢复。'), A.row(...report[key].map((id) => A.link('登记 #' + id, { project: detail.project.id, tab: 'entries', entry: id })))]));
+        }
+        body.appendChild(report.latest_report ? A.panel('最近一次汇报 · 登记 #' + report.latest_report.entry_id, [A.entryFormView(report.latest_report), A.link('查看汇报原文', { project: detail.project.id, tab: 'entries', entry: report.latest_report.entry_id })]) : A.hint('尚无进度汇报。'));
+        definitions.filter((f) => ['progress_report', 'report_cycle', 'report_request'].includes(f.kind)).forEach((f) => body.appendChild(A.hint(f.label + '：' + f.conditions)));
+        part.appendChild(body);
+        return part;
+    }
+    function devStartHint(node) {
+        if (node.status !== 'not_started' || node.actions.start === true || node.dev_start_ready === 'not_dev_node') return null;
+        const reasons = { no_plan: '请先确定开工日（开发节点的计划开始）', no_cycle: '请先设定汇报节奏' };
+        if (node.dev_start_ready === 'ok') return null;
+        return A.hint(reasons[node.dev_start_ready] || '开发节点开始条件无法读取，请刷新后重试');
+    }
     async function planTab(detail, params, c) {
         const plan = A.state.plan;
+        // 未附筛选的 entries 接口返回本项目全部登记及勘误；与角色元数据共用本次读取。
+        const entryData = plan.nodes.some((n) => n.report) ? await A.request('/projects/' + detail.project.id + '/entries', null, c) : { registration: null, entries: [] };
+        const registration = entryData.registration;
+        const sourceEntries = new Map(entryData.entries.map((entry) => [Number(entry.id), entry]));
         const selected = params.has('node') ? A.id(params.get('node')) : null;
         if (selected && !plan.nodes.some((n) => n.id === selected)) throw new Error('该节点不属于当前项目');
         const host = A.el('div');
@@ -145,7 +203,7 @@
             host.appendChild(A.panel(group.id === null ? '项目层节点' : group.name + ' · 交付节点', group.id === null ? null : [batchOperations(detail, group, allNodes, c)]));
             nodes.forEach((n) => host.appendChild(A.panel(n.name + ' · ' + (nodeStates[n.status] || n.status), [
                 A.facts([['环节', n.g_stage], ['确认基线', span(n.baseline)], ['当前计划', span(n.current_plan)], ['实际', (n.actual_start || '—') + ' → ' + (n.actual_end || '—')], ['相对基线', n.diff_days == null ? '暂无基线' : n.diff_days + ' 天'], ['逾期', n.overdue_days + ' 天'], ['收口后未结异议', n.post_close_objections_open + ' 条']]),
-                n.close_blockers.length ? blockers(n.close_blockers, detail.project.id) : null, nodeOperations(detail, n, c),
+                n.close_blockers.length ? blockers(n.close_blockers, detail.project.id) : null, devStartHint(n), nodeOperations(detail, n, c), reportPanel(detail, n, registration, sourceEntries, c),
             ])));
         });
         return host;
@@ -159,12 +217,14 @@
             const part = A.panel(batch.name, [A.facts([['交接事项', summary.total + ' 项'], ['已清', summary.cleared + ' 项'], ['未清', summary.uncleared + ' 项'], ['需要确认 / 已确认', summary.need_confirm + ' / ' + summary.confirmed]]), blockers(data.blockers, detail.project.id)]);
             if (data.actions.golive === true) part.appendChild(A.append(A.el('div', 'sbui-panel-body'), [A.button('确认试运行结束并正式上线', () => {
                 A.assertCurrent(c);
-                A.dialog('确认正式上线 · ' + batch.name, [{ name: 'checked', label: '已核对交接事项，确认试运行结束', type: 'checkbox', required: true, full: true }], async (v, cc) => { if (!v.checked) throw new Error('请核对后勾选'); await A.request('/batches/' + batch.id + '/golive', { method: 'POST', body: {} }, cc); await A.render(); }, '记录正式上线');
+                A.dialog('确认正式上线 · ' + batch.name, [{ name: 'checked', label: '已核对交接事项，确认试运行结束', type: 'checkbox', required: true, full: true }, { name: 'files', label: '上线凭据（可选，至多10个）', type: 'file', multiple: true, full: true }], async (v, cc) => { if (!v.checked) throw new Error('请核对后勾选'); const attachment_ids = await A.stageFiles(detail.project.id, v.files, cc); await A.request('/batches/' + batch.id + '/golive', { method: 'POST', body: { attachment_ids } }, cc); await A.render(); }, '记录正式上线');
             }, 'primary')]));
             if (data.actions.revoke_golive === true) part.appendChild(A.append(A.el('div', 'sbui-panel-body'), [A.button('撤销正式上线', () => {
                 A.assertCurrent(c);
-                A.dialog('撤销正式上线 · ' + batch.name, [{ name: 'reason', label: '撤销原因', type: 'textarea', required: true, max: 500, full: true }], async (v, cc) => { await A.request('/batches/' + batch.id + '/revoke-golive', { method: 'POST', body: { reason: v.reason } }, cc); await A.render(); }, '记录撤销上线');
+                A.dialog('撤销正式上线 · ' + batch.name, [{ name: 'reason', label: '撤销原因', type: 'textarea', required: true, max: 500, full: true }, { name: 'files', label: '撤销上线凭据（可选，至多10个）', type: 'file', multiple: true, full: true }], async (v, cc) => { const attachment_ids = await A.stageFiles(detail.project.id, v.files, cc); await A.request('/batches/' + batch.id + '/revoke-golive', { method: 'POST', body: { reason: v.reason, attachment_ids } }, cc); await A.render(); }, '记录撤销上线');
             }, 'danger')]));
+            const event = data.batch.last_golive_event;
+            part.appendChild(A.panel('最近一次上线事件与凭据', event ? [A.facts([['事件', event.kind === 'revoke' ? '撤销上线' : '正式上线'], ['发生时间', event.created_at], ['原因', event.reason]]), A.attachmentList(event.attachments || [], c)] : [A.hint('尚无上线事件。')]));
             host.appendChild(part);
             for (const item of data.items) {
                 const ops = A.row(A.link('打开登记与办理', { project: detail.project.id, tab: 'entries', entry: item.entry_id }));

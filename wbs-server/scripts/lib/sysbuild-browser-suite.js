@@ -9,6 +9,9 @@ const crypto = require('crypto');
 const sqlite3 = require('sqlite3');
 const { chromium } = require('playwright');
 const stage8 = require('./sysbuild-browser-stage8');
+const traceSetup = require('./sysbuild-browser-trace-setup');
+const traceForms = require('./sysbuild-browser-trace-forms');
+const traceConfirm = require('./sysbuild-browser-trace-confirm');
 // 只标记单个目标断言 / 等待；长场景其他位置失败不能冒作该变异的目标失败。
 async function target(id, task) {
     try { return await task(); }
@@ -24,7 +27,7 @@ const FRONT_MUTATIONS = [
     { id: 'query-link', file: 'sysbuild-ui.js', from: "if (!location.hash && location.search) history.replaceState(null, '', location.pathname + '#' + location.search.slice(1));", to: 'if (false) history.replaceState(null, "", location.pathname);', expect: '邀请窄范围入口', expectFailure: '[invitation-context]' },
     { id: 'new-project-capability', file: 'sysbuild-page.js', from: 'if (data.actions && data.actions.create === true) ops.appendChild', to: 'if (true) ops.appendChild', expect: '只读账号的入口', expectFailure: '[readonly-create]' },
     { id: 'pending-join-label', file: 'sysbuild-members.js', from: "pending: '待本人接受'", to: "pending: '已生效'", expect: '成员加入与任职分开', expectFailure: '[pending-join]' },
-    { id: 'platform-nav', file: 'app.js', from: "projectLink.textContent = '项目管理';", to: "projectLink.textContent = '错误入口';", expect: '平台导航入口', expectFailure: '[platform-nav]' },
+    { id: 'platform-nav', file: 'app.js', from: "projectLink.textContent = '项目管理（开发中）';", to: "projectLink.textContent = '错误入口';", expect: '平台导航入口', expectFailure: '[platform-nav]' },
     // 动态入口的图标：两行必须一起替换，只删第一行会让第二行对 null 取属性而抛错，入口插不进去，失败会落到 [platform-nav]。
     { id: 'platform-nav-icon', file: 'app.js', from: "projectLink.insertAdjacentHTML('afterbegin', SVG_ICONS.clipboard);\n        projectLink.firstElementChild.setAttribute('aria-hidden', 'true');", to: 'void 0;', expect: '平台导航入口', expectFailure: '[platform-nav-icon]' },
     // 去重判据失效：静态入口之外再插一份动态入口，项目管理页的平台导航里会有两个同名链接。
@@ -35,13 +38,16 @@ const FRONT_MUTATIONS = [
     { id: 'dialog-generation', file: 'sysbuild-ui.js', from: ' && (c.dialog === undefined || c.dialog === state.dialog)', to: '', expect: '异步弹窗不串参与方', expectFailure: '晚到的旧请求不能覆盖最后选择的参与方' },
     { id: 'dialog-close-while-submitting', file: 'sysbuild-ui.js', from: 'if (closeButton) closeButton.disabled = true;', to: 'if (closeButton) closeButton.disabled = false;', expect: '提交中保留弹窗', expectFailure: '[dialog-close-disabled]' },
     { id: 'readonly-member-description', file: 'sysbuild-page.js', from: '当前账号不提供登记与维护权限。', to: '可以登记事实与个人意见。', expect: '只读账号的入口', expectFailure: '[readonly-description]' },
-    { id: 'g0-snapshot-content', file: 'sysbuild-page.js', from: '{ ...v.snapshot_json, text: values.text }', to: '{ ...v.snapshot_json, ignored_text: values.text }', expect: '新建三步保存与恢复', expectFailure: '[g0-saved-content]' },
+    { id: 'g0-snapshot-content', file: 'sysbuild-page.js', from: 'text: values.text, material_version_ids:', to: "text: '', material_version_ids:", expect: '新建三步保存与恢复', expectFailure: '[g0-saved-content]' },
     { id: 'g0-submit-version', file: 'sysbuild-page.js', from: "'/package-versions/' + version.id + '/submit'", to: "'/package-versions/' + (version.id + 999999) + '/submit'", expect: '新建三步保存与恢复', expectFailure: '[g0-submitted]' },
     { id: 'g0-pending-hint', file: 'sysbuild-page.js', from: '本版已发起，等待必需确认人处理。', to: '如需提交，请先补齐需求方现任负责人及服务端列明的前置条件。', expect: '新建三步保存与恢复', expectFailure: '[g0-submitted]' },
     { id: 'g0-unsaved-submit', file: 'sysbuild-page.js', from: 'assertSavedInitiation(); await A.request', to: 'await A.request', expect: '未保存立项内容阻止发起', expectFailure: '[g0-unsaved-submit]' },
     { id: 'package-unsaved-submit', file: 'sysbuild-packages.js', from: 'assertSavedDraft(); await A.request', to: 'await A.request', expect: '未保存草稿正文与材料阻止发起', expectFailure: '[package-unsaved-text]' },
-    { id: 'package-unsaved-materials', file: 'sysbuild-packages.js', from: ' || JSON.stringify(materials) !== JSON.stringify(savedMaterials)', to: '', expect: '未保存草稿正文与材料阻止发起', expectFailure: '[package-unsaved-materials]' },
+    { id: 'package-unsaved-materials', file: 'sysbuild-page.js', from: 'ids: Array.from(new Set(ids.map(Number))).sort((a, b) => a - b)', to: 'ids: []', expect: '未保存草稿正文与材料阻止发起', expectFailure: '[package-unsaved-materials]' },
     ...stage8.MUTATIONS,
+    ...traceSetup.MUTATIONS,
+    ...traceForms.MUTATIONS,
+    ...traceConfirm.MUTATIONS,
 ];
 function cleanupArtifacts(dir) {
     const resolved = path.resolve(dir);
@@ -97,7 +103,7 @@ async function run(options) {
     async function invite(pid, person, partyId) {
         return api(people.pm, 'POST', '/projects/' + pid + '/members', { user_id: person.id, party_id: partyId || null }, 201);
     }
-    async function initiationDraft() {
+    async function initiationDraft(page) {
         const pid = await project('未保存内容检查_' + suffix);
         const party = (await api(people.pm, 'POST', '/projects/' + pid + '/parties', { side: 'demand', name: '草稿检查需求方' }, 201)).party.id;
         const added = await invite(pid, people.owner, party);
@@ -107,7 +113,13 @@ async function run(options) {
         const pkg = (await api(people.pm, 'POST', '/projects/' + pid + '/packages', { type: 'initiation' }, 201)).package.id;
         const vid = (await api(people.pm, 'POST', '/packages/' + pkg + '/versions', {}, 201)).version.id;
         const text = '已保存并待确认的立项范围';
-        await api(people.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { text } });
+        // L3：新门的声明经真实界面填写，不能再用夹具 PATCH 绕过声明编辑。
+        await visit(page, '#project=' + pid + '&tab=setup&step=3');
+        await page.getByLabel(/^立项确认内容/).fill(text);
+        await page.locator('[name="no_written_basis"]').check();
+        await page.locator('[name="no_written_basis_reason"]').fill('本浏览器夹具的立项依据为线下讨论，尚无书面原件');
+        await page.getByRole('button', { name: '保存本版立项内容', exact: true }).click();
+        await page.locator('form[data-submitting="true"]').waitFor({ state: 'detached' });
         return { pid, vid, text };
     }
     const bundled = fs.existsSync(chromium.executablePath());
@@ -137,6 +149,7 @@ async function run(options) {
         });
         const page = await context.newPage();
         page.on('pageerror', (e) => errors.push(e.message));
+        page.on('dialog', async (dialog) => { errors.push('unexpected native dialog: ' + dialog.type()); await dialog.dismiss(); });
         if (mutation) {
             const source = fs.readFileSync(path.join(publicDir, 'assets/js', mutation.file), 'utf8').replace(/\r\n/g, '\n');
             assert.strictEqual(source.split(mutation.from).length - 1, 1, mutation.id + ' anchor must occur once');
@@ -151,7 +164,7 @@ async function run(options) {
     async function contains(page, text) { await page.getByText(text, { exact: true }).first().waitFor({ timeout: 15000 }); }
     const cases = [
         ['未保存立项内容阻止发起', async (page) => {
-            const { pid, vid, text } = await initiationDraft();
+            const { pid, vid, text } = await initiationDraft(page);
             await visit(page, '#project=' + pid + '&tab=setup&step=3');
             let submits = 0;
             page.on('request', (req) => { if (req.method() === 'POST' && req.url().endsWith('/package-versions/' + vid + '/submit')) submits += 1; });
@@ -168,7 +181,7 @@ async function run(options) {
             assert.strictEqual(submits, 1, '恢复保存值后只提交一次');
         }],
         ['未保存草稿正文与材料阻止发起', async (page) => {
-            const { pid, vid, text } = await initiationDraft();
+            const { pid, vid, text } = await initiationDraft(page);
             const plan = await api(people.pm, 'GET', '/projects/' + pid + '/plan');
             const made = await api(people.pm, 'POST', '/nodes/' + plan.nodes[0].id + '/materials/draft-check/versions', { name: '待保存引用的材料', body: '供本版明确引用的原始材料' }, 201);
             await visit(page, '#project=' + pid + '&tab=packages&version=' + vid);
@@ -201,7 +214,7 @@ async function run(options) {
         }],
         ['平台导航入口', async (page) => {
             await page.goto(env.baseUrl + '/Task_Pool.html', { waitUntil: 'domcontentloaded' });
-            const nav = page.getByRole('navigation').getByRole('link', { name: '项目管理', exact: true });
+            const nav = page.getByRole('navigation').getByRole('link', { name: '项目管理（开发中）', exact: true });
             await target('platform-nav', () => nav.waitFor());
             assert.ok((await nav.getAttribute('href')).endsWith('/Sys_Build.html'), '[platform-nav] 项目管理入口须指向模块页面');
             // 动态入口：恰好一个图标，且对读屏隐藏（先断言个数，再读属性，避免 0 个时等到超时而丢掉目标标记）。
@@ -221,27 +234,28 @@ async function run(options) {
             assert.ok(precondition.user, '[platform-nav-precondition] 全局 currentUser 为空，adjustNavbarForRole 会直接返回');
             await target('platform-nav-selected', () => page.evaluate(() => { adjustNavbarForRole(); }));
             const platform = page.getByRole('navigation', { name: '平台导航', exact: true });
-            const own = platform.getByRole('link', { name: '项目管理', exact: true });
+            const own = platform.getByRole('link', { name: '项目管理（开发中）', exact: true });
             assert.strictEqual(await own.count(), 1, '[platform-nav-selected] 平台导航里「项目管理」链接须恰好一个，不得重复');
             assert.strictEqual(await own.getAttribute('aria-current'), 'page', '[platform-nav-selected] 项目管理页的入口须标 aria-current="page"');
             assert.strictEqual(await own.locator('svg').count(), 1, '[platform-nav-selected] 项目管理页的入口内须恰好一个 svg 图标');
         }],
         ['新建三步保存与恢复', async (page) => {
             await visit(page);
-            await page.getByRole('link', { name: '新建项目', exact: true }).click();
+            await page.getByRole('button', { name: '新建项目', exact: true }).click();
             await page.getByLabel(/^系统名称/).fill('浏览器新建_' + suffix);
             await page.getByLabel(/^建设方式/).selectOption('inhouse');
-            await page.getByLabel(/^建设目标/).fill('新建后必须保留这份目标');
-            await page.getByRole('button', { name: '保存并设置需求方', exact: true }).click();
-            await page.getByRole('heading', { name: '成员与授权', exact: true }).waitFor();
+            await page.getByRole('button', { name: '保存并进入立项准备', exact: true }).click();
+            await page.locator('[name="body"]').waitFor();
             const url = new URL(page.url());
             const pid = Number(new URLSearchParams(url.hash.slice(1)).get('project'));
             const detail = await api(people.pm, 'GET', '/projects/' + pid);
-            assert.strictEqual(detail.project.goal, '新建后必须保留这份目标');
+            assert.ok(!detail.project.goal, 'v1.3 建档弹窗不再填写建设目标');
+            assert.strictEqual(new URLSearchParams(url.hash.slice(1)).get('step'), '1');
             assert.strictEqual(detail.project.pm_user_id, people.pm.id);
             assert.strictEqual(detail.members.length, 1, 'no other person is auto-enrolled');
             await page.reload({ waitUntil: 'domcontentloaded' });
-            await page.getByRole('heading', { name: '成员与授权', exact: true }).waitFor();
+            await page.locator('[name="body"]').waitFor();
+            await visit(page, '#project=' + pid + '&tab=setup&step=2');
             await page.getByRole('button', { name: '添加参与方', exact: true }).click();
             await page.locator('#sbuiDialog select[name="side"]').selectOption('demand');
             await page.locator('#sbuiDialog').getByLabel(/^名称/).fill('新建流程需求方');
@@ -255,6 +269,9 @@ async function run(options) {
             await api(people.owner, 'POST', '/my/invitations/' + appointed.invitation.id + '/accept', {});
             await page.getByRole('link', { name: '核对 G0 立项确认', exact: true }).click();
             await page.getByRole('button', { name: '建立立项草稿', exact: true }).click();
+            await page.getByLabel(/^立项确认内容/).waitFor();
+            await page.locator('[name="no_written_basis"]').check();
+            await page.locator('[name="no_written_basis_reason"]').fill('本浏览器夹具的立项依据为线下讨论，尚无书面原件');
             await page.getByLabel(/^立项确认内容/).fill('这份逐字保存的立项范围用于本次G0确认_' + suffix);
             await Promise.all([
                 page.waitForResponse((res) => res.request().method() === 'PATCH' && /\/package-versions\/\d+$/.test(new URL(res.url()).pathname)),
@@ -293,7 +310,7 @@ async function run(options) {
         }],
         ['只读账号的入口', async (page) => {
             await visit(page);
-            assert.strictEqual(await page.getByRole('link', { name: '新建项目', exact: true }).count(), 0, '[readonly-create] 只读账号不得出现建项入口');
+            assert.strictEqual(await page.getByRole('button', { name: '新建项目', exact: true }).count(), 0, '[readonly-create] 只读账号不得出现建项入口');
             await page.getByRole('link', { name: '全部项目', exact: true }).waitFor();
             await page.getByRole('link', { name: '全部项目', exact: true }).click();
             await page.getByRole('heading', { name: '全部项目', exact: true }).waitFor();
@@ -454,10 +471,10 @@ async function run(options) {
                 return route.continue();
             });
             const firstWrite = page.waitForRequest((req) => req.method() === 'POST' && req.url().endsWith('/api/sysbuild/projects'));
-            await page.locator('#sbuiView form').evaluate((f) => { f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+            await page.locator('#sbuiDialog form').evaluate((f) => { f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
             await firstWrite;
             release();
-            await page.getByRole('heading', { name: '成员与授权', exact: true }).waitFor();
+            await page.locator('[name="body"]').waitFor();
             assert.strictEqual(writes, 1, 'only the first submit may issue a POST');
             await page.unroute('**/api/sysbuild/projects');
         }],
@@ -514,6 +531,7 @@ async function run(options) {
         }],
     ];
     cases.push(...stage8.defineCases({ people, api, project, invite, pageFor, visit, contains, env, sql, suffix, options, out, token, target }));
+    for (const module of [traceSetup, traceForms, traceConfirm]) cases.push(...module.defineCases({ people, api, project, invite, pageFor, visit, contains, env, sql, suffix, options, out, token, target }));
     try {
         const selectedName = options.caseName || (options.mutation && options.mutation.expect);
         const selected = selectedName ? cases.filter(([name]) => name === selectedName) : cases;

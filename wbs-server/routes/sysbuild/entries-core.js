@@ -10,6 +10,7 @@ const rules = require('./rules');
 const { makeError } = require('./db');
 const { writeEvent } = require('./events');
 const core = require('./confirm-core');
+const forms = require('./entry-forms');
 
 const internalError = (message) => makeError(500, 'SYSBUILD_INTERNAL', `内部错误：${message}`);
 const stateError = (message) => makeError(409, 'SYSBUILD_STATE', message);
@@ -19,7 +20,7 @@ const emit = (q, user, projectId, objectType, objectId, eventType, payload) => w
 });
 
 const ENTRY_COLS = `id, project_id, node_id, type, purpose, commitment_flag, commitment_flag_source, is_risk, source_party_id, source_name, operator_user_id,
-  operator_identity_snapshot, period, days_after_close, business_date, title, body, no_written_evidence, no_evidence_reason, parent_entry_id, objects_entry_id, revision_of_entry_id, created_at`;
+  operator_identity_snapshot, period, days_after_close, business_date, title, body, no_written_evidence, no_evidence_reason, parent_entry_id, objects_entry_id, revision_of_entry_id, routing_json, created_at`;
 const SNAPSHOT_COLS = 'id, entry_id, part_no, overall_package_version_id, item_version_id, committed_batch_id, golive_event_id, decided_at, trigger_action_id, route, basis_category';
 const ACTION_COLS = 'id, entry_id, action, conclusion_kind, basis_kind, basis_ref, text, sys_issue_no, assignee_text, change_id, created_by, created_at';
 const SUPERSEDED_BY_NEW_CONCLUSION = 'PM 已改结论';
@@ -276,11 +277,11 @@ const returnedToHandling = (objection) => objection !== null && objection.mode =
 async function insertEntryRow(q, f) {
   const ins = await q.run(
     `INSERT INTO sysbuild_entries (project_id, node_id, type, purpose, commitment_flag, commitment_flag_source, is_risk, source_party_id, source_name, operator_user_id,
-       operator_identity_snapshot, period, days_after_close, business_date, title, body, no_written_evidence, no_evidence_reason, parent_entry_id, objects_entry_id, revision_of_entry_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       operator_identity_snapshot, period, days_after_close, business_date, title, body, no_written_evidence, no_evidence_reason, parent_entry_id, objects_entry_id, revision_of_entry_id, routing_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [f.projectId, f.nodeId, f.type, f.purpose, f.commitment, f.commitmentSource, f.isRisk, f.sourcePartyId, f.sourceName === undefined ? null : f.sourceName, f.operatorUserId,
       f.snapshotJson, f.period, f.days, f.businessDate, f.title, f.body, f.noEvidence, f.noEvidence === 1 ? f.noEvidenceReason : null,
-      f.parentEntryId === undefined ? null : f.parentEntryId, f.objectsEntryId === undefined ? null : f.objectsEntryId, f.revisionOfEntryId === undefined ? null : f.revisionOfEntryId]
+      f.parentEntryId === undefined ? null : f.parentEntryId, f.objectsEntryId === undefined ? null : f.objectsEntryId, f.revisionOfEntryId === undefined ? null : f.revisionOfEntryId, forms.serializeEntryForm(f.form)]
   );
   return ins.lastID;
 }
@@ -463,6 +464,14 @@ async function objectorBasisOf(q, entry, facts, identity, user) {
 
 // 办理动作的 target（读接口逐对象 actions 与写端点同一份；rules.OBJECT_OPS.entry_* 据此判定）。extra 覆盖 / 追加（如 kind）。
 async function entryTarget(q, project, entry, facts, user, extra) {
+  const formView = forms.readEntryForm(entry);
+  let usedByActiveChange = false;
+  if (formView.form_kind === 'dev_assessment') {
+    usedByActiveChange = !!(await q.get("SELECT id FROM sysbuild_changes WHERE id = ? AND project_id = ? AND status IN ('pending', 'effective')", [formView.form.about_change_id, entry.project_id]));
+  } else if (formView.form_unreadable && entry.purpose === 'dev_note') {
+    // 无法读取指向的变更时，存在仍受保护的变更就不能证明作废安全。
+    usedByActiveChange = !!(await q.get("SELECT id FROM sysbuild_changes WHERE project_id = ? AND status IN ('pending', 'effective') LIMIT 1", [entry.project_id]));
+  }
   const conf = await resolveConclusionConfirmer(q, entry);
   const adj = await resolveAdjudicator(q, entry);
   // C5 S-S1c：开发方关键事项事实——是否需要开发方负责人认可（用途为处理说明 / 交付物，或来源方为开发方且当前带涉及承诺）、是否已被引用为办理依据、是否已有结论（挂靠变更用）
@@ -480,6 +489,10 @@ async function entryTarget(q, project, entry, facts, user, extra) {
   //   只有问题与处理类、当前带风险标记的登记才可能用到（别的登记取消风险本来就 409），其余不查库直接给 false。golive-core 顶层依赖本文件，所以在这里延迟 require（同 packages）。
   const declineOutstanding = entry.type === 'issue' && facts.derived.risk_current === true ? await require('./golive-core').declineOutstandingOf(q, entry.id) : false;
   return Object.assign({
+    formKind: formView.form_kind,
+    formKindHint: forms.formKindHint(entry),
+    formUnreadable: formView.form_unreadable,
+    usedByActiveChange,
     declineOutstanding,
     purpose: entry.purpose,
     needsDevConfirm: needsDev,
@@ -546,6 +559,7 @@ async function devConfirmOf(q, entry) {
 const entryVoidedOf = async (q, entryId) => !!(await q.get("SELECT id FROM sysbuild_entry_actions WHERE entry_id = ? AND action = 'void' LIMIT 1", [entryId]));
 // 登记可否作「已认可的关键事项」被引用（办理依据 / 改期引用）：已认可且未作废。返回 { ok, reason }。
 async function devApprovalUsable(q, entry) {
+  if (forms.readEntryForm(entry).form_unreadable) return { ok: false, reason: '表单不可读，不能作为已认可的关键事项使用' };
   if (await entryVoidedOf(q, entry.id)) return { ok: false, reason: '该登记已作废' };
   const dc = await devConfirmOf(q, entry);
   if (dc.status === 'approved') return { ok: true, reason: null };
@@ -638,6 +652,7 @@ async function devEntryTaskObjectView(q, task, obj) {
       period: e.period, days_after_close: e.days_after_close, source_party_id: e.source_party_id, operator_user_id: e.operator_user_id,
       commitment_current: facts.derived.commitment_current, risk_current: facts.derived.risk_current, revision_of_entry_id: e.revision_of_entry_id,
       no_written_evidence: e.no_written_evidence === 1, no_evidence_reason: e.no_evidence_reason, created_at: e.created_at,
+      ...forms.entryFormView(e, facts.actions),
     },
     voided: obj.voided,
     dev_confirm_state: obj.devStatus,
@@ -725,6 +740,7 @@ async function entryTaskObjectView(q, task, obj) {
       period: e.period, days_after_close: e.days_after_close, source_party_id: e.source_party_id, operator_user_id: e.operator_user_id,
       commitment_current: facts.derived.commitment_current, risk_current: facts.derived.risk_current,
       no_written_evidence: e.no_written_evidence === 1, no_evidence_reason: e.no_evidence_reason, created_at: e.created_at,
+      ...forms.entryFormView(e, facts.actions),
     },
     conclusion: conclusion ? {
       action_id: conclusion.id, kind: conclusion.conclusion_kind, text: conclusion.text, sys_issue_no: conclusion.sys_issue_no, assignee_text: conclusion.assignee_text,

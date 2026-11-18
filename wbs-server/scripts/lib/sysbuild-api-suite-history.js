@@ -5,7 +5,7 @@
 // 本文件只放用例与变异，由 sysbuild-api-suite.js 登记（同一套夹具、同一个变异自检）。期望值一律手写，不取自被测代码。
 // 夹具规则：建项走 POST /projects；窗口开关、历史补录、历史导入、提交、代录全部走生产端点。只有这几类直接写库：
 //   ① 需求部门参与方、现任任职 / 生效授权 / 待处理授权提议（membership 套件另有端点用例，这里只要「这个状态的任职 / 授权」）；② 附件行（暂存）；
-//   ③ 把任务修订的创建时间回拨到固定日期（代录的外部确认日期下限取修订创建日；历史补录与历史导入没有下限，P63 / P54）；事件时间是真实时钟，进程内夹具的「今天」是注入的 2026-11-15，依赖事件时间的断言必须先把事件时间写库为固定值；
+//   ③ 把任务修订的创建时间回拨到固定日期（代录的外部确认日期下限取修订创建日；历史补录与历史导入没有下限，P63 / P54）；事件时间是真实时钟，进程内夹具的「今天」由统一todayProvider固定注入，依赖事件时间的断言必须先把事件时间写库为固定值；
 //   ④ 构造「库内与生产路径不可达」的状态：已有历史导入行的待处理任职 / 授权（互斥判定的事实来源）、待确认修订的授权任务、第二个草稿版本等。
 // 日期约定：回拨后的修订创建时间 = FLOOR_AT（2026-10-20 09:00:00）只服务代录用例；历史补录的外部日期与历史导入的原日期都没有下限，只要求不晚于今天（P63 / P54）。
 'use strict';
@@ -985,6 +985,7 @@ function defineHistoryCases(T) {
     const oNode = (await sqlGet('SELECT id FROM sysbuild_nodes WHERE project_id = ? AND template_key = ?', [other, 'b_dev'])).id;
     expectErr(await post(U.pm, impUrl(pid), await impBody(pid, 'node_closed', oNode)), 409, 'SYSBUILD_STATE', '别的项目的节点');
     // 进行中：实际开始 = 今天（真实开始），原日期更早 → 409（历史收口不能早于实际开始）；回拨实际开始后可导入，opened_at 不改写
+    await H.prepareDevStart(pid, nDev); // L2 §10：这里只补真实开始的正向前置，历史导入本身仍不要求计划 / 节奏。
     const st = await post(U.pm, `/sysbuild/nodes/${nDev}/start`, {});
     assert.strictEqual(st.status, 200, st.text);
     // P68 ①：节点在平台上于 opened_at（今天）开始，不能导入更早的收口——文案写明开始日
@@ -1013,7 +1014,8 @@ function defineHistoryCases(T) {
     // P70：原日期与平台开始日同一天 → closed_at 取 opened_at（原为 2026-10-21 00:00:00，会早于 opened_at 10:00:00 造成倒挂）
     assert.deepStrictEqual([nd.status, nd.opened_at, nd.closed_at], ['closed', openedAt, openedAt], '进行中节点的 opened_at 不改写，同日 closed_at 取 opened_at');
     assert.ok(nd.closed_at >= nd.opened_at, 'closed_at 不早于 opened_at');
-    assert.deepStrictEqual(await recKinds(nDev), [['actual_start', '2026-10-21'], ['actual_end', '2026-10-21']]);
+    // L2 §10：普通开始前先有计划；保留全部排期记录的精确顺序比较，不过滤新增前置。
+    assert.deepStrictEqual(await recKinds(nDev), [['plan_change', null], ['actual_start', '2026-10-21'], ['actual_end', '2026-10-21']]);
     assert.deepStrictEqual((await payloads(pid, 'history_fact_imported')).map((p) => [p.fact_type, p.object_id]), [['node_closed', nIni], ['node_closed', nDev]]);
   });
 
@@ -1146,6 +1148,7 @@ function defineHistoryCases(T) {
     const pid = await newProject();
     await openWin(pid);
     const nDev = await nodeIdOf(pid, 'b_dev');
+    await H.prepareDevStart(pid, nDev);
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nDev}/start`, {})).status, 200);
     await sqlRun("UPDATE sysbuild_nodes SET opened_at = '2026-10-21 10:00:00' WHERE id = ?", [nDev]);
     await sqlRun("UPDATE sysbuild_node_schedule_records SET actual_date = '2026-10-21' WHERE node_id = ? AND kind = 'actual_start'", [nDev]);
@@ -1156,6 +1159,7 @@ function defineHistoryCases(T) {
     const p2 = await newProject();
     await openWin(p2);
     const n2 = await nodeIdOf(p2, 'b_dev');
+    await H.prepareDevStart(p2, n2);
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${n2}/start`, {})).status, 200);
     await sqlRun("UPDATE sysbuild_nodes SET opened_at = '2026-10-21 15:30:00' WHERE id = ?", [n2]);
     await sqlRun("UPDATE sysbuild_node_schedule_records SET actual_date = '2026-10-21' WHERE node_id = ? AND kind = 'actual_start'", [n2]);
@@ -1408,6 +1412,7 @@ function defineHistoryCases(T) {
     const p5 = await newProject();
     await openWin(p5);
     const nDev = (await sqlGet('SELECT id FROM sysbuild_nodes WHERE project_id = ? AND template_key = ?', [p5, 'b_dev'])).id;
+    await H.prepareDevStart(p5, nDev);
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nDev}/start`, {})).status, 200);
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nDev}/close`, {})).status, 200);
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nDev}/reopen`, { reason: '重做' })).status, 200);
@@ -1671,7 +1676,7 @@ function defineHistoryCases(T) {
     const ownerP = { isPm: false, ownerOfParties: [3], userId: 50, isReadonly: false };
     const selfP = { isPm: false, userId: 50, isReadonly: false };
     const hcCases = [
-      ['package_version_submit', pm, { versionStatus: 'draft', packageType: 'initiation', confirmersMissing: null }],
+      ['package_version_submit', pm, { versionStatus: 'draft', packageType: 'initiation', confirmersMissing: null, initiationBasis: 'ok' }], // L2 §10：此处只测历史互斥，显式备齐普通提交的新门。
       ['confirm_reissue', pm, { objectType: 'package_version', objectStatus: 'pending', revisionStatus: 'objected', reissueBlocked: null }],
       ['confirm_proxy', pm, { proxyable: true, currentRevisionId: 7, revisionStatus: 'pending', objectVersionId: 9, objectPending: true, requiredIsSelf: false, qualificationLoss: null }],
       ['appointment_proxy_accept', pm, { status: 'pending', memberActive: true, hasAccount: false, accountDisabled: false }],
@@ -1824,7 +1829,7 @@ const HISTORY_MUTATIONS = [
   m('内容包导入不限类型', [IP], 'history.js', "if (!HISTORY_IMPORT_PACKAGE_TYPES.includes(pkg.type)) return { block: '该类型的内容包不支持历史生效导入' };", ''), // 预筛 M1：锚点随清单独立改写
   m('内容包导入放行正式变更', ['C5 预筛4轮：历史导入不接变更包'], 'history.js', "if (pkg.type === 'change') return { block: '正式变更不支持历史生效导入' };", ''),
   m('内容包导入不核对同包已有生效 / 待确认版本', [IP], 'history.js', "if (other) return { block: '该内容包已有生效或待确认的版本（已走普通路径 / 有当前任务），历史版本不能覆盖' };", ''),
-  m('内容包导入要求确认人齐全（P56 不要求）', [IP], 'history.js', 'Object.assign({}, facts, { confirmersMissing: null, historyConflict: null })', 'Object.assign({}, facts, { historyConflict: null })'),
+  m('内容包导入要求确认人齐全（P56 不要求）', [IP], 'history.js', 'Object.assign({}, facts, { confirmersMissing: null, historyConflict: null },', 'Object.assign({}, facts, { historyConflict: null },'),
   m('内容包导入不重核条目集合', [IP], 'history.js', "const set = pkg.type === 'overall' ? await ctx.recheckOverallSet(q, pkg, ver) : [];", 'const set = [];'),
   m('内容包导入的生效时刻取此刻', [IP], 'history.js', '{ effectiveAt: at, recordedPlans: plans }', '{ effectiveAt: null, recordedPlans: plans }'),
   m('内容包导入不交节点计划清单（基线来源核对缺记录）', [IP], 'history.js', '{ effectiveAt: at, recordedPlans: plans }', '{ effectiveAt: at, recordedPlans: undefined }'),

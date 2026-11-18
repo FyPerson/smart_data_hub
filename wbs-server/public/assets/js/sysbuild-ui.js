@@ -253,6 +253,8 @@
     function closeDialog() {
         const dlg = $('sbuiDialog');
         if (dlg.querySelector('form[data-submitting="true"]')) return;
+        const currentForm = dlg.querySelector('form');
+        if (currentForm && currentForm.sbuiCanClose && currentForm.sbuiCanClose() !== true) return;
         state.dialog += 1;
         state.dialogLease = null;
         disposeInvalid();
@@ -262,6 +264,7 @@
         const c = lease || reserveDialog();
         assertCurrent(c);
         const dlg = $('sbuiDialog');
+        dlg.classList.remove('sbui-create-dialog');
         state.dialogLease = c;
         const titleNode = el('h2', '', title); titleNode.id = 'sbuiDialogTitle';
         const close = button('关闭', closeDialog);
@@ -278,6 +281,23 @@
         $('sbuiDialogContent').replaceChildren(append(el('header', 'sbui-panel-head'), [titleNode, close]), append(el('div', 'sbui-panel-body'), [f]));
         if (!dlg.open) dlg.showModal();
         return f;
+    }
+    // 建档短表单的关闭提示属于本模块；随弹窗 DOM 销毁，不跨账号或视图保留输入。
+    function guardDialogUnsaved(f, c) {
+        const snapshot = () => JSON.stringify(Array.from(f.querySelectorAll('input,select,textarea')).map((input) => [input.name, input.type === 'checkbox' ? input.checked : input.value]));
+        const initial = snapshot();
+        let warning = null;
+        f.sbuiCanClose = () => {
+            assertCurrent(c);
+            if (snapshot() === initial) return true;
+            if (!warning) {
+                warning = panel('尚有未保存的内容', [hint('关闭将放弃本次填写，尚未建立项目。'), row(button('继续填写', () => { warning.remove(); warning = null; }), button('放弃未保存内容', () => { f.sbuiCanClose = null; closeDialog(); }, 'danger'))]);
+                warning.setAttribute('role', 'alert');
+                f.appendChild(warning);
+            }
+            warning.querySelector('button').focus();
+            return false;
+        };
     }
     async function stageFiles(projectId, files, c) {
         const ids = [];
@@ -361,10 +381,8 @@
     window.addEventListener('pagehide', clearSession);
     window.addEventListener('pageshow', (e) => { if (e.persisted) init().catch((err) => fail(err)); });
     $('sbuiDialog').addEventListener('cancel', (event) => {
-        if ($('sbuiDialog').querySelector('form[data-submitting="true"]')) { event.preventDefault(); return; }
-        state.dialog += 1;
-        state.dialogLease = null;
-        disposeInvalid();
+        event.preventDefault();
+        try { closeDialog(); } catch (err) { fail(err); }
     });
     $('sbuiDialog').addEventListener('close', () => {
         if ($('sbuiDialog').open) return;
@@ -373,7 +391,7 @@
         disposeInvalid();
         $('sbuiDialogContent').replaceChildren();
     });
-    window.SysBuildUI = { state, $, el, append, row, text, hint, button, link, panel, table, facts, disclosure, context, valid, assertCurrent, request, fail, errorText, notice, form, dialog, reserveDialog, closeDialog, stageFiles, perform, command, navigate, render, onDispose, releaseUrl,
+    window.SysBuildUI = { state, $, el, append, row, text, hint, button, link, panel, table, facts, disclosure, context, valid, assertCurrent, request, fail, errorText, notice, form, dialog, reserveDialog, closeDialog, guardDialogUnsaved, stageFiles, perform, command, navigate, render, onDispose, releaseUrl,
         registerRoute: (key, fn) => routes.set(key, fn), registerTab: (key, label, fn, visible) => tabs.set(key, { label, render: fn, visible }), tabs,
         objectUrl: (blob) => { const u = URL.createObjectURL(blob); urls.add(u); return u; },
         id: (raw) => { if (!/^[1-9][0-9]*$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) throw new Error('编号不合法'); return Number(raw); },

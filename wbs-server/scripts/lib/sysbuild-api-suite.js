@@ -220,7 +220,8 @@ async function makeInprocHarness() {
   app.use('/api', attachmentModule.router);
   // 固定「今天」（C3a 预筛 L9）：进程内夹具注入固定的 todayProvider，用例以服务端返回的日期为准并核对它等于这个注入值；与墙钟脱钩。
   //   currentToday 可由用例往回拨 / 复原（H.setToday）：codex 17 号 M-1 的收口防御用例要构造「实际开始晚于收口日期」，只有注入的 todayProvider 能做到。
-  let currentToday = '2026-11-15';
+  // 固定注入日须与当前开发期的墙钟分离，并晚于SQL默认生成的任务创建日，避免日期变异偶然同值和跨日的代录下限冲突。
+  let currentToday = '2090-11-15';
   // C4b：代录端点（任职 / 授权 / 确认任务）绑定凭据附件用真实 attachments.js 的助手，外部确认日期上限用同一个注入的「今天」。
   const membershipRoutes = createMembershipRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday });
   app.use('/api', membershipRoutes.router);
@@ -249,6 +250,7 @@ async function makeInprocHarness() {
   // C6b：PM 补发 / 发送意图列表、我的待办（待办的待我确认 / 知会两类读 confirm / entries 导出的同一取数函数）
   app.use('/api', createNotifyRoutes({
     db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], notifier,
+    todayProvider: () => currentToday,
     myConfirmationItems: confirmRoutes.myConfirmationItems, myNoticeItems: entryRoutes.myNoticeItems, myInvitationItems: membershipRoutes.myInvitationItems,
   }).router);
   // C8：仅夹具的可控读后交错；在第一次读锁释放后执行一次hook，验证任务GET二次锁内仍核修订。
@@ -1268,6 +1270,19 @@ require('./sysbuild-api-suite-stage8').defineStage8Cases({ test, U, api, sqlGet,
     return response.body.attachment.id;
   },
 });
+// 新阶段用例追加到既有顺序末尾；避免新增项目夹具扩大旧全账户待办用例的扫描面。
+require('./sysbuild-api-suite-trace-l1').defineTraceL1Cases({
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation,
+  getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
+});
+require('./sysbuild-api-suite-trace-l2').defineTraceL2Cases({
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation,
+  getModuleDir: () => MODULE_DIR, getFixedToday: () => (H && H.fixedToday) || null, confirm: confirmHelpers,
+});
+require('./sysbuild-api-suite-trace-l3').defineTraceL3Cases({
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr,
+  getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
+});
 }
 
 // ── 运行 ─────────────────────────────────────────────────────────────────────────────
@@ -1378,6 +1393,9 @@ const MUTATIONS = [
   ...require('./sysbuild-api-suite-notify').NOTIFY_MUTATIONS,
   ...require('./sysbuild-api-suite-frontend').FRONTEND_MUTATIONS,
   ...require('./sysbuild-api-suite-stage8').STAGE8_MUTATIONS,
+  ...require('./sysbuild-api-suite-trace-l1').TRACE_L1_MUTATIONS,
+  ...require('./sysbuild-api-suite-trace-l2').TRACE_L2_MUTATIONS,
+  ...require('./sysbuild-api-suite-trace-l3').TRACE_L3_MUTATIONS,
 ];
 
 // 变异 id 全局唯一（codex 20 号 M-1）：阶段补检改按 id 名单选择（--mutation-ids），id 必须能唯一定位一条变异。加载时校验，有重复就列出重复的 id 并让进程以退出码 1 结束
@@ -1395,14 +1413,22 @@ function findDuplicateMutationIds(list) {
   }
 }
 
+// 51 号 MEDIUM-1（用户 2026-11-16 定）：默认 900 秒。435 例的未变异基线单轮实测 420–625 秒，420 秒默认值会被 SIGTERM、自检不形成结果。
+//   环境变量仍可在 420000–900000 之间下调；判红标准不变（仍须命中 expect）。
+function childTimeoutMs() {
+  const value = Number(process.env.SDH_SYSBUILD_SELF_CHILD_TIMEOUT_MS || '900000');
+  if (!Number.isSafeInteger(value) || value < 420000 || value > 900000) throw new Error('SDH_SYSBUILD_SELF_CHILD_TIMEOUT_MS 须为420000至900000的整数');
+  return value;
+}
 function runChild(args) {
+  const timeoutMs = childTimeoutMs();
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [__filename, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let errOut = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { errOut += d; });
-    const timer = setTimeout(() => { child.kill(); }, 420000);
+    const timer = setTimeout(() => { child.kill(); }, timeoutMs);
     child.on('error', (e) => { clearTimeout(timer); resolve({ kind: 'abnormal', detail: e.message }); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
@@ -1428,7 +1454,7 @@ function copyModuleDir(dstDir, transform) {
     "require('express')": `require(${JSON.stringify(require.resolve('express'))})`,
     "require('multer')": `require(${JSON.stringify(require.resolve('multer'))})`, // items.js 取 attachments.js 的 attachmentDisplayName（C3b 预筛 LOW-5），副本里要有 attachments.js
   };
-  for (const f of ['db.js', 'schema.js', 'rules.js', 'events.js', 'membership.js', 'membership-visibility.js', 'projects.js', 'templates.js', 'plan.js', 'items.js', 'packages.js', 'materials.js', 'materials-core.js', 'confirm-core.js', 'confirm.js', 'history.js', 'confirmation-sheet.js', 'entries-core.js', 'entries-routing.js', 'entries.js', 'changes.js', 'golive-core.js', 'golive.js', 'notify-core.js', 'notify-schedule.js', 'notify.js', 'attachments.js']) { // C8：材料与同源身份可见助手同样进入每个变异副本。
+  for (const f of ['db.js', 'schema.js', 'rules.js', 'events.js', 'membership.js', 'membership-visibility.js', 'projects.js', 'templates.js', 'plan.js', 'items.js', 'packages.js', 'materials.js', 'materials-core.js', 'confirm-core.js', 'confirm.js', 'history.js', 'confirmation-sheet.js', 'entries-core.js', 'entries-routing.js', 'entries.js', 'entry-forms.js', 'submission-scope.js', 'assessment-view.js', 'report-core.js', 'report-recipients.js', 'changes.js', 'golive-core.js', 'golive.js', 'notify-core.js', 'notify-schedule.js', 'notify.js', 'attachments.js']) { // L2：汇报事实与收件人助手也进入每个变异副本。
     let src = fs.readFileSync(path.join(DEFAULT_DIR, f), 'utf8').replace(/\r\n/g, '\n');
     for (const [from, to] of Object.entries(requires)) src = src.split(from).join(to);
     if (transform) src = transform(f, src);
@@ -1540,6 +1566,7 @@ async function selfTest(argv) {
 }
 async function selfTestIn(root, opts) {
   const filterMode = !opts.full;
+  console.log(`  自检子进程执行上限：${childTimeoutMs() / 1000} 秒（默认900秒；判红仍须命中expect）`);
   const baseDir = path.join(root, 'base');
   fs.mkdirSync(baseDir);
   copyModuleDir(baseDir, null);
@@ -1647,10 +1674,17 @@ async function selfTestIn(root, opts) {
       const t = tasks[idx];
       const args = ['--inproc', '--module-dir', t.kind === 'sub' ? baseDir : t.dir, '--no-keep'];
       if (filterMode && t.onlyFile) args.push('--only-file', t.onlyFile);
+      if (!filterMode) console.log(`  全序执行 #${t.idx} [${t.mu.id}]`);
       t.res = await runChild(args);
+      if (!filterMode) console.log(`  全序子进程完成 #${t.idx}：${t.res.kind} ${t.res.detail}（判红须等下方 expect 汇总核对）`);
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  // 长阶段的全序变异可降低并发；用例集合与判红标准不变，执行等待预算由childTimeoutMs单独限定。
+  const workerText = process.env.SDH_SYSBUILD_SELF_WORKERS || '3';
+  if (!['1', '2', '3'].includes(workerText)) throw new Error('SDH_SYSBUILD_SELF_WORKERS 须为 1 / 2 / 3');
+  const workerCount = Number(workerText);
+  console.log(`  自检子进程并发：${workerCount}`);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   let extraFail = 0;
   let ctlBad = false;

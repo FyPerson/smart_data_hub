@@ -47,6 +47,10 @@ const BATCH_NODES = Object.freeze({
   ]),
 });
 
+// L2：模板开发节点由模板本身导出，节点改名、改序不改变汇报承载节点。
+const DEVELOPMENT_NODE_KEYS = Object.freeze([...new Set(Object.values(BATCH_NODES)
+  .flat().filter((node) => node.g.split('+').includes('G3')).map((node) => node.key))]);
+
 const DEFAULT_BATCH_NAME = '第 1 批';
 
 // 在建项事务里带出默认批次 + 项目层节点 + 默认批次的批次层节点，并各写事件。q = withWriteTxn 回调给的查询助手。
@@ -86,4 +90,4 @@ async function seedProjectStructure(q, args) {
   return batchId;
 }
 
-module.exports = { G_STAGES, PROJECT_NODES, BATCH_NODES, DEFAULT_BATCH_NAME, seedProjectStructure };
+module.exports = { G_STAGES, PROJECT_NODES, BATCH_NODES, DEVELOPMENT_NODE_KEYS, DEFAULT_BATCH_NAME, seedProjectStructure };

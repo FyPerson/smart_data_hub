@@ -87,6 +87,8 @@ function defineStage8Cases(T) {
         await C.seedParty(pid, '修订需求方', U.own, U.del);
         const pk = await C.mkPackage(pid, 'initiation');
         const vid = await C.mkVersion(pk);
+        // L2 fixture：通知修订用例需要成功提交的立项包，显式补声明；材料正例与反例不动。
+        await call(U.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { no_written_basis_reason: '通知修订用例的立项来源为线下讨论，尚无书面原件' } });
         await post(U.pm, '/package-versions/' + vid + '/submit');
         const first = (await C.tasksOf(vid))[0];
         const before = await viewCount();
@@ -117,6 +119,8 @@ function defineStage8Cases(T) {
         await C.seedParty(pid, '锁内复核需求方', U.own, U.del);
         const pk = await C.mkPackage(pid, 'initiation');
         const vid = await C.mkVersion(pk);
+        // L2 fixture：先置立项门前置，随后仍按原交错读取时点验证旧修订被拒。
+        await call(U.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { no_written_basis_reason: '锁内复核用例的立项来源为线下讨论，尚无书面原件' } });
         await post(U.pm, '/package-versions/' + vid + '/submit');
         const first = (await C.tasksOf(vid))[0];
         const before = await viewCount();
@@ -412,7 +416,7 @@ const STAGE8_MUTATIONS = [
     mu('新引用接受遮蔽材料', 'C8 材料引用校验', 'materials-core.js', "if (options && options.usable && bound.some((a) => a.deleted_at || a.masked_at)) throw invalid('材料含已删除或已遮蔽的附件，不能新增引用，请建立可复核的新版本');", "if (false) throw invalid('材料含已删除或已遮蔽的附件，不能新增引用，请建立可复核的新版本');"),
     mu('材料确认正文缺失', 'C8 材料引用', 'confirm.js', 'materials: await materialsCore.selectedMaterials(q, pkg.project_id, ver.snapshot_json, { usable: false }),', 'materials: [],'),
     mu('材料详情引用缺失', 'C8 材料引用', 'packages.js', 'materials: await materialsCore.selectedMaterials(q, pkg.project_id, ver.snapshot_json, { usable: false }),', 'materials: [],'),
-    mu('普通提交漏冻结材料', 'C8 材料引用', 'confirm.js', 'await materialsCore.freezeSelectedMaterials(q, { projectId: pid, versionId: vid, operatorId: opId, operatorName: opName });', 'void vid;'),
+    mu('普通提交漏冻结材料', 'C8 材料引用', 'confirm.js', 'await materialsCore.freezeMaterialRows(q, { projectId: pid, versionId: vid, operatorId: opId, operatorName: opName }, scope.materials);', 'void vid;'),
     mu('材料生效漏核冻结完整性', 'C8 材料冻结兜底', 'confirm-core.js', 'async function applyPackageEffect(q, user, projectId, pkg, ver, o) {\n  await materialsCore.assertMaterialFreezes(q, projectId, ver);', 'async function applyPackageEffect(q, user, projectId, pkg, ver, o) {'),
     mu('旧通知任务GET不核修订', 'C8 通知修订', 'confirm.js', "if (expectedRevision !== null && expectedRevision !== undefined && expectedRevision !== c.latest.id) throw makeError(409, 'SYSBUILD_TASK_SUPERSEDED', '任务修订已变化，请明确重新打开当前任务');", "if (false) throw makeError(409, 'SYSBUILD_TASK_SUPERSEDED', '任务修订已变化，请明确重新打开当前任务');"),
     mu('通知只核第一次读锁', 'C8 通知读写交错', 'confirm.js', 'if (expectedRevision !== null && expectedRevision !== undefined && expectedRevision !== c.latest.id)', 'if (!record && expectedRevision !== null && expectedRevision !== undefined && expectedRevision !== c.latest.id)'),
@@ -437,7 +441,7 @@ const STAGE8_MUTATIONS = [
     mu('登记来源选项遗漏PM本人', 'C8 登记与条目元数据', 'entries.js', "[{ id: null, label: 'PM 本人登记' }, ...", '[...'),
     mu('登记遗漏本人确认提示', 'C8 登记与条目元数据', 'entries.js', 'enabled: selfConfirm,', 'enabled: false,'),
     mu('登记固定声明文案错误', 'C8 登记与条目元数据', 'entries.js', "text: core.checkboxTextsOf('dev_key_confirm').confirm", "text: '错误的声明'"),
-    mu('登记不提供修订动作', 'C8 登记与条目元数据', 'entries.js', "actions.revise = devConfirm.status === 'not_approved' && sourceMatches && canCreate && purposeAllowed;", 'actions.revise = false;'),
+    mu('登记不提供修订动作', 'C8 登记与条目元数据', 'entries.js', "actions.revise = !formView.form && !formView.form_unreadable && devConfirm.status === 'not_approved' && sourceMatches && canCreate && purposeAllowed;", 'actions.revise = false;'),
     mu('条目元数据漏提出人任务', 'C8 登记与条目元数据', 'items.js', 'confirm_tasks: proposerTasks.map((task) => ({ task_id: task.task_id, revision_id: task.revision_id, rev_no: task.rev_no, status: task.status, required_member_id: task.required_member_id, required_name: task.required_name, proxy_only: task.required_user_id === null })),', 'confirm_tasks: [],'),
     mu('知会详情绕过项目可见性', 'C8 登记与条目元数据', 'entries.js', 'const { access, identity } = await loadProjectCtx(q, notice.project_id, req.user);', 'const access = await rules.loadProjectAccess(q, notice.project_id, req.user, accessOpts()); const identity = await rules.completeIdentity(q, access, req.user);'),
     mu('材料维护类别误作身份类', 'rules：OP_KIND 与状态表', 'rules.js', "material_version_create: 'maintain',", "material_version_create: 'membership',"),

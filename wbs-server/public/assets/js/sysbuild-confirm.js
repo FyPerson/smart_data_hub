@@ -10,7 +10,7 @@
     const label = (map, key) => map[key] || key || '—';
     const prose = (text) => A.el('div', 'sbui-longtext', text == null || text === '' ? '未填写' : String(text));
     function snapshotView(snapshot) {
-        const names = { text: '确认内容', scope: '范围', goal: '目标', acceptance: '验收原则', out_of_scope: '不做的范围', notes: '说明', title: '标题', body: '正文', schedule: '排期', plans: '计划' };
+        const names = { text: '确认内容', scope: '范围', goal: '目标', acceptance: '验收原则', out_of_scope: '不做的范围', notes: '说明', title: '标题', body: '正文', schedule: '排期', plans: '计划', no_written_basis_reason: '无书面依据原因' };
         const render = (value, depth) => {
             if (depth > 32) return A.hint('原文层级过深，请查看归档确认单。');
             if (value === null || typeof value !== 'object') return prose(value);
@@ -28,15 +28,44 @@
     function entryOriginal(entry) {
         return A.panel('登记原文 · #' + entry.id + ' ' + entry.title, [
             A.facts([['业务日期', entry.business_date], ['登记时段', entry.period === 'supplement' ? '补充登记 · 收口后 ' + (entry.days_after_close == null ? '—' : entry.days_after_close) + ' 天' : '过程登记'], ['涉及承诺', entry.commitment_current ? '是' : '否'], ['风险标记', entry.risk_current ? '是' : '否']]),
-            prose(entry.body), evidenceDeclaration(entry),
+            prose(entry.body), A.entryFormView(entry), evidenceDeclaration(entry),
         ]);
     }
-    function objectContent(data, c) {
+    function assessmentView(a, projectId) {
+        const body = [];
+        if (a.legacy) body.push(A.hint('提交时没有开发评估记录（旧版）'));
+        else if (a.exempt) body.push(A.hint('开发方尚未入场，本次变更未做开发评估'));
+        else if (a.unreadable) body.push(A.hint('提交时的开发评估记录无法读取，请核实原始记录'));
+        else {
+            const f = a.form;
+            body.push(A.panel('提交时固定的原开发评估', [
+                A.link('登记 #' + a.entry_id, { project: projectId, tab: 'entries', entry: a.entry_id }),
+                A.facts([['能否做', label({ yes: '能做', partial: '部分能做', no: '不能做' }, f.feasible)], ['增加工时', f.extra_person_days + ' 人日'], ['工期影响', f.schedule_impact_days + ' 天'], ['认可人', a.approved_by_name], ['认可时间', a.approved_at]]),
+                A.panel('工期影响与受影响节点', [prose(f.impact_note)]), A.panel('前提与风险', [prose(f.premise)]),
+            ]));
+        }
+        if (a.has_correction) body.push(A.panel('勘误说明', [A.hint('以下为后续勘误，原评估字段及原认可记录不变。'), ...(a.corrections || []).map((correction) => A.panel(correction.created_at, [prose(correction.text)]))]));
+        const panel = A.panel('开发评估', body); panel.dataset.l3Assessment = 'true';
+        return panel;
+    }
+    function initiationBasis(o, initiationNodeIds, c) {
+        const materials = (o.materials || []).filter((m) => initiationNodeIds.includes(m.node_id));
+        const body = [];
+        const reason = o.snapshot_json && o.snapshot_json.no_written_basis_reason;
+        if (reason) body.push(A.panel('无书面依据', [prose(reason)]));
+        materials.forEach((m) => body.push(A.panel(m.name + ' · v' + m.version_no, [prose(m.body), A.hint('本版选入的材料及冻结附件，不随材料后续版本变化。'), A.attachmentList(m.attachments, c)])));
+        if (!materials.length) body.push(A.hint('本版未选入立项节点材料。'));
+        const panel = A.panel('立项依据', body); panel.dataset.l3Basis = 'true';
+        return panel;
+    }
+    function objectContent(data, c, initiationNodeIds) {
         const o = data.object;
         const host = A.el('div', 'sbui-stack');
         if (o.type === 'package_version') {
             if (o.change) host.appendChild(A.panel('本次正式变更 · ' + o.change.title, [prose(o.change.body), A.disclosure('变更影响说明', snapshotView(o.change.affects)), evidenceDeclaration(o.change)]));
+            if (o.package.type === 'change') host.appendChild(assessmentView(o.assessment, data.task.project_id));
             host.appendChild(A.panel(label(packageNames, o.package.type) + ' · v' + o.version.version_no, [snapshotView(o.snapshot_json)]));
+            if (o.package.type === 'initiation') host.appendChild(initiationBasis(o, initiationNodeIds, c));
             const ownParty = Number(data.task.party_id);
             const items = (o.items || []).map((item, index) => ({ item, index })).sort((a, b) => Number(Number(b.item.proposer_party_id) === ownParty) - Number(Number(a.item.proposer_party_id) === ownParty) || a.index - b.index);
             items.forEach(({ item }) => host.appendChild(A.panel(item.code + ' · v' + item.version_no + (ownParty && Number(item.proposer_party_id) === ownParty ? ' · 本部门' : ''), [
@@ -140,7 +169,13 @@
             host.appendChild(A.panel('请核对邀请或授权后本人处理', [A.link('进入本人接受页面', data.object.type === 'invitation' ? { invitation: data.task.object_id } : { delegation: data.task.object_id })]));
             return host;
         }
-        host.appendChild(objectContent(data, c));
+        // 材料视图已返回固定版本与冻结附件；仅用既有计划读接口定位立项节点，不重新取最新版材料。
+        let initiationNodeIds = [];
+        if (data.object.type === 'package_version' && data.object.package.type === 'initiation') {
+            const plan = await A.request('/projects/' + data.task.project_id + '/plan', null, c);
+            initiationNodeIds = plan.nodes.filter((node) => node.template_key === 'p_initiation').map((node) => node.id);
+        }
+        host.appendChild(objectContent(data, c, initiationNodeIds));
         host.appendChild(A.panel('各次修订与确认记录', [confirmationHistory(data, c)]));
         if (data.actions.decide === true) host.appendChild(A.panel('本人作出决定', [decisionForm(data, c)]));
         else host.appendChild(A.panel('当前没有可提交的本人决定', [A.hint('请查看修订状态与必需确认人。已确认的决定不会因重复打开再次提交。')]));

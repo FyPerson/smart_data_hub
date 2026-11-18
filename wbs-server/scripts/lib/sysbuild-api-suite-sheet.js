@@ -6,7 +6,7 @@
 // 夹具规则：建项走 POST /projects；无账号成员走 POST /members（person_name）；条目、包、版本、提交、平台确认、代录、历史补录、历史导入、撤回、改发全部走生产端点。
 //   只有这几类直接写库：① 需求部门参与方、现任任职 / 生效授权；② 附件行（暂存）与附件的原名 / 遮蔽（构造被遮蔽、带特殊字符原名的附件）；
 //   ③ 把任务修订的创建时间回拨到固定日期（代录外部日期的下限取修订创建日）；④ 改项目名（构造带特殊字符的项目名）。
-// 时间：进程内夹具的「今天」固定为 2026-11-15，外部确认日期用固定的 2026-10-25；导出时间是服务器当前时刻，用例只断格式，不断值。
+// 时间：进程内夹具的「今天」由统一todayProvider固定注入，外部确认日期用固定的 2026-10-25；导出时间是服务器当前时刻，用例只断格式，不断值。
 'use strict';
 const assert = require('assert');
 
@@ -284,6 +284,9 @@ function defineSheetCases(T) {
     expectErr(await sheet(U.out, pv), 404, 'SYSBUILD_NOT_FOUND', '非成员导出草稿');
     // 同项目再建一个待确认版本（对照：非草稿 200）
     await seedParty(pid, '甲部', U.own, U.del);
+    // L2 fixture：只在正向提交对照前补声明，前面的草稿 / 非成员拒绝原样保留。
+    const basis = await api(U.pm, 'PATCH', `/sysbuild/package-versions/${pv}`, { snapshot_json: { no_written_basis_reason: '确认单用例的立项来源为线下讨论，尚无书面原件' } });
+    assert.strictEqual(basis.status, 200, basis.text);
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
     assert.strictEqual((await sheet(U.pm, pv)).status, 200, '提交后可导出');
@@ -445,7 +448,7 @@ function defineSheetCases(T) {
     assert.ok(head.includes('已生效 · 生效时间 2026-10-20 00:00'), `生效时间是原日期 00:00，实际 ${head}`);
     assert.ok(head.includes('立项包'), '立项包类型');
     assert.ok(!body.includes('id="sec-plans"'), '立项包没有节点计划节');
-    assert.deepStrictEqual(headingsOf(body), ['一、包内容快照', '二、冻结附件清单（本包版本）', '三、引用条目', '四、必需确认人', '五、历史补录的确认', '附录：修订历史'], '立项包的小节序号连续（不因缺节点计划节而跳号）');
+    assert.deepStrictEqual(headingsOf(body), ['一、包内容快照', '二、立项依据', '三、冻结附件清单（本包版本）', '四、引用条目', '五、必需确认人', '六、历史补录的确认', '附录：修订历史'], '立项包的小节序号连续（不因缺节点计划节而跳号）');
     assert.deepStrictEqual(rowsBy(sectionOf(body, 'sec-confirmers'), 'data-task-id'), [], '导入生效的版本没有确认任务');
     // 对照：普通生效的版本为 0
     const m = await mixedScene();

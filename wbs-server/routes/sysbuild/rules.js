@@ -567,7 +567,12 @@ const OBJECT_OPS = Object.freeze({
   batch_update: Object.freeze({ can: canActAsPm, state: (t) => (batchFrozen(t) ? '批次已转出或被替代，不能再修改' : null) }),
   node_start: Object.freeze({
     can: canActAsPm,
-    state: withFrozenBatch((t) => (t.nodeStatus !== 'not_started' ? '只有未开始的节点可以开始' : null)),
+    state: withFrozenBatch((t) => {
+      if (t.nodeStatus !== 'not_started') return '只有未开始的节点可以开始';
+      if (t.devStartReady === 'ok' || t.devStartReady === 'not_dev_node') return null;
+      if (t.devStartReady === 'no_plan') return '请先确定开工日（开发节点的计划开始）';
+      return t.devStartReady === 'no_cycle' ? '请先设定汇报节奏' : '开发节点开始条件无法读取，请刷新后重试';
+    }),
   }),
   node_close: Object.freeze({
     can: canActAsPm,
@@ -688,7 +693,7 @@ const OBJECT_OPS = Object.freeze({
   // ── C4a：内容包提交确认 / 撤回、确认任务改发 / 决策（方案 v1.2 §4.2、§4.5、§5.2「发起确认」「作出确认」；派单 C4a P22–P28）──────────────────
   // state 可以返回字符串（409 SYSBUILD_STATE）或 { code, message }（409 带指定错误码，如 SYSBUILD_TASK_SUPERSEDED）。
   // target 约定：
-  //   提交 { versionStatus, packageType, batchStatus, confirmersMissing, initiationEffective（仅总体规划包判）, planMissing（仅总体规划包判）}；撤回 { versionStatus, batchStatus }；
+  //   提交 { versionStatus, packageType, batchStatus, confirmersMissing, initiationEffective（仅总体规划包判）, planMissing（仅总体规划包判）, devAssessment / scopeRejection（仅变更包判）}；撤回 { versionStatus, packageType, batchStatus }；
   //   改发 { objectType, objectStatus（所在对象版本状态：包版本 status）, revisionStatus（当前修订）, batchStatus }；
   //   决策 { isRequired（本人是当前修订的必需确认人）, currentRevisionId, revisionStatus, objectVersionId, objectPending, qualificationLoss（失去资格的原因，无则空）,
   //     revisionIdGiven / objectVersionIdGiven（请求带的值；读接口 actions 不带，缺省不判）}。
@@ -744,12 +749,27 @@ const OBJECT_OPS = Object.freeze({
         if (t.planMissing === undefined) return PLANS_UNKNOWN_MESSAGE;
         if (t.planMissing !== null) return `${PLAN_MISSING_MESSAGE_HEAD}${t.planMissing.join('、')}`;
       }
+      // 51 号 HIGH-1：送审内容本身被拒（集合重核、材料不可用）时原样报出原因与错误码，先于评估事实；不能让用户误以为评估不可读而去作废有效评估。
+      if (t.packageType === 'initiation') {
+        if (t.scopeRejection) return { status: t.scopeRejection.status, code: t.scopeRejection.code, message: t.scopeRejection.message };
+        if (t.initiationBasis !== 'ok') return '请选入立项节点下带附件的立项依据，或填写无书面依据原因（10–500字）';
+      }
+      if (t.packageType === 'change' && t.scopeRejection) return { status: t.scopeRejection.status, code: t.scopeRejection.code, message: t.scopeRejection.message };
+      if (t.packageType === 'change' && !['ok', 'exempt'].includes(t.devAssessment)) {
+        const messages = {
+          none: '请先让开发方登记开发评估',
+          not_approved: '最新一份开发评估尚未获开发方负责人认可',
+          stale: '变更内容、附件或排期在评估之后有改动，请开发方重新评估',
+          dev_lead_vacant: '开发方当前没有负责人：请先补任负责人并使任职生效，再登记开发评估',
+        };
+        return Object.prototype.hasOwnProperty.call(messages, t.devAssessment) ? messages[t.devAssessment] : '有一条开发评估记录无法读取，请作废该登记或重新登记开发评估';
+      }
       return null;
     }),
   }),
   package_version_withdraw: Object.freeze({
     can: canActAsPm,
-    state: withFrozenBatch((t) => (t.versionStatus === 'pending' ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')),
+    state: withFrozenBatch((t) => (t.versionStatus === 'pending' || (t.packageType === 'change' && t.versionStatus === 'draft') ? null : '只有待确认的版本可以撤回提交，已生效的版本不能撤回')),
   }),
   // ── C5 S-S1c 正式变更（方案 v1.4 §4.1 表「正式变更」、§4.2「范围变更包」、§4.5「正式变更」与维护类同行、§7）──────────────────────────────────────────
   // 建变更：PM（admin 接管后）；前提是总体规划已有生效版本（没有时修改总体规划草稿即可，不需要变更）。target = { overallEffective }；事实没取到拒绝。方向类证据与引用登记在端点里按 400 判。
@@ -953,6 +973,7 @@ const OBJECT_OPS = Object.freeze({
   entry_void: Object.freeze({
     can: canCorrectOrVoidEntry,
     state: (t) => {
+      if (t.formKind === 'report_cycle' || t.formKindHint === 'report_cycle') return '汇报节奏不可作废，请新登记一条节奏替代';
       const v = entryNotVoided(t) || entryStateKnown(t);
       if (v) return v;
       if (EFFECTIVE_CONCLUSION_STATES.includes(t.conclusionState)) return '该登记已有有效结论，不能作废';
@@ -960,6 +981,7 @@ const OBJECT_OPS = Object.freeze({
       if (t.usedAsBasis === true) return '该登记已被引用为办理依据，不能作废';
       // 预筛 L2：已被开发方改期引用为关键事项（节点改期记录的 dev_key_entry_id）同样不能作废
       if (t.usedAsScheduleKey === true) return '该登记已被引用为改期依据（关键事项），不能作废';
+      if ((t.formKind === 'dev_assessment' || t.formUnreadable === true) && t.usedByActiveChange !== false) return '该开发评估可能被待确认或已生效的变更引用，不能作废';
       // P94 / M-a：有未结异议时只有「登记人本人且登记时身份不是 PM」可作废；PM 代登的登记（登记人 = PM）有未结异议时任何人都不能作废，只能给结论 / 交裁定收尾
       //   （registrantWasPm 取登记时的身份快照；事实没取到按「不是登记人豁免」拒绝）
       if (ENTRY_OPEN_OBJECTION_STATES.includes(t.conclusionState) && !(t.isRegistrant === true && t.registrantWasPm === false)) return '有未结异议，不能由 PM 作废';
@@ -1082,6 +1104,7 @@ const OBJECT_OPS = Object.freeze({
     state: (t) => {
       const v = entryNotVoided(t) || entryStateKnown(t);
       if (v) return v;
+      if (t.formKind) return '带表单的登记不能拆分，请分开登记';
       if (!ENTRY_HANDLED_TYPES.includes(t.type)) return '只有意见与反馈、问题与处理可以拆分';
       // C5 S-S1c（派单 0b 冲突 5）：开发方处理说明 / 正式交付物用途的登记不进分流；需要开发方负责人认可的登记（来源方为开发方且带涉及承诺）不可拆分
       if (ENTRY_DEV_PURPOSES.includes(t.purpose)) return '开发方处理说明 / 正式交付物用途的登记不进分流，不能拆分';
@@ -1370,9 +1393,12 @@ function checkOp(op, identity, project, target) {
   // 项目状态类别取 OP_KIND（硬门：未登记的动作报 500，没有缺省类别；C2 动作全是 membership，C3a 起节点收口是 close）。
   if (!Object.prototype.hasOwnProperty.call(OP_KIND, op)) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：动作未登记项目状态类别');
   if (!projectAllowsWrite(project.status, OP_KIND[op])) return { status: 409, code: 'SYSBUILD_PROJECT_READONLY', message: '当前项目状态不允许该写入' };
+  // L1：登记办理与读接口 actions 共用此处；不可读表单只保留经引用保护核实的作废出口。
+  if ((op.startsWith('entry_') || op === 'notice_object') && op !== 'entry_void' && t.formUnreadable === true) return { status: 409, code: 'SYSBUILD_STATE', message: '表单无法读取，除作废外不能办理，请先作废后重新登记' };
+  if (['report_cycle', 'report_request'].includes(t.formKind) && ['entry_mark_commitment', 'entry_unmark_commitment', 'entry_mark_risk', 'entry_unmark_risk'].includes(op)) return { status: 409, code: 'SYSBUILD_STATE', message: '汇报节奏与临时汇报要求不能补标或取消涉及承诺、风险' };
   if (def.noSelf && isSelfManagedTarget(identity, t)) return { status: 409, code: 'SYSBUILD_STATE', message: SELF_TARGET_MESSAGE };
   const msg = def.state(t);
-  if (msg) return typeof msg === 'string' ? { status: 409, code: 'SYSBUILD_STATE', message: msg } : { status: 409, code: msg.code, message: msg.message };
+  if (msg) return typeof msg === 'string' ? { status: 409, code: 'SYSBUILD_STATE', message: msg } : { status: msg.status === 400 ? 400 : 409, code: msg.code, message: msg.message }; // 51 号 HIGH-1：原样转报的业务拒绝可带 400，其余一律 409
   if (def.requal) {
     const why = def.requal(t);
     if (why) return { status: 409, code: 'SYSBUILD_STATE', message: why, stale: true };

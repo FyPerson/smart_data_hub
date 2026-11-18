@@ -328,7 +328,8 @@ function defineChangeCases(T) {
     const s = await mkScene();
     const a = await mkChange(s.pid);
     const va = await draftOf(a.change.id);
-    expectErr(await withdraw(U.pm, va.id, '草稿不能撤回'), 409, 'SYSBUILD_STATE', '草稿不能撤回');
+    // #213 L1：变更草稿放弃已开放；非变更草稿仍不可撤回由 L1 专项用例覆盖。
+    assert.strictEqual((await chGet(U.pm, a.change.id)).actions.withdraw, true, '变更草稿可放弃');
     assert.strictEqual((await submitCh(U.pm, a.change.id)).status, 200);
     expectErr(await withdraw(U.m1, va.id, '无权'), 403, 'SYSBUILD_FORBIDDEN', '一般成员');
     expectErr(await withdraw(U.pm, va.id), 400, 'SYSBUILD_INVALID_INPUT', '缺原因');
@@ -763,10 +764,10 @@ function defineChangeCases(T) {
         assert.strictEqual(r.status, 403, `${label} × 一般成员 × ${name}：403 ${r.text}`);
       }
     };
-    // 草稿（未过期）：只能提交
+    // #213 L1：草稿（未过期）可提交或放弃
     const c1 = await mkChange(s.pid);
-    await check('草稿', c1.change.id, { submit: true, withdraw: false, new_version: false });
-    for (const name of ['withdraw', 'new_version']) assert.ok([409].includes((await exec[name](U.pm, { id: c1.change.id })).status), `草稿 × PM × ${name}：标志为假 → 409`);
+    await check('草稿', c1.change.id, { submit: true, withdraw: true, new_version: false });
+    assert.strictEqual((await exec.new_version(U.pm, { id: c1.change.id })).status, 409, '草稿 × PM × new_version：标志为假 → 409');
     // 待确认（无异议）：只能撤回
     assert.strictEqual((await exec.submit(U.pm, { id: c1.change.id })).status, 200, '草稿 × 提交：标志为真 → 200');
     await check('待确认无异议', c1.change.id, { submit: false, withdraw: true, new_version: false });
@@ -821,7 +822,7 @@ function defineChangeCases(T) {
     assert.ok(chk('change_new_version', pm, 'active', { changeStatus: 'withdrawn', hasObjection: true, staleDraft: true }).message.includes('已撤回'), '已撤回的文案');
     assert.strictEqual(code(chk('change_new_version', idn({ isMember: true }), 'active', { changeStatus: 'pending', hasObjection: true })), '403:SYSBUILD_FORBIDDEN');
     // package_version_submit：变更包分支
-    const F = { confirmersMissing: null, historyConflict: null, parentSuperseded: false, changeEvidenceOk: true, otherPendingPackage: null }; // C6a：变更包同属待确认互斥的四类（事实 otherPendingPackage = null 表示没有别的待确认内容包）
+    const F = { confirmersMissing: null, historyConflict: null, parentSuperseded: false, changeEvidenceOk: true, otherPendingPackage: null, devAssessment: 'exempt' }; // L1：没有开发方任职的旧场景走豁免，保持其余规则原期望。
     const sub = (o, st) => chk('package_version_submit', pm, st || 'active', Object.assign({ versionStatus: 'draft', packageType: 'change' }, F, o || {}));
     assert.strictEqual(sub({ changeStatus: 'draft', otherChangePending: false }), null);
     assert.strictEqual(code(sub({ changeStatus: 'pending', otherChangePending: false })), '409:SYSBUILD_STATE', '变更不是草稿');
@@ -846,7 +847,7 @@ function defineChangeCases(T) {
     assert.ok(notSup.message.includes('C5 / C6 起可用'), '批次需求包 parent 未被替代：仍是类型未开放的文案');
     assert.ok(chk('package_version_submit', pm, 'active', Object.assign({ versionStatus: 'draft', packageType: 'overall', initiationEffective: true, planMissing: null }, F, { parentSuperseded: true })).message.includes('请基于现行规划重建草稿'));
     assert.strictEqual(chk('package_version_submit', pm, 'active', Object.assign({ versionStatus: 'draft', packageType: 'overall', initiationEffective: true, planMissing: null }, F)), null, '总体规划包 parent 未被替代照常');
-    assert.strictEqual(chk('package_version_submit', pm, 'active', Object.assign({ versionStatus: 'draft', packageType: 'initiation' }, F)), null);
+    assert.strictEqual(chk('package_version_submit', pm, 'active', Object.assign({ versionStatus: 'draft', packageType: 'initiation', initiationBasis: 'ok' }, F)), null);
     // package_version_create 对变更包 409；package_item_add / remove 对变更包放行、对别的类型仍拒绝
     const pc = chk('package_version_create', pm, 'active', { packageType: 'change', hasDraft: false, hasPending: false, hasEffective: false });
     assert.deepStrictEqual([code(pc), pc.message.includes('只经正式变更产生')], ['409:SYSBUILD_STATE', true]);
@@ -960,6 +961,7 @@ function defineChangeCases(T) {
   test(`${T_Y_LAPSE}——登记结论「转正式变更」所挂变更被撤回 → 派生 to_change_lapsed（不属有效结论：conclude_kinds 非空、可再给结论、收口前置算未结；已确定 / 已确认两种有效结论都适用）；变更生效则结论保持有效`, async () => {
     const s = await mkScene();
     const nid = await nodeIdOf(s.pid, 'b_dev');
+    await H.prepareDevStart(s.pid, nid); // L2 开始门正向前置，后续旧结论断言不变。
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nid}/start`)).status, 200, '夹具：节点开工');
     const reg = async (uid, extra) => (await post(uid, `/sysbuild/projects/${s.pid}/entries`, Object.assign({ type: 'feedback', title: '要加导出', body: '希望能批量导出', node_id: nid }, extra || {}))).body.entry;
     const act = (uid, eid, body) => post(uid, `/sysbuild/entries/${eid}/actions`, body);
@@ -1287,12 +1289,12 @@ const CHANGE_MUTATIONS = [
   cm('窗口互斥对象不取总体规划包', [T_HISTORY], 'confirm-core.js', "if (pkg.type !== 'change') return [pkg.id];", 'return [pkg.id];'),
   cm('窗口互斥对象只取总体规划包不取变更包自身', [T_Y_WINDOW], 'confirm-core.js', 'return o ? [pkg.id, o.id] : [pkg.id];', 'return o ? [o.id] : [pkg.id];'),
   // ── confirm.js ──
-  cm('提交不冻结变更证据', [T_SUBMIT], 'confirm.js', "await attachmentHelpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: vid, ownerType: 'change', ownerId: changeRow.id, operatorId: opId, operatorName: opName, projectId: pid });", ''),
+  cm('提交不冻结变更证据', [T_SUBMIT], 'confirm.js', "for (const source of scope.attachmentSources) if (source.ownerType === 'change') await freezeSource(source);", ''),
   cm('提交不回写变更状态', [T_SUBMIT, T_WITHDRAW], 'confirm.js', "UPDATE sysbuild_changes SET status = 'pending', package_version_id = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'", "UPDATE sysbuild_changes SET status = 'draft', package_version_id = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'draft'"),
   cm('撤回不回写变更状态', [T_WITHDRAW], 'confirm.js', "UPDATE sysbuild_changes SET status = 'withdrawn', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'", "UPDATE sysbuild_changes SET status = 'pending', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'"),
-  cm('变更提交不记节点计划', [T_SUBMIT, T_BASELINE], 'confirm.js', "pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: await core.currentNodePlans(q, pid) } : {}", "pkg.type === 'overall' ? { node_plans: await core.currentNodePlans(q, pid) } : {}"),
-  cm('变更提交不重核条目集合', [T_SUBMIT], 'confirm.js', "const set = pkg.type === 'overall' || pkg.type === 'change' ? await recheckOverallSet(q, pkg, ver) : [];", "const set = pkg.type === 'overall' ? await recheckOverallSet(q, pkg, ver) : [];"),
-  cm('承诺批次不是默认批次不拦', [T_SUBMIT], 'confirm.js', "else if (pkg.type === 'change' && (!defaultBatch || batch.id !== defaultBatch.id)) bad.structure.push(label);", ''),
+  cm('变更提交不记节点计划', [T_SUBMIT, T_BASELINE], 'confirm.js', "pkg.type === 'overall' || pkg.type === 'change' ? { node_plans: scope.nodePlans } : {}", "pkg.type === 'overall' ? { node_plans: scope.nodePlans } : {}"),
+  cm('变更提交不重核条目集合', [T_SUBMIT], 'submission-scope.js', "const items = pkg.type === 'overall' || pkg.type === 'change' ? await recheckOverallSet(q, pkg, ver) : [];", "const items = pkg.type === 'overall' ? await recheckOverallSet(q, pkg, ver) : [];"),
+  cm('承诺批次不是默认批次不拦', [T_SUBMIT], 'submission-scope.js', "else if (pkg.type === 'change' && (!defaultBatch || batch.id !== defaultBatch.id)) bad.structure.push(label);", ''),
   cm('代录 / 改发的窗口互斥对象不取总体规划包', [T_HISTORY], 'confirm.js', 'await core.historyPackageIdsOf(q, c.obj.pkg)', '[c.obj.pkg.id]'),
   cm('确认页不带变更内容', [T_SUBMIT], 'confirm.js', "if (pkg.type === 'change') {\n        const ch = await q.get('SELECT id, title, body, affects_json, no_written_evidence, no_evidence_reason FROM sysbuild_changes WHERE package_id = ?', [pkg.id]);", "if (false) {\n        const ch = await q.get('SELECT id, title, body, affects_json, no_written_evidence, no_evidence_reason FROM sysbuild_changes WHERE package_id = ?', [pkg.id]);"),
   // ── plan.js ──
@@ -1325,10 +1327,10 @@ const CHANGE_MUTATIONS = [
   cm('变更证据计数不排除软删除附件', [T_Y_EVID], 'packages.js', "WHERE a.deleted_at IS NULL\n            AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings WHERE owner_type = 'change'", "WHERE 1 = 1\n            AND a.id IN (SELECT attachment_id FROM sysbuild_attachment_bindings WHERE owner_type = 'change'"),
   cm('变更证据不认无书面证据声明', [T_Y_EVID], 'packages.js', 'facts.changeEvidenceOk = n.n > 0 || reasonOk;', 'facts.changeEvidenceOk = n.n > 0;'),
   cm('窗口互斥只取变更包自身的第一个对象', [T_HISTORY], 'confirm-core.js', 'const ids = Array.isArray(packageIds) ? packageIds : [packageIds];', 'const ids = Array.isArray(packageIds) ? [packageIds[0]] : [packageIds];'),
-  cm('已上线条目移出规划不拦', [T_Y_LIVE], 'confirm.js', "if (liveRemoved.length > 0 && bad.project.length === 0 && bad.noBatch.length === 0 && bad.batchGone.length === 0 && bad.structure.length === 0 && bad.liveMove.length === 0) throw stateError(`已上线条目不能移出规划，后续增强请建新条目：${list(liveRemoved)}`);", ''),
+  cm('已上线条目移出规划不拦', [T_Y_LIVE], 'submission-scope.js', "if (liveRemoved.length > 0 && bad.project.length === 0 && bad.noBatch.length === 0 && bad.batchGone.length === 0 && bad.structure.length === 0 && bad.liveMove.length === 0) throw stateError(`已上线条目不能移出规划，后续增强请建新条目：${list(liveRemoved)}`);", ''),
   // C6a 修订批 2：冻结判定（含移出）抽到 entries-core.liveFreezeBreaches / isFrozenLiveBatch，两条锚点随之迁移
   cm('已上线判据不看批次状态', [T_Y_LIVE], 'entries-core.js', 'return (await batchLiveState(q, batchId)).live;', 'return false;'),
-  cm('已上线条目移出规划只对总体规划包的集合判（变更包不判）', [T_Y_LIVE], 'confirm.js', "if (pkg.type === 'change') for (const id of breaches.removed) liveRemoved.push(await codeOfItem(id));", ''),
+  cm('已上线条目移出规划只对总体规划包的集合判（变更包不判）', [T_Y_LIVE], 'submission-scope.js', "if (pkg.type === 'change') for (const id of breaches.removed) liveRemoved.push(await codeOfItem(id));", ''),
   cm('转变更结论的失效只认已确认', [T_Y_LAPSE], 'entries-core.js', "if ((state === 'settled_no_confirm' || state === 'confirmed') && current !== null", "if ((state === 'confirmed') && current !== null"),
   cm('转变更结论的失效只认已确定', [T_Y_LAPSE], 'entries-core.js', "if ((state === 'settled_no_confirm' || state === 'confirmed') && current !== null", "if ((state === 'settled_no_confirm') && current !== null"),
   cm('变更未撤回也让结论失效', [T_Y_LAPSE], 'entries-core.js', "changeStatusOf[current.change_id] === 'withdrawn') {", "changeStatusOf[current.change_id] !== 'effective') {"),

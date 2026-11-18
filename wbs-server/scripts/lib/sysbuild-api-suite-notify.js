@@ -165,6 +165,9 @@ function defineNotifyCases(T) {
   async function submitInitiation(pid) {
     const pk = await mkPackage(pid, 'initiation');
     const pv = await mkVersion(pk);
+    // L2 fixture：本助手只准备成功的待确认立项包，显式满足新立项门，不改通用 submit 请求。
+    const basis = await api(U.pm, 'PATCH', `/sysbuild/package-versions/${pv}`, { snapshot_json: { no_written_basis_reason: '通知用例的立项来源为线下讨论，尚无书面原件' } });
+    assert.strictEqual(basis.status, 200, basis.text);
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
     return { pk, pv, tasks: await tasksOf(pv) };
@@ -823,8 +826,9 @@ function defineNotifyCases(T) {
     // ⑧ 每类至多 50 条：counts 是全量
     const sample = await todoOf(U.pm);
     for (const k of Object.keys(sample.items)) assert.ok(sample.items[k].length <= 50, `${k} 至多 50 条`);
-    assert.deepStrictEqual(Object.keys(sample.counts).sort(), ['accept', 'badge', 'confirm', 'handle', 'needs_offline', 'notice', 'objection', 'overdue', 'routing', 'send_failed']);
-    assert.deepStrictEqual(Object.keys(sample.items).sort(), ['accept', 'confirm', 'handle', 'needs_offline', 'notice', 'objection', 'overdue', 'routing', 'send_failed']);
+    // L2 §10：新增三类，角标的原有计数断言保留。
+    assert.deepStrictEqual(Object.keys(sample.counts).sort(), ['accept', 'badge', 'change_assess', 'confirm', 'handle', 'needs_offline', 'notice', 'objection', 'overdue', 'report_due', 'report_overdue', 'routing', 'send_failed']);
+    assert.deepStrictEqual(Object.keys(sample.items).sort(), ['accept', 'change_assess', 'confirm', 'handle', 'needs_offline', 'notice', 'objection', 'overdue', 'report_due', 'report_overdue', 'routing', 'send_failed']);
     // P183：accept = 待我接受的邀请与授权（与 GET /my/invitations 同源），角标 badge = confirm + accept
     //   x3 被邀请加入本方 → accept 一条（invitation）；本方负责人再发起授权（直接待接受）→ 再一条（delegation）；接受 / 拒绝后消失；badge 随之变化
     const mx3 = await post(U.pm, `/sysbuild/projects/${pid}/members`, { party_id: s.A.party, user_id: U.x3 });

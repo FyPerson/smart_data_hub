@@ -92,6 +92,8 @@ function defineGoliveCases(T) {
   const nodeRow = (nid) => sqlGet('SELECT * FROM sysbuild_nodes WHERE id = ?', [nid]);
   const startNode = async (pid, key) => {
     const id = await nodeIdOf(pid, key);
+    // L2 §10：本助手仅构造开工成功的前置，失败用例仍直接调用端点。
+    await H.prepareDevStart(pid, id);
     const r = await post(U.pm, `/sysbuild/nodes/${id}/start`);
     assert.strictEqual(r.status, 200, r.text);
     return id;
@@ -1459,7 +1461,7 @@ function defineGoliveCases(T) {
     assert.strictEqual(sub({ packageType: 'closing', closingNotReady: null, parentSuperseded: true }), null);
     // 待确认互斥：四类 × 其他待确认类型；立项包不在内；事实没取到 fail-closed
     const ZH = { overall: '总体规划', change: '变更', batch_accept: '批次验收', closing: '结项', initiation: '立项' };
-    const base = { overall: { initiationEffective: true, planMissing: null }, change: { changeStatus: 'draft', otherChangePending: false, changeEvidenceOk: true }, batch_accept: { batchStatus: 'active' }, closing: { closingNotReady: null } };
+    const base = { overall: { initiationEffective: true, planMissing: null }, change: { changeStatus: 'draft', otherChangePending: false, changeEvidenceOk: true, devAssessment: 'exempt' }, batch_accept: { batchStatus: 'active' }, closing: { closingNotReady: null } }; // L1：旧的互斥矩阵补齐新事实，期望不变。
     for (const type of ['overall', 'change', 'batch_accept', 'closing']) {
       assert.strictEqual(sub(Object.assign({ packageType: type }, base[type])), null, `${type} 无其他待确认`);
       for (const other of ['overall', 'change', 'batch_accept', 'closing']) {
@@ -1468,8 +1470,8 @@ function defineGoliveCases(T) {
       }
       assert.strictEqual(sub(Object.assign({ packageType: type, otherPendingPackage: undefined }, base[type])).message, '无法确定项目里是否已有待确认的内容包，请刷新后重试', `${type} 事实没取到`);
     }
-    assert.strictEqual(sub({ packageType: 'initiation', otherPendingPackage: 'overall' }), null, '立项包不受互斥约束');
-    assert.strictEqual(sub({ packageType: 'initiation', otherPendingPackage: undefined }), null, '立项包不读这条事实');
+    assert.strictEqual(sub({ packageType: 'initiation', initiationBasis: 'ok', otherPendingPackage: 'overall' }), null, '立项包不受互斥约束');
+    assert.strictEqual(sub({ packageType: 'initiation', initiationBasis: 'ok', otherPendingPackage: undefined }), null, '立项包不读这条事实');
     assert.deepStrictEqual(R.EXCLUSIVE_PENDING_PACKAGE_TYPES.slice(), ['overall', 'change', 'batch_accept', 'closing']);
     // 确认人集合（confirm-core 手写核对）：验收包 = 负责人 + 代表人；结项包 = 只有代表人；立项包 = 只有负责人
     assert.deepStrictEqual(R.SUBMITTABLE_PACKAGE_TYPES.slice(), ['overall', 'initiation', 'change', 'batch_accept', 'closing']);
@@ -1949,6 +1951,7 @@ function defineGoliveCases(T) {
     assert.ok(r1.body.message.includes('需求确认') && !r1.body.message.includes('用户验收测试'), r1.body.message);
     // ② 其余节点收口、b_uat 没收口：放行，快照记豁免
     for (const n of await others(s1)) {
+      await H.prepareDevStart(s1.pid, n.id);
       if (n.status === 'not_started') assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${n.id}/start`)).status, 200);
       assert.strictEqual((await closeNodeReq(n.id)).status, 200);
     }
@@ -2776,7 +2779,7 @@ const GOLIVE_MUTATIONS = [
   gm('P163：已上线批次的条目换版本不拦', [T_FREEZE], 'entries-core.js', 'c === null || c.item_version_id !== it.item_version_id || c.committed_batch_id !== it.committed_batch_id', 'c === null || c.committed_batch_id !== it.committed_batch_id'),
   gm('P163：条目移入已上线批次不拦', [T_FREEZE], 'entries-core.js', 'c === null || c.item_version_id !== it.item_version_id || c.committed_batch_id !== it.committed_batch_id', 'c === null || c.item_version_id !== it.item_version_id'),
   gm('P163：往已上线批次加新条目不拦', [T_FREEZE], 'entries-core.js', 'c === null || c.item_version_id !== it.item_version_id || c.committed_batch_id !== it.committed_batch_id', 'c !== null && (c.item_version_id !== it.item_version_id || c.committed_batch_id !== it.committed_batch_id)'),
-  gm('P163：冻结拒绝不抛', [T_FREEZE], 'confirm.js', 'if (bad.liveFrozen.length > 0) throw stateError(', 'if (false) throw stateError('),
+  gm('P163：冻结拒绝不抛', [T_FREEZE], 'submission-scope.js', 'if (bad.liveFrozen.length > 0) throw stateError(', 'if (false) throw stateError('),
   gm('P165：代表人已决定的交接任务也可改发', [T_REQ], 'confirm.js', "if (c.latest.status !== 'pending' && c.latest.status !== 'invalid') return { isDelegate: true,", "if (false) return { isDelegate: true,"),
   gm('P165：同一指纹已有不认可也能重新发起（无答复也放行）', [T_REQ, T_RULES, T_REPLY], 'rules.js', "if (t.confirmState === 'declined' && !replyOk) return t.needKind === null ? DECLINED_NO_NEED_MESSAGE : DECLINED_REPLY_MESSAGE;", ''),
   // ── 修订批 3（P174：答复）──

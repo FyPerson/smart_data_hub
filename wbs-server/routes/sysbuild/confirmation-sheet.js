@@ -23,6 +23,7 @@ const rules = require('./rules');
 const { makeError } = require('./db');
 const core = require('./confirm-core');
 const { loadFoldedSet, setList } = require('./packages');
+const { submittedAssessmentView } = require('./assessment-view');
 
 const hasKey = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const invalid = (message, field) => Object.assign(makeError(400, 'SYSBUILD_INVALID_INPUT', message), field ? { field } : {});
@@ -206,6 +207,24 @@ function renderChangeRows(ch) {
 <tr><th>引用登记</th><td>${refs}</td></tr>
 ${ch.no_written_evidence ? html`<tr><th>无书面证据</th><td><strong class="warn">该变更声明无书面证据</strong> · 原因：${ch.no_evidence_reason}</td></tr>` : ''}`;
 }
+function renderAssessmentRows(a) {
+  if (a.legacy || a.exempt || a.unreadable) return html`<tr><th>开发评估</th><td>${a.message}</td></tr>`;
+  const f = a.form;
+  const feasible = lookup({ yes: '能做', partial: '部分能做', no: '不能做' }, f.feasible, '开发评估结论');
+  return html`<tr><th>原开发评估</th><td data-assessment-entry-id="${a.entry_id}"><strong>登记 #${a.entry_id}</strong> · ${feasible}<br>增加工时：${f.extra_person_days} 人日<br>工期影响：${f.schedule_impact_days} 天<br>工期影响与受影响节点：<span class="pre-wrap">${f.impact_note || '（无）'}</span><br>前提与风险：<span class="pre-wrap">${f.premise || '（无）'}</span><br>认可人：${a.approved_by_name} · 认可时间：${fmtTime(a.approved_at)}</td></tr>
+${a.has_correction ? html`<tr><th>勘误说明</th><td><strong>以下为后续勘误，原评估字段及原认可记录不变。</strong>${a.corrections.map((c) => html`<div class="pre-wrap">${c.text}（${fmtTime(c.created_at)}）</div>`)}</td></tr>` : ''}`;
+}
+function renderChangeImpact(affects) {
+  const values = affects && typeof affects === 'object' && !Array.isArray(affects) ? affects : {};
+  const names = { scope: '对范围的影响', schedule: '对排期的影响', acceptance: '对验收的影响' };
+  const rows = Object.entries(values).map(([key, value]) => html`<tr><th>${hasKey(names, key) ? names[key] : key}</th><td class="pre-wrap">${value !== null && typeof value === 'object' ? JSON.stringify(value, null, 2) : value === null || value === '' ? '（未填写）' : String(value)}</td></tr>`);
+  return rows.length ? html`<table class="kv">${rows}</table>` : EMPTY;
+}
+function renderInitiationBasis(m) {
+  const reason = m.snapshot.no_written_basis_reason;
+  return html`${reason ? html`<p class="warn"><strong>无书面依据</strong> · 原因：${reason}</p>` : ''}
+${m.initiationMaterials.length ? m.initiationMaterials.map(renderMaterial) : html`<p class="muted">本版未选入立项节点材料。</p>`}`;
+}
 function renderHeader(m) {
   const imports = m.imports;
   const importBlocks = imports.map((r) => html`<div class="hist-import" data-history-import-id="${r.id}">
@@ -228,6 +247,7 @@ function renderHeader(m) {
 ${m.ver.form === null ? '' : html`<tr><th>形态</th><td>${mapForm(m.ver.form)}</td></tr>`}
 <tr><th>版本号</th><td>v${m.ver.version_no}</td></tr>
 ${m.change === null ? '' : renderChangeRows(m.change)}
+${m.change === null ? '' : renderAssessmentRows(m.assessment)}
 <tr><th>版本状态</th><td><span class="badge">${badgeText(m.ver)}</span></td></tr>
 <tr><th>导出人</th><td>${m.exporterName}</td></tr>
 <tr><th>导出时间</th><td>${m.exportedAt}</td></tr>
@@ -346,7 +366,7 @@ ul { margin: 2px 0; padding-left: 18px; }
 }
 </style>`;
 
-const SECTION_NUMERALS = Object.freeze(['一', '二', '三', '四', '五', '六', '七']);
+const SECTION_NUMERALS = Object.freeze(['一', '二', '三', '四', '五', '六', '七', '八']);
 function renderPage(m) {
   const title = `需求确认单 · ${m.projectName} · ${mapPackageType(m.pkg.type)} v${m.ver.version_no}`;
   const historySection = m.histConfs.length === 0
@@ -371,7 +391,9 @@ ${STYLE_AND_HEAD}
 <body>
 ${renderHeader(m)}
 ${section('sec-snapshot', '包内容快照', renderSnapshot(m.snapshot))}
+${m.pkg.type === 'initiation' ? section('sec-initiation-basis', '立项依据', renderInitiationBasis(m)) : ''}
 ${m.pkg.type === 'overall' || m.pkg.type === 'change' ? section('sec-plans', '节点计划快照', renderPlans(m.plans)) : ''}
+${m.change ? section('sec-change-impact', '变更影响说明', renderChangeImpact(m.change.affects)) : ''}
 ${section('sec-frozen', '冻结附件清单（本包版本）', attList(m.frozen))}
 ${m.materials.length ? section('sec-materials', '引用材料版本全文', m.materials.map(renderMaterial)) : ''}
 ${section('sec-items', '引用条目', m.items.length === 0 ? EMPTY : m.items.map(renderItem))}
@@ -538,6 +560,7 @@ function createConfirmationSheetRoutes(ctx) {
     m.plans = pkg.type === 'overall' || pkg.type === 'change' ? await core.submittedNodePlans(q, vid) : null; // 变更包按提交记录（提交事件的 node_plans）
     // 范围变更包（C5 S-S1c）：变更标题 / 说明 / 引用登记；其余类型为 null
     m.change = null;
+    m.assessment = null;
     if (pkg.type === 'change') {
       const ch = await q.get('SELECT id, title, body, affects_json, no_written_evidence, no_evidence_reason FROM sysbuild_changes WHERE package_id = ?', [pkg.id]);
       if (!ch) throw internalError('变更包没有对应的变更');
@@ -548,13 +571,20 @@ function createConfirmationSheetRoutes(ctx) {
         const e = await q.get('SELECT id, title FROM sysbuild_entries WHERE id = ? AND project_id = ?', [eid, pid]);
         if (e) entries.push({ id: e.id, title: e.title });
       }
-      m.change = { id: ch.id, title: ch.title, body: ch.body, entries, no_written_evidence: ch.no_written_evidence === 1, no_evidence_reason: ch.no_evidence_reason };
+      m.change = { id: ch.id, title: ch.title, body: ch.body, affects: aff.affects === undefined ? {} : aff.affects, entries, no_written_evidence: ch.no_written_evidence === 1, no_evidence_reason: ch.no_evidence_reason };
+      m.assessment = await submittedAssessmentView(q, pid, vid);
     }
     const pkgFrozen = await core.frozenSetOf(q, 'package_version', vid);
     m.frozen = await withMaskReason(q, await core.attachmentView(q, pkgFrozen));
     // 指定材料版本的正文与原冻结清单；以本包冻结集合为上限，不回读材料“最新版”。
     m.materials = await materialsCore.assertMaterialFreezes(q, pid, ver);
     for (const material of m.materials) material.attachments = await core.attachmentView(q, material.frozen);
+    m.initiationMaterials = [];
+    if (pkg.type === 'initiation') {
+      const nodes = await q.all("SELECT id FROM sysbuild_nodes WHERE project_id = ? AND template_key = 'p_initiation'", [pid]);
+      const ids = nodes.map((node) => node.id);
+      m.initiationMaterials = m.materials.filter((material) => ids.includes(material.node_id));
+    }
     // 引用条目（按 item_id 升序）
     m.items = [];
     for (const e of setList(await loadFoldedSet(q, vid))) {

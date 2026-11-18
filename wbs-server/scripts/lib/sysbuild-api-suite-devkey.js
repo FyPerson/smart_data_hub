@@ -598,6 +598,7 @@ function defineDevKeyCases(T) {
     assert.strictEqual((await get(U.pm, `/sysbuild/projects/${s.pid}/entries?routing=pending`)).body.entries.filter((x) => x.id === dn.id || x.id === dn2.id).length, 0, '不进待判定列表');
     // 类型为办理类的仍按结论判：挂节点、节点进行中 → 收口前置阻塞（ENTRY_UNRESOLVED）
     const nid = await nodeId(s.pid, 'b_dev');
+    await H.prepareDevStart(s.pid, nid); // L2 开始门正向前置。
     assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${nid}/start`)).status, 200);
     const nodeEntry = await regDevOk(U.x2, s.pid, { type: 'feedback', node_id: nid });
     const view = (await get(U.pm, `/sysbuild/projects/${s.pid}/plan`)).body.nodes.find((n) => n.id === nid);

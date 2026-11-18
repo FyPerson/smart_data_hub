@@ -22,6 +22,8 @@ const { effectiveOverallVersionId } = require('./packages');
 const entriesCore = require('./entries-core'); // C5 S-S1b：收口前置读登记事实（entries-core 只依赖 rules / db / events / confirm-core，不依赖本文件，不成环）
 const goliveCore = require('./golive-core'); // C6a：批次视图的上线信息与 actions、项目上线进度（golive-core 不依赖本文件，不成环）
 const notifySchedule = require('./notify-schedule'); // C6b：改期知会的生成（只依赖 events / confirm-core / notify-core，不成环）
+const reports = require('./report-core');
+const { goliveEventView } = require('./golive');
 
 const NAME_MAX = 60;
 const REASON_MAX = 500;
@@ -366,8 +368,9 @@ function createPlanRoutes(ctx) {
 
   // target 构造（读写两端同一份）：rules.OBJECT_OPS 的 state 只认这些字段。
   const batchTarget = (batch) => ({ batchStatus: batch.status });
-  function nodeTarget(node, batch, recs, corrects, overallPending) {
+  function nodeTarget(node, batch, recs, corrects, overallPending, devStartReady) {
     return {
+      devStartReady,
       nodeStatus: node.status,
       templateKey: node.template_key,
       isMilestone: node.is_golive_milestone === 1,
@@ -422,7 +425,7 @@ function createPlanRoutes(ctx) {
       const recs = data.recsByNode[n.id] || [];
       const batch = n.batch_id === null ? null : (batchById[n.batch_id] || null);
       const actions = {};
-      for (const [flag, op, corrects] of NODE_ACTION_OPS) actions[flag] = rules.opAllowed(op, access, project, nodeTarget(n, batch, recs, corrects, data.overallPending));
+      for (const [flag, op, corrects] of NODE_ACTION_OPS) actions[flag] = rules.opAllowed(op, access, project, nodeTarget(n, batch, recs, corrects, data.overallPending, data.devStartReady[n.id]));
       return Object.assign({
         id: n.id, batch_id: n.batch_id, template_key: n.template_key, name: n.name, g_stage: n.g_stage, sort_order: n.sort_order,
         is_golive_milestone: n.is_golive_milestone === 1, status: n.status, opened_at: n.opened_at, closed_at: n.closed_at,
@@ -434,6 +437,8 @@ function createPlanRoutes(ctx) {
         //   「改期的是基线」与「总体规划生效后新增、尚无基线的计划」（后者同样要原因与证据，但不写基线）。
         has_baseline: recs.some((r) => r.kind === 'baseline'),
         plan_write_mode: planWriteMode(recs.some((r) => r.kind === 'baseline'), data.facts.overall),
+        report: data.reports[n.id],
+        dev_start_ready: data.devStartReady[n.id],
         actions,
       });
     });
@@ -449,6 +454,14 @@ function createPlanRoutes(ctx) {
     const row = await q.get('SELECT build_type FROM sysbuild_projects WHERE id = ?', [projectId]);
     access.buildType = row.build_type;
     const data = await loadPlanData(q, projectId);
+    const todayStr = today();
+    data.reports = {};
+    data.devStartReady = {};
+    for (const node of data.nodes) {
+      const state = await reports.reportStateOf(q, node, () => todayStr);
+      data.devStartReady[node.id] = await reports.devStartReadyOf(q, node, () => todayStr, state);
+      data.reports[node.id] = await reports.reportViewOf(q, node, () => todayStr, state);
+    }
     if (withGolive === true) {
       data.golive = {};
       for (const b of data.batches) {
@@ -457,11 +470,12 @@ function createPlanRoutes(ctx) {
           info: await goliveCore.goliveInfoOf(q, b.id),
           blockers: b.status === 'active' ? (await goliveCore.handoverViewOf(q, b)).blockers : [],
         };
+        data.golive[b.id].info.last_event = await goliveEventView(q, data.golive[b.id].info.last_event);
       }
       data.closingPending = await goliveCore.closingPendingOf(q, projectId);
       data.goliveProgress = await goliveCore.goliveProgressOf(q, projectId);
     }
-    return buildPlanView(access, data, today());
+    return buildPlanView(access, data, todayStr);
   }
   async function nodeResponse(q, projectId, nid, user) {
     const view = await planViewFor(q, projectId, user, false);
@@ -549,7 +563,7 @@ function createPlanRoutes(ctx) {
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
       const { node, batch, recs, access } = await loadNodeCtx(q, nid, user);
-      rules.assertOp('node_start', access, access.project, nodeTarget(node, batch, recs, null));
+      rules.assertOp('node_start', access, access.project, nodeTarget(node, batch, recs, null, undefined, await reports.devStartReadyOf(q, node, today)));
       const r = await q.run(
         "UPDATE sysbuild_nodes SET status = 'in_progress', opened_at = datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE id = ? AND status = 'not_started'",
         [nid]

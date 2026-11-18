@@ -79,6 +79,8 @@ function defineRoutingCases(T) {
   const reopenNodeFx = (nid) => sqlRun("UPDATE sysbuild_nodes SET status = 'in_progress', closed_at = NULL WHERE id = ?", [nid]);
   async function startNode(pid, key) {
     const nid = await nodeId(pid, key);
+    // L2 §10：本助手只用于预期成功的开工夹具；原权限/状态反例直接发请求。
+    await H.prepareDevStart(pid, nid);
     const r = await post(U.pm, `/sysbuild/nodes/${nid}/start`);
     assert.strictEqual(r.status, 200, r.text);
     return nid;
