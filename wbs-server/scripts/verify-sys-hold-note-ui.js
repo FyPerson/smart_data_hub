@@ -9,7 +9,7 @@ function walk(n){if(!n||typeof n!=='object')return;if(n.type==='FunctionDeclarat
 walk(ast);
 const names=['esc','siHoldNoteIsOrigin','siBuildHoldNoteIndex','siHoldNotePayload','siHoldNoteVersion','siHoldNoteOrphanText',
  'siHoldNoteAttachmentsAt','siHoldNoteAttachmentHtml','siHoldNoteChangeHtml','siRenderHoldNoteHtml','siHoldNoteOwnerId','siHoldNoteFormData',
- 'siAttExt','siTlAttIsImage','siTlAttLinkHtml'];
+ 'siAttExt','siTlAttIsImage','siTlThumbHtml','siTlAttLinkHtml'];
 for(const name of names)assert.ok(functions.has(name),'missing function '+name);
 const token=id=>'e30.'+Buffer.from(JSON.stringify({id})).toString('base64url')+'.signature';
 // 时间线图片预览（2026-11-21）：SI_IMG_EXTS 是 const 不在函数提取面内，从真实源码取字面量，不在测试里另抄一份。
@@ -55,11 +55,19 @@ check('timeline image attachments preview, others download',()=>{
   assert.strictEqual((out.match(/siPreviewAttImage\(1,(\d+),'hold'\)/g)||[]).join('|'),"siPreviewAttImage(1,201,'hold')|siPreviewAttImage(1,202,'hold')");
   assert.strictEqual((out.match(/siDownloadHoldNoteAtt\(1,(\d+)\)/g)||[]).join('|'),'siDownloadHoldNoteAtt(1,201)|siDownloadHoldNoteAtt(1,202)|siDownloadHoldNoteAtt(1,203)');
   assert.ok(!out.includes('siPreviewAttImage(1,203'),'pdf must not preview');
-  assert.ok(!out.includes('<img'),'image file name must be escaped');
+  // [时间线缩略图·2026-11-22] 图片项现在合法地带一个小图占位 <img>，所以「不含 <img」改成三条：注入的原样标签不出现、
+  //   每个 <img 都是缩略图占位、占位个数与编号恰为两张图片（pdf 没有），且都标 hold 端点。
+  const THUMB='<img class="si-clickable-thumb si-att-thumb si-tl-thumb" ';
+  assert.ok(!out.includes('<img src=x'),'image file name must be escaped');
+  assert.strictEqual(out.split('<img').length-1,out.split(THUMB).length-1,'every <img must be a timeline thumbnail placeholder');
+  assert.strictEqual((out.match(/data-att-issue="1" data-att-id="(\d+)" data-att-name="[^"]*" data-att-kind="hold">/g)||[]).map(s=>/data-att-id="(\d+)"/.exec(s)[1]).join('|'),'201|202',out);
+  assert.ok(!/<img[^>]*\ssrc=/.test(out.replace(/"[^"]*"/g,'""')),'placeholders carry no src (filled by siLoadAttThumbs)');   // 先抹掉属性值：转义后的坏文件名里含「src=」字样
   const att=context.siTlAttLinkHtml(7,{id:31,original_name:'凭证.JPEG'}),doc=context.siTlAttLinkHtml(7,{id:32,original_name:'交付.xlsx'});
   assert.ok(att.includes("onclick=\"siPreviewAttImage(7,31,'att')\"")&&att.includes('onclick="siDownloadAtt(7,31)"'),att);
-  assert.ok(!doc.includes('siPreviewAttImage')&&doc.includes('onclick="siDownloadAtt(7,32)"'),doc);
-  assert.ok(!context.siTlAttLinkHtml(7,{id:33,original_name:imgBad}).includes('<img'));
+  assert.ok(att.startsWith(THUMB)&&att.includes('data-att-issue="7" data-att-id="31" data-att-name="凭证.JPEG">')&&!att.includes('data-att-kind'),att);
+  assert.ok(!doc.includes('siPreviewAttImage')&&doc.includes('onclick="siDownloadAtt(7,32)"')&&!doc.includes('<img'),doc);
+  const badAtt=context.siTlAttLinkHtml(7,{id:33,original_name:imgBad});
+  assert.ok(!badAtt.includes('<img src=x')&&badAtt.split('<img').length-1===1&&badAtt.startsWith(THUMB),badAtt);
   for(const n of ['a.jpg','a.jpeg','a.gif','a.webp','a.bmp','A.PNG'])assert.strictEqual(context.siTlAttIsImage(n),true,n);
   for(const n of ['a.pdf','a.png.zip','png','',null,undefined])assert.strictEqual(context.siTlAttIsImage(n),false,String(n));
  }finally{context.siDetail=saved;}

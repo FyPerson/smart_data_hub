@@ -187,6 +187,51 @@ async function runBrowser(){
   assert.strictEqual(await page.locator('#siDBody .si-hn-btn').count(),0);
   assert.strictEqual(await page.evaluate(()=>__hnXss),0);
  });
+ // [时间线缩略图·2026-11-22] 暂缓备注里的图片附件：打开详情即显示小图（走暂缓备注附件端点）。
+ //   [codex 610 L2] 图片先在、再追加 pdf、再移除图片：当前版本没有这张图，两个历史版本各有一张，每次渲染只取一次、共用同一地址；
+ //   展开历史点小图弹放大层且显示的就是该地址。[codex 610 M2] 第一张显示后账号判定变为不一致（代际不变），后一张不得复用地址。
+ await check('C3 browser hold-note image thumbnails',async()=>{
+  const tid=await issue();await open(tid);
+  await page.getByRole('button',{name:'添加暂缓备注',exact:true}).click();
+  await page.locator('#f_content').fill('缩略图备注');
+  await page.locator('#siPickerInput_hold-note').setInputFiles(upload('凭证图.png',png,'image/png'));
+  await page.locator('#siMConfirm').click();await closed();
+  await page.waitForFunction(()=>siDetail&&siDetail.hold_note_attachments.length===1);
+  const tnote=await page.evaluate(()=>Number(siCurTimeline.find(e=>e.action_code==='hold_note').id));
+  const tatt=await page.evaluate(()=>Number(siDetail.hold_note_attachments[0].id));
+  await page.evaluate(n=>siHoldNoteEdit(n),tnote);
+  await page.locator('#siPickerInput_hold-note').setInputFiles(upload('补充.pdf'));
+  await page.locator('#siMConfirm').click();await closed();await waitEdits(tnote,1);
+  await page.evaluate(n=>siHoldNoteEdit(n),tnote);
+  await page.locator('#siHoldNoteExisting .si-hn-existing-row').filter({hasText:'凭证图.png'}).getByRole('button',{name:'移除',exact:true}).click();
+  await page.locator('#siMConfirm').click();await closed();await waitEdits(tnote,2);
+  const endpoint=env.baseUrl+'/api/sys-issues/'+tid+'/hold-note-attachments/'+tatt+'/download';
+  const sel='#siDBody img.si-tl-thumb[data-att-kind="hold"][data-att-id="'+tatt+'"]';
+  const hits=[],onReq=r=>{if(r.url()===endpoint)hits.push(r.method());};page.on('request',onReq);
+  try{
+   await open(tid);
+   const ready=await page.waitForFunction(s=>{const t=[...document.querySelectorAll(s)];return t.length>=2&&t.every(i=>/^blob:/.test(i.getAttribute('src')||'')&&i.complete&&i.naturalWidth>0);},sel,{timeout:8000}).then(()=>true).catch(()=>false);
+   const state=await page.evaluate(s=>[...document.querySelectorAll(s)].map(i=>({src:i.getAttribute('src'),w:i.naturalWidth,hist:!!i.closest('.si-hn-hist')})),sel);
+   assert.ok(ready,'hold-note image thumbnails in history versions must show the image: '+JSON.stringify(state)+' placeholders='+await page.locator('#siDBody .si-hn-attachments .si-pdf-icon').count());
+   assert.strictEqual(await page.locator('#siDBody .si-hn-attachments').first().locator('img.si-tl-thumb[data-att-id="'+tatt+'"]').count(),0,'the removed image must not appear in the current version');
+   assert.ok(state.length===2&&state.every(x=>x.hist),'the removed image appears once in each of the two history versions: '+JSON.stringify(state));
+   assert.strictEqual(new Set(state.map(x=>x.src)).size,1,'the same attachment shares one address: '+JSON.stringify(state));
+   assert.deepStrictEqual(hits,['GET'],'the hold-note attachment is fetched once per render');
+   await page.locator('#siDBody .si-hn-hist summary').first().click();
+   await page.locator(sel).first().click();await page.locator('#siImgLightbox.show').waitFor({timeout:5000});
+   assert.strictEqual(await page.locator('#siImgLightboxImg').getAttribute('src'),state[0].src);
+   await page.evaluate(()=>siCloseLightbox(null));
+  }finally{page.off('request',onReq);}
+  // 替身只看目标附件（单号 + 附件编号）：它的一张小图拿到地址后账号判定即不一致（返回 0），代际不变。
+  await page.evaluate(s=>{window.__realOwner=siHoldNoteOwnerId;siHoldNoteOwnerId=()=>document.querySelector(s+'[src^="blob:"]')?0:window.__realOwner();},'#siDBody img.si-tl-thumb[data-att-kind="hold"][data-att-issue="'+tid+'"][data-att-id="'+tatt+'"]');
+  try{
+   await open(tid);
+   const settled=await page.waitForFunction(s=>{const t=[...document.querySelectorAll(s)];return t.length>0&&t.every(i=>i.getAttribute('src'));},sel,{timeout:8000}).then(()=>true).catch(()=>false);
+   const after=await page.evaluate(s=>({blob:document.querySelectorAll(s+'[src^="blob:"]').length,img:document.querySelectorAll(s).length,ph:document.querySelectorAll('#siDBody .si-hn-attachments .si-pdf-icon').length}),sel);
+   assert.ok(settled,'thumbnail loading must settle: '+JSON.stringify(after));
+   assert.deepStrictEqual(after,{blob:1,img:1,ph:1},'after the account check flips, the duplicate must not reuse the address');
+  }finally{await page.evaluate(()=>{siHoldNoteOwnerId=window.__realOwner;delete window.__realOwner;});await open(tid);}
+ });
  await check('C3 browser audit snapshot',async()=>{
   await api('DELETE','/sys-issues/'+id,{reason:'C3 audit fixture'});
   const audits=await api('GET','/sys-issue-delete-audit');const entry=audits.items.find(x=>x.issue_id===id);assert.ok(entry);

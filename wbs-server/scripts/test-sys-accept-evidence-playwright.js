@@ -643,6 +643,86 @@ async function main() {
             await shotOnFail(page4, after.mine.length === 1 && after.revoked && !after.held, 't4-timeline-img-undecodable-revoke', `解码失败的地址应被实际撤销且不留在回收数组（${JSON.stringify(after)}）`);
         } finally { await page4.unroute(t4DlUrl); }
 
+        // [时间线缩略图·2026-11-22] 时间线图片文件名前的小图：打开详情即显示；凭证（screenshot）同时出现在开发交付区与
+        //   时间线打回行，每次渲染只取一次、两处共用一个地址；点小图弹放大层显示该地址且不下载；内容不是图片时换占位、文件名链接仍在。
+        await t4ResetLb();
+        {
+            // [codex 610 建议] 按附件编号定位目标小图：开发交付区与时间线各自的目标占位分开取。
+            const tlThumbSel = `.si-timeline .si-tl-att img.si-tl-thumb[data-att-id="${attId4}"]`;
+            const dvThumbSel = `#siDBody img.si-att-thumb:not(.si-tl-thumb)[data-att-id="${attId4}"]`;
+            const hits = []; const onReq = r => { if (r.url() === t4DlUrl) hits.push(r.method()); };
+            page4.on('request', onReq);
+            let st = { tl: [], dv: [] }, shown = false;
+            try {
+                await page4.evaluate(x => siOpenDrawer(x), id4);
+                shown = await page4.waitForFunction(s => { const i = document.querySelector(s); return !!i && /^blob:/.test(i.getAttribute('src') || '') && i.complete && i.naturalWidth > 0; }, tlThumbSel, { timeout: 8000 }).then(() => true).catch(() => false);
+                st = await page4.evaluate(([a, b]) => ({ tl: [...document.querySelectorAll(a)].map(i => i.getAttribute('src')), dv: [...document.querySelectorAll(b)].map(i => i.getAttribute('src')) }), [tlThumbSel, dvThumbSel]);
+            } finally { page4.off('request', onReq); }
+            await shotOnFail(page4, shown, 't4-tl-thumb-shown', `打开详情后时间线图片小图应显示出来（${JSON.stringify(st)}）`);
+            await shotOnFail(page4, st.tl.length >= 1 && st.dv.length >= 1 && hits.length === 1 && [...st.tl, ...st.dv].every(s => s === st.tl[0]), 't4-tl-thumb-fetch-once', `同一凭证在开发交付区与时间线各一处，每次渲染只取一次、共用一个地址（请求=${JSON.stringify(hits)}，${JSON.stringify(st)}）`);
+            const dlEvent = page4.waitForEvent('download', { timeout: 1500 }).catch(() => null);
+            const clicked = await page4.locator(tlThumbSel).first().click({ timeout: 5000 }).then(() => true).catch(() => false);
+            const lbShown = await page4.locator('#siImgLightbox.show').waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+            const lbSrc = await t4LbSrcNow();
+            const dl = await dlEvent;
+            await shotOnFail(page4, clicked && lbShown && lbSrc === st.tl[0] && !dl, 't4-tl-thumb-click', `点时间线小图应弹放大层、显示小图地址且不下载（点击=${clicked}，弹出=${lbShown}，放大层=${lbSrc}，小图=${st.tl[0]}，下载=${!!dl}）`);
+            await t4ResetLb();
+            // [codex 610 M3] 先点文件名（预览请求被扣住），再点已加载的小图：放大层显示小图；放行文件名预览后仍是小图地址。
+            const h = await t4HoldFirst();
+            try {
+                const n0 = await t4DoneCount();
+                await t4ImgLink().click();
+                const arrived = await t4Bounded(h.arrived, 5000);
+                let d = { arrived };
+                if (arrived) {
+                    d.clicked = await page4.locator(tlThumbSel).first().click({ timeout: 5000 }).then(() => true).catch(() => false);
+                    d.thumbShown = await page4.locator('#siImgLightbox.show').waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+                    d.srcBefore = await t4LbSrcNow();
+                    h.release();
+                    d.finished = await t4Bounded(h.finished, 8000);
+                    d.done = await t4WaitDone(n0 + 1);
+                    d.open = await t4LbOpen();
+                    d.srcAfter = await t4LbSrcNow();
+                }
+                await shotOnFail(page4, arrived && d.clicked && d.thumbShown && d.srcBefore === st.tl[0] && d.finished && d.done && d.open && d.srcAfter === st.tl[0],
+                    't4-tl-thumb-click-wins', `先点文件名、后点小图：最后一次点击（小图）应保持显示（小图=${st.tl[0]}，${JSON.stringify(d)}）`);
+            } finally { h.release(); await page4.unroute(t4DlUrl); }
+            await t4ResetLb();
+            // [codex 610-R M1] 小图还没加载完成（complete=false）时点击：不弹放大层、不递增预览序号（不作废在途的文件名预览）。
+            //   做法：把已加载的目标小图改指向一个被扣住不回的地址，使其确定地处于「加载中」，再点击。
+            const hangUrl = `${BASE_URL}/__t4_thumb_pending_${Date.now()}.png`;
+            let hung = null, reached;
+            const hangArrived = new Promise(r => { reached = r; });
+            await page4.route(hangUrl, r => { hung = r; reached(); });
+            try {
+                // [codex 610-R2 L] 先确认被扣请求已到达拦截器，再采样 complete / 预览序号并点击。
+                const swapped = await page4.evaluate(([s, u]) => { const i = document.querySelector(s); if (!i) return false; i.setAttribute('src', u); return true; }, [tlThumbSel, hangUrl]);
+                const arrivedOk = swapped && await t4Bounded(hangArrived, 5000);
+                const before = arrivedOk ? await page4.evaluate(s => { const i = document.querySelector(s); return { complete: i.complete, w: i.naturalWidth, seq: siTlPreviewSeq }; }, tlThumbSel) : null;
+                const clicked = await page4.locator(tlThumbSel).first().click({ timeout: 5000 }).then(() => true).catch(() => false);
+                const after = await page4.evaluate(() => ({ open: document.getElementById('siImgLightbox').classList.contains('show'), seq: siTlPreviewSeq }));
+                // 注：换 src 后浏览器在新图到达前保留旧图尺寸（naturalWidth 仍为 1），「未就绪」以 complete=false 为准。
+                await shotOnFail(page4, !!before && !before.complete && clicked && !after.open && after.seq === before.seq,
+                    't4-tl-thumb-click-not-ready', `小图未加载完成时点击不应弹放大层、不应作废在途预览（点击前=${JSON.stringify(before)}，点击=${clicked}，点击后=${JSON.stringify(after)}）`);
+            } finally {
+                await t4ResetLb();
+                if (hung) await hung.fulfill({ status: 200, contentType: 'image/png', body: PNG_BYTES }).catch(() => {});   // 用真图放行，不 abort（abort 会留 console 加载错误）
+                await page4.unroute(hangUrl);
+                await page4.evaluate(x => siOpenDrawer(x), id4);
+                const restored = await page4.waitForFunction(s => { const i = document.querySelector(s); return !!i && i.complete && i.naturalWidth > 0; }, tlThumbSel, { timeout: 8000 }).then(() => true).catch(() => false);
+                await shotOnFail(page4, restored, 't4-tl-thumb-click-not-ready-restore', '收尾重开详情后目标小图应重新加载完成（后续用例的前置）');
+            }
+        }
+        await page4.route(t4DlUrl, route => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('not really a png') }));
+        try {
+            await page4.evaluate(x => siOpenDrawer(x), id4);
+            // [codex 610-R L2] 按附件编号定位：目标文件名链接紧前一项应是失败占位，时间线里不再有该附件的小图，链接仍在。
+            const linkSel = `.si-timeline .si-tl-att a[onclick="siPreviewAttImage(${id4},${attId4},'att')"]`;
+            const ph = await page4.waitForFunction(([l, a]) => { const link = document.querySelector(l); const prev = link && link.previousElementSibling; return !!prev && prev.matches('span.si-pdf-icon') && !document.querySelector(`.si-timeline img.si-tl-thumb[data-att-id="${a}"]`); }, [linkSel, attId4], { timeout: 8000 }).then(() => true).catch(() => false);
+            const links = await page4.locator(linkSel).count();
+            await shotOnFail(page4, ph && links === 1, 't4-tl-thumb-undecodable', `内容不是图片时目标小图应换「预览加载失败」占位、文件名链接仍在（占位=${ph}，链接=${links}）`);
+        } finally { await page4.unroute(t4DlUrl); await page4.evaluate(x => siOpenDrawer(x), id4); await page4.waitForFunction(() => !!document.querySelector('.si-timeline .si-tl-att')); }
+
         // [codex 609 M-1 / 609-R L1] 放大层开着时详情重渲 / 关抽屉：先确认放大层确实打开，之后放大层随地址回收一起关闭、
         //   滚动锁恢复，当次图片地址被浏览器实际撤销。
         await t4ResetLb();
