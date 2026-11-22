@@ -42,7 +42,7 @@ check('C3 void keeps downloads',()=>{
  assert.ok(output.includes('已作废'));assert.ok(output.includes('siDownloadHoldNoteAtt('));
  assert.ok(!output.includes('onclick="siHoldNoteEdit'));assert.ok(!output.includes('<img'));
 });
-check('timeline image attachments preview, others download',()=>{
+check('timeline image attachments thumbnail only, others download',()=>{
  const saved=context.siDetail;
  const imgBad='<img src=x onerror=globalThis.__hnXss=1>.PNG';
  context.siDetail={issue:{id:1},hold_note_attachments:[
@@ -51,20 +51,23 @@ check('timeline image attachments preview, others download',()=>{
   {id:203,note_id:20,added_event_id:20,removed_event_id:null,status:'active',original_name:'说明.pdf'}]};
  try{
   const out=context.siHoldNoteAttachmentHtml(20,20);
-  // 两张图片：各一个预览按钮 + 一个 ⬇ 下载按钮；pdf 只有原下载按钮。
-  assert.strictEqual((out.match(/siPreviewAttImage\(1,(\d+),'hold'\)/g)||[]).join('|'),"siPreviewAttImage(1,201,'hold')|siPreviewAttImage(1,202,'hold')");
-  assert.strictEqual((out.match(/siDownloadHoldNoteAtt\(1,(\d+)\)/g)||[]).join('|'),'siDownloadHoldNoteAtt(1,201)|siDownloadHoldNoteAtt(1,202)|siDownloadHoldNoteAtt(1,203)');
-  assert.ok(!out.includes('siPreviewAttImage(1,203'),'pdf must not preview');
-  // [时间线缩略图·2026-11-22] 图片项现在合法地带一个小图占位 <img>，所以「不含 <img」改成三条：注入的原样标签不出现、
-  //   每个 <img 都是缩略图占位、占位个数与编号恰为两张图片（pdf 没有），且都标 hold 端点。
+  // [时间线只留缩略图·2026-11-22 用户定] 两张图片各只有一个小图占位（不再有文件名按钮与 ⬇），pdf 只有原下载按钮。
   const THUMB='<img class="si-clickable-thumb si-att-thumb si-tl-thumb" ';
+  const items=out.replace(/^<ul class="si-hn-attachments">|<\/ul>$/g,'').split('</li>').filter(Boolean).map(s=>s.replace(/^<li>/,''));
+  assert.strictEqual(items.length,3,out);
+  for(const it of items.slice(0,2))assert.ok(it.startsWith(THUMB)&&it.endsWith('data-att-kind="hold">')&&it.split('<').length-1===1&&!/onclick=/.test(it),'image item is exactly one thumbnail: '+it);
+  assert.ok(items[0].includes(' title="截图.png（点击放大）" '),'hover shows the full file name: '+items[0]);
+  assert.strictEqual((out.match(/siDownloadHoldNoteAtt\(1,(\d+)\)/g)||[]).join('|'),'siDownloadHoldNoteAtt(1,203)','only the pdf has a download button');
+  assert.ok(!out.includes('siPreviewAttImage')&&!out.includes('⬇'),'no filename preview entry and no download icon for images');
+  // 图片项合法地带一个小图占位 <img>，所以「不含 <img」改成：注入的原样标签不出现、每个 <img 都是缩略图占位、
+  //   占位个数与编号恰为两张图片（pdf 没有），且都标 hold 端点。
   assert.ok(!out.includes('<img src=x'),'image file name must be escaped');
   assert.strictEqual(out.split('<img').length-1,out.split(THUMB).length-1,'every <img must be a timeline thumbnail placeholder');
   assert.strictEqual((out.match(/data-att-issue="1" data-att-id="(\d+)" data-att-name="[^"]*" data-att-kind="hold">/g)||[]).map(s=>/data-att-id="(\d+)"/.exec(s)[1]).join('|'),'201|202',out);
   assert.ok(!/<img[^>]*\ssrc=/.test(out.replace(/"[^"]*"/g,'""')),'placeholders carry no src (filled by siLoadAttThumbs)');   // 先抹掉属性值：转义后的坏文件名里含「src=」字样
   const att=context.siTlAttLinkHtml(7,{id:31,original_name:'凭证.JPEG'}),doc=context.siTlAttLinkHtml(7,{id:32,original_name:'交付.xlsx'});
-  assert.ok(att.includes("onclick=\"siPreviewAttImage(7,31,'att')\"")&&att.includes('onclick="siDownloadAtt(7,31)"'),att);
-  assert.ok(att.startsWith(THUMB)&&att.includes('data-att-issue="7" data-att-id="31" data-att-name="凭证.JPEG">')&&!att.includes('data-att-kind'),att);
+  assert.ok(att.startsWith(THUMB)&&att.endsWith('data-att-issue="7" data-att-id="31" data-att-name="凭证.JPEG">')&&att.split('<').length-1===1&&!att.includes('onclick')&&!att.includes('data-att-kind'),'image entry is exactly one thumbnail: '+att);
+  assert.ok(att.includes(' title="凭证.JPEG（点击放大）" '),att);
   assert.ok(!doc.includes('siPreviewAttImage')&&doc.includes('onclick="siDownloadAtt(7,32)"')&&!doc.includes('<img'),doc);
   const badAtt=context.siTlAttLinkHtml(7,{id:33,original_name:imgBad});
   assert.ok(!badAtt.includes('<img src=x')&&badAtt.split('<img').length-1===1&&badAtt.startsWith(THUMB),badAtt);

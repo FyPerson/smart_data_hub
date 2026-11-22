@@ -440,11 +440,8 @@
         .si-tl-attach-list ul { white-space: normal; word-break: break-all; max-height: 150px; overflow: auto; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px 8px 8px 22px; margin: 4px 0 0; font-size: 11px; }
         .si-tl-attach-list li { margin: 2px 0; }
         .si-tl-att a { font-size: 11px; color: #2563eb; cursor: pointer; margin-right: 8px; }
-        .si-tl-att .si-tl-att-dl, .si-hn-dl-icon { border: 0; background: transparent; padding: 0 2px; font-size: 11px; color: #6b7280; cursor: pointer; }
-        .si-tl-att .si-tl-att-dl { margin: 0 8px 0 -6px; }
-        .si-tl-att .si-tl-att-dl:hover, .si-hn-dl-icon:hover { color: #1e293b; }
-        .si-hn-dl-icon { margin-left: 4px; }
-        /* [时间线缩略图·2026-11-22] 时间线图片附件在文件名前显示小图（打开详情即加载，同开发交付区 siLoadAttThumbs），点小图放大。 */
+        /* [时间线缩略图·2026-11-22] 时间线图片附件只显示小图（打开详情即加载，同开发交付区 siLoadAttThumbs），悬停看完整文件名，点小图放大；
+           不再显示文件名与 ⬇（用户 11-22 定：放大后用浏览器自带的图片另存为）。 */
         .si-tl-thumb { display: inline-block; width: 48px; height: 48px; object-fit: cover; vertical-align: middle; margin: 2px 4px 2px 0; border: 1px solid #e5e7eb; border-radius: 4px; background: #f9fafb; font-size: 0; }
         /* [时间线改动明细 方案 20260911 v1.2 §3.2] 修改类事件「查看改动」展开区：头行「变更对象 · 变更字段」+ 逐字段两块「修改前 / 修改后」包裹。
            复用 .si-tl-release-json 的 details/summary 外观；本页内联 CSS，非共享静态资源（W4 前也因此无需手动 bump ?v=）。 */
@@ -5008,10 +5005,10 @@
         const issueId = Number(siDetail && siDetail.issue && siDetail.issue.id);
         if (!Number.isSafeInteger(issueId) || issueId <= 0) return '';
         const rows = siHoldNoteAttachmentsAt(noteId, eventId);
-        // [时间线图片预览·2026-11-21] 图片附件点击预览（siPreviewAttImage），旁留 ⬇ 走原下载；非图片保持原下载按钮。
-        // [时间线缩略图·2026-11-22] 图片项最前加小图（siTlThumbHtml kind='hold'），含已移除的历史版本。
+        // [时间线缩略图·2026-11-22] 图片附件只显示小图（siTlThumbHtml kind='hold'，含已移除的历史版本），悬停看文件名、点小图放大；
+        //   非图片保持原下载按钮。
         return rows.length ? '<ul class="si-hn-attachments">' + rows.map(a => siTlAttIsImage(a.original_name)
-            ? `<li>${siTlThumbHtml(issueId, a.id, a.original_name, 'hold')}<button type="button" class="si-hn-download" onclick="siPreviewAttImage(${issueId},${Number(a.id)},'hold')" title="点击预览">🖼️ ${esc(a.original_name)}</button><button type="button" class="si-hn-dl-icon" onclick="siDownloadHoldNoteAtt(${issueId},${Number(a.id)})" title="下载原图">⬇</button></li>`
+            ? `<li>${siTlThumbHtml(issueId, a.id, a.original_name, 'hold')}</li>`
             : `<li><button type="button" class="si-hn-download" onclick="siDownloadHoldNoteAtt(${issueId},${Number(a.id)})">📎 ${esc(a.original_name || '附件')}</button></li>`).join('') + '</ul>' : '';
     }
     function siHoldNoteChangeHtml(e) {
@@ -5890,8 +5887,6 @@
     const SI_IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
     let siAttThumbUrls = [];   // 本次详情渲染产生的缩略图 objectURL（重渲/关抽屉前 revoke）
     let siAttThumbGen = 0;     // codex120 MED：渲染代际——重渲/关抽屉递增，旧 async 加载任务据此失效（防泄漏+防给已卸载 img 设 src）
-    let siTlPreviewSeq = 0;    // [codex 609 M-2] 时间线图片预览点击序号（见 siPreviewAttImage）
-    let siTlPreviewUrl = null; // [codex 609 L-1] 最近一次时间线预览的地址（见 siPreviewAttImage）
     function siRevokeAttThumbs() {
         siAttThumbGen++;   // 使正在跑的旧 siLoadAttThumbs 循环失效（每次 await 后校验代际，不符即退出并自 revoke）
         // [codex 609 M-1] 放大层正显示待回收的地址（缩略图或时间线预览）时先关掉并恢复滚动锁——此前只有切单
@@ -5901,7 +5896,6 @@
         if (lb && lbImg && lb.classList.contains('show') && siAttThumbUrls.includes(lbImg.getAttribute('src'))) siCloseLightbox(null);
         for (const u of siAttThumbUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
         siAttThumbUrls = [];
-        siTlPreviewUrl = null;   // [609 L-1] 最近一次时间线预览地址已随本数组回收
     }
     function siAttExt(name) {
         const m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
@@ -5957,16 +5951,27 @@
         const owner = siHoldNoteOwnerId();
         const imgs = document.querySelectorAll('img.si-att-thumb[data-att-id]:not([data-att-loaded])');
         const failPlaceholder = () => Object.assign(document.createElement('span'), { className: 'si-pdf-icon', textContent: '⚠️', title: '预览加载失败' });
-        const fail = (img) => { if (img.isConnected) img.replaceWith(failPlaceholder()); };
+        // ⑦ [时间线只留缩略图·2026-11-22] 时间线小图不再配文件名与 ⬇：失败占位悬停显示完整文件名、点击走原下载函数取回原文件
+        //   （暂缓备注走 siDownloadHoldNoteAtt，自带账号与单号核对）。开发交付区的占位保持原样。
+        const fail = (img) => {
+            if (!img.isConnected) return;
+            const ph = failPlaceholder();
+            if (img.classList.contains('si-tl-thumb')) {
+                const iid = Number(img.getAttribute('data-att-issue')), aid = Number(img.getAttribute('data-att-id'));
+                const hold = img.getAttribute('data-att-kind') === 'hold';
+                ph.title = (img.getAttribute('data-att-name') || '') + '（预览加载失败，点击下载原文件）';
+                ph.classList.add('si-tl-thumb-fail');
+                ph.style.cursor = 'pointer';
+                ph.addEventListener('click', () => { if (hold) siDownloadHoldNoteAtt(iid, aid); else siDownloadAtt(iid, aid); });
+            }
+            img.replaceWith(ph);
+        };
         const got = new Map();   // ⑤ key → objectURL 或 null（取图失败）
         const show = (img, url, cap) => {
             img.addEventListener('error', () => fail(img), { once: true });   // ⑥
             img.src = url;
-            // [codex 610 M3] 点小图即作废还在途的文件名预览（siPreviewAttImage 按 siTlPreviewSeq 判最新一次点击），
-            //   否则先点甲图文件名、再点已加载的乙图小图，甲图晚到会盖掉乙图。
-            // [codex 610-R M1] 小图还没加载成功时点击不做任何事（不弹放大层、不作废在途预览）：否则坏图解码失败前被点开，
-            //   小图换成占位后放大层仍空白打开并锁住滚动。
-            img.addEventListener('click', () => { if (!img.complete || !img.naturalWidth) return; siTlPreviewSeq++; siOpenLightbox(url, cap); });
+            // [codex 610-R M1] 小图还没加载成功时点击不做任何事：否则坏图解码失败前被点开，小图换成占位后放大层仍空白打开并锁住滚动。
+            img.addEventListener('click', () => { if (!img.complete || !img.naturalWidth) return; siOpenLightbox(url, cap); });
         };
         for (const img of imgs) {
             if (siAttThumbGen !== myGen) return;                 // [codex 610 M1] 本轮已失效：整轮结束（不再处理后续旧占位、不再发请求）
@@ -6000,16 +6005,13 @@
             }
         }
     }
-    // ── 时间线图片附件点击预览（2026-11-21 用户诉求：时间线上的图片不用下载就能看）──
-    //   复用上面开发交付区缩略图那一套：authFetch 鉴权取 blob → objectURL → siOpenLightbox。objectURL 并入
-    //   siAttThumbUrls、以 siAttThumbGen 为代际，随切单 / 重渲 / 关抽屉由 siRevokeAttThumbs 统一 revoke；
-    //   取图途中代际变了、已换单（暂缓备注附件另核账号未变，同 siDownloadHoldNoteAtt）就不弹。
-    //   调用点按扩展名分流：非图片保持原下载；图片旁另留 ⬇ 按钮走原下载函数，想存原图时用。
-    //   kind：'att' = sys_issue_attachments（提交行交付物 / 凭证三写点）；'hold' = 暂缓备注附件（独立端点，含已移除的历史版本）。
+    // ── 时间线图片附件（#218：2026-11-21 用户诉求「时间线上的图片不用下载就能看」；11-22 定为只显示缩略图）──
+    //   时间线三处入口（提交行交付物 / 凭证三写点 / 暂缓备注附件含历史版本）按扩展名分流：图片只出小图占位，
+    //   由开发交付区同一加载器 siLoadAttThumbs 鉴权取图填入、点小图放大（同一代际与回收）；悬停看完整文件名；
+    //   不显示文件名与 ⬇（用户 11-22 定：放大后用浏览器自带的图片另存为）。非图片保持点文件名直接下载。
+    //   kind：'att' = sys_issue_attachments；'hold' = 暂缓备注附件（独立端点，加载器另核账号）。
     function siTlAttIsImage(name) { return SI_IMG_EXTS.includes(siAttExt(name)); }
-    // [时间线缩略图·2026-11-22 用户选「打开详情即全部加载」] 图片文件名前的小图占位：无 src，由 siRenderDrawer 末尾的
-    //   siLoadAttThumbs() 按 data-att-* 鉴权取图填入并绑定点击放大（与开发交付区同一加载器、同一代际与回收）。
-    //   kind='hold' 走暂缓备注附件端点并核对账号（见 siLoadAttThumbs）。文件名链接与 ⬇ 保持不变。
+    // 小图占位：无 src，由 siRenderDrawer 末尾的 siLoadAttThumbs() 按 data-att-* 填入；title 为完整文件名。
     function siTlThumbHtml(issueId, attId, name, kind) {
         const n = esc(name);
         return `<img class="si-clickable-thumb si-att-thumb si-tl-thumb" alt="${n}" title="${n}（点击放大）" data-att-issue="${Number(issueId)}" data-att-id="${Number(attId)}" data-att-name="${n}"${kind === 'hold' ? ' data-att-kind="hold"' : ''}>`;
@@ -6018,48 +6020,7 @@
         const name = a.original_name || a.file_name;
         const iid = Number(issueId), aid = Number(a.id);
         if (!siTlAttIsImage(name)) return `<a onclick="siDownloadAtt(${iid},${aid})">📎${esc(name)}</a>`;
-        return siTlThumbHtml(iid, aid, name, 'att')
-            + `<a onclick="siPreviewAttImage(${iid},${aid},'att')" title="点击预览">🖼️${esc(name)}</a>`
-            + `<button type="button" class="si-tl-att-dl" onclick="siDownloadAtt(${iid},${aid})" title="下载原图">⬇</button>`;
-    }
-    //   [codex 609] M-2：每次点击递增 siTlPreviewSeq，只有最新一次点击能弹出或报错（连点两张图时先点的晚到不覆盖、
-    //   关闭后也不再弹出）；M-4：弹出前先解码，扩展名对但内容不是可显示图片时提示改用 ⬇，不弹空白放大层；
-    //   L-1：只保留最近一次预览的地址（siTlPreviewUrl），打开新预览时回收上一次，失效或解码失败的地址当场回收。
-    //   M-3（换账号）：别的标签页换账号经 storage 监听关抽屉 → siRevokeAttThumbs 使代际失效并关放大层，不另加账号校验。
-    //   （siTlPreviewSeq / siTlPreviewUrl 声明在 siAttThumbGen 旁边：siRevokeAttThumbs 要用，放前面避开 let 暂时性死区。）
-    function siTlForgetUrl(u) {
-        const i = siAttThumbUrls.indexOf(u);
-        if (i >= 0) siAttThumbUrls.splice(i, 1);
-        try { URL.revokeObjectURL(u); } catch (_) {}
-    }
-    async function siPreviewAttImage(issueId, attId, kind) {
-        const mySeq = ++siTlPreviewSeq;
-        const myGen = siAttThumbGen;
-        const hold = kind === 'hold';
-        const owner = hold ? siHoldNoteOwnerId() : 0;
-        const active = () => mySeq === siTlPreviewSeq && siAttThumbGen === myGen && Number(siOpenId) === Number(issueId)
-            && (!hold || (owner > 0 && siHoldNoteOwnerId() === owner));
-        if (!active()) return;
-        const list = (siDetail && (hold ? siDetail.hold_note_attachments : siDetail.attachments)) || [];
-        const known = list.find(a => Number(a.id) === Number(attId));
-        const cap = known ? (known.original_name || known.file_name || '') : '';
-        try {
-            const res = await authFetch('/api/sys-issues/' + Number(issueId) + (hold ? '/hold-note-attachments/' : '/attachments/') + Number(attId) + '/download');
-            if (!active() || !res) return;
-            if (!res.ok) { showToast(res.status === 503 ? '系统繁忙，请稍后重试' : '预览失败，请刷新后重试', 'error'); return; }
-            const blob = await res.blob();
-            if (!active()) return;
-            const url = URL.createObjectURL(blob);
-            siAttThumbUrls.push(url);   // 先入共享数组：解码期间关抽屉 / 重渲时由 siRevokeAttThumbs 统一回收
-            let decoded = true;
-            try { const probe = new Image(); probe.src = url; await probe.decode(); } catch (_) { decoded = false; }
-            if (!active()) { siTlForgetUrl(url); return; }
-            if (!decoded) { siTlForgetUrl(url); showToast('无法预览，请点 ⬇ 下载查看', 'error'); return; }
-            const prev = siTlPreviewUrl;
-            siTlPreviewUrl = url;
-            siOpenLightbox(url, cap);
-            if (prev && prev !== url) siTlForgetUrl(prev);
-        } catch (_) { if (active()) showToast('预览失败，请稍后重试', 'error'); }
+        return siTlThumbHtml(iid, aid, name, 'att');
     }
     // 附件权限计算（共享）：isOwnerDev=在册开发∨ / isCoordinator=对接人∪admin。spec/开发交付两处渲染共用。
     function siAttPerms(data) {
@@ -12533,7 +12494,6 @@
         const lb = document.getElementById('siImgLightbox');
         const img = document.getElementById('siImgLightboxImg');
         if (!lb || !lb.classList.contains('show')) return;   // 已关则幂等返回（防冒泡连触发两次）
-        siTlPreviewSeq++;   // [codex 609-R M1] 实际关闭放大层时作废进行中的时间线预览（防关掉缩略图后，先前点的时间线图片晚到又弹出）
         lb.classList.remove('show');
         if (img) img.src = '';
         document.body.style.overflow = siLbPrevOverflow;   // L2 修：恢复原值而非固定空串
