@@ -50,7 +50,10 @@ async function runBrowser(){
  token=await testEnv.signToken(1);const id=await issue();
  browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});
  const context=await browser.newContext({acceptDownloads:true,viewport:{width:1440,height:1000},timezoneId:'Asia/Shanghai'});
- await context.addInitScript(({token})=>{localStorage.setItem('token',token);localStorage.setItem('user',JSON.stringify({id:1,username:'admin',role:'admin'}));},{token});
+ // [#217·2026-11-22] 登录页不注入凭据：真实登出后到 login.html 时没有 token。若这里照写，login.html 的 checkAuth
+ //   会用它调 /auth/me 成功并跳到 /Task_Pool.html，末组「退出登录清理」读 localStorage 时撞上这次跳转
+ //   （实测导航序列 /login.html → /Task_Pool.html），报「Execution context was destroyed」。
+ await context.addInitScript(({token})=>{if(location.pathname==='/login.html')return;localStorage.setItem('token',token);localStorage.setItem('user',JSON.stringify({id:1,username:'admin',role:'admin'}));},{token});
  page=await context.newPage();const pageErrors=[],httpErrors=[],expectedHttpErrors=[];
  page.on('pageerror',e=>pageErrors.push(e.message));
  page.on('response',r=>{if(r.status()>=400)httpErrors.push([r.url(),r.status()]);});
@@ -201,9 +204,16 @@ async function runBrowser(){
    const trigger=document.createElement('button');trigger.type='button';trigger.id='c3LogoutTrigger';trigger.textContent='C3 logout';
    trigger.addEventListener('click',()=>logout(),{once:true});document.getElementById('siMBody').appendChild(trigger);
   },urls);
-  await Promise.all([page.waitForURL('**/login.html'),page.locator('#c3LogoutTrigger').click()]);
-  const proof=await page.evaluate(()=>JSON.parse(localStorage.getItem('__hnLogoutProof')));
-  assert.deepStrictEqual(proof,{count:0,revoked:true});
+  const navs=[],onNav=f=>{if(f===page.mainFrame())navs.push(new URL(f.url()).pathname);};page.on('framenavigated',onNav);
+  try{
+   await Promise.all([page.waitForURL('**/login.html'),page.locator('#c3LogoutTrigger').click()]);
+   // 等登录页的请求都落定，若它还要跳走（如 checkAuth 认为仍登录），跳转会在此之前发生并被 navs 记下。
+   await page.waitForLoadState('networkidle');
+   assert.deepStrictEqual(navs,['/login.html'],'logout must land on login.html and stay there');
+   const after=await page.evaluate(()=>({proof:JSON.parse(localStorage.getItem('__hnLogoutProof')),token:localStorage.getItem('token'),user:localStorage.getItem('user')}));
+   assert.deepStrictEqual(after,{proof:{count:0,revoked:true},token:null,user:null});
+  }catch(e){e.message+=' | main-frame navigations after logout: '+JSON.stringify(navs);throw e;}
+  finally{page.off('framenavigated',onNav);}
  });
  await check('C3 browser clean runtime',async()=>{
   assert.deepStrictEqual(pageErrors,[]);

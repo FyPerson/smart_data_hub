@@ -8,10 +8,13 @@ const ast=acorn.parse(script,{ecmaVersion:'latest'}), functions=new Map();
 function walk(n){if(!n||typeof n!=='object')return;if(n.type==='FunctionDeclaration'&&n.id)functions.set(n.id.name,script.slice(n.start,n.end));for(const [k,v]of Object.entries(n)){if(k==='start'||k==='end')continue;if(Array.isArray(v))v.forEach(walk);else if(v&&typeof v==='object')walk(v);}}
 walk(ast);
 const names=['esc','siHoldNoteIsOrigin','siBuildHoldNoteIndex','siHoldNotePayload','siHoldNoteVersion','siHoldNoteOrphanText',
- 'siHoldNoteAttachmentsAt','siHoldNoteAttachmentHtml','siHoldNoteChangeHtml','siRenderHoldNoteHtml','siHoldNoteOwnerId','siHoldNoteFormData'];
+ 'siHoldNoteAttachmentsAt','siHoldNoteAttachmentHtml','siHoldNoteChangeHtml','siRenderHoldNoteHtml','siHoldNoteOwnerId','siHoldNoteFormData',
+ 'siAttExt','siTlAttIsImage','siTlAttLinkHtml'];
 for(const name of names)assert.ok(functions.has(name),'missing function '+name);
 const token=id=>'e30.'+Buffer.from(JSON.stringify({id})).toString('base64url')+'.signature';
-const context={siDetail:null,siFmtDT:String,siOpenId:1,currentUser:{id:1},getToken:()=>token(1),atob,FormData,File};
+// 时间线图片预览（2026-11-21）：SI_IMG_EXTS 是 const 不在函数提取面内，从真实源码取字面量，不在测试里另抄一份。
+const imgExtsSrc=/const SI_IMG_EXTS = (\[[^\]]*\]);/.exec(html);assert.ok(imgExtsSrc,'missing SI_IMG_EXTS');
+const context={siDetail:null,siFmtDT:String,siOpenId:1,currentUser:{id:1},getToken:()=>token(1),atob,FormData,File,SI_IMG_EXTS:JSON.parse(imgExtsSrc[1].replace(/'/g,'"'))};
 vm.createContext(context);vm.runInContext(names.map(n=>functions.get(n)).join('\n'),context);
 let passed=0;function check(label,fn){try{fn();passed++;console.log('PASS '+label);}catch(e){throw new Error('FAIL '+label+': '+e.message,{cause:e});}}
 const bad='<img src=x onerror=globalThis.__hnXss=1>.pdf';
@@ -38,6 +41,28 @@ check('C3 void keeps downloads',()=>{
  const output=context.siRenderHoldNoteHtml(origin,context.siBuildHoldNoteIndex([origin,edit1,edit2,voided]).byOrigin.get(10));
  assert.ok(output.includes('已作废'));assert.ok(output.includes('siDownloadHoldNoteAtt('));
  assert.ok(!output.includes('onclick="siHoldNoteEdit'));assert.ok(!output.includes('<img'));
+});
+check('timeline image attachments preview, others download',()=>{
+ const saved=context.siDetail;
+ const imgBad='<img src=x onerror=globalThis.__hnXss=1>.PNG';
+ context.siDetail={issue:{id:1},hold_note_attachments:[
+  {id:201,note_id:20,added_event_id:20,removed_event_id:null,status:'active',original_name:'截图.png'},
+  {id:202,note_id:20,added_event_id:20,removed_event_id:null,status:'active',original_name:imgBad},
+  {id:203,note_id:20,added_event_id:20,removed_event_id:null,status:'active',original_name:'说明.pdf'}]};
+ try{
+  const out=context.siHoldNoteAttachmentHtml(20,20);
+  // 两张图片：各一个预览按钮 + 一个 ⬇ 下载按钮；pdf 只有原下载按钮。
+  assert.strictEqual((out.match(/siPreviewAttImage\(1,(\d+),'hold'\)/g)||[]).join('|'),"siPreviewAttImage(1,201,'hold')|siPreviewAttImage(1,202,'hold')");
+  assert.strictEqual((out.match(/siDownloadHoldNoteAtt\(1,(\d+)\)/g)||[]).join('|'),'siDownloadHoldNoteAtt(1,201)|siDownloadHoldNoteAtt(1,202)|siDownloadHoldNoteAtt(1,203)');
+  assert.ok(!out.includes('siPreviewAttImage(1,203'),'pdf must not preview');
+  assert.ok(!out.includes('<img'),'image file name must be escaped');
+  const att=context.siTlAttLinkHtml(7,{id:31,original_name:'凭证.JPEG'}),doc=context.siTlAttLinkHtml(7,{id:32,original_name:'交付.xlsx'});
+  assert.ok(att.includes("onclick=\"siPreviewAttImage(7,31,'att')\"")&&att.includes('onclick="siDownloadAtt(7,31)"'),att);
+  assert.ok(!doc.includes('siPreviewAttImage')&&doc.includes('onclick="siDownloadAtt(7,32)"'),doc);
+  assert.ok(!context.siTlAttLinkHtml(7,{id:33,original_name:imgBad}).includes('<img'));
+  for(const n of ['a.jpg','a.jpeg','a.gif','a.webp','a.bmp','A.PNG'])assert.strictEqual(context.siTlAttIsImage(n),true,n);
+  for(const n of ['a.pdf','a.png.zip','png','',null,undefined])assert.strictEqual(context.siTlAttIsImage(n),false,String(n));
+ }finally{context.siDetail=saved;}
 });
 check('C3 payload degradation',()=>{
  for(const payload_json of ['bad','[]','null','"x"'])assert.strictEqual(context.siHoldNoteChangeHtml({payload_json}),'');
