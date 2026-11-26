@@ -1,5 +1,9 @@
+
 'use strict';
 module.exports = [
+    { id: '#212 B2.3 错把 v7 账本配为定义 1', expect: 'V7 账本定义 2 升级到 V9 后保留链和序号，非空来源拒绝', from: 'const LEDGER_DEFINITION_BY_SCHEMA = Object.freeze([null, 1, 1, 1, 1, 1, 1, 2, 3, 4]);', to: 'const LEDGER_DEFINITION_BY_SCHEMA = Object.freeze([null, 1, 1, 1, 1, 1, 1, 1, 3, 4]);' },
+    { id: '#212 B2.3 v7 账本漏升定义', expect: 'V7 账本定义 2 升级到 V9 后保留链和序号，非空来源拒绝', from: 'if (locked.ledgerDefinition !== null && locked.ledgerDefinition !== LEDGER_DEFINITION_BY_SCHEMA[VERSION]) {', to: 'if (locked.ledgerDefinition === 1) {' },
+    { id: '#212 B5.1 错把 v8 账本当成 v9 定义', expect: 'V8 账本定义 3 升级到 V9 后保留链和序号，非空来源拒绝', from: 'const LEDGER_DEFINITION_BY_SCHEMA = Object.freeze([null, 1, 1, 1, 1, 1, 1, 2, 3, 4]);', to: 'const LEDGER_DEFINITION_BY_SCHEMA = Object.freeze([null, 1, 1, 1, 1, 1, 1, 2, 4, 4]);' },
     { id: '失败回执误报已提交', expect: '非空旧结构拒绝', from: 'error.applied = applied; error.outcome = outcome;', to: "error.applied = true; error.outcome = 'committed';" },
     { id: '已回滚误报未执行', expect: '重建中途 DDL 失败', from: 'error.applied = applied; error.outcome = outcome;', to: "error.applied = applied; error.outcome = 'not_started';" },
     { id: '未知结构冒认当前版', expect: '未知结构 / 额外触发器', from: 'KNOWN.find((r) => r.digest === digest)', to: 'KNOWN[5]' },
@@ -21,7 +25,7 @@ module.exports = [
     { id: '跳过旧快照兼容检查', expect: 'C8旧快照预留字段', from: 'known && known.version === VERSION && !blocked.length ? await compatibilityOf(db)', to: 'false ? await compatibilityOf(db)' },
     { id: '待确认包缺材料冻结也放行', expect: 'C8材料与内容包冻结检查', from: "if (version.status !== 'draft') await materialReader.assertMaterialFreezes", to: 'if (false) await materialReader.assertMaterialFreezes' },
     { id: '兼容检查允许写SQL', expect: '兼容读取助手', from: "if (!/^\\s*SELECT\\b/i.test(sql))", to: 'if (false)' },
-    { id: '备份结构不一致也继续迁移', expect: '备份检出未知结构', from: 'if (copied.blocked.length || copied.digest !== before.digest || JSON.stringify(copied.counts) !== JSON.stringify(before.counts))', to: 'if (false)' },
+    { id: '备份结构不一致也继续迁移', expect: '备份检出未知结构', from: 'if (copied.blocked.length || JSON.stringify(copied) !== JSON.stringify(before))', to: 'if (false)' },
     { id: '提交确认丢失却声称未迁移', expect: '提交确认丢失', from: "applied = null; outcome = 'unknown';", to: "applied = false; outcome = 'rolled_back';" },
     { id: '提交后关闭失败误报未迁移', expect: '提交后关闭失败', from: "failure('CONNECTION_CLOSE_FAILED', '数据库连接关闭未确认，请按账本和回执核对'), { applied, outcome, backup }", to: "failure('CONNECTION_CLOSE_FAILED', '数据库连接关闭未确认，请按账本和回执核对'), { applied: false, outcome, backup }" },
     { id: '部署步骤目标版本未批准也执行', file: 'deploy-prestart.cjs', expect: '部署前步骤：未批准目标', from: 'options.toVersion !== core.VERSION', to: 'false' },

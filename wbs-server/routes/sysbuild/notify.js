@@ -25,14 +25,11 @@ const rules = require('./rules');
 const { makeError } = require('./db');
 const { writeEvent } = require('./events');
 const core = require('./confirm-core');
-const entriesCore = require('./entries-core');
-const goliveCore = require('./golive-core');
 const notifyCore = require('./notify-core');
 const notifySchedule = require('./notify-schedule');
-const membership = require('./membership'); // 修订批 2（M2）：邀请 / 授权的「可操作」判定与站内入口共用
 const reports = require('./report-core');
 const { reportRecipientsOf } = require('./report-recipients');
-const { devAssessmentOf } = require('./submission-scope');
+const workNotify = require('./work-notify');
 
 const { PURPOSES, REF_TYPES, ROUTES } = notifyCore;
 const SYSTEM_OPERATOR = Object.freeze({ id: 0, display_name: '系统' }); // schema.js 约定②：系统操作人名一律「系统」
@@ -46,9 +43,9 @@ const KIND_TITLES = Object.freeze({
   [PURPOSES.CONFIRM_REQUEST]: '待确认',
   [PURPOSES.CONFIRM_REISSUE]: '待确认（已改发给您）',
   [PURPOSES.DECISION_OBJECTED]: '确认被提出异议或不认可',
-  [PURPOSES.INVITATION]: '项目邀请',
-  [PURPOSES.DELEGATION_ACCEPT]: '授权待接受',
   [PURPOSES.SCHEDULE_NOTICE]: '改期知会',
+  [PURPOSES.LEADER_CONFIRMATION_NOTICE]: '确认发起知悉',
+  ...workNotify.TITLES,
 });
 const OWNER_TITLE = '【系统建设记录】有事项需要您处理';
 const OWNER_TEXT = '您有一项事项需要处理，请打开平台查看。';
@@ -64,7 +61,6 @@ const SYSTEMIC_APP_REASONS = Object.freeze(['rate_limit', 'no_scope']); // errco
 //   不再各写各的（原先抛异常分支只看网络类，限流 / 无权限被抛出时判成非系统性，补发 / 扫描不中止）。
 const isSystemicReason = (reason) => SYSTEMIC_NET_REASONS.includes(reason) || SYSTEMIC_APP_REASONS.includes(reason);
 
-const PROJECT_TERMINATED_FAIL = Object.freeze({ reason: 'project_terminated', error: '项目已终止，暂时无法发送（项目重开后补发 / 扫描会再试）' }); // P187：可恢复的失败（不是「无需发送」）
 const NO_ACCOUNT_STATE = Object.freeze({ ignoreAccountStatus: true }); // 修订批 3：发送前复核先不看账号状态（confirm-core.eligibleSqlOf / notify-schedule.scheduleNoticeObjectorFacts 的 o）
 const hasKey = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const invalid = (message, field) => Object.assign(makeError(400, 'SYSBUILD_INVALID_INPUT', message), field ? { field } : {});
@@ -109,31 +105,13 @@ function judgeChannelResponse(res, ctx) {
   return { ok: true, reason: 'ok', failReason: null, error: null, errcode: null, systemic: false, tokenExpired: false };
 }
 
-// 被有异议 / 不认可的修订是否仍待 PM 处理：它是任务的最新修订（没有改发，由调用方判），且被确认的对象还是「现行」（内容包版本仍待确认、条目没有新版本、登记没有新的结论类动作……）。
+// 被有异议 / 不认可的修订是否仍待 PM 处理：它是任务的最新修订（没有改发，由调用方判），且被确认的对象还是「现行」（内容包版本仍待确认）。
 //   待办 handle 类（revision_declined）与发送侧复核 decision_objected（describeRef）共用。row：{ object_type, object_id, object_version_id }。
 async function declinedStillOpen(q, row) {
   if (row.object_type === 'package_version') {
     const v = await q.get('SELECT status FROM sysbuild_package_versions WHERE id = ?', [row.object_version_id]);
     return !!v && v.status === 'pending';
   }
-  if (row.object_type === 'item_version') {
-    const m = await q.get('SELECT MAX(id) AS id FROM sysbuild_item_versions WHERE item_id = ?', [row.object_id]);
-    return !!m && m.id === row.object_version_id;
-  }
-  if (row.object_type === 'conclusion' || row.object_type === 'adjudication') {
-    const later = await q.get("SELECT id FROM sysbuild_entry_actions WHERE entry_id = ? AND id > ? AND action IN ('conclude', 'for_reference', 'void', 'escalate') LIMIT 1", [row.object_id, row.object_version_id]);
-    return !later;
-  }
-  if (row.object_type === 'dev_entry') {
-    // L8：开发方关键事项的认可被否后，PM 可以改登记（出新的登记 revision_of_entry_id）、也可以作废 / 把它办结——这三种都不再待处理
-    const re = await q.get('SELECT id FROM sysbuild_entries WHERE revision_of_entry_id = ? LIMIT 1', [row.object_id]);
-    if (re) return false;
-    const e = await q.get(`SELECT ${entriesCore.ENTRY_COLS} FROM sysbuild_entries WHERE id = ?`, [row.object_id]);
-    if (!e) return false;
-    const facts = await entriesCore.loadEntryFacts(q, e, { skipChildren: true });
-    return !entriesCore.entryResolved(facts.derived); // entryResolved = 已作废 / 有有效结论 / 拆分子项全部已结（单一「已结」口径）
-  }
-  if (row.object_type === 'handover') return goliveCore.fingerprintIsCurrent(q, row.object_id, row.object_version_id);
   return true;
 }
 
@@ -201,22 +179,10 @@ function createNotifier(opts) {
     return !!r;
   }
   async function revisionSummary(q, rev) {
-    const entryTitle = async () => {
-      const e = await q.get('SELECT title FROM sysbuild_entries WHERE id = ?', [rev.object_id]);
-      return e ? e.title : '（登记已不存在）';
-    };
     if (rev.object_type === 'package_version') {
       const v = await q.get('SELECT p.type AS type, v.version_no AS version_no FROM sysbuild_package_versions v JOIN sysbuild_packages p ON p.id = v.package_id WHERE v.id = ?', [rev.object_version_id]);
       return v ? `${rules.PACKAGE_TYPE_LABELS[v.type] || v.type}内容包第 ${v.version_no} 版待确认` : '内容包待确认';
     }
-    if (rev.object_type === 'item_version') {
-      const it = await q.get('SELECT it.code AS code FROM sysbuild_item_versions iv JOIN sysbuild_items it ON it.id = iv.item_id WHERE iv.id = ?', [rev.object_version_id]);
-      return it ? `需求条目 ${it.code} 待您确认` : '需求条目待您确认';
-    }
-    if (rev.object_type === 'conclusion') return `登记「${await entryTitle()}」的办理结论待确认`;
-    if (rev.object_type === 'adjudication') return `登记「${await entryTitle()}」待您裁定`;
-    if (rev.object_type === 'dev_entry') return `开发方关键事项「${await entryTitle()}」待认可`;
-    if (rev.object_type === 'handover') return `登记「${await entryTitle()}」的上线交接待确认`;
     return '有一项确认任务待处理';
   }
   // 意图引用的业务对象：返回 { skip（无需发送的原因，空 = 要发）, summary, route }。
@@ -227,7 +193,49 @@ function createNotifier(opts) {
   //   通用 = 账号存在且 active（loadIntentData）。邀请 / 授权仍按被引用对象的状态判。user：收件人账号行（可空，空时由 sendOne 报 no_user）。
   //   修订批 3（预筛 MED-B）：本函数**一律不把账号状态并进判定**（NO_ACCOUNT_STATE：确认类的资格复核、改期知会的「现任负责人」都传 ignoreAccountStatus），先按永久失格条件判跳过；
   //   账号停用是可恢复的，由 loadIntentData 在「没有任何永久失格」之后才记 failed（user_disabled）。返回 { skip（永久失格，无需发送）| fail: { reason, error }（可恢复，记 failed）| 要发 }。
+  async function describeLeaderConfirmation(q, intent) {
+    const pid = intent.project_id;
+    const route = ROUTES.project(pid);
+    const skip = (reason) => ({ skip: reason, summary: '', route });
+    if (intent.ref_type !== REF_TYPES.REVISION) return skip('确认发起知悉的引用对象不符');
+    const submitted = await q.get(
+      `SELECT t.party_id, t.object_version_id, t.object_id, p.type, v.status, pr.status AS project_status
+         FROM sysbuild_confirm_task_revisions r
+         JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
+         JOIN sysbuild_package_versions v ON v.id = t.object_version_id AND v.package_id = t.object_id
+         JOIN sysbuild_packages p ON p.id = v.package_id AND p.project_id = t.project_id
+         JOIN sysbuild_projects pr ON pr.id = p.project_id
+         JOIN sysbuild_parties d ON d.id = t.party_id AND d.project_id = p.project_id AND d.side = 'demand'
+         JOIN sysbuild_delegations a ON a.id = r.basis_delegation_id AND a.party_id = d.id AND a.member_id = r.required_member_id
+         JOIN sysbuild_members m ON m.id = r.required_member_id AND m.project_id = p.project_id AND m.party_id = d.id
+        WHERE r.id = ? AND t.project_id = ? AND t.object_type = 'package_version' AND t.purpose = 'package_confirm'
+          AND r.rev_no = 1 AND r.basis_appointment_id IS NULL AND m.user_id <> ?`,
+      [intent.ref_id, pid, intent.recipient_user_id]
+    );
+    if (!submitted || !Object.hasOwn(notifyCore.LEADER_CONFIRMATION_SUBJECTS, submitted.type)) return skip('确认发起知悉的提交对象不符');
+    if (submitted.status !== 'pending' && submitted.status !== 'effective') return skip('本次确认提交已失效');
+    // 意图引用首修订。改发后仍用它核对来源，提交有效性则看本版本的最新修订。
+    if (submitted.status === 'pending') {
+      if (submitted.project_status === 'terminated') return skip('项目已终止，本次确认提交已失效');
+      const invalid = await q.get(
+        `SELECT 1 AS invalid FROM sysbuild_confirm_tasks t
+          WHERE t.project_id = ? AND t.object_type = 'package_version' AND t.purpose = 'package_confirm'
+            AND t.object_id = ? AND t.object_version_id = ?
+            AND COALESCE((SELECT r.status FROM sysbuild_confirm_task_revisions r WHERE r.task_id = t.id ORDER BY r.rev_no DESC LIMIT 1), 'invalid') = 'invalid'
+          LIMIT 1`,
+        [pid, submitted.object_id, submitted.object_version_id]
+      );
+      if (invalid) return skip('本次确认提交已有失效任务');
+    }
+    const leader = await core.currentDemandLeaderUser(q, pid, submitted.party_id);
+    if (leader !== Number(intent.recipient_user_id)) return skip('收件人已不是该部门现任领导');
+    const subject = notifyCore.LEADER_CONFIRMATION_SUBJECTS[submitted.type];
+    return { skip: '', summary: `项目有一项${subject}确认已发起，由需求部门负责人确认，供知悉`, route };
+  }
+
   async function describeRef(q, intent, user) {
+    if (intent.purpose === PURPOSES.LEADER_CONFIRMATION_NOTICE) return describeLeaderConfirmation(q, intent);
+    if (workNotify.isWorkPurpose(intent.purpose)) return workNotify.describe(q, intent, user, opts.readonlyIds);
     const pid = intent.project_id;
     if (intent.ref_type === REF_TYPES.REVISION) {
       const rev = await q.get(
@@ -256,56 +264,11 @@ function createNotifier(opts) {
       const base = await revisionSummary(q, rev);
       return { skip: '', summary: intent.purpose === PURPOSES.DECISION_OBJECTED ? `有确认被提出异议或不认可：${base}` : base, route: ROUTES.confirm(pid, rev.id) };
     }
-    if (intent.ref_type === REF_TYPES.INVITATION) {
-      // M2（修订批 2）：邀请发送前复核——邀请仍待处理、被邀请成员行的账号就是收件人且未移出（加入邀请允许尚未加入）、项目未终止、
-      //   收件人此刻对这条邀请「可操作」（接受或拒绝，membership.invitationActionsOf，与 GET /my/invitations 的 actions、待办 accept 类同一个函数）。
-      //   成员移出 / 换负责人本身会级联撤回待处理的邀请与授权（membership.cascadeMemberRemoval / endAppointment），这里是纵深防御：级联漏掉的、或收件人账号与意图不符的也不外发。
-      const inv = await q.get(`${membership.INVITATION_SELECT} WHERE i.id = ?`, [intent.ref_id]);
-      if (!inv) return { skip: '邀请已不存在', summary: '', route: ROUTES.project(pid) };
-      const skipWith = (why) => ({ skip: why, summary: '', route: ROUTES.invitation(pid, inv.id) });
-      if (inv.status !== 'pending') return skipWith('邀请已处理');
-      if (inv.user_id === null || inv.user_id === undefined || Number(inv.user_id) !== Number(intent.recipient_user_id)) return skipWith('被邀请人的账号与邀请不符');
-      if (inv.removed_at !== null) return skipWith('被邀请人已被移出本项目');
-      if (inv.project_status === 'terminated') {
-        // P187（修订批 3）：项目终止是可恢复的（管理员可以重开），待处理的邀请重开后仍有效——记 failed（可恢复，重开后补发 / 扫描能送出），不记「无需发送」终态。
-        //   但终止之外的永久失格仍要先排除：把项目状态换成 active 再问一次「可操作」，仍不可操作 = 终止之外另有原因（邀请人失权、任职已变等）→ 跳过。
-        if (user) {
-          const act = await membership.invitationActionsOf(q, user, Object.assign({}, inv, { project_status: 'active' }), accessOpts());
-          if (!act.accept && !act.decline) return skipWith('收件人此刻不能处理这条邀请');
-        }
-        return { fail: PROJECT_TERMINATED_FAIL, summary: '', route: ROUTES.invitation(pid, inv.id) };
-      }
-      if (user) {
-        const act = await membership.invitationActionsOf(q, user, inv, accessOpts());
-        if (!act.accept && !act.decline) return skipWith('收件人此刻不能处理这条邀请');
-      }
-      return { skip: '', summary: inv.kind === 'join' ? '邀请您加入本项目' : '提议您担任参与方负责人', route: ROUTES.invitation(pid, inv.id) };
-    }
-    if (intent.ref_type === REF_TYPES.DELEGATION) {
-      const d = await q.get(`${membership.DELEGATION_ITEM_SELECT} WHERE d.id = ?`, [intent.ref_id]);
-      if (!d) return { skip: '授权已不存在', summary: '', route: ROUTES.project(pid) };
-      const skipWith = (why) => ({ skip: why, summary: '', route: ROUTES.delegation(pid, d.id) });
-      if (d.status !== 'pending_accept') return skipWith('授权已不在待接受状态');
-      if (d.user_id === null || d.user_id === undefined || Number(d.user_id) !== Number(intent.recipient_user_id)) return skipWith('被授权人的账号与授权不符');
-      if (d.removed_at !== null) return skipWith('被授权人已被移出本项目');
-      if (d.project_status === 'terminated') {
-        if (user) {
-          const act = await membership.delegationActionsOf(q, user, Object.assign({}, d, { project_status: 'active' }), accessOpts());
-          if (!act.accept && !act.decline) return skipWith('收件人此刻不能处理这条授权');
-        }
-        return { fail: PROJECT_TERMINATED_FAIL, summary: '', route: ROUTES.delegation(pid, d.id) };
-      }
-      if (user) {
-        const act = await membership.delegationActionsOf(q, user, d, accessOpts());
-        if (!act.accept && !act.decline) return skipWith('收件人此刻不能处理这条授权');
-      }
-      return { skip: '', summary: '授权您担任参与方代表人，等待您接受', route: ROUTES.delegation(pid, d.id) };
-    }
     if (intent.ref_type === REF_TYPES.NOTICE) {
       const n = await q.get('SELECT id, kind, recipient_member_id FROM sysbuild_notices WHERE id = ?', [intent.ref_id]);
       if (!n) return { skip: '知会已不存在', summary: '', route: ROUTES.project(pid) };
       if (intent.purpose === PURPOSES.SCHEDULE_NOTICE) {
-        // K1：改期知会只发给「此刻仍是该参与方现任负责人」的接收人本人（与知会异议资格同一份事实 notify-schedule.scheduleNoticeObjectorFacts）
+        // K1：改期知会只发给「此刻仍是该参与方现任负责人」的接收人本人（读 notify-schedule.scheduleNoticeObjectorFacts：函数名是知会异议时代的旧名，C6 起只剩接收人「仍是现任负责人」这份事实）
         const skipWith = (why) => ({ skip: why, summary: '', route: ROUTES.notice(pid, n.id) });
         const mem = await q.get('SELECT removed_at, joined_at FROM sysbuild_members WHERE id = ?', [n.recipient_member_id]);
         if (!mem || mem.removed_at !== null || mem.joined_at === null) return skipWith('接收人已不是本项目成员');
@@ -315,7 +278,7 @@ function createNotifier(opts) {
       }
       return { skip: '', summary: '正式上线里程碑的计划日期推后，请查看改期知会', route: ROUTES.notice(pid, n.id) };
     }
-    return { skip: '', summary: '', route: ROUTES.project(pid) };
+    return { skip: '该通知对象已停用', summary: '', route: ROUTES.project(pid) };
   }
   async function loadIntentData(q, id) {
     const intent = await q.get('SELECT id, project_id, purpose, ref_type, ref_id, recipient_user_id, channel, status, attempts FROM sysbuild_send_intents WHERE id = ?', [id]);
@@ -325,13 +288,12 @@ function createNotifier(opts) {
     // K1 通用：收件人账号已停用（status 不是 active）→ 不外发。P186（修订批 2）：账号停用是可恢复的条件，记 failed（可被补发 / 扫描在账号恢复后重试），不记「无需发送」终态。
     //   修订批 3（预筛 MED-B）：先按与账号状态无关的条件复核（describeRef，永久失格 → skip），全部满足、**只是**账号停用才记 failed：
     //   否则「停用 + 已移出 / 已确认 / 已改发 / 前任 PM / 知会接收人移出」会被记成可恢复的失败，账号一恢复就外发过期通知（探针 probe_disabled_combo X1–X5）。
-    //   可恢复的失败共两种：账号停用（user_disabled）、项目已终止的邀请 / 授权（project_terminated，P187，describeRef 返回 fail）；同时出现时取 describeRef 的（项目终止）。
+    // 账号停用且仍具备其他接收资格时记可恢复失败，账号恢复后可补发。
     const disabled = !!user && user.status !== 'active';
-    const ref = await describeRef(q, intent, user || null);
+    const ref = notifyCore.PURPOSE_LIST.includes(intent.purpose) ? await describeRef(q, intent, user || null) : { skip: '该通知用途已停用', summary: '', route: ROUTES.project(intent.project_id) };
     let failWith = null;
     if (!ref.skip) {
-      if (ref.fail) failWith = ref.fail;
-      else if (disabled) failWith = { reason: 'user_disabled', error: '收件人账号已停用，暂时无法发送（账号恢复后补发 / 扫描会再试）' };
+      if (disabled) failWith = { reason: 'user_disabled', error: '收件人账号已停用，暂时无法发送（账号恢复后补发 / 扫描会再试）' };
     }
     return {
       intent, user: user || null, systemName: project ? project.system_name : '',
@@ -343,6 +305,14 @@ function createNotifier(opts) {
   // 消息：markdown 标题 + 一句摘要 + 「打开确认」链接（platform_base_url + 页面路由）；收件人是需求部门负责人时只给固定文案 + 链接（§9.2）。
   function buildMessage(data, baseUrl) {
     const link = `${baseUrl}${data.route}`;
+    if (data.intent.purpose === PURPOSES.LEADER_CONFIRMATION_NOTICE) {
+      const title = `【系统建设记录】${KIND_TITLES[data.intent.purpose]}`;
+      return { title, text: `### ${title}\n\n${escapeMd(data.summary)}\n\n[查看项目](${link})`, link };
+    }
+    if (workNotify.isWorkPurpose(data.intent.purpose)) {
+      const title = `【系统建设记录】${KIND_TITLES[data.intent.purpose]}`;
+      return { title, text: `### ${title}\n\n${escapeMd(data.summary)}\n\n[查看意见](${link})`, link };
+    }
     if (data.ownerRecipient && data.intent.purpose === PURPOSES.SCHEDULE_NOTICE) {
       // L7：改期知会的收件人是需求部门现任负责人，只给固定文案 + 链接；用知会口吻，与「有事项需要您处理」的确认类固定文案区分
       return { title: NOTICE_OWNER_TITLE, text: `### ${NOTICE_OWNER_TITLE}\n\n${NOTICE_OWNER_TEXT}\n\n[${NOTICE_LINK_LABEL}](${link})`, link };
@@ -660,7 +630,7 @@ function createNotifier(opts) {
 
 // ── 端点：PM 补发 / 发送意图列表 / 我的待办 ─────────────────────────────────────────────────────────────────────
 function createNotifyRoutes(ctx) {
-  for (const k of ['db', 'logger', 'notifier', 'myConfirmationItems', 'myNoticeItems', 'myInvitationItems']) {
+  for (const k of ['db', 'logger', 'notifier', 'myConfirmationItems']) {
     if (ctx[k] === undefined) throw new Error('routes/sysbuild/notify 缺参数: ' + k);
   }
   if (!(Array.isArray(ctx.readonlyIds) || ctx.readonlyIds instanceof Set)) throw new Error('routes/sysbuild/notify 参数 readonlyIds 必须是数组或 Set');
@@ -719,7 +689,7 @@ function createNotifyRoutes(ctx) {
           WHERE i.project_id = ? AND (? IS NULL OR i.status = ?) ORDER BY i.id DESC`,
         [pid, status, status]
       );
-      return { project_id: pid, items: rows, failed_count: await notifyCore.failedIntentCount(q, pid), needs_offline_count: await notifyCore.needsOfflineCount(q, pid), offline_items: await notifyCore.needsOfflineItems(q, pid), actions: { resend: true } };
+      return { project_id: pid, items: rows, failed_count: await notifyCore.failedIntentCount(q, pid), actions: { resend: true } };
     });
     res.json(out);
   }));
@@ -741,160 +711,98 @@ function createNotifyRoutes(ctx) {
 
   // ── GET /sysbuild/my/todo：我的待办（全部从现有数据派生，不建通知表，§9.1）──────────────────────────────────
   //   返回 { counts, items }，items 是 { 类别: [...] }（每类最多 TODO_ITEM_CAP 条，counts 是全量）。类别与数据源：
-  //   confirm = myConfirmationItems（与 GET /my/confirmations 同源，计数即顶部角标）；handle（PM 所担任项目）= 未办结的办理类登记（含补充登记）+ 被有异议 / 不认可且 PM 尚未改发或出新版本的修订；
-  //   routing = 待判定的登记（PM 看所担任项目的全部，其他成员只看本人登记的，与 entries ?routing=pending 同口径）；notice = myNoticeItems 里 actions.object 为真（仍可提异议）的知会（P182）；
-  //   accept = 待我接受的邀请与授权（myInvitationItems，与 GET /my/invitations 同源，P183），counts.badge = confirm + accept；
-  //   objection（PM）= 改期知会异议（转 PM）；send_failed（PM）= 补发能处理的发送失败（失败的意图 / 待发送超时的 pending）；needs_offline（PM，P188）= 须线下通知的（无账号负责人的改期知会，补发处理不了，与项目视图同口径）；overdue（PM，P154）= 所担任项目内创建超过 OVERDUE_DAYS 天仍待确认的修订。
-  //   已终止 / 已结项的项目：confirm 照「待我确认」现有过滤（C4a / C5 P81 口径）；其余类别不按项目状态过滤。读接口不写浏览记录。
-  //   修订批 1：handle 类的「未办结登记」取数是 entries-core.unresolvedProcessEntriesOf(q, pid, { anyPeriod: true, rows: true })（L9：与节点收口前置共用同一个循环体，不复制）；
+  //   confirm = myConfirmationItems（与 GET /my/confirmations 同源，计数即顶部角标）；handle（PM 所担任项目）= 被有异议 / 不认可且 PM 尚未改发或出新版本的修订；
+  //   send_failed（PM）= 补发能处理的发送失败（失败的意图 / 待发送超时的 pending）；overdue（PM，P154）= 所担任项目内创建超过 OVERDUE_DAYS 天仍待确认的修订；
+  //   report_due / report_overdue = 进度汇报应交 / 逾期。已终止 / 已结项的项目：confirm 照「待我确认」现有过滤（C4a / C5 P81 口径）；其余类别不按项目状态过滤。读接口不写浏览记录。
   //   declinedStillOpen 在本文件顶部（模块级），发送侧复核 decision_objected 也调它。
-  router.get('/sysbuild/my/todo', handle(async (req, res) => {
-    const user = req.user;
+  async function todoFor(q, user, uncapped = false) {
     const uid = Number(user.id);
-    const out = await db.withRead(async (q) => {
-      const cap = (arr) => arr.slice(0, TODO_ITEM_CAP);
-      const items = { confirm: [], accept: [], handle: [], routing: [], notice: [], objection: [], send_failed: [], needs_offline: [], overdue: [] };
-      const counts = { confirm: 0, accept: 0, handle: 0, routing: 0, notice: 0, objection: 0, send_failed: 0, needs_offline: 0, overdue: 0 };
+    const cap = (arr) => uncapped ? arr : arr.slice(0, TODO_ITEM_CAP);
+    const items = { confirm: [], handle: [], send_failed: [], overdue: [] };
+    const counts = { confirm: 0, handle: 0, send_failed: 0, overdue: 0 };
 
-      const confirms = await ctx.myConfirmationItems(q, user);
-      counts.confirm = confirms.length;
-      items.confirm = cap(confirms);
+    const confirms = await ctx.myConfirmationItems(q, user);
+    counts.confirm = confirms.length;
+    items.confirm = cap(confirms);
 
-      // P183：accept = 待我接受的邀请与授权（GET /my/invitations 同源 myInvitationItems）；顶部角标 counts.badge = confirm + accept
-      const inv = await ctx.myInvitationItems(q, user);
-      //   kind = invitation / delegation（邀请视图自带的 kind = join / appointment 改放 invitation_kind，免得被覆盖）
-      //   P185（修订批 2）：只计「此刻可操作」的（actions.accept 或 actions.decline 为真，与 GET /my/invitations 每条的 actions 同一个判定）——已终止项目里待处理的邀请 / 授权、邀请人失权后接受不了也拒绝不了的等不进待办和角标
-      const actionable = (i) => !!i.actions && (i.actions.accept === true || i.actions.decline === true);
-      const accepts = inv.invitations.filter(actionable).map((i) => Object.assign({}, i, { kind: 'invitation', invitation_kind: i.kind })).concat(inv.delegations.filter(actionable).map((d) => Object.assign({}, d, { kind: 'delegation' })));
-      counts.accept = accepts.length;
-      items.accept = cap(accepts);
-
-      // P182：notice 只列「仍可提异议」的知会（actions.object === true，与 GET /my/notices 每条的 actions.object 同一个判定）——不再列已不能异议、或没有处理手段的知会
-      const notices = (await ctx.myNoticeItems(q, user)).filter((i) => i.actions && i.actions.object === true);
-      counts.notice = notices.length;
-      items.notice = cap(notices);
-
-      // 我所担任 PM 的项目（含各状态）；非只读限制只作用于写，这里是读
-      //   项目按编号从新到旧（每类超过 50 条时，截断保留较新项目的条目；counts 仍是全量）
-      const pmProjects = await q.all('SELECT id, system_name, status FROM sysbuild_projects WHERE pm_user_id = ? ORDER BY id DESC', [uid]);
-      const handle = [];
-      const objection = [];
-      const sendFailed = [];
-      const needsOffline = [];
-      const overdue = [];
-      for (const p of pmProjects) {
-        for (const e of await entriesCore.unresolvedProcessEntriesOf(q, p.id, { anyPeriod: true, rows: true })) {
-          handle.push({ kind: 'entry_unresolved', project_id: p.id, system_name: p.system_name, entry_id: e.id, title: e.title, node_id: e.node_id, created_at: e.created_at });
-        }
-        const declined = await q.all(
-          `SELECT r.id AS revision_id, r.status AS status, r.updated_at AS decided_at, t.id AS task_id, t.object_type AS object_type, t.object_id AS object_id, t.object_version_id AS object_version_id, t.purpose AS purpose
-             FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
-            WHERE t.project_id = ? AND r.status IN ('objected', 'rejected')
-              AND r.rev_no = (SELECT MAX(r2.rev_no) FROM sysbuild_confirm_task_revisions r2 WHERE r2.task_id = t.id)
-            ORDER BY r.id`,
-          [p.id]
-        );
-        for (const d of declined) {
-          if (!(await declinedStillOpen(q, d))) continue;
-          handle.push({
-            kind: 'revision_declined', project_id: p.id, system_name: p.system_name, task_id: d.task_id, revision_id: d.revision_id, status: d.status,
-            purpose: d.purpose, object_type: d.object_type, object_id: d.object_id, decided_at: d.decided_at,
-          });
-        }
-        const objs = await q.all(
-          `SELECT o.id AS objection_id, o.notice_id AS notice_id, o.reason AS reason, o.created_at AS created_at, n.ref_id AS record_id
-             FROM sysbuild_notice_objections o JOIN sysbuild_notices n ON n.id = o.notice_id WHERE n.project_id = ? AND o.mode = 'to_pm' ORDER BY o.id DESC`,
-          [p.id]
-        );
-        for (const o of objs) objection.push({ project_id: p.id, system_name: p.system_name, objection_id: o.objection_id, notice_id: o.notice_id, record_id: o.record_id, reason: o.reason, created_at: o.created_at });
-        // send_failed：失败的发送意图 + 待发送超时的 pending（L3），补发能处理的；needs_offline：没有发送意图、最后一次尝试失败的改期知会（K2 / P184：负责人没有平台账号，须线下通知，补发处理不了）。
-        //   P188（修订批 3）：两类拆开计数与列条目，口径与项目视图的 notify.send_failed / notify.needs_offline 同一份（notify-core.failedSendItems / failedIntentCount、needsOfflineItems / needsOfflineCount）。
-        for (const f of await notifyCore.failedSendItems(q, p.id)) sendFailed.push(Object.assign({ project_id: p.id, system_name: p.system_name }, f));
-        for (const f of await notifyCore.needsOfflineItems(q, p.id)) needsOffline.push(Object.assign({ project_id: p.id, system_name: p.system_name }, f));
-        const late = await q.all(
-          `SELECT r.id AS revision_id, r.created_at AS created_at, t.id AS task_id, t.purpose AS purpose, t.object_type AS object_type, t.object_id AS object_id
-             FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
-            WHERE t.project_id = ? AND r.status = 'pending' AND r.created_at <= datetime('now','localtime', ?) ORDER BY r.id`,
-          [p.id, `-${notifyCore.OVERDUE_DAYS} days`]
-        );
-        for (const l of late) overdue.push({ project_id: p.id, system_name: p.system_name, task_id: l.task_id, revision_id: l.revision_id, purpose: l.purpose, object_type: l.object_type, object_id: l.object_id, created_at: l.created_at });
-      }
-      counts.handle = handle.length; items.handle = cap(handle);
-      counts.objection = objection.length; items.objection = cap(objection);
-      counts.send_failed = sendFailed.length; items.send_failed = cap(sendFailed);
-      counts.needs_offline = needsOffline.length; items.needs_offline = cap(needsOffline);
-      counts.overdue = overdue.length; items.overdue = cap(overdue);
-
-      // 待判定：PM 看所担任项目的全部，其他成员只看本人登记的（项目可见 = PM 或已加入未移出的成员）
-      const visible = await q.all(
-        `SELECT p.id AS id, p.system_name AS system_name, p.pm_user_id AS pm_user_id FROM sysbuild_projects p
-          WHERE p.pm_user_id = ? OR EXISTS (SELECT 1 FROM sysbuild_members m WHERE m.project_id = p.id AND m.user_id = ? AND ${rules.MEMBER_ACTIVE_SQL}) ORDER BY p.id DESC`,
-        [uid, uid]
+    // 我所担任 PM 的项目（含各状态）；非只读限制只作用于写，这里是读
+    //   项目按编号从新到旧（每类超过 50 条时，截断保留较新项目的条目；counts 仍是全量）
+    const pmProjects = await q.all('SELECT id, system_name, status FROM sysbuild_projects WHERE pm_user_id = ? ORDER BY id DESC', [uid]);
+    const handle = [];
+    const sendFailed = [];
+    const overdue = [];
+    for (const p of pmProjects) {
+      const declined = await q.all(
+        `SELECT r.id AS revision_id, r.status AS status, r.updated_at AS decided_at, t.id AS task_id, t.object_type AS object_type, t.object_id AS object_id, t.object_version_id AS object_version_id, t.purpose AS purpose
+           FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
+          WHERE t.project_id = ? AND r.status IN ('objected', 'rejected')
+            AND r.rev_no = (SELECT MAX(r2.rev_no) FROM sysbuild_confirm_task_revisions r2 WHERE r2.task_id = t.id)
+          ORDER BY r.id`,
+        [p.id]
       );
-      const routing = [];
-      for (const p of visible) {
-        const isPm = Number(p.pm_user_id) === uid;
-        const rows = await q.all(
-          `SELECT ${entriesCore.ENTRY_COLS} FROM sysbuild_entries
-            WHERE project_id = ? AND (SELECT s.route FROM sysbuild_routing_snapshots s WHERE s.entry_id = sysbuild_entries.id ORDER BY s.id DESC LIMIT 1) = 'pending' ORDER BY id DESC`,
-          [p.id]
-        );
-        for (const e of rows) {
-          if (!isPm && Number(e.operator_user_id) !== uid) continue;
-          const facts = await entriesCore.loadEntryFacts(q, e);
-          if (entriesCore.entryResolved(facts.derived)) continue;
-          if (facts.routing === null || facts.routing.route !== 'pending') continue;
-          routing.push({ project_id: p.id, system_name: p.system_name, entry_id: e.id, title: e.title, node_id: e.node_id, created_at: e.created_at });
-        }
+      for (const d of declined) {
+        if (!(await declinedStillOpen(q, d))) continue;
+        handle.push({
+          kind: 'revision_declined', project_id: p.id, system_name: p.system_name, task_id: d.task_id, revision_id: d.revision_id, status: d.status,
+          purpose: d.purpose, object_type: d.object_type, object_id: d.object_id, decided_at: d.decided_at,
+        });
       }
-      counts.routing = routing.length; items.routing = cap(routing);
-      const reportDue = [];
-      const reportOverdue = [];
-      const changeAssess = [];
-      const today = reports.todayOf(ctx.todayProvider);
-      for (const p of visible) {
-        const isPm = Number(p.pm_user_id) === uid;
-        const recipients = await reportRecipientsOf(q, p.id);
-        if (isPm || recipients.due.includes(uid)) {
-          const batches = await q.all('SELECT id FROM sysbuild_batches WHERE project_id = ? ORDER BY id', [p.id]);
-          for (const batch of batches) {
-            const node = await reports.developmentNodeOf(q, batch.id);
-            if (!node) continue;
-            const due = await reports.dueDatesOf(q, node, reports.addDays(today, 2), () => today);
-            for (const item of due) {
-              if (item.submitted) continue;
-              const base = { project_id: p.id, system_name: p.system_name, node_id: node.id, node_name: node.name, ...item, message: `${node.name}：${item.due_on} 应交进度汇报` };
-              if (recipients.due.includes(uid)) reportDue.push({ ...base, kind: 'report_due' });
-              if (isPm && item.overdue) reportOverdue.push({ ...base, kind: 'report_overdue' });
-            }
-          }
-        }
-        if (isPm || recipients.assessment.includes(uid)) {
-          const changes = await q.all("SELECT id, title, package_id FROM sysbuild_changes WHERE project_id = ? AND status = 'draft' ORDER BY id DESC", [p.id]);
-          for (const change of changes) {
-            const ver = await q.get("SELECT * FROM sysbuild_package_versions WHERE package_id = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", [change.package_id]);
-            if (!ver) continue;
-            const pkg = await q.get('SELECT id, project_id, batch_id, type FROM sysbuild_packages WHERE id = ?', [change.package_id]);
-            const assessment = await devAssessmentOf(q, pkg, ver);
-            if (!['none', 'not_approved', 'stale', 'dev_lead_vacant', 'unknown'].includes(assessment.fact)) continue;
-            const toPm = ['dev_lead_vacant', 'unknown'].includes(assessment.fact);
-            if (!(toPm ? isPm : recipients.assessment.includes(uid))) continue;
-            const messages = { none: '请登记开发评估', not_approved: '最新一份开发评估尚未获开发方负责人认可', stale: '送审内容已变化，请重新登记开发评估', dev_lead_vacant: '开发方当前没有负责人，请先补任', unknown: '有一条开发评估记录无法读取，请作废该登记或重新登记开发评估' };
-            changeAssess.push({ kind: 'change_assess', project_id: p.id, system_name: p.system_name, change_id: change.id, title: change.title, package_version_id: ver.id, fact: assessment.fact,
-              message: assessment.scopeRejection ? assessment.scopeRejection.message : messages[assessment.fact], ...(assessment.scopeRejection ? { scopeRejection: assessment.scopeRejection } : {}) });
+      // send_failed：失败的发送意图 + 待发送超时的 pending（L3），补发能处理的；口径与项目视图的 notify.send_failed 同一份（notify-core.failedSendItems / failedIntentCount）。
+      for (const f of await notifyCore.failedSendItems(q, p.id)) sendFailed.push(Object.assign({ project_id: p.id, system_name: p.system_name }, f));
+      const late = await q.all(
+        `SELECT r.id AS revision_id, r.created_at AS created_at, t.id AS task_id, t.purpose AS purpose, t.object_type AS object_type, t.object_id AS object_id
+           FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id
+          WHERE t.project_id = ? AND r.status = 'pending' AND r.created_at <= datetime('now','localtime', ?) ORDER BY r.id`,
+        [p.id, `-${notifyCore.OVERDUE_DAYS} days`]
+      );
+      for (const l of late) overdue.push({ project_id: p.id, system_name: p.system_name, task_id: l.task_id, revision_id: l.revision_id, purpose: l.purpose, object_type: l.object_type, object_id: l.object_id, created_at: l.created_at });
+    }
+    counts.handle = handle.length; items.handle = cap(handle);
+    counts.send_failed = sendFailed.length; items.send_failed = cap(sendFailed);
+    counts.overdue = overdue.length; items.overdue = cap(overdue);
+
+    // 可见项目（项目可见 = PM 或已加入未移出的成员）：下面进度汇报应交 / 逾期的循环用
+    const visible = await q.all(
+      `SELECT p.id AS id, p.system_name AS system_name, p.pm_user_id AS pm_user_id FROM sysbuild_projects p
+        WHERE p.pm_user_id = ? OR EXISTS (SELECT 1 FROM sysbuild_members m WHERE m.project_id = p.id AND m.user_id = ? AND ${rules.MEMBER_ACTIVE_SQL}) ORDER BY p.id DESC`,
+      [uid, uid]
+    );
+    const reportDue = [];
+    const reportOverdue = [];
+    const today = reports.todayOf(ctx.todayProvider);
+    for (const p of visible) {
+      const isPm = Number(p.pm_user_id) === uid;
+      const recipients = await reportRecipientsOf(q, p.id);
+      if (isPm || recipients.due.includes(uid)) {
+        const batches = await q.all('SELECT id FROM sysbuild_batches WHERE project_id = ? ORDER BY id', [p.id]);
+        for (const batch of batches) {
+          const node = await reports.developmentNodeOf(q, batch.id);
+          if (!node) continue;
+          const due = await reports.dueDatesOf(q, node, reports.addDays(today, 2), () => today);
+          for (const item of due) {
+            if (item.submitted) continue;
+            const base = { project_id: p.id, system_name: p.system_name, node_id: node.id, node_name: node.name, ...item, message: `${node.name}：${item.due_on} 应交进度汇报` };
+            if (recipients.due.includes(uid)) reportDue.push({ ...base, kind: 'report_due' });
+            if (isPm && item.overdue) reportOverdue.push({ ...base, kind: 'report_overdue' });
           }
         }
       }
-      counts.report_due = reportDue.length; items.report_due = cap(reportDue);
-      counts.report_overdue = reportOverdue.length; items.report_overdue = cap(reportOverdue);
-      counts.change_assess = changeAssess.length; items.change_assess = cap(changeAssess);
-      counts.badge = counts.confirm + counts.accept; // P183：顶部角标 = 待我确认 + 待我接受
-      return { counts, items };
-    });
-    res.json(out);
+    }
+    counts.report_due = reportDue.length; items.report_due = cap(reportDue);
+    counts.report_overdue = reportOverdue.length; items.report_overdue = cap(reportOverdue);
+    const workItems = await workNotify.myWork(q, user, accessOpts());
+    for (const [kind, rows] of Object.entries(workItems)) {
+      counts[kind] = rows.length;
+      items[kind] = cap(rows);
+    }
+    counts.badge = counts.confirm;
+    return { counts, items };
+  }
+  router.get('/sysbuild/my/todo', handle(async (req, res) => {
+    res.json(await db.withRead((q) => todoFor(q, req.user)));
   }));
 
-  return { router };
+  return { router, todoFor };
 }
 
 module.exports = { createNotifier, createNotifyRoutes, TODO_ITEM_CAP, RESEND_BATCH_CAP, scrub, normalizeBaseUrl };

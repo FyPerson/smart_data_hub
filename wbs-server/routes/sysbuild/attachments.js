@@ -25,7 +25,6 @@
 //   孤儿文件口径：磁盘上有文件、库里没有任何 file_name 等于它的行。出现原因是回读失败（模块故障 / 等锁超时 /
 //   结果异常）而保守保留，日志「孤儿文件待人工核对：<完整路径>」，按记录核对后人工处理。
 'use strict';
-const visibility = require('./membership-visibility');
 const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs');
@@ -481,8 +480,6 @@ function createAttachmentRoutes(ctx) {
       if (!att) throw rules.notFound();
       const access = await rules.loadProjectAccess(q, att.project_id, req.user, accessOpts());
       rules.assertCan(access, rules.canViewAttachments);
-      const identity = await rules.completeIdentity(q, access, req.user);
-      if (!(await visibility.attachmentVisible(q, identity, att.project_id, att.id))) throw rules.notFound();
       if (att.deleted_at) throw rules.notFound();
       if (att.masked_at && !access.isAdmin) throw makeError(403, 'SYSBUILD_ATTACHMENT_MASKED', '该附件已被遮蔽');
       return att;
@@ -529,10 +526,8 @@ function createAttachmentRoutes(ctx) {
       if (!att) throw rules.notFound();
       const access = await rules.loadProjectAccess(q, att.project_id, req.user, accessOpts());
       rules.assertCan(access, rules.canViewAttachments);
-      const identity = await rules.completeIdentity(q, access, req.user);
-      if (!(await visibility.attachmentVisible(q, identity, att.project_id, att.id))) throw rules.notFound();
       const frozen = await isAttachmentFrozen(q, aid);
-      const evidence = await q.get("SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event', 'golive_event') LIMIT 1", [aid]);
+      const evidence = await q.get("SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('schedule_record', 'golive_event', 'opinion_assessment') LIMIT 1", [aid]);
       const permitted = (can) => {
         try { rules.assertCan(access, can, { writeKind: 'attachment' }); return true; }
         catch (err) { if (err.status === 403 || err.status === 409) return false; throw err; }
@@ -603,15 +598,17 @@ function createAttachmentRoutes(ctx) {
       // 已删除放在权限检查之后：有权限的人重复删除得到 409，无权限的人始终是 404 / 403，不借此探测。
       if (att.deleted_at) throw makeError(409, 'SYSBUILD_STATE', '附件已删除');
       if (await isAttachmentFrozen(q, aid)) throw makeError(409, 'SYSBUILD_STATE', '附件已被确认版本引用，不能删除；如需隐藏请由项目经理遮蔽');
-      // C4b Q-S1 预筛 D1（不变量 9，同模式全扫 P59）：作为凭据绑定的附件——代录确认凭据（confirmation）、历史补录 / 历史事实导入凭据（history_import）、改期证据（schedule_record）——
-      //   与已冻结的一样不能普通软删除（凭据一删，确认 / 改期的依据就没了），受控遮蔽仍可用。
-      //   C4b Q-S2：历史补录窗口的开启 / 关闭 / 重开凭据以 owner_type = event 绑定（grep 核对：event 除这三个窗口动作外没有任何绑定用途），同属凭据，一并纳入。
-      //   L2：上线 / 撤销上线的 golive_event 绑定也是凭据；只允许遮蔽，不可普通删除。
+      // C4b Q-S1 预筛 D1（不变量 9，同模式全扫 P59）：作为凭据绑定的附件——改期证据（schedule_record）——
+      //   与已冻结的一样不能普通软删除（凭据一删，改期的依据就没了），受控遮蔽仍可用。
+      //   上线及开发评估截图同样保留凭据绑定，仍可受控遮蔽。
       const evidenceBound = await q.get(
-        "SELECT id FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event', 'golive_event') LIMIT 1",
+        "SELECT owner_type FROM sysbuild_attachment_bindings WHERE attachment_id = ? AND owner_type IN ('schedule_record', 'golive_event', 'opinion_assessment') LIMIT 1",
         [aid]
       );
-      if (evidenceBound) throw makeError(409, 'SYSBUILD_STATE', '附件已作为确认 / 改期凭据，不能删除；如需隐藏请由项目经理遮蔽');
+      if (evidenceBound) {
+        const kind = evidenceBound.owner_type === 'opinion_assessment' ? '开发评估' : '确认 / 改期';
+        throw makeError(409, 'SYSBUILD_STATE', `附件已作为${kind}凭据，不能删除；如需隐藏请由项目经理遮蔽`);
+      }
       const r = await q.run("UPDATE sysbuild_attachments SET deleted_at = datetime('now','localtime'), deleted_by = ? WHERE id = ? AND deleted_at IS NULL", [uid, aid]);
       if (r.changes === 0) throw makeError(409, 'SYSBUILD_STATE', '附件状态已变化，请刷新后重试');
       await writeEvent(q, {

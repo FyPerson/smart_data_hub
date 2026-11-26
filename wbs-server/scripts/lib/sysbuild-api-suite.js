@@ -11,7 +11,7 @@
 //                           且子进程实际跑的用例名集合与名单逐项全等）与空跑对照（无语义改动的变异必须被判「未判红」；对照不过则汇总行写「判定无效」）；
 //                           子集基线不绿的组，名下变异一律「不计为检出」；`--full` = 旧行为，每条变异跑全部用例（408 条时约 3.3 小时，C9 前跑一次；550 条时过滤模式实测 411–423 秒，`--full --mutations 408-549` 的 142 条 3136 秒）；
 //                           `--mutations 0,5,400-407`（MUTATIONS 下标，含端点）只跑被挑中的变异，可与过滤 / --full 组合；逐条输出行带 `#<下标>`。
-//                           下标方式只作快速定位用：展平数组由 membership / plan / items / confirm 几段依次展开，向较早的段追加变异会插到中间，「上一阶段总长度起的尾部区间」
+//                           下标方式只作快速定位用：展平数组由 membership / plan / packages / confirm 几段依次展开，向较早的段追加变异会插到中间，「上一阶段总长度起的尾部区间」
 //                           就不再是新增的那批（codex 20 号 M-1）。阶段补检一律按变异 id 名单：`--mutation-ids <JSON 文件>`（内容是 id 字符串数组），每个 id 必须在 MUTATIONS 中
 //                           存在且恰好出现一次，名单内不得重复，与 `--mutations` 互斥，可与 `--full` 组合；MUTATIONS 加载时校验 id 全局唯一，有重复列出并以退出码 1 结束。
 //                           expect 在两种模式共用的准备阶段统一校验（codex 20 号 L-1）：数组非空、每项为去首尾空白后非空的字符串、每项至少匹配一条基线用例；
@@ -42,6 +42,7 @@ const sqlite3 = require('sqlite3');
 const { spawn } = require('child_process');
 const { listenOnSafePort } = require('./listen-safe-port');
 const { makeDingDouble } = require('./sysbuild-api-suite-notify'); // C6b：进程内夹具的钉钉 / 配置替身
+const rec = require('./sysbuild-mut-record'); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@CASE / @@MUT 行
 
 let INPROC = false;
 let NO_KEEP = false;
@@ -112,10 +113,15 @@ async function makeInstanceHarness(fx) { // 调用方已 await fx.ready()（fx =
   if (roRows.length === 0) throw new Error(`实例库里没有 active 的只读账号（${READONLY_IDS.join(' / ')}）：无法验证只读否决`);
   // 普通用户：active、非 admin、不在只读名单。用例里的 PM 候选等都从这里取，而 viewer 不能建项也不能被指定为 PM（D1），
   //   所以先取写入角色（publisher / user）的用户，不够 11 位时把后面的 viewer 在实例库（一次性隔离副本，随 teardown 删除）里改成 user。
-  const plain = await sql.all(`SELECT id, role FROM users WHERE status = 'active' AND role <> 'admin' AND id NOT IN (${READONLY_IDS.join(',')}) ORDER BY CASE WHEN role IN ('publisher', 'user') THEN 0 ELSE 1 END, id LIMIT 14`, []);
+  const plain = await sql.all(`SELECT id, role FROM users WHERE status = 'active' AND role <> 'admin' AND id NOT IN (${READONLY_IDS.join(',')}) ORDER BY CASE WHEN role IN ('publisher', 'user') THEN 0 ELSE 1 END, id LIMIT 11`, []);
   if (plain.length < 11) throw new Error(`实例库里 active 的非 admin 普通用户不足 11 位（${plain.length}）`);
   for (const u of plain.slice(0, 11)) {
     if (u.role !== 'publisher' && u.role !== 'user') await sql.run("UPDATE users SET role = 'user' WHERE id = ?", [u.id]);
+  }
+  for (const role of ['leader', 'representative']) {
+    const name = `sysbuild-fixture-${process.pid}-${Date.now()}-${role}`;
+    const seeded = await sql.run("INSERT INTO users (username, password, display_name, role, status) VALUES (?, 'fixture-only', ?, 'user', 'active')", [name, name]);
+    plain.push({ id: seeded.lastID, role: 'user' });
   }
   const tokens = {};
   // C6b：写请求提交后，发送意图在事务外异步发送并回写（状态 / 事件）；轮询到「最近 20 秒内创建的 pending 意图」清零再把响应交给用例（信号 = 意图状态，不用固定 sleep；
@@ -163,13 +169,10 @@ async function makeInprocHarness() {
   const { createProjectRoutes } = require(path.join(MODULE_DIR, 'projects.js'));
   const { createMembershipRoutes } = require(path.join(MODULE_DIR, 'membership.js'));
   const { createPlanRoutes } = require(path.join(MODULE_DIR, 'plan.js'));
-  const { createItemRoutes } = require(path.join(MODULE_DIR, 'items.js'));
   const { createPackageRoutes } = require(path.join(MODULE_DIR, 'packages.js'));
   const { createConfirmRoutes } = require(path.join(MODULE_DIR, 'confirm.js'));
-  const { createHistoryRoutes } = require(path.join(MODULE_DIR, 'history.js'));
   const { createConfirmationSheetRoutes } = require(path.join(MODULE_DIR, 'confirmation-sheet.js'));
   const { createEntryRoutes } = require(path.join(MODULE_DIR, 'entries.js'));
-  const { createChangeRoutes } = require(path.join(MODULE_DIR, 'changes.js'));
   const { createGoliveRoutes } = require(path.join(MODULE_DIR, 'golive.js'));
   const { createNotifier, createNotifyRoutes } = require(path.join(MODULE_DIR, 'notify.js')); // C6b：通知（发送侧 + PM 补发 / 待办端点）
   // C8也验附件的读侧入口；路由和助手都取被测副本，不能让attachments.js变异跑到未变异的原件。
@@ -222,36 +225,36 @@ async function makeInprocHarness() {
   //   currentToday 可由用例往回拨 / 复原（H.setToday）：codex 17 号 M-1 的收口防御用例要构造「实际开始晚于收口日期」，只有注入的 todayProvider 能做到。
   // 固定注入日须与当前开发期的墙钟分离，并晚于SQL默认生成的任务创建日，避免日期变异偶然同值和跨日的代录下限冲突。
   let currentToday = '2090-11-15';
-  // C4b：代录端点（任职 / 授权 / 确认任务）绑定凭据附件用真实 attachments.js 的助手，外部确认日期上限用同一个注入的「今天」。
-  const membershipRoutes = createMembershipRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday });
+  // C4b：成员 / 任职 / 授权端点（membership）本身不用附件助手与注入日期；下面的计划端点才用真实 attachments.js 的助手，日期上限用同一个注入的「今天」。
+  const membershipRoutes = createMembershipRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'] });
   app.use('/api', membershipRoutes.router);
   const planRoutes = createPlanRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday });
   app.use('/api', planRoutes.router);
-  // C3b：模块 / 需求条目 / 内容包端点（条目登记与新版本沿用附件用真实 attachments.js 的绑定助手）
-  app.use('/api', createItemRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers }).router);
+  // C3b：内容包端点
   app.use('/api', createPackageRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'] }).router);
   app.use('/api', require(path.join(MODULE_DIR, 'materials.js')).createMaterialRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers }).router);
   // C4a：内容包提交确认 / 撤回、确认任务改发 / 浏览 / 决策、待我确认（提交时用真实 attachments.js 的冻结助手）
-  const confirmRoutes = createConfirmRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday });
+  const confirmRoutes = createConfirmRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers });
   app.use('/api', confirmRoutes.router);
-  // C4b Q-S2：历史补录窗口 / 历史补录 / 历史事实导入（复用 confirm 的条目集合重核与 plan 的收口取数；同一个「今天」注入）
-  app.use('/api', createHistoryRoutes({
-    db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday,
-    recheckOverallSet: confirmRoutes.recheckOverallSet, loadPlanData: planRoutes.loadPlanData,
-  }).router);
   // C4c R-S1：需求确认单导出（纯读，不需要附件助手与「今天」）
   app.use('/api', createConfirmationSheetRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'] }).router);
   // C5 S-S1a：登记与办理、知会与知会异议（写登记绑定附件、给结论冻结登记附件用真实 attachments.js 的助手；同一个注入的「今天」）
   const entryRoutes = createEntryRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday });
   app.use('/api', entryRoutes.router);
-  app.use('/api', createChangeRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers }).router);
+  app.use('/api', require(path.join(MODULE_DIR, 'work.js')).createWorkRoutes({
+    db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers,
+  }).router);
   // C6a：上线交接集合 / 交接确认发起 / 确认试运行结束 / 撤销上线（里程碑节点收口记的实际日期用同一个注入的「今天」）
   app.use('/api', createGoliveRoutes({ db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], attachmentHelpers, todayProvider: () => currentToday }).router);
   // C6b：PM 补发 / 发送意图列表、我的待办（待办的待我确认 / 知会两类读 confirm / entries 导出的同一取数函数）
-  app.use('/api', createNotifyRoutes({
+  const notifyRoutes = createNotifyRoutes({
     db, logger, readonlyIds: READONLY_IDS, writeRoles: ['admin', 'publisher', 'user'], notifier,
     todayProvider: () => currentToday,
-    myConfirmationItems: confirmRoutes.myConfirmationItems, myNoticeItems: entryRoutes.myNoticeItems, myInvitationItems: membershipRoutes.myInvitationItems,
+    myConfirmationItems: confirmRoutes.myConfirmationItems,
+  });
+  app.use('/api', notifyRoutes.router);
+  app.use('/api', require(path.join(MODULE_DIR, 'dashboard.js')).createDashboardRoutes({
+    db, logger, projectRoutes: routes, notifyRoutes, todayProvider: () => currentToday,
   }).router);
   // C8：仅夹具的可控读后交错；在第一次读锁释放后执行一次hook，验证任务GET二次锁内仍核修订。
   const readInterleaveKit = { install(fn) {
@@ -319,7 +322,7 @@ function assignUsers() {
   const p = W.plain;
   Object.assign(U, {
     admin: W.adminId, ro: W.roId,
-    pm: p[0], m1: p[1], m2: p[2], out: p[3], cand: p[4], cand2: p[5], own: p[6], del: p[7], x1: p[8], x2: p[9], x3: p[10], inactive: p[10], // inactive 只在单条用例里短暂置为停用再恢复，与 x3 不会同时使用
+    pm: p[0], m1: p[1], m2: p[2], out: p[3], cand: p[4], cand2: p[5], own: p[6], del: p[7], x1: p[8], x2: p[9], x3: p[10], inactive: p[10], fixtureLeader: p[11], fixtureRepresentative: p[12], // inactive 只在单条用例里短暂置为停用再恢复，与 x3 不会同时使用
   });
 }
 const api = (uid, method, urlPath, json) => H.call(uid, method, urlPath, json === undefined ? {} : { json });
@@ -331,7 +334,27 @@ function expectErr(r, status, code, label) {
   assert.strictEqual(r.status, status, `${label || ''} 状态码应为 ${status}，实际 ${r.status} ${String(r.text).slice(0, 200)}`);
   assert.ok(r.body && r.body.code === code, `${label || ''} code 应为 ${code}，实际 ${JSON.stringify(r.body)}`);
 }
-const GOOD = { system_name: '测试系统', build_type: 'inhouse' };
+const fixturePeople = () => ({ demand_parties: [{ name: '项目预置测试部门', leader_user_id: U.fixtureLeader, representative_user_id: U.fixtureRepresentative }] });
+const good = () => ({ system_name: '测试系统', build_type: 'inhouse', ...fixturePeople() });
+
+// Older behavior tests use separately seeded role facts. Exercise real project creation,
+// then remove only its known synthetic parties and roles before constructing those fixtures.
+async function createEmptyProjectFixture(uid, basics) {
+  const result = await api(uid, 'POST', '/sysbuild/projects', { ...basics, ...fixturePeople() });
+  assert.strictEqual(result.status, 201, result.text);
+  const pid = result.body.project.id;
+  const party = await sqlGet("SELECT id FROM sysbuild_parties WHERE project_id = ? AND name = '项目预置测试部门'", [pid]);
+  assert.ok(party);
+  const rows = await sqlGet("SELECT (SELECT id FROM sysbuild_appointments WHERE party_id = ?) AS appointment_id, (SELECT id FROM sysbuild_delegations WHERE party_id = ?) AS delegation_id", [party.id, party.id]);
+  assert.ok(rows.appointment_id && rows.delegation_id, '预置身份已通过建档事务生效');
+  await sqlRun("DELETE FROM sysbuild_events WHERE project_id = ? AND ((object_type = 'party' AND object_id = ?) OR (object_type = 'appointment' AND object_id = ?) OR (object_type = 'delegation' AND object_id = ?) OR (object_type = 'member' AND object_id IN (SELECT id FROM sysbuild_members WHERE project_id = ? AND party_id = ?)))",
+    [pid, party.id, rows.appointment_id, rows.delegation_id, pid, party.id]);
+  await sqlRun('DELETE FROM sysbuild_delegations WHERE id = ?', [rows.delegation_id]);
+  await sqlRun('DELETE FROM sysbuild_appointments WHERE id = ?', [rows.appointment_id]);
+  await sqlRun('DELETE FROM sysbuild_members WHERE project_id = ? AND party_id = ?', [pid, party.id]);
+  await sqlRun('DELETE FROM sysbuild_parties WHERE project_id = ? AND id = ?', [pid, party.id]);
+  return pid;
+}
 const eventsOf = (pid, type) => sqlAll('SELECT * FROM sysbuild_events WHERE project_id = ? AND event_type = ? ORDER BY id', [pid, type]);
 
 // 种子：直接写库造项目 / 成员 / 参与方 / 任职 / 授权（只用于读侧与规则断言）。
@@ -354,21 +377,15 @@ async function markProjectClosedFixture(pid) {
 }
 async function addMember(pid, uid, opt) {
   const o = opt || {};
+  if (Object.hasOwn(o, 'pending')) throw new Error('v8 成员夹具不能使用 pending 选项');
   const r = await sqlRun(
     'INSERT INTO sysbuild_members (project_id, party_id, user_id, joined_at, removed_at, removed_reason, added_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [pid, o.party || null, uid, o.pending ? null : '2026-10-01 10:00:00', o.removed ? '2026-10-02 10:00:00' : null, o.removed ? '离项' : null, W.adminId]
+    [pid, o.party || null, uid, '2026-10-01 10:00:00', o.removed ? '2026-10-02 10:00:00' : null, o.removed ? '离项' : null, W.adminId]
   );
   return r.lastID;
 }
 async function addParty(pid, name, side) {
   const r = await sqlRun('INSERT INTO sysbuild_parties (project_id, side, name, sort_order, created_by) VALUES (?, ?, ?, 0, ?)', [pid, side || 'demand', name, W.adminId]);
-  return r.lastID;
-}
-async function addInvitation(pid, memberId, kind, status, invitedBy, apptId) {
-  const r = await sqlRun(
-    'INSERT INTO sysbuild_invitations (project_id, member_id, kind, appointment_id, status, invited_by, responded_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [pid, memberId, kind, apptId || null, status, invitedBy, status === 'pending' ? null : '2026-10-05 10:00:00']
-  );
   return r.lastID;
 }
 async function addAppointment(partyId, memberId, status) {
@@ -384,7 +401,7 @@ async function addDelegation(partyId, memberId, appointmentId, status) {
 function defineCases() {
 // ── 建项 ─────────────────────────────────────────────────────────────────────────────
 test('建项：普通用户成功且自己是 PM；成员行已加入；事件 project_created / member_added 内容手写核对；空白被 trim、可空列缺省为 null', async () => {
-  const r = await api(U.pm, 'POST', '/sysbuild/projects', { system_name: '  新系统  ', phase_name: '一期', build_type: 'outsource', goal: '目标', oa_number: '12345', initiated_on: '2026-10-01' });
+  const r = await api(U.pm, 'POST', '/sysbuild/projects', { ...fixturePeople(), system_name: '  新系统  ', phase_name: '一期', build_type: 'outsource', goal: '目标', oa_number: '12345', initiated_on: '2026-10-01' });
   assert.strictEqual(r.status, 201, r.text);
   const p = r.body.project;
   assert.strictEqual(p.system_name, '新系统');
@@ -395,10 +412,10 @@ test('建项：普通用户成功且自己是 PM；成员行已加入；事件 p
   assert.strictEqual(p.initiated_on, '2026-10-01');
   assert.strictEqual(p.pm_user_id, U.pm);
   assert.strictEqual(p.status, 'active');
-  assert.strictEqual(p.history_window, 'never');
+  assert.ok(!Object.prototype.hasOwnProperty.call(p, 'history_window'), '读接口不再返回 history_window（#212 C2 删历史补录）');
   assert.strictEqual(r.body.actions.edit_basics, true);
   assert.ok(r.body.me.roles.includes('pm'));
-  const members = await sqlAll('SELECT * FROM sysbuild_members WHERE project_id = ?', [p.id]);
+  const members = await sqlAll('SELECT * FROM sysbuild_members WHERE project_id = ? AND party_id IS NULL', [p.id]);
   assert.strictEqual(members.length, 1);
   assert.strictEqual(members[0].user_id, U.pm);
   assert.strictEqual(members[0].party_id, null);
@@ -411,10 +428,10 @@ test('建项：普通用户成功且自己是 PM；成员行已加入；事件 p
   assert.strictEqual(ev[0].object_type, 'project');
   assert.strictEqual(ev[0].object_id, p.id);
   assert.deepStrictEqual(JSON.parse(ev[0].payload_json), { system_name: '新系统', phase_name: '一期', build_type: 'outsource', goal: '目标', oa_number: '12345', initiated_on: '2026-10-01', pm_user_id: U.pm });
-  const mev = await eventsOf(p.id, 'member_added');
+  const mev = (await eventsOf(p.id, 'member_added')).filter((e) => JSON.parse(e.payload_json).as === 'pm');
   assert.strictEqual(mev.length, 1);
   assert.deepStrictEqual(JSON.parse(mev[0].payload_json), { user_id: U.pm, party_id: null, as: 'pm' });
-  const min = await api(U.pm, 'POST', '/sysbuild/projects', GOOD);
+  const min = await api(U.pm, 'POST', '/sysbuild/projects', good());
   assert.strictEqual(min.status, 201, min.text);
   assert.strictEqual(min.body.project.phase_name, null);
   assert.strictEqual(min.body.project.goal, null);
@@ -424,9 +441,9 @@ test('建项：普通用户成功且自己是 PM；成员行已加入；事件 p
 
 test('建项：只读账号 403 且没有任何行；非 admin 传 pm_user_id 403', async () => {
   const n0 = (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n;
-  expectErr(await api(U.ro, 'POST', '/sysbuild/projects', GOOD), 403, 'SYSBUILD_FORBIDDEN', '只读账号建项');
-  expectErr(await api(U.pm, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.m1 }, GOOD)), 403, 'SYSBUILD_FORBIDDEN', '非 admin 指定 PM');
-  assert.strictEqual((await H.call(null, 'POST', '/sysbuild/projects', { json: GOOD })).status, 401, '未登录 401');
+  expectErr(await api(U.ro, 'POST', '/sysbuild/projects', good()), 403, 'SYSBUILD_FORBIDDEN', '只读账号建项');
+  expectErr(await api(U.pm, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.m1 }, good())), 403, 'SYSBUILD_FORBIDDEN', '非 admin 指定 PM');
+  assert.strictEqual((await H.call(null, 'POST', '/sysbuild/projects', { json: good() })).status, 401, '未登录 401');
   assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n, n0, '被拒绝的建项不得留行');
 });
 
@@ -436,9 +453,9 @@ test('建项 D1：平台角色不在写入名单内（viewer）不能建项 403�
   await H.setRole(v, 'viewer');
   try {
     const n0 = (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n;
-    expectErr(await api(v, 'POST', '/sysbuild/projects', GOOD), 403, 'SYSBUILD_FORBIDDEN', 'viewer 建项');
+    expectErr(await api(v, 'POST', '/sysbuild/projects', good()), 403, 'SYSBUILD_FORBIDDEN', 'viewer 建项');
     assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n, n0, 'viewer 建项被拒不得留行');
-    const c = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: v }, GOOD));
+    const c = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: v }, good()));
     expectErr(c, 400, 'SYSBUILD_INVALID_INPUT', 'viewer 被指定为建项 PM');
     assert.strictEqual(c.body.field, 'pm_user_id');
     const pid = await mkProject(U.pm);
@@ -451,27 +468,27 @@ test('建项 D1：平台角色不在写入名单内（viewer）不能建项 403�
     await H.setRole(v, orig);
   }
   // 对照：恢复角色后同一个人可以建项。
-  assert.strictEqual((await api(v, 'POST', '/sysbuild/projects', GOOD)).status, 201, '恢复为写入角色后可建项');
+  assert.strictEqual((await api(v, 'POST', '/sysbuild/projects', good())).status, 201, '恢复为写入角色后可建项');
 });
 
 test('建项：admin 代建——不传 pm_user_id 400；候选 PM 是只读账号 / 不存在 / 账号停用 各 400；代建成功且 admin 不是成员', async () => {
   const n0 = (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n;
-  const bad = await api(U.admin, 'POST', '/sysbuild/projects', GOOD);
+  const bad = await api(U.admin, 'POST', '/sysbuild/projects', good());
   expectErr(bad, 400, 'SYSBUILD_INVALID_INPUT', 'admin 不传 PM');
   assert.strictEqual(bad.body.field, 'pm_user_id');
-  const ro = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.ro }, GOOD));
+  const ro = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.ro }, good()));
   expectErr(ro, 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 是只读账号');
   assert.strictEqual(ro.body.field, 'pm_user_id');
-  expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: 987654 }, GOOD)), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 不存在');
-  expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: 'abc' }, GOOD)), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 编号不合法');
+  expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: 987654 }, good())), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 不存在');
+  expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: 'abc' }, good())), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 编号不合法');
   await sqlRun("UPDATE users SET status = 'disabled' WHERE id = ?", [U.inactive]);
   try {
-    expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.inactive }, GOOD)), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 账号停用');
+    expectErr(await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.inactive }, good())), 400, 'SYSBUILD_INVALID_INPUT', '候选 PM 账号停用');
   } finally {
     await sqlRun("UPDATE users SET status = 'active' WHERE id = ?", [U.inactive]);
   }
   assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n, n0, '被拒绝的代建不得留行');
-  const ok = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.cand }, GOOD));
+  const ok = await api(U.admin, 'POST', '/sysbuild/projects', Object.assign({ pm_user_id: U.cand }, good()));
   assert.strictEqual(ok.status, 201, ok.text);
   const pid = ok.body.project.id;
   assert.strictEqual(ok.body.project.pm_user_id, U.cand);
@@ -512,16 +529,15 @@ test('建项：参数校验各 400（系统名空 / 超长 / 非文本、build_t
   //   进程内夹具里是本模块自己的解析器（SYSBUILD_INVALID_INPUT）。两处都只断言 400 且不留行。
   assert.strictEqual((await H.call(U.pm, 'POST', '/sysbuild/projects', { raw: '{' })).status, 400, '非法 JSON 400');
   assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n, n0, '参数错误不得留行');
-  const edge = await api(U.pm, 'POST', '/sysbuild/projects', { system_name: 's'.repeat(100), build_type: 'procurement', phase_name: 'p'.repeat(50), goal: 'g'.repeat(2000), oa_number: '1'.repeat(20), initiated_on: '2099-12-31' });
+  const edge = await api(U.pm, 'POST', '/sysbuild/projects', { ...fixturePeople(), system_name: 's'.repeat(100), build_type: 'procurement', phase_name: 'p'.repeat(50), goal: 'g'.repeat(2000), oa_number: '1'.repeat(20), initiated_on: '2099-12-31' });
   assert.strictEqual(edge.status, 201, edge.text);
   assert.strictEqual(Array.from(edge.body.project.system_name).length, 100);
 });
 
 // ── 可见性与列表 ──────────────────────────────────────────────────────────────────────
-test('可见性：非成员 GET 详情 404 且与不存在的项目响应体逐字相同；只读账号与 admin 可见；待接受 / 已移出的人也是 404', async () => {
+test('可见性：非成员 GET 详情 404 且与不存在的项目响应体逐字相同；只读账号与 admin 可见；已移出的人也是 404', async () => {
   const pid = await mkProject(U.pm);
   await addMember(pid, U.m1);
-  await addMember(pid, U.x1, { pending: true });
   await addMember(pid, U.x2, { removed: true });
   const nf = await api(U.out, 'GET', `/sysbuild/projects/${pid}`);
   expectErr(nf, 404, 'SYSBUILD_NOT_FOUND', '非成员');
@@ -529,7 +545,7 @@ test('可见性：非成员 GET 详情 404 且与不存在的项目响应体逐�
   expectErr(none, 404, 'SYSBUILD_NOT_FOUND', '不存在');
   assert.deepStrictEqual(nf.body, { code: 'SYSBUILD_NOT_FOUND', message: '项目或附件不存在' });
   assert.deepStrictEqual(nf.body, none.body, '两种 404 响应体必须相同');
-  expectErr(await api(U.x1, 'GET', `/sysbuild/projects/${pid}`), 404, 'SYSBUILD_NOT_FOUND', '待接受的人还不是成员');
+  expectErr(await api(U.x1, 'GET', `/sysbuild/projects/${pid}`), 404, 'SYSBUILD_NOT_FOUND', '另一非成员');
   expectErr(await api(U.x2, 'GET', `/sysbuild/projects/${pid}`), 404, 'SYSBUILD_NOT_FOUND', '已移出的人');
   assert.strictEqual((await api(U.m1, 'GET', `/sysbuild/projects/${pid}`)).status, 200);
   assert.strictEqual((await api(U.pm, 'GET', `/sysbuild/projects/${pid}`)).status, 200);
@@ -543,14 +559,13 @@ test('列表：scope=mine 只含本人已加入的项目（含 PM）；scope=all
   const b = await mkProject(U.cand);
   await addMember(b, U.m1);
   const c = await mkProject(U.cand2);
-  await addMember(c, U.m1, { pending: true });
   const d = await mkProject(U.cand);
   await addMember(d, U.m1, { removed: true });
   const mineM1 = await api(U.m1, 'GET', '/sysbuild/projects?scope=mine');
   assert.strictEqual(mineM1.status, 200, mineM1.text);
   const idsM1 = mineM1.body.projects.map((p) => p.id);
   assert.ok(idsM1.includes(b), 'm1 是 b 的成员');
-  assert.ok(!idsM1.includes(a) && !idsM1.includes(c), 'm1 不是 a 的成员，在 c 里只是待接受');
+  assert.ok(!idsM1.includes(a) && !idsM1.includes(c), 'm1 在 a 和 c 都没有成员身份');
   assert.ok(!idsM1.includes(d), 'm1 在 d 里已被移出，d 不在 scope=mine 里（M4）');
   // PM 即使没有成员行也算「我的」项目（PM 视为成员）：scope=mine 的 PM 分支。
   seq += 1;
@@ -579,10 +594,9 @@ test('列表：scope=mine 只含本人已加入的项目（含 PM）；scope=all
 });
 
 // ── 详情 ─────────────────────────────────────────────────────────────────────────────
-test('详情：普通成员看不到待接受 / 已移出成员且无 removed_* 字段；PM 与 admin 看得到；只读账号按普通成员口径；参与方带现任负责人与生效代表人；身份卡', async () => {
+test('详情：普通成员看不到已移出成员且无 removed_* 字段；PM 与 admin 看得到；只读账号按普通成员口径；参与方带当前领导与负责人；身份卡', async () => {
   const pid = await mkProject(U.pm);
   const mC = await addMember(pid, U.m1);
-  const pend = await addMember(pid, U.x1, { pending: true });
   const rem = await addMember(pid, U.x2, { removed: true });
   const party = await addParty(pid, '财务部');
   const mOwn = await addMember(pid, U.own, { party });
@@ -598,18 +612,17 @@ test('详情：普通成员看不到待接受 / 已移出成员且无 removed_* 
   const pmView = await api(U.pm, 'GET', `/sysbuild/projects/${pid}`);
   assert.strictEqual(pmView.status, 200, pmView.text);
   const statusOf = (r, id) => (r.body.members.find((m) => m.id === id) || {}).status;
-  assert.strictEqual(statusOf(pmView, pend), 'pending');
   assert.strictEqual(statusOf(pmView, rem), 'removed');
   assert.strictEqual(statusOf(pmView, mC), 'joined');
   assert.strictEqual(pmView.body.members.find((m) => m.id === rem).removed_reason, '离项');
-  assert.strictEqual(pmView.body.members.length, 6, 'PM 看到全部 6 行（PM 本人、m1、待接受、已移出、负责人、代表人）');
+  assert.strictEqual(pmView.body.members.length, 5, 'PM 看到已加入成员和已移出成员');
   const adminView = await api(U.admin, 'GET', `/sysbuild/projects/${pid}`);
   assert.deepStrictEqual(names(adminView), names(pmView), 'admin 与 PM 看到同一批成员行');
   for (const uid of [U.m1, U.own, U.ro]) {
     const v = await api(uid, 'GET', `/sysbuild/projects/${pid}`);
     assert.strictEqual(v.status, 200, `${uid} ${v.text}`);
     const ids = names(v);
-    assert.ok(!ids.includes(pend) && !ids.includes(rem), `${uid} 不得看到待接受 / 已移出`);
+    assert.ok(!ids.includes(rem), `${uid} 不得看到已移出成员`);
     assert.ok(v.body.members.every((m) => m.status === 'joined'), `${uid} 只见已加入`);
     assert.ok(v.body.members.every((m) => !('removed_at' in m) && !('removed_reason' in m)), `${uid} 的成员行不带 removed_* 字段`);
     assert.strictEqual(v.body.members.length, 4, `${uid} 看到 4 位已加入成员`);
@@ -782,14 +795,10 @@ test('接管：admin 接管后能改基本信息，原 PM 不再能改（403）�
   assert.strictEqual(madded[0].object_id, am[0].id);
 });
 
-test('更换 PM（M3 / D5 硬门）：新 PM 有待接受的成员行 → 409 且不被置为已加入；成员行属某参与方 → 409；已加入且不属参与方 → 200 不新建；没有行 → 200 新建并写 member_added；已移出的残留行不影响', async () => {
+test('更换 PM（M3 / D5 硬门）：成员行属某参与方 → 409；已加入且不属参与方 → 200 不新建；没有行 → 200 新建并写 member_added；已移出的残留行不影响', async () => {
   const pid = await mkProject(U.pm);
   const post = (uid) => api(U.admin, 'POST', `/sysbuild/projects/${pid}/pm`, { pm_user_id: uid, reason: '换人' });
   const pmNow = async () => (await sqlGet('SELECT pm_user_id FROM sysbuild_projects WHERE id = ?', [pid])).pm_user_id;
-  const pendRow = await addMember(pid, U.cand, { pending: true });
-  expectErr(await post(U.cand), 409, 'SYSBUILD_STATE', '待接受的成员行');
-  assert.strictEqual((await sqlGet('SELECT joined_at FROM sysbuild_members WHERE id = ?', [pendRow])).joined_at, null, '不替本人把待接受的行置为已加入');
-  assert.strictEqual(await pmNow(), U.pm);
   const party = await addParty(pid, '甲部');
   await addMember(pid, U.m2, { party });
   expectErr(await post(U.m2), 409, 'SYSBUILD_STATE', '成员行属某参与方');
@@ -818,7 +827,6 @@ test('更换 PM（M3 / D5 硬门）：新 PM 有待接受的成员行 → 409 �
   const partyOld = await addParty(pid, '旧部');
   const gone = await addMember(pid, U.x1, { party: partyOld, removed: true });
   await addAppointment(partyOld, gone, 'active');
-  await addAppointment(partyOld, gone, 'pending'); // 残留的待处理提议也只算未移出的行（X16）
   const r4 = await post(U.x1);
   assert.strictEqual(r4.status, 200, r4.text);
   assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_members WHERE project_id = ? AND user_id = ? AND removed_at IS NULL AND joined_at IS NOT NULL', [pid, U.x1])).n, 1, '换完后有一条已加入的未移出行（X11）');
@@ -826,22 +834,15 @@ test('更换 PM（M3 / D5 硬门）：新 PM 有待接受的成员行 → 409 �
   assert.strictEqual((await eventsOf(pid, 'member_added')).filter((e) => JSON.parse(e.payload_json).user_id === U.x1).length, 1);
 });
 
-test('更换 PM：新 PM 是某方现任负责人 / 生效代表人 / 有待接受的任职或授权提议 → 409 SYSBUILD_STATE，PM 不变、不写事件；PM 不得兼任', async () => {
+test('更换 PM：新 PM 是某方现任负责人 / 生效代表人 → 409 SYSBUILD_STATE，PM 不变、不写事件；PM 不得兼任', async () => {
   const pid = await mkProject(U.pm);
   const party = await addParty(pid, '业务部');
   // 成员行 party_id 都留空：否则 pmClash 的「成员行属某参与方」会先于兼任判断挡住，遮蔽兼任查询本身（任职 / 授权挂在 party 上与成员行的 party_id 无关）。
   const mOwn = await addMember(pid, U.own);
   const mDel = await addMember(pid, U.del);
-  const mP1 = await addMember(pid, U.x1);
-  const mP2 = await addMember(pid, U.x2);
-  const mP3 = await addMember(pid, U.x3);
   const appt = await addAppointment(party, mOwn, 'active');
   await addDelegation(party, mDel, appt, 'active');
-  const party2 = await addParty(pid, '另一部');
-  await addAppointment(party2, mP1, 'pending');
-  await addDelegation(party, mP2, appt, 'pending_owner');
-  await addDelegation(party, mP3, appt, 'pending_accept');
-  for (const [uid, label] of [[U.own, '现任负责人'], [U.del, '生效代表人'], [U.x1, '待接受的任职提议'], [U.x2, '待负责人确认的授权提议'], [U.x3, '待本人接受的授权提议']]) {
+  for (const [uid, label] of [[U.own, '现任领导'], [U.del, '生效负责人']]) {
     expectErr(await api(U.admin, 'POST', `/sysbuild/projects/${pid}/pm`, { pm_user_id: uid, reason: '换' }), 409, 'SYSBUILD_STATE', label);
   }
   assert.strictEqual((await sqlGet('SELECT pm_user_id FROM sysbuild_projects WHERE id = ?', [pid])).pm_user_id, U.pm);
@@ -905,7 +906,7 @@ const STATUSES = ['active', 'paused', 'terminated', 'closed'];
 // 身份：pm / member / admin（非成员）/ readonly（非成员）/ admin_pm（admin 已接管）；
 //   admin_owner = admin 兼某方现任负责人；admin_pendrow = admin 在本项目有待接受的成员行；admin_party = admin 的成员行属某参与方
 //   （后三种让 takeover 的 pmClash 三种挡法各有一个身份：标志为假、执行 409，M1 / M3 / D5）。
-const KINDS = ['pm', 'member', 'admin', 'readonly', 'admin_pm', 'admin_owner', 'admin_pendrow', 'admin_party'];
+const KINDS = ['pm', 'member', 'admin', 'readonly', 'admin_pm', 'admin_owner', 'admin_party'];
 // 手写期望（不取自被测代码）：谁能改基本信息 / 状态 / 更换 PM / 接管，及合法转移目标。
 const EXPECT_EDIT = (kind, status) => (kind === 'pm' || kind === 'admin_pm') && (status === 'active' || status === 'paused');
 const EXPECT_ADMIN = (kind) => kind === 'admin' || kind.startsWith('admin_');
@@ -920,8 +921,6 @@ async function fresh(kind, status) {
     const party = await addParty(pid, '甲部');
     const mAdm = await addMember(pid, U.admin, { party });
     await addAppointment(party, mAdm, 'active');
-  } else if (kind === 'admin_pendrow') {
-    await addMember(pid, U.admin, { pending: true });
   } else if (kind === 'admin_party') {
     const party = await addParty(pid, '乙部');
     await addMember(pid, U.admin, { party });
@@ -936,7 +935,7 @@ async function flagsOf(kind, status) {
   return { pid, uid, actions: d.body.actions };
 }
 
-test('actions 与执行一致：8 种身份（含 admin 兼负责人 / 有待接受成员行 / 属参与方）× 4 种项目状态，标志为真 ⇔ 真实调用写端点成功；标志与手写期望表一致；为假时被拒（403 / 409）', async () => {
+test('actions 与执行一致：7 种身份（含 admin 兼任职 / 属参与方）× 4 种项目状态，标志为真 ⇔ 真实调用写端点成功；标志与手写期望表一致；为假时被拒（403 / 409）', async () => {
   for (const status of STATUSES) {
     for (const kind of KINDS) {
       const tag = `${kind}/${status}`;
@@ -1018,16 +1017,14 @@ test('rules：项目状态 × 动作表逐格与手写矩阵全等；未登记�
     comment: [T, T, T, T],
     attachment: [T, T, T, T],
     golive: [T, F, F, F],
-    history_import: [T, T, F, F],
     g7: [F, F, F, T],
     membership: [T, T, F, T],
     close: [T, F, F, F], // C3a（方案 v1.2 §4.5 第二行）：节点收口单列——暂停时不能收口
-    history_close: [T, T, T, T], // C4b Q-S2 预筛 P67：关闭「历史补录中」窗口不受项目状态限制（关闭只收窄能力）；开启 / 重开 / 补录 / 导入仍按 history_import 行
   };
   for (const [kind, row] of Object.entries(expected)) {
     STATUSES.forEach((st, i) => assert.strictEqual(projectAllowsWrite(st, kind), row[i], `${kind} × ${st}`));
   }
-  assert.deepStrictEqual(Object.keys(MODS.rules.PROJECT_ACTION_TABLE).sort(), Object.keys(expected).sort(), '表里不多不少恰是这 14 类');
+  assert.deepStrictEqual(Object.keys(MODS.rules.PROJECT_ACTION_TABLE).sort(), Object.keys(expected).sort(), '表里不多不少恰是这 12 类');
   assert.strictEqual(projectAllowsWrite('active', 'nonexistent'), false);
   assert.strictEqual(projectAllowsWrite('weird', 'basics'), false);
   assert.strictEqual(projectAllowsWrite('active', 'constructor'), false);
@@ -1069,53 +1066,33 @@ test('rules：项目级判定函数的矩阵与只读一票否决（admin / PM �
   assert.deepStrictEqual(r.platformIdentity({ id: 6, role: 'user' }, popts), { isAdmin: false, isReadonly: true, roleCanWrite: true });
   assert.deepStrictEqual(r.platformIdentity({ id: 1, role: 'admin' }, popts), { isAdmin: true, isReadonly: false, roleCanWrite: true });
   // pmClash 纯函数（期望手写）：clash 先于 pending_member 先于 in_party；全空返回 null。
-  const base = { ownerOfParties: [], delegateOfParties: [], hasPendingProposal: false, pendingMemberRow: false, partyId: null };
+  const base = { ownerOfParties: [], delegateOfParties: [], partyId: null };
   assert.strictEqual(r.pmClash(base), null);
   assert.strictEqual(r.pmClash(Object.assign({}, base, { ownerOfParties: [3] })).code, 'clash');
   assert.strictEqual(r.pmClash(Object.assign({}, base, { delegateOfParties: [3] })).code, 'clash');
-  assert.strictEqual(r.pmClash(Object.assign({}, base, { hasPendingProposal: true })).code, 'clash');
-  assert.strictEqual(r.pmClash(Object.assign({}, base, { pendingMemberRow: true })).code, 'pending_member');
   assert.strictEqual(r.pmClash(Object.assign({}, base, { partyId: 7 })).code, 'in_party');
-  assert.strictEqual(r.pmClash(Object.assign({}, base, { partyId: 7, pendingMemberRow: true, ownerOfParties: [1] })).code, 'clash');
   // actions.takeover 与 pmClash 同源（纯函数层面）：admin 且不是 PM 且 pmClash 为 null 才为真。
   const adm = (o) => Object.assign({ project: { id: 1, status: 'active' }, isAdmin: true, isPm: false, isMember: false, isReadonly: false }, base, o);
   assert.strictEqual(r.actionsFor(adm({}), { status: 'active' }).takeover, true);
   assert.strictEqual(r.actionsFor(adm({ ownerOfParties: [1] }), { status: 'active' }).takeover, false);
-  assert.strictEqual(r.actionsFor(adm({ pendingMemberRow: true }), { status: 'active' }).takeover, false);
   assert.strictEqual(r.actionsFor(adm({ partyId: 2 }), { status: 'active' }).takeover, false);
   assert.strictEqual(r.actionsFor(adm({ isPm: true }), { status: 'active' }).takeover, false);
   assert.strictEqual(r.actionsFor(adm({ ownerOfParties: [1] }), { status: 'active' }).change_pm, true, 'change_pm 只表示可以发起，不含候选人校验');
 });
 
-test('rules：loadProjectIdentity 返回成员行、所属参与方、负责人 / 代表人集合与待处理邀请；待接受 / 已移出的人没有项目身份', async () => {
+test('rules：loadProjectIdentity 返回成员行、所属参与方、领导与负责人集合；非成员及已移出的人没有项目身份', async () => {
   const pid = await mkProject(U.pm);
   const party = await addParty(pid, '甲部');
   const mOwn = await addMember(pid, U.own, { party });
   const mDel = await addMember(pid, U.del, { party });
   const appt = await addAppointment(party, mOwn, 'active');
   await addDelegation(party, mDel, appt, 'active');
-  const mPend = await addMember(pid, U.x1, { party, pending: true });
-  await sqlRun("INSERT INTO sysbuild_invitations (project_id, member_id, kind, status, invited_by) VALUES (?, ?, 'join', 'pending', ?)", [pid, mPend, W.adminId]);
   const mGone = await addMember(pid, U.x2, { party, removed: true });
   const partyB = await addParty(pid, '乙部');
   await addAppointment(partyB, mGone, 'active'); // 已移出的人名下残留一条生效任职：不能算负责人
-  // X8：已处理的邀请（accepted / declined / withdrawn）不算「待处理邀请」。
-  await sqlRun("INSERT INTO sysbuild_invitations (project_id, member_id, kind, status, invited_by, responded_at) VALUES (?, ?, 'join', 'accepted', ?, '2026-10-05 10:00:00')", [pid, mPend, W.adminId]);
-  await sqlRun("INSERT INTO sysbuild_invitations (project_id, member_id, kind, status, invited_by, responded_at) VALUES (?, ?, 'join', 'declined', ?, '2026-10-06 10:00:00')", [pid, mPend, W.adminId]);
-  // X6：已移出的人名下残留生效授权，不算生效代表人；残留的待处理任职提议不算「有待处理提议」（只看未移出的行）。
+  // X6：已移出的人名下残留生效授权，不计入当前负责人集合。
   const partyF = await addParty(pid, '丙部');
   await addDelegation(partyF, mGone, appt, 'active');
-  await addAppointment(partyF, mGone, 'pending');
-  // X7：待接受（未加入）的成员行名下的生效任职不算负责人。
-  const partyG = await addParty(pid, '丁部');
-  const mPend3 = await addMember(pid, U.x3, { pending: true });
-  await addAppointment(partyG, mPend3, 'active');
-  // 正向：未移出的成员名下有待处理的任职提议 / 授权提议 → hasPendingProposal；已加入且属某参与方、没有任职 → partyId 非空。
-  const partyH = await addParty(pid, '戊部');
-  const mM2 = await addMember(pid, U.m2);
-  await addAppointment(partyH, mM2, 'pending');
-  const mCand = await addMember(pid, U.cand);
-  await addDelegation(partyH, mCand, appt, 'pending_owner');
   await addMember(pid, U.out, { party });
   // rules.loadProjectIdentity 只用 q 的 get / all：直接拿夹具的外部连接包成 q 调用（与端点读的是同一份库）。
   const qExt = { get: sqlGet, all: sqlAll, run: sqlRun };
@@ -1129,36 +1106,16 @@ test('rules：loadProjectIdentity 返回成员行、所属参与方、负责人 
   const del = await load(U.del);
   assert.deepStrictEqual(del.delegateOfParties, [party]);
   assert.deepStrictEqual(del.ownerOfParties, []);
-  const pend = await load(U.x1);
-  assert.strictEqual(pend.isMember, false);
-  assert.strictEqual(pend.memberId, null, '待接受的人没有成员身份');
-  assert.deepStrictEqual(pend.pendingInvitations.map((i) => i.kind), ['join']);
-  assert.strictEqual(pend.pendingInvitations.length, 1, '已接受 / 已拒绝的邀请不算待处理（X8）');
-  assert.strictEqual(pend.pendingMemberRow, true);
+  const outsider = await load(U.x1);
+  assert.strictEqual(outsider.isMember, false);
+  assert.strictEqual(outsider.memberId, null, '非成员没有成员身份');
   const gone = await load(U.x2);
   assert.strictEqual(gone.isMember, false);
   assert.deepStrictEqual(gone.ownerOfParties, []);
-  assert.deepStrictEqual(gone.delegateOfParties, [], '已移出的人不是生效代表人（X6）');
-  assert.strictEqual(gone.hasPendingProposal, false, '已移出的行上的待处理提议不算（X16）');
-  assert.strictEqual(gone.pendingMemberRow, false);
-  const pend3 = await load(U.x3);
-  assert.deepStrictEqual(pend3.ownerOfParties, [], '待接受的成员行名下的生效任职不算负责人（X7）');
-  assert.strictEqual(pend3.memberId, null);
-  assert.strictEqual(pend3.pendingMemberRow, true);
-  assert.strictEqual(pend3.hasPendingProposal, false);
-  const m2id = await load(U.m2);
-  assert.strictEqual(m2id.hasPendingProposal, true, '名下有待处理的任职提议');
-  assert.strictEqual(m2id.ownerOfParties.length, 0);
-  const candId = await load(U.cand);
-  assert.strictEqual(candId.hasPendingProposal, true, '名下有待负责人确认的授权提议');
-  assert.strictEqual(own.hasPendingProposal, false);
-  assert.strictEqual(own.pendingMemberRow, false);
+  assert.deepStrictEqual(gone.delegateOfParties, [], '已移出的人没有生效的负责人身份（X6）');
   // pmClash：同一个判定，三种挡法与不挡（期望手写）。
   assert.strictEqual(MODS.rules.pmClash(own).code, 'clash');
   assert.strictEqual(MODS.rules.pmClash(del).code, 'clash');
-  assert.strictEqual(MODS.rules.pmClash(m2id).code, 'clash');
-  assert.strictEqual(MODS.rules.pmClash(candId).code, 'clash');
-  assert.strictEqual(MODS.rules.pmClash(pend).code, 'pending_member');
   assert.strictEqual(MODS.rules.pmClash(await load(U.out)).code, 'in_party');
   assert.strictEqual(MODS.rules.pmClash(gone), null, '已移出的人不挡');
   assert.strictEqual(MODS.rules.pmClash(await load(U.pm)), null);
@@ -1172,26 +1129,23 @@ test('rules：loadProjectIdentity 返回成员行、所属参与方、负责人 
   assert.strictEqual(none.project, null);
 });
 
-// C2b（M-S2）：参与方 / 成员 / 任职 / 授权 / 邀请 / 窄范围入口的用例在 sysbuild-api-suite-membership.js，同一套夹具与变异自检。
+// C4a（#113 段 4）：「生产路径生效」共用助手（交接 ②：plan / packages 套件里能经生产路径到达的 effective 改走提交 + 全部确认）与确认相关用例在 sysbuild-api-suite-confirm.js。
+const confirmHelpers = require('./sysbuild-api-suite-confirm').makeConfirmHelpers({ U, api, sqlRun, sqlGet, sqlAll, addMember, addParty, addAppointment, addDelegation, createEmptyProjectFixture });
 require('./sysbuild-api-suite-membership').defineMembershipCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, mkProject, addMember, addParty, addAppointment, addDelegation, addInvitation,
-  getMods: () => MODS, getModuleDir: () => MODULE_DIR, setRole: (uid, role) => H.setRole(uid, role),
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, confirm: confirmHelpers,
 });
-
-// C4a（#113 段 4）：「生产路径生效」共用助手（交接 ②：plan / items 套件里能经生产路径到达的 effective 改走提交 + 全部确认）与确认相关用例在 sysbuild-api-suite-confirm.js。
-const confirmHelpers = require('./sysbuild-api-suite-confirm').makeConfirmHelpers({ U, api, sqlRun, sqlGet, sqlAll, addMember, addParty, addAppointment, addDelegation });
 
 // C3a（#113 段 3 N-S1）：默认批次 / 节点模板 / 节点动作 / 排期与改期 / §4.5 收口闸门的用例在 sysbuild-api-suite-plan.js，同一套夹具与变异自检。
 require('./sysbuild-api-suite-plan').definePlanCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, getMods: () => MODS, getWorld: () => W, confirm: confirmHelpers,
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, createEmptyProjectFixture, fixturePeople, getMods: () => MODS, getWorld: () => W, confirm: confirmHelpers,
   getModuleDir: () => MODULE_DIR, getFixedToday: () => (H && H.fixedToday) || null,
   // 往回拨 / 复原注入的「今天」；实例模式没有注入点，返回 false（用例据此跳过只能在进程内构造的部分）
   setFixedToday: (d) => { if (H && typeof H.setToday === 'function') { H.setToday(d); return true; } return false; },
 });
 
-// C3b（#113 段 3 N-S2）：模块 / 需求条目与版本 / 内容包与版本 / 附件沿用的用例在 sysbuild-api-suite-items.js，同一套夹具与变异自检。
-require('./sysbuild-api-suite-items').defineItemCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, getMods: () => MODS, getWorld: () => W,
+// C3b（#113 段 3 N-S2；#212 C7 起模块 / 需求条目 / 条目集合修订 / 附件沿用随需求条目流程删除）：内容包与版本（草稿期）、现行版本解析的用例在 sysbuild-api-suite-packages.js，同一套夹具与变异自检。
+require('./sysbuild-api-suite-packages').definePackageCases({
+  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, createEmptyProjectFixture, getMods: () => MODS, getWorld: () => W,
   getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
   // 原始 JSON 文本请求（不经 JSON.stringify）：18 号 L-1 要发 1e400 这类 JSON.stringify 会先改写成 null 的数字
   apiRaw: (uid, method, urlPath, rawText) => H.call(uid, method, urlPath, { raw: rawText }),
@@ -1203,44 +1157,20 @@ require('./sysbuild-api-suite-confirm').defineConfirmCases({
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
 });
 
-// C4b Q-S1（#113 段 5）：代录——无账号确认人 / 确认任务代录 / 任职接受与授权代录 / 提出人任务与改发 / 动作标志的用例在 sysbuild-api-suite-proxy.js，同一套夹具与变异自检。
-require('./sysbuild-api-suite-proxy').defineProxyCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
-  getFixedToday: () => (H && H.fixedToday) || null, SKIP,
-});
-
-// C4b Q-S2（#113 段 5）：「历史补录中」时间窗 / 历史补录 / 历史事实导入 / 与当前确认任务按对象互斥的用例在 sysbuild-api-suite-history.js，同一套夹具与变异自检。
-require('./sysbuild-api-suite-history').defineHistoryCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
-  getFixedToday: () => (H && H.fixedToday) || null, SKIP,
-});
-
 // C4c R-S1（#113 段 6）：需求确认单导出（GET …/confirmation-sheet）的用例在 sysbuild-api-suite-sheet.js，同一套夹具与变异自检。
 require('./sysbuild-api-suite-sheet').defineSheetCases({
   test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, confirm: confirmHelpers,
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
 });
 
-// C5 S-S1a（#113 段 7）：登记与办理、知会与知会异议、办理结论确认与负责人裁定的用例在 sysbuild-api-suite-entries.js，同一套夹具与变异自检。
+// C5 S-S1a（#113 段 7）：登记与办理（C6 后办理动作只剩更正与作废）、登记入口与键集合的用例在 sysbuild-api-suite-entries.js，同一套夹具与变异自检。
 require('./sysbuild-api-suite-entries').defineEntryCases({
   test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
 });
 
-// C5 S-S1b（#113 段 7）：问题分流与判定快照、混合拆分与手动拆分、待判定归属、节点收口前置、收口后异议、记系统迭代单号的用例在 sysbuild-api-suite-routing.js，同一套夹具与变异自检。
-require('./sysbuild-api-suite-routing').defineRoutingCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
-  getFixedToday: () => (H && H.fixedToday) || null, SKIP,
-});
-
-// C5 S-S1c（#113 段 7）：正式变更（变更包生效生成新总体规划版本）与登记结论「转正式变更」/ 挂靠变更的用例在 sysbuild-api-suite-changes.js，同一套夹具与变异自检。
-require('./sysbuild-api-suite-changes').defineChangeCases({
-  test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
-  getFixedToday: () => (H && H.fixedToday) || null, SKIP,
-});
-
-// C5 S-S1c（#113 段 7）：开发方关键事项（处理说明 / 交付物 / 开发方来源的涉及承诺的认可、本人提交并确认、修订重提、办理依据、改期引用）与预筛第 3 轮三条 LOW 的用例在 sysbuild-api-suite-devkey.js。
-require('./sysbuild-api-suite-devkey').defineDevKeyCases({
+// #212 第一步 C5 / C6：删除 S1 正式变更与 S4 / S7 记录的旧办理规则后的新增用例（旧库读点 / R9 / 键集合 / 撤回探针 / N-RULES / 现行总体规划等）与保留的变更类变异、N1–N24 新增变异在 sysbuild-api-suite-c5.js。
+require('./sysbuild-api-suite-c5').defineC5Cases({
   test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
 });
@@ -1251,7 +1181,7 @@ require('./sysbuild-api-suite-golive').defineGoliveCases({
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
 });
 
-// C6b（#113 段 8）：发送意图（触发点 × 收件人）、事务外发送与补发 / 扫描、防重、待办七类、改期知会与知会异议的用例在 sysbuild-api-suite-notify.js（进程内用钉钉替身；实例模式读平台钉钉替身日志）。
+// C6b（#113 段 8）：发送意图（触发点 × 收件人）、事务外发送与补发 / 扫描、防重、待办（C6 后无知会异议类）、改期知会生成的用例在 sysbuild-api-suite-notify.js（进程内用钉钉替身；实例模式读平台钉钉替身日志）。
 require('./sysbuild-api-suite-notify').defineNotifyCases({
   test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment, addDelegation, getMods: () => MODS, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
   getFixedToday: () => (H && H.fixedToday) || null, SKIP,
@@ -1259,7 +1189,7 @@ require('./sysbuild-api-suite-notify').defineNotifyCases({
 });
 // C7：空列表入口能力与只读时间线分页。
 require('./sysbuild-api-suite-frontend').defineFrontendCases({
-  test, U, api, sqlGet, sqlAll, mkProject, addMember, expectErr, setRole: (uid, role) => H.setRole(uid, role),
+  test, U, api, sqlGet, sqlAll, mkProject, addMember, expectErr, setRole: (uid, role) => H.setRole(uid, role), confirm: confirmHelpers,
 });
 require('./sysbuild-api-suite-stage8').defineStage8Cases({ test, U, api, sqlGet, sqlAll, sqlRun, confirm: confirmHelpers, SKIP, getReadInterleaveKit: () => H && H.readInterleaveKit,
   stageFile: async (uid, pid) => {
@@ -1283,6 +1213,17 @@ require('./sysbuild-api-suite-trace-l3').defineTraceL3Cases({
   test, U, api, sqlRun, sqlGet, sqlAll, expectErr,
   getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
 });
+require('./sysbuild-api-suite-cards').defineCardCases({ test, U, api, sqlGet, sqlAll, sqlRun, expectErr, getModuleDir: () => MODULE_DIR, confirm: confirmHelpers });
+require('./sysbuild-api-suite-step4').defineStep4Cases({ test, U, api, sqlGet, sqlAll, sqlRun, expectErr, addParty, confirm: confirmHelpers });
+require('./sysbuild-api-suite-work').defineWorkCases({
+  test, U, api, upload: (uid, tail, formData) => H.call(uid, 'POST', tail, { formData }),
+  sqlGet, sqlAll, sqlRun, expectErr, addParty, addMember, addAppointment, addDelegation, confirm: confirmHelpers,
+  getKit: () => H && H.notifyKit, skip: SKIP,
+});
+require('./sysbuild-api-suite-dashboard').defineDashboardCases({
+  test, U, api, sqlRun, sqlGet, addParty, addMember, addAppointment, addDelegation, expectErr,
+  getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
+});
 }
 
 // ── 运行 ─────────────────────────────────────────────────────────────────────────────
@@ -1301,6 +1242,7 @@ async function runAll() {
     } catch (e) {
       failed += 1;
       console.log(`  ✗ ${c.name}\n      ${e && e.message}`);
+      if (rec.enabled()) console.log(rec.caseLine(c.name, e));
     }
   }
   console.log(`\n${cases.length - failed - skipped}/${cases.length} 通过${skipped > 0 ? `（跳过 ${skipped}）` : ''}`);
@@ -1328,15 +1270,11 @@ const MUTATIONS = [
   { id: 'actions 的 takeover 不排除已是 PM', expect: ['actions 与执行一致', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'takeover: changePm && !identity.isPm && pmClash(identity) === null,', to: 'takeover: changePm && pmClash(identity) === null,' }] },
   { id: 'actions 的 takeover 不看 pmClash（M1：标志为真执行 409）', expect: ['actions 与执行一致', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'takeover: changePm && !identity.isPm && pmClash(identity) === null,', to: 'takeover: changePm && !identity.isPm,' }] },
   { id: '更换 PM 不查 pmClash（兼任 / 待接受行 / 属参与方都放行）', expect: ['更换 PM（M3', '更换 PM：新 PM 是某方'], edits: [{ file: 'projects.js', from: 'if (block) throw stateError(block.message);', to: 'if (false) throw stateError(block.message);' }] },
-  { id: 'pmClash 的兼任判断被去掉', expect: ['更换 PM：新 PM 是某方', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'if (identity.ownerOfParties.length > 0 || identity.delegateOfParties.length > 0 || identity.hasPendingProposal) {', to: 'if (false) {' }] },
-  { id: 'pmClash 的待接受成员行硬门被去掉（M3）', expect: ['更换 PM（M3', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'if (identity.pendingMemberRow) {', to: 'if (false) {' }] },
   { id: 'pmClash 的成员行属参与方硬门被去掉（D5）', expect: ['更换 PM（M3', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'if (identity.partyId !== null && identity.partyId !== undefined) {', to: 'if (false) {' }] },
-  { id: '兼任判断漏掉待处理的任职提议', expect: ['更换 PM：新 PM 是某方', 'rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "a.member_id = m.id AND a.status = 'pending')", to: "a.member_id = m.id AND a.status = 'none')" }] },
-  { id: '兼任判断漏掉待负责人确认 / 待本人接受的授权提议', expect: ['更换 PM：新 PM 是某方'], edits: [{ file: 'rules.js', from: "d.status IN ('pending_owner', 'pending_accept')", to: "d.status IN ('pending_owner')" }] },
-  { id: '待处理提议查询含已移出的成员行（X16）', expect: ['rules：loadProjectIdentity', '更换 PM（M3'], edits: [{ file: 'rules.js', from: 'WHERE m.project_id = ? AND m.user_id = ? AND m.removed_at IS NULL\n        AND (EXISTS', to: 'WHERE m.project_id = ? AND m.user_id = ?\n        AND (EXISTS' }] },
   { id: '建项不写 PM 成员行', expect: ['建项：普通用户成功'], edits: [{ file: 'projects.js', from: 'await ensurePmMemberRow(q, pid, pmId, user);', to: '' }] },
   { id: '更换 PM / 接管不写新 PM 成员行', expect: ['接管：', '更换 PM（M3'], edits: [{ file: 'projects.js', from: "await ensurePmMemberRow(q, pid, newPm, user, 'pm_change');", to: '' }] },
   { id: '更换 PM 新建成员行的事件缺 via', expect: ['接管：', '更换 PM（M3'], edits: [{ file: 'projects.js', from: "await ensurePmMemberRow(q, pid, newPm, user, 'pm_change');", to: 'await ensurePmMemberRow(q, pid, newPm, user);' }] },
+  { id: 'pmClash 的兼任判断被去掉', expect: ['更换 PM：新 PM 是某方', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'if (identity.ownerOfParties.length > 0 || identity.delegateOfParties.length > 0) {', to: 'if (false) {' }] },
   { id: 'PM 成员行查找含已移出的行（X11）', expect: ['更换 PM（M3'], edits: [{ file: 'projects.js', from: "'SELECT id FROM sysbuild_members WHERE project_id = ? AND user_id = ? AND removed_at IS NULL ORDER BY id LIMIT 1'", to: "'SELECT id FROM sysbuild_members WHERE project_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1'" }] },
   { id: '非成员 404 被改成 403', expect: ['可见性：'], edits: [{ file: 'rules.js', from: 'if (!canViewProject(access)) throw NOT_FOUND();', to: "if (!canViewProject(access)) throw makeError(403, 'SYSBUILD_FORBIDDEN', '没有权限执行该操作');" }] },
   { id: 'canViewProject 对非成员放行（可见性只有这一份，L3）', expect: ['可见性：', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'return !!(identity.project && (identity.isAdmin || identity.isMember || identity.isReadonly));', to: 'return !!identity.project;' }] },
@@ -1361,32 +1299,21 @@ const MUTATIONS = [
   { id: '列表 scope=mine 去掉 PM 分支（X2）', expect: ['列表：'], edits: [{ file: 'projects.js', from: 'WHERE p.pm_user_id = ? OR EXISTS', to: 'WHERE (0 AND p.pm_user_id = ?) OR EXISTS' }] },
   { id: '列表 scope=mine 含已移出的成员（X1 / M4）', expect: ['列表：'], edits: [{ file: 'projects.js', from: 'm.user_id = ? AND ${rules.MEMBER_ACTIVE_SQL})', to: 'm.user_id = ? AND m.joined_at IS NOT NULL)' }] },
   { id: '身份解析：已移出成员仍算负责人（X7 同族）', expect: ['rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "WHERE a.status = 'active' AND p.project_id = ? AND m.user_id = ? AND ${MEMBER_ACTIVE_SQL}", to: "WHERE a.status = 'active' AND p.project_id = ? AND m.user_id = ?" }] },
-  { id: '身份解析：待接受的成员行名下的生效任职算负责人（X7）', expect: ['rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "WHERE a.status = 'active' AND p.project_id = ? AND m.user_id = ? AND ${MEMBER_ACTIVE_SQL}", to: "WHERE a.status = 'active' AND p.project_id = ? AND m.user_id = ? AND m.removed_at IS NULL" }] },
   { id: '身份解析：已移出成员仍算生效代表人（X6）', expect: ['rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "WHERE d.status = 'active' AND p.project_id = ? AND m.user_id = ? AND ${MEMBER_ACTIVE_SQL}", to: "WHERE d.status = 'active' AND p.project_id = ? AND m.user_id = ?" }] },
-  { id: '身份解析：已处理的邀请也算待处理（X8）', expect: ['rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "AND i.status = 'pending' AND m.removed_at IS NULL", to: 'AND m.removed_at IS NULL' }] },
-  { id: 'MEMBER_ACTIVE_SQL 漏掉「已加入」条件（共用片段）', expect: ['rules：loadProjectIdentity'], edits: [{ file: 'rules.js', from: "const MEMBER_ACTIVE_SQL = 'm.removed_at IS NULL AND m.joined_at IS NOT NULL';", to: "const MEMBER_ACTIVE_SQL = 'm.removed_at IS NULL';" }] },
-  // C2b（M-S2）的变异在 sysbuild-api-suite-membership.js
+  // 第二步人员切换的变异在 sysbuild-api-suite-membership.js
   ...require('./sysbuild-api-suite-membership').MEMBERSHIP_MUTATIONS,
   // C3a 的变异在 sysbuild-api-suite-plan.js
   ...require('./sysbuild-api-suite-plan').PLAN_MUTATIONS,
-  // C3b 的变异在 sysbuild-api-suite-items.js
-  ...require('./sysbuild-api-suite-items').ITEM_MUTATIONS,
+  // C3b 的变异在 sysbuild-api-suite-packages.js（#212 C7 起由原 sysbuild-api-suite-items.js 拆出）
+  ...require('./sysbuild-api-suite-packages').PACKAGE_MUTATIONS,
   // C4a 的变异在 sysbuild-api-suite-confirm.js
   ...require('./sysbuild-api-suite-confirm').CONFIRM_MUTATIONS,
-  // C4b Q-S1 的变异在 sysbuild-api-suite-proxy.js
-  ...require('./sysbuild-api-suite-proxy').PROXY_MUTATIONS,
-  // C4b Q-S2 的变异在 sysbuild-api-suite-history.js
-  ...require('./sysbuild-api-suite-history').HISTORY_MUTATIONS,
   // C4c R-S1 的变异在 sysbuild-api-suite-sheet.js
   ...require('./sysbuild-api-suite-sheet').SHEET_MUTATIONS,
   // C5 S-S1a 的变异在 sysbuild-api-suite-entries.js
   ...require('./sysbuild-api-suite-entries').ENTRY_MUTATIONS,
-  // C5 S-S1b 的变异在 sysbuild-api-suite-routing.js
-  ...require('./sysbuild-api-suite-routing').ROUTING_MUTATIONS,
-  // C5 S-S1c 的变异在 sysbuild-api-suite-changes.js
-  ...require('./sysbuild-api-suite-changes').CHANGE_MUTATIONS,
-  // C5 S-S1c 的变异（开发方关键事项与预筛第 3 轮）在 sysbuild-api-suite-devkey.js
-  ...require('./sysbuild-api-suite-devkey').DEVKEY_MUTATIONS,
+  // #212 C5 的变异（保留的变更类变异与 N1–N24）在 sysbuild-api-suite-c5.js
+  ...require('./sysbuild-api-suite-c5').C5_MUTATIONS,
   // C6a 的变异在 sysbuild-api-suite-golive.js
   ...require('./sysbuild-api-suite-golive').GOLIVE_MUTATIONS,
   // C6b 的变异在 sysbuild-api-suite-notify.js（id 前缀 C6b ）
@@ -1396,6 +1323,10 @@ const MUTATIONS = [
   ...require('./sysbuild-api-suite-trace-l1').TRACE_L1_MUTATIONS,
   ...require('./sysbuild-api-suite-trace-l2').TRACE_L2_MUTATIONS,
   ...require('./sysbuild-api-suite-trace-l3').TRACE_L3_MUTATIONS,
+  ...require('./sysbuild-api-suite-cards').CARD_MUTATIONS,
+  ...require('./sysbuild-api-suite-step4').step4Mutations,
+  ...require('./sysbuild-api-suite-work').workMutations,
+  ...require('./sysbuild-api-suite-dashboard').dashboardMutations,
 ];
 
 // 变异 id 全局唯一（codex 20 号 M-1）：阶段补检改按 id 名单选择（--mutation-ids），id 必须能唯一定位一条变异。加载时校验，有重复就列出重复的 id 并让进程以退出码 1 结束
@@ -1442,19 +1373,21 @@ function runChild(args) {
       const failedNames = out.split('\n').filter((l) => l.startsWith('  ✗ ')).map((l) => l.slice(4).trim());
       // 通过的用例名（未变异的全量基线用它得到完整用例名单，供过滤模式按 expect 前缀圈定子集）。
       const passedNames = out.split('\n').filter((l) => l.startsWith('  ✓ ')).map((l) => l.slice(4).trim());
-      if (code === 1 && passedN < totalN) return resolve({ kind: 'red', detail: `${passedN}/${totalN}`, failedNames, passedNames, total: totalN });
+      if (code === 1 && passedN < totalN) return resolve({ kind: 'red', detail: `${passedN}/${totalN}`, failedNames, passedNames, total: totalN, caseDetails: rec.parseCaseLines(out) });
       if (code === 0 && passedN === totalN) return resolve({ kind: 'green', detail: `${passedN}/${totalN}`, failedNames, passedNames, total: totalN });
       return resolve({ kind: 'abnormal', detail: `退出码 ${code} 与汇总 ${passedN}/${totalN} 不一致` });
     });
   });
 }
+// 变异副本复制的模块文件清单（#212 C1b 把原来内联在 copyModuleDir 里的数组原样提成常量，供 sysbuild-step1/mutation-check.js 核「每个 edit 的 file 都在清单内」；清单内容与顺序未变）。
+const COPIED_MODULE_FILES = ['db.js', 'schema.js', 'rules.js', 'events.js', 'membership.js', 'membership-people.js', 'membership-visibility.js', 'projects.js', 'templates.js', 'plan.js', 'packages.js', 'materials.js', 'materials-core.js', 'confirm-core.js', 'confirm.js', 'confirmation-sheet.js', 'entries-core.js', 'entries.js', 'entry-forms.js', 'submission-scope.js', 'scope-plans.js', 'stage-cards.js', 'report-core.js', 'report-recipients.js', 'golive-core.js', 'golive.js', 'node-completion.js', 'notify-core.js', 'notify-schedule.js', 'notify.js', 'attachments.js', 'work-core.js', 'work.js', 'work-notify.js', 'dashboard.js'];
 function copyModuleDir(dstDir, transform) {
   const requires = {
     "require('sqlite3')": `require(${JSON.stringify(require.resolve('sqlite3'))})`,
     "require('express')": `require(${JSON.stringify(require.resolve('express'))})`,
-    "require('multer')": `require(${JSON.stringify(require.resolve('multer'))})`, // items.js 取 attachments.js 的 attachmentDisplayName（C3b 预筛 LOW-5），副本里要有 attachments.js
+    "require('multer')": `require(${JSON.stringify(require.resolve('multer'))})`, // attachments.js 需要 multer，副本里要把它改成绝对路径
   };
-  for (const f of ['db.js', 'schema.js', 'rules.js', 'events.js', 'membership.js', 'membership-visibility.js', 'projects.js', 'templates.js', 'plan.js', 'items.js', 'packages.js', 'materials.js', 'materials-core.js', 'confirm-core.js', 'confirm.js', 'history.js', 'confirmation-sheet.js', 'entries-core.js', 'entries-routing.js', 'entries.js', 'entry-forms.js', 'submission-scope.js', 'assessment-view.js', 'report-core.js', 'report-recipients.js', 'changes.js', 'golive-core.js', 'golive.js', 'notify-core.js', 'notify-schedule.js', 'notify.js', 'attachments.js']) { // L2：汇报事实与收件人助手也进入每个变异副本。
+  for (const f of COPIED_MODULE_FILES) { // L2：汇报事实与收件人助手也进入每个变异副本。
     let src = fs.readFileSync(path.join(DEFAULT_DIR, f), 'utf8').replace(/\r\n/g, '\n');
     for (const [from, to] of Object.entries(requires)) src = src.split(from).join(to);
     if (transform) src = transform(f, src);
@@ -1607,7 +1540,7 @@ async function selfTestIn(root, opts) {
       }
       return out;
     });
-    if (bad) { console.log(`  ✗ #${i} [${mu.id}] ${bad}`); weak += 1; } else prepared.push({ mu, dir, idx: i });
+    if (bad) { console.log(`  ✗ #${i} [${mu.id}] ${bad}`); weak += 1; if (rec.enabled()) console.log(rec.mutLine('api', mu.id, rec.VERDICT.ANCHOR, [], bad)); } else prepared.push({ mu, dir, idx: i });
   });
   // 子进程实际跑的用例名集合（通过 ∪ 失败，排序）必须与名单逐项全等，不只比条数（P-S0 LOW-3）。
   const ranNames = (res) => (res.passedNames || []).concat(res.failedNames || []).slice().sort();
@@ -1714,9 +1647,16 @@ async function selfTestIn(root, opts) {
 
   prepared.forEach((p) => {
     const tag = `#${p.idx} [${p.mu.id}]`;
+    // C1c：机器基线的每条变异一行（只在 SYSBUILD_MUT_RECORD=1 时输出；verdict 取下面已有的判定，不另判）
+    const emit = (verdict, res, note) => {
+      if (!rec.enabled()) return;
+      const failures = res && res.kind === 'red' ? (res.caseDetails || []) : (res && res.kind === 'abnormal' ? [{ case: null, errorClass: null, message: res.detail }] : []);
+      console.log(rec.mutLine('api', p.mu.id, verdict, failures, note));
+    };
     if (p.skip) {
       console.log(`  ✗ ${tag} ${p.skip}`);
       weak += 1;
+      emit(rec.VERDICT.WEAK, null, p.skip);
       return;
     }
     const res = p.res;
@@ -1724,6 +1664,7 @@ async function selfTestIn(root, opts) {
     if (filterMode && p.group && p.group.baselineOk !== true) {
       console.log(`  ✗ ${tag} ${res.kind === 'red' ? '判红' : res.kind}，但子集基线不绿，不计为检出`);
       weak += 1;
+      emit(rec.VERDICT.WEAK, res, '子集基线不绿，不计为检出');
       return;
     }
     // expect 核对：每个期望前缀都必须有被打红的用例以它开头；没登记 expect 的变异本身就是自检失败（L4）。
@@ -1738,6 +1679,7 @@ async function selfTestIn(root, opts) {
     else { ok = true; label = `判红（${res.detail}），命中期望 ${expect.length} 项`; }
     console.log(`  ${ok ? '✓' : '✗'} ${tag} ${label}`);
     if (!ok) weak += 1;
+    emit(ok ? rec.VERDICT.RED : (res.kind === 'abnormal' ? rec.VERDICT.ABNORMAL : rec.VERDICT.WEAK), res, ok ? null : label);
   });
   const modeLabel = filterMode ? '过滤模式' : '--full 全量模式';
   if (ctlBad) console.log('\n变异自检：判定无效（空跑对照未通过）'); // 对照不过 = 过滤子进程没有真的在跑 / 报绿，逐条结果都不可信，不输出得分
@@ -1794,7 +1736,20 @@ async function runSelfTest(argv) {
   return selfTest(Array.isArray(argv) ? argv : []);
 }
 
-module.exports = { runInstanceSuite, runSelfTest };
+// 只读导出（#212 C1b，供 scripts/sysbuild-step1/mutation-check.js 读取；不改变任何用例、变异、夹具或判定）：
+//   MUTATIONS = 上面展平后的变异登记；listCaseNames() = 不跑用例体、不起服务、不开库地取全部用例名——
+//   defineCases() 与各子套件的 define 函数只往 cases 里 push { name, fn }，这里调用前后把 cases 还原成原样。
+function listCaseNames() {
+  const saved = cases.splice(0, cases.length);
+  try {
+    defineCases();
+    return cases.map((c) => c.name);
+  } finally {
+    cases.length = 0;
+    saved.forEach((c) => cases.push(c));
+  }
+}
+module.exports = { runInstanceSuite, runSelfTest, MUTATIONS, listCaseNames, COPIED_MODULE_FILES };
 
 // 命令行入口：只给变异自检的子进程用（--inproc）。
 if (require.main === module) {

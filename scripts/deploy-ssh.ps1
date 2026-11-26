@@ -122,8 +122,8 @@ if ($PushTimeoutSec -notmatch '^[0-9]{1,5}$' -or [int]$PushTimeoutSec -lt 60 -or
 }
 $script:PushTimeoutSec = [int]$PushTimeoutSec
 $script:SysbuildMigrationRequested = $PSBoundParameters.ContainsKey('SysbuildMigrationFromVersion')
-if ($script:SysbuildMigrationRequested -and $SysbuildMigrationFromVersion -notmatch '^[0-6]$') {
-    Write-Host '[REFUSED] -SysbuildMigrationFromVersion requires the reviewed source schema version 0-6.' -ForegroundColor Red
+if ($script:SysbuildMigrationRequested -and $SysbuildMigrationFromVersion -notmatch '^[0-9]$') {
+    Write-Host '[REFUSED] -SysbuildMigrationFromVersion requires the reviewed source schema version 0-9.' -ForegroundColor Red
     exit 2
 }
 if ($DryRunFailAt.StartsWith('sysbuild_migration_') -and -not $script:SysbuildMigrationRequested) {
@@ -411,17 +411,17 @@ function Resolve-SysbuildMigrationOutcome {
         $property = $j.PSObject.Properties[$name]
         if ($null -eq $property -or ($property.Value -isnot [int] -and $property.Value -isnot [long])) { return $unknown }
     }
-    if ($j.fromVersion -ne $ExpectedFromVersion -or $j.toVersion -ne 6 -or $j.report -isnot [string] -or -not [string]::Equals($j.report, $ExpectedReport, [StringComparison]::OrdinalIgnoreCase)) { return $unknown }
+    if ($j.fromVersion -ne $ExpectedFromVersion -or $j.toVersion -ne 9 -or $j.report -isnot [string] -or -not [string]::Equals($j.report, $ExpectedReport, [StringComparison]::OrdinalIgnoreCase)) { return $unknown }
     if ($p.Kind -eq 'SYSBUILD_MIGRATION_UNKNOWN' -or $null -eq $j.PSObject.Properties['applied'] -or $j.applied -isnot [bool]) { return $unknown }
     if ($p.Kind -eq 'SYSBUILD_MIGRATION_FAIL') {
         if ($Res.ExitCode -eq 0 -or @('not_started', 'rolled_back', 'committed', 'noop') -notcontains $j.outcome) { return $unknown }
         return [pscustomobject]@{ Outcome = 'FAIL'; Json = $j; Why = 'Migration reported a failure; do not start services.' }
     }
     if (-not (Test-Ok $Res)) { return $unknown }
-    if (($j.applied -and $j.outcome -ne 'committed') -or (-not $j.applied -and ($j.outcome -ne 'noop' -or $ExpectedFromVersion -ne 6))) { return $unknown }
+    if (($j.applied -and $j.outcome -ne 'committed') -or (-not $j.applied -and ($j.outcome -ne 'noop' -or $ExpectedFromVersion -ne 9))) { return $unknown }
     $issueProperty = $j.PSObject.Properties['compatibilityIssues']
     if ($null -eq $issueProperty -or ($issueProperty.Value -isnot [int] -and $issueProperty.Value -isnot [long]) -or $j.compatibilityIssues -ne 0) { return $unknown }
-    if ($j.contractSha256 -ne 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7' -or $j.reportSha256 -isnot [string] -or $j.reportSha256 -cnotmatch '^[a-f0-9]{64}$') { return $unknown }
+    if ($j.contractSha256 -ne '91f6f61bf27fcac6734939a1d28912306b7dcf35f8981d525d5a34121f4c5fcf' -or $j.reportSha256 -isnot [string] -or $j.reportSha256 -cnotmatch '^[a-f0-9]{64}$') { return $unknown }
     if ($j.applied -and ($null -eq $j.backup -or $j.backup.verified -isnot [bool] -or -not $j.backup.verified -or $j.backup.path -isnot [string] -or $j.backup.path -eq '' -or $j.backup.sha256 -cnotmatch '^[a-f0-9]{64}$')) { return $unknown }
     return [pscustomobject]@{ Outcome = 'OK'; Json = $j; Why = '' }
 }
@@ -1146,7 +1146,7 @@ Write-Host ""
 if ($script:SysbuildMigrationRequested) {
     $migrationTool = Invoke-Git -ArgList @('cat-file', '-e', "$($script:NewCommit):scripts/sysbuild-predeploy/deploy-prestart.cjs") -TimeoutSec 30
     if (-not (Test-Ok $migrationTool)) { Stop-BeforeStop 'New commit does not contain the reviewed sysbuild migration step.' 'NO_SYSBUILD_MIGRATION_TOOL' }
-    Write-Info "[PLAN] Explicit sysbuild migration $SysbuildMigrationFromVersion -> 6 after code checkout and before service start. Real-sample dry-run approval is required."
+    Write-Info "[PLAN] Explicit sysbuild migration $SysbuildMigrationFromVersion -> 9 after code checkout and before service start. Real-sample dry-run approval is required."
 }
 
 # 首发硬门：只读探测成功且账本不存在时，必须明确指定经过真实样本核对的迁移来源。
@@ -1421,12 +1421,12 @@ Write-Host ""
 
 # ================================================================ STEP 6b explicit sysbuild migration (opt-in only)
 if ($script:SysbuildMigrationRequested) {
-    Write-Step '6b/9' "Sysbuild schema migration $SysbuildMigrationFromVersion -> 6 (explicit opt-in)"
+    Write-Step '6b/9' "Sysbuild schema migration $SysbuildMigrationFromVersion -> 9 (explicit opt-in)"
     $migrationReport = "$RemoteTmpDir\sysbuild_migration_$($script:Id).json"
-    $migrationCmd = "cd /d `"$RemoteRepo`" && node scripts\sysbuild-predeploy\deploy-prestart.cjs --db `"$RemoteDb`" --backup-dir `"$RemoteTmpDir`" --from-version $SysbuildMigrationFromVersion --to-version 6 --report `"$migrationReport`" --maintenance-confirmed"
+    $migrationCmd = "cd /d `"$RemoteRepo`" && node scripts\sysbuild-predeploy\deploy-prestart.cjs --db `"$RemoteDb`" --backup-dir `"$RemoteTmpDir`" --from-version $SysbuildMigrationFromVersion --to-version 9 --report `"$migrationReport`" --maintenance-confirmed"
     $migrationRes = Invoke-RemoteWrite -Command $migrationCmd -TimeoutSec 600
     if ($migrationRes.DryRun) {
-        $fakeMigration = @{ fromVersion = [int]$SysbuildMigrationFromVersion; toVersion = 6; applied = $true; outcome = 'committed'; contractSha256 = 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7'; compatibilityIssues = 0; report = $migrationReport; reportSha256 = ('b' * 64); backup = @{ verified = $true; path = 'E:\Task_Pool_deploy_tmp\sysbuild-migrate-dryrun\before.sqlite'; sha256 = ('a' * 64) } }
+        $fakeMigration = @{ fromVersion = [int]$SysbuildMigrationFromVersion; toVersion = 9; applied = $true; outcome = 'committed'; contractSha256 = '91f6f61bf27fcac6734939a1d28912306b7dcf35f8981d525d5a34121f4c5fcf'; compatibilityIssues = 0; report = $migrationReport; reportSha256 = ('b' * 64); backup = @{ verified = $true; path = 'E:\Task_Pool_deploy_tmp\sysbuild-migrate-dryrun\before.sqlite'; sha256 = ('a' * 64) } }
         if ($DryRunFailAt -eq 'sysbuild_migration_unknown') { $migrationRes = New-FakeProc -TimedOut $true }
         elseif ($DryRunFailAt -eq 'sysbuild_migration_fail') {
             $fakeMigration.applied = $false; $fakeMigration.outcome = 'rolled_back'

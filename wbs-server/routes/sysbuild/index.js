@@ -16,16 +16,15 @@ const { createAttachmentRoutes } = require('./attachments');
 const { createProjectRoutes } = require('./projects');
 const { createMembershipRoutes } = require('./membership');
 const { createPlanRoutes } = require('./plan');
-const { createItemRoutes } = require('./items');
 const { createPackageRoutes } = require('./packages');
 const { createMaterialRoutes } = require('./materials');
 const { createConfirmRoutes } = require('./confirm');
-const { createHistoryRoutes } = require('./history');
 const { createConfirmationSheetRoutes } = require('./confirmation-sheet');
 const { createEntryRoutes } = require('./entries');
-const { createChangeRoutes } = require('./changes');
+const { createWorkRoutes } = require('./work');
 const { createGoliveRoutes } = require('./golive');
 const { createNotifier, createNotifyRoutes } = require('./notify');
+const { createDashboardRoutes } = require('./dashboard');
 
 module.exports = (deps) => {
   const REQUIRED_DEPS = [
@@ -101,12 +100,9 @@ module.exports = (deps) => {
   const projects = createProjectRoutes({ db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES });
   router.use(projects.router);
 
-  // 参与方 / 成员 / 任职 / 授权 / 邀请端点与受邀人窄范围入口（C2b）：同款前置与依赖。
-  //   C4b：无账号成员的任职 / 授权由 PM 代录，代录端点在同一事务里绑定凭据附件（attachments.helpers），外部确认日期上限用 todayProvider（缺省 = 服务器本地日期）。
+  // 参与方、成员和有效身份写入口。
   const membership = createMembershipRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
-    attachmentHelpers: attachments.helpers,
-    todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined,
   });
   router.use(membership.router);
 
@@ -118,14 +114,7 @@ module.exports = (deps) => {
   });
   router.use(plan.router);
 
-  // 模块 / 需求条目端点（C3b）：新版本沿用附件、登记时绑定证据附件都用 attachments.helpers。
-  const items = createItemRoutes({
-    db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
-    attachmentHelpers: attachments.helpers,
-  });
-  router.use(items.router);
-
-  // 内容包与版本 / 条目集合修订端点（C3b，草稿期；提交确认与生效是 C4）。
+  // 内容包与版本端点（C3b，草稿期；提交确认与生效是 C4）。
   const packages = createPackageRoutes({ db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES });
   router.use(packages.router);
   const materials = createMaterialRoutes({ db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES, attachmentHelpers: attachments.helpers });
@@ -135,19 +124,8 @@ module.exports = (deps) => {
   const confirm = createConfirmRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
     attachmentHelpers: attachments.helpers,
-    todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined, // C4b：代录的外部确认日期上限
   });
   router.use(confirm.router);
-
-  // 「历史补录中」时间窗、历史补录、历史事实导入（C4b Q-S2）：复用 confirm 的条目集合重核与 plan 的收口取数。
-  const history = createHistoryRoutes({
-    db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
-    attachmentHelpers: attachments.helpers,
-    todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined,
-    recheckOverallSet: confirm.recheckOverallSet,
-    loadPlanData: plan.loadPlanData,
-  });
-  router.use(history.router);
 
   // 需求确认单导出（C4c R-S1）：纯读的打印友好 HTML；导出时刻可注入（nowProvider，缺省 = 服务器当前时刻）。
   const confirmationSheet = createConfirmationSheetRoutes({
@@ -156,20 +134,18 @@ module.exports = (deps) => {
   });
   router.use(confirmationSheet.router);
 
-  // 登记与办理、知会与知会异议（C5 S-S1a）：写登记时绑定附件、给结论时冻结登记附件都用 attachments.helpers；todayProvider 可选（业务日期上限与「收口后第 N 天」，缺省 = 服务器本地日期）。
+  // 登记与办理、改期知会的接收人查看（C5 S-S1a；C6 起办理只剩更正与作废）：写登记时绑定附件用 attachments.helpers；todayProvider 可选（业务日期上限与「收口后第 N 天」，缺省 = 服务器本地日期）。
   const entries = createEntryRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
     attachmentHelpers: attachments.helpers,
     todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined,
   });
   router.use(entries.router);
-
-  // 正式变更（C5 S-S1c）：建变更 / 出新版本 / 读；提交与撤回在 confirm 路由（POST /changes/:cid/submit、包版本 withdraw），生效在 confirm-core。建变更时绑定方向类证据附件用 attachments.helpers。
-  const changes = createChangeRoutes({
+  const work = createWorkRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES,
     attachmentHelpers: attachments.helpers,
   });
-  router.use(changes.router);
+  router.use(work.router);
 
   // 上线交接集合 / 交接确认发起 / 确认试运行结束（上线、再上线）/ 撤销上线（C6a）：发起交接确认时冻结登记附件用 attachments.helpers；todayProvider 可选（里程碑节点收口记的实际日期，缺省 = 服务器本地日期）。
   const golive = createGoliveRoutes({
@@ -179,13 +155,16 @@ module.exports = (deps) => {
   });
   router.use(golive.router);
 
-  // 通知与待办（C6b）：PM 补发 / 发送意图列表、我的待办。待办的「待我确认」「知会」两类读 confirm / entries 导出的同一取数函数（与 GET /my/confirmations、/my/notices 同源）。
+  // 通知与待办。待确认列表与确认入口共享资格判定。
   const notifyRoutes = createNotifyRoutes({
     db, logger, readonlyIds: deps.READONLY_LEADER_IDS, writeRoles: deps.WRITE_ALLOWED_ROLES, notifier,
     todayProvider: typeof deps.todayProvider === 'function' ? deps.todayProvider : undefined,
-    myConfirmationItems: confirm.myConfirmationItems, myNoticeItems: entries.myNoticeItems, myInvitationItems: membership.myInvitationItems,
+    myConfirmationItems: confirm.myConfirmationItems,
   });
   router.use(notifyRoutes.router);
+  router.use(createDashboardRoutes({
+    db, logger, projectRoutes: projects, notifyRoutes, todayProvider: deps.todayProvider,
+  }).router);
 
   // 初始化成功后触发一次「模块就绪时扫描」（后台任务开关 off 时 notifier.onReady 什么也不做）；返回的仍是底层单飞的同一个 Promise。
   const initSchema = () => {

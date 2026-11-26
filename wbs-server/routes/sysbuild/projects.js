@@ -16,8 +16,9 @@ const express = require('express');
 const schema = require('./schema');
 const rules = require('./rules');
 const { makeError } = require('./db');
-const { writeEvent } = require('./events');
+const { EVENT_TYPES, writeEvent } = require('./events');
 const membership = require('./membership');
+const people = require('./membership-people');
 const { seedProjectStructure } = require('./templates');
 const confirmCore = require('./confirm-core');
 const goliveCore = require('./golive-core'); // C6a：项目详情的 golive_progress（与 GET /plan 同源）
@@ -145,7 +146,7 @@ function createProjectRoutes(ctx) {
   }
 
   // ── 读库小助手 ──────────────────────────────────────────────────────────────────────────
-  const PROJECT_COLS = 'p.id AS id, p.system_name AS system_name, p.phase_name AS phase_name, p.build_type AS build_type, p.goal AS goal, p.oa_number AS oa_number, p.initiated_on AS initiated_on, p.pm_user_id AS pm_user_id, p.status AS status, p.history_window AS history_window, p.created_by AS created_by, p.created_at AS created_at, p.updated_at AS updated_at, COALESCE(u.display_name, u.username) AS pm_name';
+  const PROJECT_COLS = 'p.id AS id, p.system_name AS system_name, p.phase_name AS phase_name, p.build_type AS build_type, p.goal AS goal, p.oa_number AS oa_number, p.initiated_on AS initiated_on, p.pm_user_id AS pm_user_id, p.status AS status, p.created_by AS created_by, p.created_at AS created_at, p.updated_at AS updated_at, COALESCE(u.display_name, u.username) AS pm_name';
   const PROJECT_FROM = 'FROM sysbuild_projects p LEFT JOIN users u ON u.id = p.pm_user_id';
   async function loadProjectRow(q, pid) {
     return q.get(`SELECT ${PROJECT_COLS} ${PROJECT_FROM} WHERE p.id = ?`, [pid]);
@@ -169,7 +170,6 @@ function createProjectRoutes(ctx) {
       party_id: identity.partyId,
       owner_of_parties: identity.ownerOfParties,
       delegate_of_parties: identity.delegateOfParties,
-      pending_invitation_count: identity.pendingInvitations.length,
     };
   }
   function viewOf(row) {
@@ -184,7 +184,6 @@ function createProjectRoutes(ctx) {
       pm_user_id: row.pm_user_id,
       pm_name: row.pm_name,
       status: row.status,
-      history_window: row.history_window,
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
@@ -207,8 +206,7 @@ function createProjectRoutes(ctx) {
     return u;
   }
   // PM 的成员行：没有「未移出」的行就新建一行（已加入、不挂参与方）并写 member_added；已有行则不动。返回是否新建。
-  //   不再把「待接受」的成员行替本人置为已加入（预筛 M3 硬门）：更换 PM 前 pmClash 已挡住有待接受成员行 / 成员行属某参与方的候选人，
-  //   所以走到这里要么没有未移出的行，要么是已加入且 party_id 为空的行。via：事件 payload 里的来源（更换 PM 传 'pm_change'，建项不传）。
+  // 已有未移出的成员行必须是无参与方归属。via 记录 PM 变更来源。
   async function ensurePmMemberRow(q, pid, pmUserId, operator, via) {
     const row = await q.get(
       'SELECT id FROM sysbuild_members WHERE project_id = ? AND user_id = ? AND removed_at IS NULL ORDER BY id LIMIT 1',
@@ -227,8 +225,10 @@ function createProjectRoutes(ctx) {
     return true;
   }
   // 先可见性、再补齐其余身份字段（L6）：看不见的人（不存在 / 非成员）只付 loadProjectAccess 的查询就得到 404。
+  const projectAccess = (q, pid, user) => rules.loadProjectAccess(q, pid, user, accessOpts());
+  const canReadProject = async (q, pid, user) => rules.canViewProject(await projectAccess(q, pid, user));
   async function loadVisibleIdentity(q, pid, user) {
-    const access = await rules.loadProjectAccess(q, pid, user, accessOpts());
+    const access = await projectAccess(q, pid, user);
     rules.assertVisible(access);
     return rules.completeIdentity(q, access, user);
   }
@@ -250,6 +250,7 @@ function createProjectRoutes(ctx) {
     if (!platform.isAdmin && pmRaw !== null) throw makeError(403, 'SYSBUILD_FORBIDDEN', '只有 admin 可以指定项目负责人');
     if (platform.isAdmin && pmRaw === null) throw invalid('admin 代建项目必须指定项目负责人（pm_user_id）', 'pm_user_id');
     const pmId = platform.isAdmin ? pmRaw : uid;
+    const parties = people.readInitialParties(body);
     const out = await db.withWriteTxn(async (q) => {
       if (platform.isAdmin) await assertEligiblePm(q, pmId);
       const ins = await q.run(
@@ -264,41 +265,40 @@ function createProjectRoutes(ctx) {
       });
       // C3a：同一事务带出默认批次与节点（方案 v1.2 §2.3 / §3）；任何一步失败整个建项回滚。
       await seedProjectStructure(q, { projectId: pid, buildType: values.build_type, operatorId: uid, operatorName: operatorNameOf(user) });
+      await people.addInitialParties(q, { id: pid, pm_user_id: pmId }, user, parties);
       return projectResponse(q, pid, user);
     });
     res.status(201).json(out);
   }));
 
   // ── GET /sysbuild/projects?scope=mine|all ─────────────────────────────────────────────
-  router.get('/sysbuild/projects', handle(async (req, res) => {
-    const scope = req.query.scope === undefined ? 'mine' : req.query.scope;
+  async function listProjects(q, user, scope = 'mine') {
     if (scope !== 'mine' && scope !== 'all') throw invalid('scope 必须是 mine 或 all', 'scope');
-    const user = req.user;
     const uid = Number(user.id);
     const platform = rules.platformIdentity(user, accessOpts());
     if (scope === 'all' && !rules.canListAll(platform)) throw makeError(403, 'SYSBUILD_FORBIDDEN', '没有权限执行该操作');
-    const items = await db.withRead(async (q) => {
-      const rows = scope === 'all'
-        ? await q.all(`SELECT ${PROJECT_COLS} ${PROJECT_FROM} ORDER BY p.id DESC`, [])
-        : await q.all(
-          `SELECT ${PROJECT_COLS} ${PROJECT_FROM}
-            WHERE p.pm_user_id = ? OR EXISTS (SELECT 1 FROM sysbuild_members m WHERE m.project_id = p.id AND m.user_id = ? AND ${rules.MEMBER_ACTIVE_SQL})
-            ORDER BY p.id DESC`,
-          [uid, uid]
-        );
-      const out = [];
-      for (const row of rows) {
-        const identity = await rules.loadProjectIdentity(q, row.id, user, accessOpts());
-        out.push(Object.assign(viewOf(row), { me: identityCard(identity), actions: rules.actionsFor(identity, row) }));
-      }
-      return out;
-    });
+    const rows = scope === 'all'
+      ? await q.all(`SELECT ${PROJECT_COLS} ${PROJECT_FROM} ORDER BY p.id DESC`, [])
+      : await q.all(
+        `SELECT ${PROJECT_COLS} ${PROJECT_FROM}
+          WHERE p.pm_user_id = ? OR EXISTS (SELECT 1 FROM sysbuild_members m WHERE m.project_id = p.id AND m.user_id = ? AND ${rules.MEMBER_ACTIVE_SQL})
+          ORDER BY p.id DESC`,
+        [uid, uid]
+      );
+    const items = [];
+    for (const row of rows) {
+      const identity = await rules.loadProjectIdentity(q, row.id, user, accessOpts());
+      items.push(Object.assign(viewOf(row), { me: identityCard(identity), actions: rules.actionsFor(identity, row) }));
+    }
     // C7：空列表时也能决定入口；与真实建项 / 全部项目权限共用判定，前端不复制平台只读名单。
-    res.json({ scope, projects: items, actions: {
+    return { scope, projects: items, actions: {
       create: rules.canCreateProject(platform),
       list_all: rules.canListAll(platform),
       create_pm_required: platform.isAdmin === true,
-    } });
+    } };
+  }
+  router.get('/sysbuild/projects', handle(async (req, res) => {
+    res.json(await db.withRead((q) => listProjects(q, req.user, req.query.scope)));
   }));
 
   // C7 时间线框架：只返回事件事实元数据，不返回任意 payload。
@@ -312,7 +312,7 @@ function createProjectRoutes(ctx) {
     if (query.before !== undefined && before === null) throw invalid('分页游标不合法', 'before');
     if (!limit || limit > 100) throw invalid('每页条数须为 1–100', 'limit');
     const out = await db.withRead(async (q) => {
-      // 复用详情的当前可见对象集合：时间线不能成为未接受 / 拒绝 / 撤回意图的读取旁路。
+      // 复用详情的当前可见对象，时间线维持相同的人员范围。
       const detail = await projectDetailView(q, pid, req.user);
       const visibleMembers = new Set(detail.members.map((m) => m.id));
       const visibleAppointments = new Set(detail.appointments.map((a) => a.id));
@@ -322,25 +322,20 @@ function createProjectRoutes(ctx) {
         if (type === 'member') return visibleMembers.has(id);
         if (type === 'appointment') return visibleAppointments.has(id);
         if (type === 'delegation') return visibleDelegations.has(id);
-        if (type !== 'invitation') return false;
-        const invitation = await q.get('SELECT kind, member_id, appointment_id FROM sysbuild_invitations WHERE id = ? AND project_id = ?', [id, pid]);
-        if (!invitation) return false;
-        return invitation.kind === 'join' ? visibleMembers.has(invitation.member_id) : invitation.kind === 'appointment' && visibleAppointments.has(invitation.appointment_id);
+        return false;
       }
       async function visibleTimelineEvent(event) {
         const key = event.object_type + ':' + event.object_id;
         if (hasKey(visibilityCache, key)) return visibilityCache[key];
         let visible;
-        if (['member', 'appointment', 'delegation', 'invitation'].includes(event.object_type)) {
+        if (['member', 'appointment', 'delegation'].includes(event.object_type)) {
           visible = await visibleMembershipObject(event.object_type, event.object_id);
         } else if (event.object_type === 'confirm_task' || event.object_type === 'confirm_revision') {
           const task = event.object_type === 'confirm_task'
             ? await q.get('SELECT object_type, object_id FROM sysbuild_confirm_tasks WHERE id = ? AND project_id = ?', [event.object_id, pid])
             : await q.get('SELECT t.object_type AS object_type, t.object_id AS object_id FROM sysbuild_confirm_task_revisions r JOIN sysbuild_confirm_tasks t ON t.id = r.task_id WHERE r.id = ? AND t.project_id = ?', [event.object_id, pid]);
-          visible = !!task && (task.object_type === 'invitation' || task.object_type === 'delegation'
-            ? await visibleMembershipObject(task.object_type, task.object_id)
-            : ['package_version', 'item_version', 'dev_entry', 'conclusion', 'adjudication', 'handover'].includes(task.object_type));
-        } else visible = true;
+          visible = !!task && task.object_type === 'package_version';
+        } else visible = EVENT_TYPES.includes(event.event_type);
         visibilityCache[key] = visible;
         return visible;
       }
@@ -348,7 +343,8 @@ function createProjectRoutes(ctx) {
       let candidateBefore = before;
       for (;;) {
         const rows = await q.all(
-          `SELECT id, project_id, object_type, object_id, event_type, operator_id, operator_name, created_at
+          `SELECT id, project_id, object_type, object_id, event_type, operator_id, operator_name, created_at,
+                  CASE WHEN event_type = 'material_not_applicable' THEN json_extract(payload_json, '$.material_key') END AS declaration_key
            FROM sysbuild_events WHERE project_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`,
           [pid, candidateBefore, candidateBefore, 100]
         );
@@ -360,63 +356,68 @@ function createProjectRoutes(ctx) {
         candidateBefore = rows[rows.length - 1].id;
       }
       const hasMore = visibleRows.length > limit;
-      const items = visibleRows.slice(0, limit);
+      const items = visibleRows.slice(0, limit).map(({ declaration_key, ...event }) => event.event_type === 'material_not_applicable'
+        ? { ...event, label: declaration_key === 'initiation-basis' ? '填写了无书面依据原因' : '将材料标为不适用' } : event);
       return { project_id: pid, items, next_before: hasMore && items.length ? items[items.length - 1].id : null };
     });
     res.json(out);
   }));
 
   // ── GET /sysbuild/projects/:id：详情 ──────────────────────────────────────────────────
+  async function projectParties(q, pid) {
+    const parties = await q.all('SELECT id, side, name, sort_order FROM sysbuild_parties WHERE project_id = ? ORDER BY sort_order, id', [pid]);
+    const owners = await q.all(
+      `SELECT a.party_id AS party_id, a.id AS appointment_id, a.member_id AS member_id, m.user_id AS user_id, a.effective_at AS effective_at, COALESCE(u.display_name, u.username) AS name
+         FROM sysbuild_appointments a JOIN sysbuild_members m ON m.id = a.member_id JOIN sysbuild_parties p ON p.id = a.party_id LEFT JOIN users u ON u.id = m.user_id
+        WHERE a.status = 'active' AND p.project_id = ? AND ${rules.MEMBER_ACTIVE_SQL}`,
+      [pid]
+    );
+    const delegates = await q.all(
+      `SELECT d.party_id AS party_id, d.id AS delegation_id, d.member_id AS member_id, m.user_id AS user_id, d.effective_at AS effective_at, COALESCE(u.display_name, u.username) AS name
+         FROM sysbuild_delegations d JOIN sysbuild_members m ON m.id = d.member_id JOIN sysbuild_parties p ON p.id = d.party_id LEFT JOIN users u ON u.id = m.user_id
+        WHERE d.status = 'active' AND p.project_id = ? AND ${rules.MEMBER_ACTIVE_SQL}`,
+      [pid]
+    );
+    const ownerOf = (partyId) => owners.find((o) => o.party_id === partyId) || null;
+    const delegateOf = (partyId) => delegates.find((d) => d.party_id === partyId) || null;
+    return parties.map((p) => {
+      const o = ownerOf(p.id);
+      const d = delegateOf(p.id);
+      return {
+        id: p.id, side: p.side, name: p.name, sort_order: p.sort_order,
+        owner: o ? { appointment_id: o.appointment_id, member_id: o.member_id, user_id: o.user_id, name: o.name, effective_at: o.effective_at } : null,
+        delegate: d ? { delegation_id: d.delegation_id, member_id: d.member_id, user_id: d.user_id, name: d.name, effective_at: d.effective_at } : null,
+      };
+    });
+  }
+
   async function projectDetailView(q, pid, user) {
       const identity = await loadVisibleIdentity(q, pid, user);
       const row = await loadProjectRow(q, pid);
       const manager = identity.isPm || identity.isAdmin;
-      const parties = await q.all('SELECT id, side, name, sort_order FROM sysbuild_parties WHERE project_id = ? ORDER BY sort_order, id', [pid]);
-      const owners = await q.all(
-        `SELECT a.party_id AS party_id, a.member_id AS member_id, a.effective_at AS effective_at, COALESCE(u.display_name, u.username, m.person_name) AS name
-           FROM sysbuild_appointments a JOIN sysbuild_members m ON m.id = a.member_id JOIN sysbuild_parties p ON p.id = a.party_id LEFT JOIN users u ON u.id = m.user_id
-          WHERE a.status = 'active' AND p.project_id = ? AND ${rules.MEMBER_ACTIVE_SQL}`,
-        [pid]
-      );
-      const delegates = await q.all(
-        `SELECT d.party_id AS party_id, d.member_id AS member_id, d.effective_at AS effective_at, COALESCE(u.display_name, u.username, m.person_name) AS name
-           FROM sysbuild_delegations d JOIN sysbuild_members m ON m.id = d.member_id JOIN sysbuild_parties p ON p.id = d.party_id LEFT JOIN users u ON u.id = m.user_id
-          WHERE d.status = 'active' AND p.project_id = ? AND ${rules.MEMBER_ACTIVE_SQL}`,
-        [pid]
-      );
+      const partyItems = await projectParties(q, pid);
       const memberRows = await q.all(
-        `SELECT m.id AS id, m.party_id AS party_id, m.user_id AS user_id, COALESCE(u.display_name, u.username, m.person_name) AS name,
+        `SELECT m.id AS id, m.party_id AS party_id, m.user_id AS user_id, COALESCE(u.display_name, u.username) AS name,
                 m.joined_at AS joined_at, m.removed_at AS removed_at, m.removed_reason AS removed_reason
            FROM sysbuild_members m LEFT JOIN users u ON u.id = m.user_id WHERE m.project_id = ? ORDER BY m.id`,
         [pid]
       );
       const members = [];
       for (const m of memberRows) {
-        const status = m.removed_at !== null ? 'removed' : (m.joined_at === null ? 'pending' : 'joined');
+        const status = m.removed_at !== null ? 'removed' : 'joined';
         // 普通成员（含只读账号）一律排除待接受与已移出（08a M-2、08b M-6）；PM 与 admin 为管理需要全部可见。
         if (!visibility.memberVisible(identity, m)) continue;
         const item = { id: m.id, party_id: m.party_id, user_id: m.user_id, name: m.name, status, joined_at: m.joined_at };
         if (manager) { item.removed_at = m.removed_at; item.removed_reason = m.removed_reason; }
         members.push(item);
       }
-      const ownerOf = (partyId) => owners.find((o) => o.party_id === partyId) || null;
-      const delegateOf = (partyId) => delegates.find((d) => d.party_id === partyId) || null;
-      const partyItems = parties.map((p) => {
-        const o = ownerOf(p.id);
-        const d = delegateOf(p.id);
-        return {
-          id: p.id, side: p.side, name: p.name, sort_order: p.sort_order,
-          owner: o ? { member_id: o.member_id, name: o.name, effective_at: o.effective_at } : null,
-          delegate: d ? { member_id: d.member_id, name: d.name, effective_at: d.effective_at } : null,
-        };
-      });
       // C2b：参与方 / 成员补逐对象 actions；任职与授权列表（按本人可见范围）。判定与写端点同源（rules.OBJECT_OPS）。
-      const objs = await membership.decorateDetail(q, identity, row, partyItems, members, ctx.readonlyIds);
+      const objs = await membership.decorateDetail(q, identity, row, partyItems, members);
       // 预筛 LOW-5：部分上线进度（已正式上线 n / 有效批次 m，转出单列）与 GET /plan 的 project.golive_progress 同一个函数
       const golive_progress = await goliveCore.goliveProgressOf(q, pid);
       const detail = { project: Object.assign(viewOf(row), { golive_progress }), parties: partyItems, members, appointments: objs.appointments, delegations: objs.delegations, me: identityCard(identity), actions: rules.actionsFor(identity, row) };
       // C6b（§9.2）：PM 的项目视图显示「通知发送失败 N 条」，供点补发（POST …/send-intents/resend）；只给本人是 PM 的详情，其他人不带这个字段
-      if (identity.isPm === true) detail.notify = { send_failed: await notifyCore.failedIntentCount(q, pid), needs_offline: await notifyCore.needsOfflineCount(q, pid) }; // 修订批 2（P184）：补发能处理的失败 / 须线下通知的（无账号负责人的改期知会）拆成两个数
+      if (identity.isPm === true) detail.notify = { send_failed: await notifyCore.failedIntentCount(q, pid) };
       return detail;
   }
   router.get('/sysbuild/projects/:id', handle(async (req, res) => {
@@ -541,8 +542,6 @@ function createProjectRoutes(ctx) {
       const r = await q.run("UPDATE sysbuild_projects SET pm_user_id = ?, updated_at = datetime('now','localtime') WHERE id = ? AND pm_user_id = ?", [newPm, pid, oldPm]);
       if (r.changes === 0) throw stateError('项目负责人已变化，请刷新后重试');
       await ensurePmMemberRow(q, pid, newPm, user, 'pm_change');
-      // C2b（M1 ③）：同事务撤回原 PM 发出的待处理邀请及关联的待接受成员行 / 任职提议——邀请人失权即失效，不留惰性悬挂（admin 发出的不受影响）。
-      await membership.withdrawInvitationsOfInviter(q, user, pid, oldPm, ctx.readonlyIds);
       await writeEvent(q, {
         projectId: pid, objectType: 'project', objectId: pid, eventType: 'project_pm_changed',
         payload: { from: oldPm, to: newPm, reason, takeover: newPm === uid }, operatorId: uid, operatorName: operatorNameOf(user),
@@ -552,7 +551,7 @@ function createProjectRoutes(ctx) {
     res.json(out);
   }));
 
-  return { router };
+  return { router, listProjects, projectParties, canReadProject };
 }
 
 module.exports = { createProjectRoutes };

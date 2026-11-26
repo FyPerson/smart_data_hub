@@ -50,7 +50,10 @@ const { spawn, spawnSync } = require('child_process');
 
 const REGISTRY_ENV = 'S2C_TEST_REGISTRY';
 const REGISTRY_HEADER = '{"registry":"lines-test","v":1}';
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,7}Z$/;
+const hasProcessIdentity = (entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
+    && Number.isSafeInteger(entry.pid) && entry.pid > 0 && typeof entry.start === 'string' && ISO_RE.test(entry.start);
+const canonicalStart = (start) => start.replace(/\.(\d{1,7})Z$/, (_, fraction) => '.' + fraction.padEnd(7, '0') + 'Z');
 
 /** 仅测试用（套件 / 自检的单元测试）：psPrelude 拼进回收脚本开头（例如用同名函数遮蔽 Get-Process 制造查询失败）。 */
 const _test = { psPrelude: '' };
@@ -151,13 +154,48 @@ function buildReapScript(e) {
     ];
 }
 
-/** 对一个登记项做一次回收尝试。返回 { outcome: 'killed' | 'gone' | 'reused' | 'kill-failed' | 'query-failed', code, stderr }。 */
+// 回收查询已失败时，只复核原进程是否消失。即使无法取得新进程句柄，CIM 仍可能确认 PID 已被复用。
+// 复核不发终止命令，只有明确无进程或精确创建时间不符才能结算。其余继续按查询失败处理。
+function confirmOriginalEnded(e, timeoutMs) {
+    return psRun([
+        `try { $c = Get-CimInstance Win32_Process -Filter "ProcessId=${e.pid}" -ErrorAction Stop } catch { [Console]::Error.Write($_.Exception.Message); $c = $null }`,
+        'if ($null -ne $c -and $c.CreationDate -is [DateTime]) {',
+        `  if ($c.CreationDate.ToUniversalTime().ToString("o") -ne '${e.start}') { exit 5 }`,
+        '  exit 4',
+        '}',
+        GET_PROCESS_LINE(e.pid),
+        'exit 4',
+    ], timeoutMs);
+}
+
+// PowerShell 可以在同一个 CLIXML 块中写入进度和序列化错误。保留错误和独立的明文 stderr。
+const shortStderr = (text) => String(text || '').replace(
+    /#< CLIXML\s*<Objs\b[\s\S]*?(?:<\/Objs>|$)/g,
+    (block) => Array.from(block.matchAll(/<S\b[^>]*\bS="Error"[^>]*>([\s\S]*?)<\/S>/g), (match) => match[1]).join(' '),
+).trim().slice(0, 200);
+
+/** 对一个登记项做一次回收尝试。返回 outcome、code、stderr。身份复核仍不确定时另带 confirmation 诊断。 */
 function reapEntry(e, timeoutMs) {
-    const r = psRun(buildReapScript(e), timeoutMs);
+    if (!hasProcessIdentity(e)) return { outcome: 'query-failed', code: 4, stderr: '登记项的 PID 或创建时间无效' };
+    // CIM 的 "o" 固定为七位小数。补零保留同一时刻，避免仅格式差异被识别为 PID 复用。
+    const identity = { pid: e.pid, start: canonicalStart(e.start) };
+    const budget = Math.max(1, Math.min(60000, Number.isFinite(timeoutMs) ? timeoutMs : 60000));
+    const deadline = Date.now() + budget;
+    const r = psRun(buildReapScript(identity), budget);
     if (r.error) return { outcome: 'query-failed', code: -1, stderr: String(r.error.message) };
-    const stderr = String(r.stderr || '').replace(/#< CLIXML[\s\S]*$/, '').trim().slice(0, 200);
+    const stderr = shortStderr(r.stderr);
     const map = { 0: 'killed', 3: 'gone', 5: 'reused', 6: 'kill-failed' };
-    return { outcome: map[r.status] || 'query-failed', code: r.status, stderr };
+    const result = { outcome: map[r.status] || 'query-failed', code: r.status, stderr };
+    const remaining = deadline - Date.now();
+    if (r.status === 4 && remaining > 0) {
+        const confirmation = confirmOriginalEnded(identity, remaining);
+        if (!confirmation.error && (confirmation.status === 3 || confirmation.status === 5)) {
+            return { outcome: map[confirmation.status], code: confirmation.status, stderr: '' };
+        }
+        result.confirmation = { code: confirmation.status, stderr: shortStderr(confirmation.stderr) };
+        if (confirmation.error) result.confirmation.error = shortStderr(confirmation.error.message);
+    }
+    return result;
 }
 
 /** 取进程的精确创建时间（CIM，与被测代码同口径）。返回 { kind: 'ok', start } / { kind: 'gone' } / { kind: 'failed', why }。 */
@@ -195,11 +233,11 @@ function readRegistry(file) {
         if (raw.trim() === '') continue;
         let e;
         try { e = JSON.parse(raw); } catch (_) { problems.push(`登记文件第 ${i + 1} 行不是合法 JSON：${JSON.stringify(raw.slice(0, 80))}`); continue; }
-        if (!(e && typeof e === 'object' && !Array.isArray(e) && Number.isSafeInteger(e.pid) && e.pid > 0 && typeof e.start === 'string' && ISO_RE.test(e.start))) {
+        if (!hasProcessIdentity(e)) {
             problems.push(`登记文件第 ${i + 1} 行不是 { pid, start（精确创建时间）} 记录：${JSON.stringify(raw.slice(0, 80))}`);
             continue;
         }
-        const key = `${e.pid}|${e.start}`;
+        const key = `${e.pid}|${canonicalStart(e.start)}`;
         if (seen.has(key)) continue;
         seen.add(key);
         entries.push({ pid: e.pid, start: e.start });
@@ -257,7 +295,12 @@ async function reapRegistry(file, opts) {
             await sleep(Math.max(0, Math.min(300, left())));   // 查询失败 / 终止失败：保留记录，稍后重试
         }
         if (last === null) { unprocessed.push({ pid: e.pid, start: e.start }); continue; }
-        if (last.outcome !== 'gone' && last.outcome !== 'reused') failed.push({ pid: e.pid, start: e.start, outcome: last.outcome, code: last.code });
+        if (last.outcome !== 'gone' && last.outcome !== 'reused') {
+            const record = { pid: e.pid, start: e.start, outcome: last.outcome, code: last.code };
+            if (last.stderr) record.stderr = last.stderr;
+            if (last.confirmation) record.confirmation = last.confirmation;
+            failed.push(record);
+        }
     }
     return { total: entries.length, killed: Array.from(killedSet), failed, unprocessed, exhausted, problems };
 }
@@ -557,6 +600,51 @@ async function selfTestReapIdentity(problems) {
         await new Promise((resolve) => dead.once('exit', resolve));
         const r4 = reapEntry({ pid: dead.pid, start: '2001-01-01T00:00:00.0000000Z' });
         if (r4.outcome !== 'gone') problems.push(`R4 已退出的进程应判 gone（明确找不到），实际 ${r4.outcome}（stderr ${r4.stderr}）`);
+        const noHandle = "function Get-Process { [CmdletBinding()] param($Id) [pscustomobject]@{ Handle = [IntPtr]::Zero } }";
+        _test.psPrelude = noHandle;
+        try {
+            // 同一个存活夹具分别提供过时登记和精确登记。两个场景都禁止终止该夹具。
+            const stale = new Date(Date.parse(s3) + 2000).toISOString().replace(/Z$/, s3.slice(-5));
+            const r5 = reapEntry({ pid: k3.pid, start: stale });
+            if (r5.outcome !== 'reused' || !alive(k3.pid)) problems.push(`R5 无句柄但创建时间不符应判 reused、保留夹具，实际 ${r5.outcome}`);
+            const r6 = reapEntry({ pid: k3.pid, start: s3 });
+            if (r6.outcome !== 'query-failed' || !alive(k3.pid)) problems.push(`R6 无句柄且创建时间相符应判查询失败、保留夹具，实际 ${r6.outcome}`);
+            _test.psPrelude = noHandle + "\nfunction Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) Write-Error 'injected CIM failure' }";
+            const r7 = reapEntry({ pid: k3.pid, start: s3 });
+            if (r7.outcome !== 'query-failed' || !alive(k3.pid) || !r7.confirmation || !r7.confirmation.stderr.includes('injected CIM failure')) {
+                problems.push(`R7 无句柄也无法读取创建时间应判查询失败、保留夹具与复查诊断，实际 ${JSON.stringify(r7)}`);
+            }
+            // 两次查询在不同 PowerShell 中。用私有标记模拟首次取不到句柄，复查时明确找不到进程。
+            const marker = tmpName('R8-no-process', 'mark');
+            const literal = "'" + marker.replace(/'/g, "''") + "'";
+            _test.psPrelude = [
+                'function Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) }',
+                'function Get-Process { [CmdletBinding()] param($Id)',
+                `  if (Test-Path -LiteralPath ${literal}) { Write-Error 'injected absence' -ErrorId 'NoProcessFoundForGivenId'; return }`,
+                `  New-Item -ItemType File -Path ${literal} | Out-Null`,
+                '  [pscustomobject]@{ Handle = [IntPtr]::Zero }',
+                '}',
+            ].join('\n');
+            try {
+                const r8 = reapEntry({ pid: dead.pid, start: '2001-01-01T00:00:00.0000000Z' });
+                if (r8.outcome !== 'gone' || !fs.existsSync(marker)) problems.push(`R8 复查明确找不到原进程应判 gone，实际 ${r8.outcome}`);
+            } finally {
+                unlinkQuiet(marker);
+            }
+            _test.psPrelude = [
+                noHandle,
+                "[Console]::Error.WriteLine('#< CLIXML')",
+                "[Console]::Error.WriteLine('<Objs><Obj S=\"progress\">ignored</Obj><S S=\"Error\">serialized failure</S></Objs>')",
+                "function Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) [pscustomobject]@{ CreationDate = [DateTime]::Parse('2001-01-01T00:00:00.1500000Z') } }",
+            ].join('\n');
+            const r9 = reapEntry({ pid: k3.pid, start: '2001-01-01T00:00:00.15Z' });
+            if (r9.outcome !== 'query-failed' || !alive(k3.pid)
+                || !r9.confirmation || !r9.confirmation.stderr.includes('serialized failure') || r9.confirmation.stderr.includes('ignored')) {
+                problems.push(`R9 相同时间的不同精度不得判复用，序列化错误仍应可见，实际 ${JSON.stringify(r9)}`);
+            }
+        } finally {
+            _test.psPrelude = '';
+        }
         // 终止 k3（R3 之后恢复正常再回收）
         reset();
         append({ pid: k3.pid, start: s3 });

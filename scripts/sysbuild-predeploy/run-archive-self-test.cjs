@@ -27,6 +27,10 @@ const mutations = [
     { id: '补拉清单漏掉变化附件', expect: '最终清单差异', from: 'fetch: [...added, ...changed]', to: 'fetch: [...added]' },
     { id: '镜像落后不提示', expect: '镜像落后时', from: "mirror.projectId === ref.id && mirror.revision === pkg.revision ? 'matches' : 'stale'", to: "true ? 'matches' : 'stale'" },
 ];
+// 只读导出（#212 C1b）：变异登记供 wbs-server/scripts/sysbuild-step1/mutation-check.js 读取；下面的自检驱动只在直接运行本脚本时执行（未缩进，内容一字未改）。
+module.exports = { mutations };
+if (require.main === module) {
+const rec = require(path.join(__dirname, '../../wbs-server/scripts/lib/sysbuild-mut-record.js')); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@MUT 行
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'sysbuild-archive-mut-'));
 function execute(name, args) {
     const r = spawnSync(process.execPath, [path.join(__dirname, 'verify-archive.cjs'), ...args], { cwd: path.resolve(__dirname, '../..'), windowsHide: true, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 30000 });
@@ -40,14 +44,16 @@ console.log('存档未变异基线 ' + baseline.summary.passed + '/' + baseline.
 const results = [];
 for (const [index, mutation] of mutations.entries()) {
     const count = source.split(mutation.from).length - 1;
-    if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); continue; }
+    if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); if (rec.enabled()) console.log(rec.mutLine('archive', mutation.id, rec.VERDICT.ANCHOR, [], 'anchor count ' + count)); continue; }
     const candidate = path.join(out, 'candidate-' + index); fs.mkdirSync(candidate);
     fs.copyFileSync(path.join(__dirname, 'archive-fs.cjs'), path.join(candidate, 'archive-fs.cjs'), fs.constants.COPYFILE_EXCL);
     const file = path.join(candidate, 'archive-core.cjs'); fs.writeFileSync(file, source.replace(mutation.from, () => mutation.to), { flag: 'wx' });
     const r = execute('mutation-' + index, ['--candidate', file]); const failed = r.summary ? r.summary.results.filter((item) => !item.passed).map((item) => item.name) : [];
     const red = r.status === 1 && !r.signal && !r.error && r.summary && r.summary.total === baseline.summary.total && failed.some((name) => name.startsWith(mutation.expect));
     results.push({ id: mutation.id, red: !!red, failed, status: r.status, evidence: r.evidence, error: r.error }); console.log((red ? '变异判红 ' : '变异未检出 ') + mutation.id);
+    if (rec.enabled()) console.log(rec.mutLine('archive', mutation.id, red ? rec.VERDICT.RED : (r.error || r.signal || !r.summary ? rec.VERDICT.ABNORMAL : rec.VERDICT.WEAK), rec.failuresOfSummary(r.summary), red ? null : (r.error || r.signal || (!r.summary ? '没有结果文件' : null))));
 }
 const red = results.filter((r) => r.red).length;
 fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ at: new Date().toISOString(), scope: 'C9 draft, private filesystem only', baseline: baseline.evidence, red, total: results.length, results }, null, 2));
 console.log('存档变异 ' + red + '/' + results.length + ' 判红；证据 ' + out); process.exitCode = red === results.length ? 0 : 1;
+}

@@ -1,70 +1,118 @@
-/* 内容包版本、条目集合、正式变更、确认任务与归档确认单。 */
+/* 内容包版本、确认任务与归档确认单。 */
 (function () {
     'use strict';
     const A = window.SysBuildUI;
-    const names = { initiation: '立项与授权', overall: '总体范围与批次规划', batch_req: '批次需求', batch_accept: '批次验收', change: '正式变更', closing: '整体验收结项' };
+    const names = { initiation: '立项与授权', overall: '总体范围与批次规划', batch_accept: '批次验收', closing: '整体验收结项' };
     const states = { draft: '草稿', pending: '待确认', effective: '已生效', superseded: '已被替代', withdrawn: '已撤回' };
     const revisionStates = { pending: '待确认', confirmed: '已确认', objected: '有异议', rejected: '不认可', invalid: '已失效', superseded: '已被替代' };
     const prose = (s) => A.el('div', 'sbui-longtext', s || '未填写');
-    function defaultBatch() {
-        const batch = A.state.plan.batches.find((b) => b.is_default === true);
-        if (!batch) throw new Error('默认交付安排未就绪，请先核对项目结构');
-        return batch;
+    const usableMaterialVersion = (version) => (version.attachments || []).every((a) => !a.masked && !a.deleted && !a.missing);
+    const latestUsableVersion = (material) => material && material.versions.filter((v) => v.attachments.length > 0 && usableMaterialVersion(v)).sort((a, b) => b.version_no - a.version_no)[0];
+    function basisMaterial(materials) {
+        const node = A.state.plan.nodes.find((n) => n.template_key === 'p_initiation' && n.batch_id === null);
+        return node && materials.materials.find((m) => m.node_id === node.id && m.material_key === 'initiation-basis');
     }
-    async function createPackage(detail, type, c) {
-        const body = { type };
-        if (type === 'batch_accept') body.batch_id = defaultBatch().id;
-        const created = await A.request('/projects/' + detail.project.id + '/packages', { method: 'POST', body }, c);
-        const result = type === 'initiation' ? await A.createInitiationVersion(detail, created.package.id, c) : await A.request('/packages/' + created.package.id + '/versions', { method: 'POST', body: {} }, c);
-        if (type === 'initiation') await A.refreshInitiation(result, c, { project: detail.project.id, tab: 'packages', version: result.version.id });
-        else A.navigate({ project: detail.project.id, tab: 'packages', version: result.version.id });
+    async function createInitiationVersion(detail, packageId, c) {
+        const created = await A.request('/packages/' + packageId + '/versions', { method: 'POST', body: {} }, c);
+        let warning = null;
+        try {
+            const [v, materials] = await Promise.all([A.request('/package-versions/' + created.version.id, null, c), A.request('/projects/' + detail.project.id + '/materials', null, c)]);
+            const material = basisMaterial(materials);
+            const latest = latestUsableVersion(material);
+            if (latest) {
+                const oldIds = new Set(material.versions.map((x) => x.id));
+                const ids = (v.snapshot_json.material_version_ids || []).filter((id) => !oldIds.has(id));
+                ids.push(latest.id);
+                await A.request('/package-versions/' + v.version.id, { method: 'PATCH', body: { snapshot_json: { ...v.snapshot_json, material_version_ids: ids } } }, c);
+            }
+        } catch (err) {
+            if (err.stale || err.name === 'AbortError' || !A.valid(c)) throw err;
+            warning = '立项依据未能自动选入。已保留立项草稿，请在草稿中补选后保存。';
+        }
+        return { ...created, warning };
     }
-    function changeForm(detail, entries, c) {
-        A.assertCurrent(c);
-        const form = A.dialog('建立正式变更', [
-            { name: 'title', label: '变更标题', required: true, max: 100, full: true },
-            { name: 'body', label: '为什么改、改什么', type: 'textarea', required: true, max: 4000, full: true },
-            { name: 'scope', label: '对范围的影响', type: 'textarea', max: 2000, full: true },
-            { name: 'schedule', label: '对排期的影响', type: 'textarea', max: 2000, full: true },
-            { name: 'acceptance', label: '对验收的影响', type: 'textarea', max: 2000, full: true },
-            { name: 'from_entry_ids', label: '引用的意见 / 问题登记（可选）', type: 'checklist', options: entries.filter((e) => ['feedback', 'issue'].includes(e.type)).map((e) => [e.id, '#' + e.id + ' ' + e.title]), full: true },
-            { name: 'files', label: '变更依据附件 / 截图', type: 'file', multiple: true, full: true },
-            { name: 'no_written_evidence', label: '确无书面证据', type: 'checkbox' },
-            { name: 'no_evidence_reason', label: '无书面证据原因', type: 'textarea', max: 500, full: true, hint: '与证据附件二选一，原因至少10个字。' },
-        ], async (v, cc) => {
-            if (v.no_written_evidence && v.files.length) throw new Error('证据附件与无书面证据声明应二选一');
-            const attachment_ids = await A.stageFiles(detail.project.id, v.files, cc);
-            const affects = Object.fromEntries(['scope', 'schedule', 'acceptance'].filter((key) => v[key].trim()).map((key) => [key, v[key]]));
-            const body = { title: v.title, body: v.body, affects, from_entry_ids: (v.from_entry_ids || []).map(A.id), attachment_ids, ...A.evidencePayload(v) };
-            const made = await A.request('/projects/' + detail.project.id + '/changes', { method: 'POST', body }, cc);
-            A.navigate({ project: detail.project.id, tab: 'packages', version: made.version.id });
-        }, '建立变更与草稿');
-        form.prepend(A.hint('变更从现行总体规划继承完整条目集合。建立后仍须编辑草稿、发起确认并全部通过，才会形成新的执行依据。'));
-    }
-    async function addItemToVersion(detail, data, c) {
-        const lease = A.reserveDialog(c);
-        const items = await A.request('/projects/' + detail.project.id + '/items', null, lease);
-        A.assertCurrent(lease);
-        const existing = new Set(data.items.map((item) => item.item_id));
-        const choices = items.items.filter((item) => !existing.has(item.id)).flatMap((item) => item.versions.map((version) => [version.id, item.code + ' · v' + version.version_no + ' · ' + version.content.slice(0, 80)]));
-        if (!choices.length) throw new Error('没有可加入的条目版本；如需换版，请先移出原条目，再加入指定的新版本');
-        A.dialog('向本版加入需求条目', [{ name: 'item_version_id', label: '明确选择条目版本', required: true, options: [['', '请选择本次拟确认的版本'], ...choices] }], async (v, cc) => {
-            await A.request('/package-versions/' + data.version.id + '/items', { method: 'POST', body: { op: 'add', item_version_id: A.id(v.item_version_id), committed_batch_id: defaultBatch().id } }, cc);
+    function initiationEditor(detail, v, materials, c) {
+        const saved = v.snapshot_json || {};
+        const chosen = (saved.material_version_ids || []).map(Number);
+        const choices = materials.materials.flatMap((m) => m.versions.map((version) => [version.id, m.name + ' · v' + version.version_no + (!usableMaterialVersion(version) ? ' · 含不可用附件，请替换' : '')]));
+        const offered = new Set(choices.map(([id]) => id));
+        const preserved = chosen.filter((id) => !offered.has(id));
+        const defs = [
+            { name: 'text', label: '本版确认正文', type: 'textarea', max: 12000, full: true, value: saved.text || detail.project.goal || '' },
+            { name: 'material_version_ids', label: '本版明确引用的材料版本', type: 'checklist', options: choices, value: chosen, full: true, hint: '选入结果以保存后的版本快照为准。同一材料只能选一版。' },
+        ];
+        const form = A.form(defs, async (values, cc) => {
+            const snapshot = { ...v.snapshot_json, text: values.text, material_version_ids: [...preserved, ...(values.material_version_ids || []).map(A.id)] };
+            delete snapshot.no_written_basis_reason;
+            await A.request('/package-versions/' + v.version.id, { method: 'PATCH', body: { snapshot_json: snapshot } }, cc);
             await A.render();
-        }, '加入本版集合', lease);
+        }, '保存本版草稿', c, '');
+        if (v.basis_declaration) form.prepend(A.panel('无书面依据', [A.el('div', 'sbui-longtext', v.basis_declaration)]));
+        if (!saved.text && detail.project.goal) form.prepend(A.hint('正文已预填项目目标，请核对并保存本版草稿。'));
+        const normalize = (text, ids) => JSON.stringify({ text: String(text || ''), ids: Array.from(new Set(ids.map(Number))).sort((a, b) => a - b) });
+        const savedState = normalize(saved.text, chosen);
+        form.sbuiAssertSaved = () => {
+            const selected = Array.from(form.querySelectorAll('[name="material_version_ids[]"]:checked')).map((input) => Number(input.value));
+            const current = normalize(form.querySelector('[name="text"]').value, [...preserved, ...selected]);
+            if (form.dataset.submitting === 'true' || current !== savedState) throw new Error('有未保存的改动，请先保存本版草稿，或放弃改动后再发起确认。');
+        };
+        const basis = basisMaterial(materials);
+        const latest = latestUsableVersion(basis);
+        if (latest && !basis.versions.some((x) => chosen.includes(x.id))) {
+            const add = A.command('选入最新立项依据', async (cc) => {
+                if (form.dataset.submitting === 'true') { A.notice('正在保存本版内容，请等待完成后再补选。'); return; }
+                const input = form.querySelector('[name="material_version_ids[]"][value="' + latest.id + '"]');
+                // 草稿未改动时直接补选并保存；已有编辑保留在表单里，仍由“保存”统一提交。
+                const selected = Array.from(form.querySelectorAll('[name="material_version_ids[]"]:checked')).map((x) => Number(x.value));
+                const current = normalize(form.querySelector('[name="text"]').value, [...preserved, ...selected]);
+                if (current !== savedState) {
+                    if (input) input.checked = true;
+                    A.notice('已勾选最新立项依据，请保存本版内容后再发起确认。');
+                    return;
+                }
+                const fresh = await A.request('/package-versions/' + v.version.id, null, cc);
+                const ids = Array.from(new Set([...(fresh.snapshot_json.material_version_ids || []), latest.id]));
+                await A.request('/package-versions/' + v.version.id, { method: 'PATCH', body: { snapshot_json: { ...fresh.snapshot_json, material_version_ids: ids } } }, cc);
+                await A.render();
+            }, '', c);
+            form.querySelector('.sbui-form-actions').prepend(add);
+        }
+        return form;
+    }
+    async function createVersion(detail, packageId, type, c) {
+        const result = type === 'initiation'
+            ? await createInitiationVersion(detail, packageId, c)
+            : await A.request('/packages/' + packageId + '/versions', { method: 'POST', body: {} }, c);
+        A.assertCurrent(c);
+        const params = { project: detail.project.id, tab: 'packages', version: result.version.id };
+        if (!result.warning) { A.navigate(params); return; }
+        // 在同一次渲染中保留草稿和自动选材失败提示。
+        history.replaceState(null, '', '#' + new URLSearchParams(params).toString());
+        const route = location.hash;
+        await A.render();
+        if (A.state.session === c.session && A.state.userId === c.userId && A.state.token === c.token && location.hash === route) A.notice(result.warning, true);
+    }
+    async function createPackageDraft(detail, card, pkg, c) {
+        let packageId = pkg?.id;
+        if (!packageId) {
+            const body = { type: card.key };
+            if (card.key === 'batch_accept') body.batch_id = card.batch_id;
+            const created = await A.request('/projects/' + detail.project.id + '/packages', { method: 'POST', body }, c);
+            packageId = created.package.id;
+        }
+        await createVersion(detail, packageId, card.key, c);
     }
     function withdrawVersion(data, c) {
         A.assertCurrent(c);
-        const abandon = data.package.type === 'change' && data.version.status === 'draft';
-        const title = abandon ? '放弃变更草稿' : '撤回本版确认';
-        const form = A.dialog(title + ' · v' + data.version.version_no, [{ name: 'reason', label: abandon ? '放弃原因' : '撤回原因', type: 'textarea', required: true, max: 500, full: true }], async (v, cc) => { await A.request('/package-versions/' + data.version.id + '/withdraw', { method: 'POST', body: { reason: v.reason } }, cc); await A.render(); }, title);
-        if (abandon) form.prepend(A.hint('放弃后该变更不能再提交，仍待认可的相关开发评估任务会关闭；已有记录保留。需要继续时另建正式变更。'));
+        const title = '撤回本版确认';
+        A.dialog(title + ' · v' + data.version.version_no, [{ name: 'reason', label: '撤回原因', type: 'textarea', required: true, max: 500, full: true }], async (v, cc) => { await A.request('/package-versions/' + data.version.id + '/withdraw', { method: 'POST', body: { reason: v.reason } }, cc); await A.render(); }, title);
     }
     async function packageVersion(detail, versionId, c) {
         const data = await A.request('/package-versions/' + versionId, null, c);
         if (Number(data.package.project_id) !== Number(detail.project.id)) throw new Error('该内容包版本不属于当前项目');
         const host = A.el('div');
-        host.appendChild(A.row(A.link('返回内容包与正式变更', { project: detail.project.id, tab: 'packages' })));
+        host.appendChild(A.row(A.link('返回对方确认', { project: detail.project.id, tab: 'packages' }),
+            data.package.type === 'initiation' ? A.link('返回立项阶段', { project: detail.project.id, tab: 'plan', stage: 'initiation' }) : null));
         const controls = A.row();
         let editForm = null;
         const savedText = data.snapshot_json.text || '';
@@ -79,24 +127,23 @@
         if (data.actions.submit === true) controls.appendChild(A.command('发起本版确认', async (cc) => { assertSavedDraft(); await A.request('/package-versions/' + data.version.id + '/submit', { method: 'POST', body: {} }, cc); await A.render(); }, 'primary', c));
         // 55 号 D1：不能发起时展示读接口给出的原因原文（与 actions.submit 同一判定）；无权限时服务端不给原因，这里也不显示。
         else if (data.version.status === 'draft' && data.submit_block && typeof data.submit_block.message === 'string') controls.appendChild(A.hint('当前不能发起确认：' + data.submit_block.message));
-        if (data.actions.withdraw === true) controls.appendChild(A.button(data.package.type === 'change' && data.version.status === 'draft' ? '放弃变更草稿' : '撤回本版确认', () => withdrawVersion(data, c)));
-        if (data.actions.new_version === true) controls.appendChild(A.command('基于包的最新内容建立新草稿', async (cc) => {
-            const made = data.package.type === 'initiation' ? await A.createInitiationVersion(detail, data.package.id, cc) : await A.request('/packages/' + data.package.id + '/versions', { method: 'POST', body: {} }, cc);
-            if (data.package.type === 'initiation') await A.refreshInitiation(made, cc, { project: detail.project.id, tab: 'packages', version: made.version.id });
-            else A.navigate({ project: detail.project.id, tab: 'packages', version: made.version.id });
-        }, '', c));
-        if (data.package.type === 'change' && data.version.status === 'draft') {
-            const [changes, entries] = await Promise.all([A.request('/projects/' + detail.project.id + '/changes', null, c), A.request('/projects/' + detail.project.id + '/entries', null, c)]);
-            const change = changes.changes.find((ch) => ch.versions.some((v) => v.id === data.version.id));
-            const allowed = entries.registration.forms.find((f) => f.kind === 'dev_assessment');
-            if (change && allowed && allowed.allowed === true) controls.appendChild(A.command('登记开发评估', (cc) => A.openEntryForm(detail, 'dev_assessment', { about_change_id: change.id }, cc), '', c));
-        }
+        if (data.actions.withdraw === true) controls.appendChild(A.button('撤回本版确认', () => withdrawVersion(data, c)));
         host.appendChild(A.panel((names[data.package.type] || data.package.type) + ' v' + data.version.version_no + ' · ' + (states[data.version.status] || data.version.status), [A.facts([['形成时间', data.version.created_at], ['生效时间', data.version.effective_at], ['继承的总体版本', data.version.parent_overall_version_id ? '#' + data.version.parent_overall_version_id : '无']]), A.hint(data.version.status === 'draft' ? '先保存草稿，再发起本版确认。发起使用已保存的版本，不自动保存未提交的编辑。' : data.version.status === 'pending' ? '本版已提交，确认人按固定版本与冻结附件作决定。' : '保留该版原文与确认事实。后续新草稿不会覆盖此版。')], controls));
         host.appendChild(A.panel('本版确认内容', [A.snapshotView(data.snapshot_json)]));
+        if (data.submit_block?.pending_work?.length) host.appendChild(A.panel('待处理任务和意见', [
+            A.row(...data.submit_block.pending_work.map((item) => A.work.itemLink(detail.project.id, item))),
+        ]));
+        if (data.scope_adjustments) host.appendChild(A.panel('确认之后的调整', [
+            data.scope_adjustments.length ? A.table(['意见', '调整', '记录时间'], data.scope_adjustments.map((item) => [
+                A.work.itemLink(detail.project.id, { kind: 'opinion', id: item.opinion_id, title: item.title }),
+                item.outcome === 'cut_agreed' ? '同意本期移出范围' : '本期做 · 需求调整',
+                item.resolved_at,
+            ])) : A.hint('暂无调整。'),
+        ]));
         if (data.actions.edit === true) {
             const materials = await A.request('/projects/' + detail.project.id + '/materials', null, c);
             if (data.package.type === 'initiation') {
-                editForm = A.initiationEditor(detail, data, materials, c, true);
+                editForm = initiationEditor(detail, data, materials, c);
                 host.appendChild(A.panel('编辑本版草稿', [editForm]));
             } else {
             const choices = materials.materials.flatMap((m) => m.versions.map((v) => [v.id, m.name + ' · v' + v.version_no + (v.attachments.some((a) => a.masked || a.deleted) ? ' · 含不可新增引用的附件，请替换' : '')]));
@@ -110,47 +157,23 @@
             host.appendChild(A.panel('编辑本版草稿', [editForm]));
             }
         }
-        const items = A.panel('本版条目集合', [A.hint('条目版本与承诺交付安排在服务端提交时重核。替换版本须先移出旧版，再明确加入新版本。')], data.actions.add_item === true ? A.command('加入需求条目', () => addItemToVersion(detail, data, c), '', c) : null);
-        items.appendChild(A.table(['条目', '明确引用版本', '操作'], data.items.map((item) => [item.code, 'v' + item.version_no, data.actions.remove_item === true ? A.command('从本版移出', async (cc) => { await A.request('/package-versions/' + data.version.id + '/items', { method: 'POST', body: { op: 'remove', item_version_id: item.item_version_id } }, cc); await A.render(); }, '', c) : '—'])));
-        host.appendChild(items);
         for (const m of data.materials || []) host.appendChild(A.panel('本版引用材料 · ' + m.name + ' v' + m.version_no, [prose(m.body), A.attachmentList(m.attachments, c)]));
         const tasks = await A.request('/package-versions/' + data.version.id + '/confirm-tasks', null, c);
-        host.appendChild(A.panel('各方确认任务（打开前不记录浏览）', [A.table(['参与方', '必需确认人', '当前修订状态', '操作'], tasks.tasks.map((task) => [task.party_name || '—', task.required_name + (task.proxy_only ? ' · 仅凭据代录' : ''), revisionStates[task.current_revision.status] || task.current_revision.status, A.link('明确打开确认全文', { task: task.task_id, revision_id: task.current_revision.id })]))]));
+        host.appendChild(A.panel('各方确认任务（打开前不记录浏览）', [A.table(['参与方', '必需确认人', '当前修订状态', '操作'], tasks.tasks.map((task) => [task.party_name || '—', task.required_name, revisionStates[task.current_revision.status] || task.current_revision.status, A.link('明确打开确认全文', { task: task.task_id, revision_id: task.current_revision.id })]))]));
         if (data.actions.export_sheet === true) {
             const sheetHost = A.el('div');
             host.appendChild(A.panel('归档确认单', [A.command('加载确认单预览', async (cc) => { const sheet = await A.confirmationSheetFrame(data.version.id, cc); A.assertCurrent(cc); sheetHost.replaceChildren(sheet); }, '', c), sheetHost]));
         }
-        if ((data.history_confirmations || []).length) host.appendChild(A.disclosure('历史补录确认（不代替当前任务）', data.history_confirmations.map((r) => A.panel((r.actual_confirmer || '历史确认人') + ' · ' + r.external_date, [prose(r.identity_basis), A.attachmentList(r.attachments, c)]))));
-        if ((data.history_imports || []).length) host.appendChild(A.disclosure('历史事实导入记录', data.history_imports.map((r) => A.panel((r.fact_type_label || '已导入历史事实') + ' · ' + r.original_date, [prose(r.identity_basis), A.attachmentList(r.attachments, c)]))));
         return host;
     }
     async function packagesTab(detail, params, c) {
         if (params.has('version')) return packageVersion(detail, A.id(params.get('version')), c);
-        const [data, changes, entries] = await Promise.all([
-            A.request('/projects/' + detail.project.id + '/packages', null, c), A.request('/projects/' + detail.project.id + '/changes', null, c), A.request('/projects/' + detail.project.id + '/entries', null, c),
-        ]);
+        const data = await A.request('/projects/' + detail.project.id + '/packages', null, c);
         const host = A.el('div');
-        const controls = A.row(...data.actions.create_package_types.filter((type) => type !== 'batch_req').map((type) => A.command('建立' + (names[type] || type) + '草稿', (cc) => createPackage(detail, type, cc), '', c)));
-        if (changes.actions.create_change === true) controls.appendChild(A.button('建立正式变更', () => changeForm(detail, entries.entries, c), 'primary'));
-        host.appendChild(A.panel('内容包与正式变更', [A.hint('当前执行内容以生效总体规划及其明确引用的条目、材料版本为准；候选新版本等待确认后才生效。'), A.hint('正式上线后，第一期已上线条目不能新增、替换版本或移入。即使条目集合未改变，变更生效仍会生成新的总体规划版本，并要求验收、结项重新确认。')], controls));
-        for (const pkg of data.packages.filter((p) => p.type !== 'change')) {
-            const part = A.panel(names[pkg.type] || pkg.type, null, pkg.actions.new_version === true ? A.command('建立新草稿版本', async (cc) => {
-                const made = pkg.type === 'initiation' ? await A.createInitiationVersion(detail, pkg.id, cc) : await A.request('/packages/' + pkg.id + '/versions', { method: 'POST', body: {} }, cc);
-                if (pkg.type === 'initiation') await A.refreshInitiation(made, cc, { project: detail.project.id, tab: 'packages', version: made.version.id });
-                else A.navigate({ project: detail.project.id, tab: 'packages', version: made.version.id });
-            }, '', c) : null);
+        host.appendChild(A.panel('对方确认', [A.hint('已保存的版本与确认记录在此查阅，发起新确认请进入对应阶段。')]));
+        for (const pkg of data.packages) {
+            const part = A.panel(names[pkg.type] || pkg.type);
             part.appendChild(A.table(['版本', '状态', '生效时间', '操作'], pkg.versions.slice().reverse().map((v) => ['v' + v.version_no, states[v.status] || v.status, v.effective_at || '—', A.link('查看该版原文与任务', { project: detail.project.id, tab: 'packages', version: v.id })])));
-            host.appendChild(part);
-        }
-        for (const ch of changes.changes) {
-            const controls = A.row();
-            const draft = ch.versions.find((v) => v.status === 'draft');
-            const assessment = entries.registration.forms.find((f) => f.kind === 'dev_assessment');
-            if (draft && assessment && assessment.allowed === true) controls.appendChild(A.command('登记开发评估', (cc) => A.openEntryForm(detail, 'dev_assessment', { about_change_id: ch.id }, cc), '', c));
-            if (draft && ch.actions.withdraw === true) controls.appendChild(A.button('放弃变更草稿', () => withdrawVersion({ package: { type: 'change' }, version: draft }, c)));
-            if (ch.actions.new_version === true) controls.appendChild(A.button('基于现行规划重建变更草稿', () => { A.assertCurrent(c); const form = A.dialog('重建变更草稿 · #' + ch.id, [{ name: 'reason', label: '重建原因', type: 'textarea', required: true, max: 500, full: true }], async (v, cc) => { const made = await A.request('/changes/' + ch.id + '/new-version', { method: 'POST', body: { reason: v.reason } }, cc); A.navigate({ project: detail.project.id, tab: 'packages', version: made.version.id }); }, '保留旧版并重建草稿'); form.prepend(A.hint('新草稿从此刻生效的总体规划继承完整内容，不沿用被异议的旧草稿。')); }));
-            const part = A.panel('正式变更 #' + ch.id + ' · ' + ch.title + ' · ' + (states[ch.status] || ch.status), [prose(ch.body), A.disclosure('本次影响说明', A.snapshotView(ch.affects)), ch.no_written_evidence ? A.hint('无书面证据：' + ch.no_evidence_reason) : null, A.attachmentList(ch.attachments, c), A.row(...ch.from_entry_ids.map((id) => A.link('来源登记 #' + id, { project: detail.project.id, tab: 'entries', entry: id })))], controls);
-            part.appendChild(A.table(['变更版本', '状态', '操作'], ch.versions.slice().reverse().map((v) => ['v' + v.version_no, states[v.status] || v.status, A.link('查看本版、保存草稿或发起确认', { project: detail.project.id, tab: 'packages', version: v.id })])));
             host.appendChild(part);
         }
         return host;
@@ -158,12 +181,11 @@
     async function overview(detail, params, c) {
         const data = await A.request('/projects/' + detail.project.id + '/packages', null, c);
         const host = A.el('div');
-        const preparation = await A.initiationPreparation(detail, c, data);
-        if (preparation) host.appendChild(preparation);
-        host.appendChild(A.panel('当前已确认依据', [A.table(['内容包', '生效版本', '操作'], data.packages.flatMap((p) => p.versions.filter((v) => v.status === 'effective').map((v) => [names[p.type] || p.type, 'v' + v.version_no, A.link('查看生效原文', { project: detail.project.id, tab: 'packages', version: v.id })]))), A.row(A.link('整理需求条目', { project: detail.project.id, tab: 'items' }), A.link('核对材料版本', { project: detail.project.id, tab: 'materials' }), A.link('查看内容包与正式变更', { project: detail.project.id, tab: 'packages' }))]));
-        host.appendChild(A.panel('节点推进', [A.table(['节点', '环节', '状态', '当前计划', '操作'], A.state.plan.nodes.map((n) => [n.name, n.g_stage || '—', A.nodeLabels[n.status] || n.status, n.current_plan ? n.current_plan.start + ' → ' + n.current_plan.end : '未设计划', A.link('查看排期与收口', { project: detail.project.id, tab: 'plan', node: n.id })])), A.row(A.link('登记与办理', { project: detail.project.id, tab: 'entries' }), A.link('核对上线交接', { project: detail.project.id, tab: 'handover' }), A.link('查看立项准备', { project: detail.project.id, tab: 'setup', step: '1' }))]));
+        host.appendChild(A.panel('当前已确认依据', [A.table(['内容包', '生效版本', '操作'], data.packages.flatMap((p) => p.versions.filter((v) => v.status === 'effective').map((v) => [names[p.type] || p.type, 'v' + v.version_no, A.link('查看生效原文', { project: detail.project.id, tab: 'packages', version: v.id })]))), A.row(A.link('核对材料版本', { project: detail.project.id, tab: 'materials' }), A.link('查看内容包', { project: detail.project.id, tab: 'packages' }))]));
+        host.appendChild(A.panel('节点推进', [A.table(['节点', '环节', '状态', '当前计划', '操作'], A.state.plan.nodes.map((n) => [n.name, n.g_stage || '—', A.nodeLabels[n.status] || n.status, n.current_plan ? n.current_plan.start + ' → ' + n.current_plan.end : '未设计划', A.link('查看排期与收口', { project: detail.project.id, tab: 'plan', node: n.id })])), A.row(A.link('登记与办理', { project: detail.project.id, tab: 'entries' }), A.link('核对上线前置', { project: detail.project.id, tab: 'handover' }))]));
         return host;
     }
-    A.registerTab('packages', '内容包与变更', packagesTab);
+    A.registerTab('packages', '对方确认', packagesTab);
+    A.createPackageDraft = createPackageDraft;
     A.registerTab('overview', '节点与材料', overview);
 }());

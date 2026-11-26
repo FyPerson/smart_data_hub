@@ -1,12 +1,12 @@
-// L2 汇报事实与应交日：只读。节点视图、开始门、待办和登记校验共用本文件。
+// 汇报事实与应交日：只读。节点视图、开始条件、待办和登记校验共用本文件。
 'use strict';
 const { makeError } = require('./db');
-const rules = require('./rules');
 const { DEVELOPMENT_NODE_KEYS } = require('./templates');
 const forms = require('./entry-forms');
 
 const NODE_COLS = 'id, project_id, batch_id, template_key, name, g_stage, sort_order, is_golive_milestone, status, opened_at, closed_at';
 const DAY_MS = 86400000;
+const DEFAULT_CYCLE = Object.freeze({ outsource: 'weekly', procurement: 'weekly', inhouse: 'biweekly' });
 const own = (o, key) => Object.prototype.hasOwnProperty.call(o, key);
 function validDay(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -41,7 +41,7 @@ async function developmentNodeOf(q, batchId) {
 function unreadableState(node, today = null) {
   return {
     node, today, is_dev: null, unreadable: true, project: null, batch: null,
-    current_plan: null, current_cycle: null, cycle_unreadable: false, cycle_unknown: false,
+    current_plan: null, current_cycle: null, default_cycle: null, cycle_unreadable: false, cycle_unknown: false,
     started_on: null, start_unreadable: true, requests: [], reports: [], latest_report: null,
     unreadable_request_ids: [], unreadable_report_ids: [], unreadable_entry_ids: [],
   };
@@ -66,7 +66,7 @@ async function reportStateOf(q, node, todayProvider) {
     state.is_dev = !!dev && dev.id === node.id;
     state.unreadable = false;
     if (!state.is_dev) return state;
-    state.project = await q.get('SELECT id, status FROM sysbuild_projects WHERE id = ?', [node.project_id]);
+    state.project = await q.get('SELECT id, status, build_type FROM sysbuild_projects WHERE id = ?', [node.project_id]);
     state.batch = await q.get('SELECT id, project_id, status FROM sysbuild_batches WHERE id = ? AND project_id = ?', [node.batch_id, node.project_id]);
     if (!state.project || !state.batch) return unreadableState(node, today);
     const recs = await q.all('SELECT id, kind, planned_start, planned_end, actual_date, corrects_kind FROM sysbuild_node_schedule_records WHERE node_id = ? ORDER BY id', [node.id]);
@@ -106,7 +106,7 @@ async function reportStateOf(q, node, todayProvider) {
           if (!state.latest_report) state.latest_report = view;
         }
         // 完全无法判种类的 note/general 仅视为未知候选，不冒充某一类表单事实。
-        if (hint === null && entry.type === 'note' && entry.purpose === 'general') {
+        if (hint === null && entry.type === 'note') {
           latestUnknownId = Math.max(latestUnknownId, entry.id);
           state.unreadable_request_ids.push(entry.id);
           state.unreadable_report_ids.push(entry.id);
@@ -125,6 +125,10 @@ async function reportStateOf(q, node, todayProvider) {
     state.cycle_unknown = latestUnknownId > latestCycleId;
     if (state.cycle_unreadable || state.cycle_unknown) state.current_cycle = null; // L2 unreadable cycle cannot fall back
     state.start_unreadable = !!state.start_unreadable;
+    const cycle = DEFAULT_CYCLE[state.project.build_type];
+    if (cycle && !state.current_cycle && !state.cycle_unreadable && !state.cycle_unknown && state.started_on) {
+      state.default_cycle = { cycle, first_due_on: addDays(state.started_on, cycle === 'weekly' ? 7 : 14) };
+    }
     return state;
   } catch (_) {
     return unreadableState(node, today);
@@ -133,10 +137,8 @@ async function reportStateOf(q, node, todayProvider) {
 
 async function devStartReadyOf(q, node, todayProvider, state) {
   const facts = state || await reportStateOf(q, node, todayProvider);
-  if (facts.unreadable || facts.is_dev === null) return 'unknown'; // L3：读取失败与缺计划分开，读写同源拒绝。
+  if (facts.unreadable || facts.is_dev === null) return 'unknown';
   if (!facts.is_dev) return 'not_dev_node';
-  if (!facts.current_plan) return 'no_plan';
-  if (!facts.current_cycle) return 'no_cycle';
   return 'ok';
 }
 
@@ -154,28 +156,31 @@ async function dueDatesOf(q, node, cutoff, todayProvider, state) {
   if (!node || node.status !== 'in_progress') return [];
   const facts = state || await reportStateOf(q, node, todayProvider);
   if (facts.unreadable || !facts.is_dev || !validDay(cutoff) || facts.start_unreadable || !validDay(facts.started_on)) return []; // L2 unavailable generator returns empty
-  if (facts.project.status !== 'active' || rules.BATCH_FROZEN_STATUSES.includes(facts.batch.status)) return []; // L2 generator lifecycle preconditions
+  if (facts.project.status !== 'active') return []; // L2 generator lifecycle preconditions
   const byDate = Object.create(null);
   const add = (day, source) => {
     if (day < facts.started_on || day > cutoff) return; // L2 inclusive reporting window
     if (!own(byDate, day)) byDate[day] = { due_on: day, sources: [], submitted: false, report_entry_ids: [], overdue: false };
     byDate[day].sources.push(source); // L2 same day keeps every source
   };
-  if (facts.current_cycle) {
-    const { entry_id, form } = facts.current_cycle;
+  const form = facts.current_cycle?.form || facts.default_cycle;
+  if (form) {
+    const source = facts.current_cycle
+      ? { kind: 'cycle', entry_id: facts.current_cycle.entry_id, reason: form.note || null }
+      : { kind: 'default_cycle' };
     const anchor = form.first_due_on;
     const lower = anchor > facts.started_on ? anchor : facts.started_on;
     if (validDay(anchor) && lower <= cutoff) {
       if (form.cycle === 'weekly' || form.cycle === 'biweekly') {
         const step = form.cycle === 'weekly' ? 7 : 14; // L2 weekly and biweekly intervals
         const firstIndex = Math.max(0, Math.ceil((utcDay(lower) - utcDay(anchor)) / (step * DAY_MS)));
-        for (let day = addDays(anchor, firstIndex * step); day <= cutoff; day = addDays(day, step)) add(day, { kind: 'cycle', entry_id, reason: form.note || null });
+        for (let day = addDays(anchor, firstIndex * step); day <= cutoff; day = addDays(day, step)) add(day, source);
       } else if (form.cycle === 'monthly') {
         const [ay, am] = anchor.split('-').map(Number);
         const [ly, lm] = lower.split('-').map(Number);
         let index = Math.max(0, (ly - ay) * 12 + lm - am);
         for (let day = monthlyDate(anchor, index); day <= cutoff; day = monthlyDate(anchor, ++index)) {
-          if (day >= lower) add(day, { kind: 'cycle', entry_id, reason: form.note || null });
+          if (day >= lower) add(day, source);
         }
       }
     }
@@ -187,7 +192,7 @@ async function dueDatesOf(q, node, cutoff, todayProvider, state) {
   }
   for (const item of Object.values(byDate)) {
     item.report_entry_ids.sort((a, b) => a - b);
-    item.sources.sort((a, b) => a.entry_id - b.entry_id);
+    item.sources.sort((a, b) => (a.entry_id ?? 0) - (b.entry_id ?? 0));
     item.submitted = item.report_entry_ids.length > 0; // L2 recognition status does not affect submission
     item.overdue = item.due_on < facts.today && !item.submitted; // L2 today is not overdue
   }
@@ -202,10 +207,12 @@ async function reportViewOf(q, node, todayProvider, state) {
   if (facts.unreadable) warning = '汇报事实无法读取';
   else if (facts.cycle_unreadable) warning = '节奏登记无法读取';
   else if (facts.cycle_unknown) warning = '登记无法读取，当前汇报节奏未知';
-  else if (node.status === 'in_progress' && !facts.current_cycle) warning = '尚未设定汇报节奏';
   if (!warning && node.status === 'in_progress' && facts.start_unreadable) warning = '节点最近开工日期无法读取';
+  if (!warning && node.status === 'in_progress' && !facts.current_cycle && !facts.default_cycle) warning = '当前没有可用的汇报节奏';
   return {
     current_cycle: facts.current_cycle,
+    default_cycle: facts.default_cycle,
+    cycle_source: facts.current_cycle ? 'registered' : facts.default_cycle ? 'default' : null,
     due_items: await dueDatesOf(q, node, cutoff, todayProvider, facts),
     latest_report: facts.latest_report,
     warning,

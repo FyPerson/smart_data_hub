@@ -6,31 +6,25 @@ const CASE_EVENT_VIS = 'C7 时间线对象可见性';
 const CASE_SCHEDULE_VIS = 'C7 S-1 改期知会详情可见性';
 function defineFrontendCases(T) {
     const { test, U, api, sqlGet, sqlAll, setRole, mkProject, addMember, expectErr } = T;
-    test(CASE_SCHEDULE_VIS + '：接收人、PM、管理员200；只读、其他成员、其他需求部门负责人404；异议原文与接收人不泄露', async () => {
+    test(CASE_SCHEDULE_VIS + '：接收人、PM、管理员200；只读、其他成员、其他需求部门负责人404；详情无 objection 键、不写浏览记录、不泄露接收人', async () => {
         const call = async (uid, method, url, body, status = 200) => {
             const response = await api(uid, method, '/sysbuild' + url, body);
             assert.strictEqual(response.status, status, response.text); return response.body;
         };
         const post = (uid, url, body, status) => call(uid, 'POST', url, body || {}, status);
-        const pid = (await post(U.pm, '/projects', { system_name: '改期异议读面', build_type: 'inhouse' }, 201)).project.id;
-        for (const [uid, delegate] of [[U.own, U.del], [U.x1, U.x2]]) {
-            const party = (await post(U.pm, '/projects/' + pid + '/parties', { side: 'demand', name: '需求方' + uid }, 201)).party.id;
-            const added = await post(U.pm, '/projects/' + pid + '/members', { user_id: uid, party_id: party }, 201);
-            await post(uid, '/my/invitations/' + added.invitation.id + '/accept');
-            const appt = await post(U.pm, '/parties/' + party + '/appointments', { member_id: added.member.id }, 201);
-            await post(uid, '/my/invitations/' + appt.invitation.id + '/accept');
-            const representative = await post(U.pm, '/projects/' + pid + '/members', { user_id: delegate, party_id: party }, 201);
-            await post(delegate, '/my/invitations/' + representative.invitation.id + '/accept');
-            const delegation = (await post(uid, '/parties/' + party + '/delegations', { member_id: representative.member.id }, 201)).delegation.id;
-            await post(delegate, '/delegations/' + delegation + '/accept');
-        }
+        const pid = (await post(U.pm, '/projects', {
+            system_name: '改期异议读面', build_type: 'inhouse',
+            demand_parties: [[U.own, U.del], [U.x1, U.x2]].map(([leader, representative]) => ({
+                name: '需求方' + leader, leader_user_id: leader, representative_user_id: representative,
+            })),
+        }, 201)).project.id;
         await addMember(pid, U.m1);
-        async function submitAndConfirm(type, item, batch) {
+        async function submitAndConfirm(type) {
             const pkg = (await post(U.pm, '/projects/' + pid + '/packages', { type }, 201)).package.id;
             const vid = (await post(U.pm, '/packages/' + pkg + '/versions', {}, 201)).version.id;
             // L2 fixture：此成功确认链先明确满足立项门；保留原改期知会可见性断言。
-            if (type === 'initiation') await call(U.pm, 'PATCH', '/package-versions/' + vid, { snapshot_json: { no_written_basis_reason: '改期知会用例的立项来源为线下讨论，尚无书面原件' } });
-            if (item) await post(U.pm, '/package-versions/' + vid + '/items', { op: 'add', item_version_id: item, committed_batch_id: batch }, 201);
+            if (type === 'initiation') await T.confirm.declareInitiationBasis(vid);
+            else await T.confirm.prepareBasisVersion(vid);
             await post(U.pm, '/package-versions/' + vid + '/submit');
             const tasks = (await call(U.pm, 'GET', '/package-versions/' + vid + '/confirm-tasks')).tasks;
             for (const task of tasks) {
@@ -42,24 +36,36 @@ function defineFrontendCases(T) {
         await submitAndConfirm('initiation');
         const plan = await call(U.pm, 'GET', '/projects/' + pid + '/plan');
         for (const node of plan.nodes) await post(U.pm, '/nodes/' + node.id + '/schedule', { kind: 'plan', planned_start: '2026-11-02', planned_end: '2026-11-30' }, 201);
-        const item = (await post(U.pm, '/projects/' + pid + '/items', { content: '改期知会所依规划需求', proposer_name: '线下提出人', no_written_evidence: true, no_evidence_reason: '当面沟通形成的需求没有书面原始材料' }, 201)).item;
-        await submitAndConfirm('overall', item.versions[0].id, plan.batches[0].id);
+        await submitAndConfirm('overall');
         const milestone = plan.nodes.find((n) => n.is_golive_milestone);
         await post(U.pm, '/nodes/' + milestone.id + '/schedule', { kind: 'plan', planned_start: '2026-11-02', planned_end: '2026-12-15', reason: '需求部门提出推迟上线时间', no_written_evidence: true, no_evidence_reason: '本次会议讨论形成改期安排尚无书面原始材料' }, 201);
         const notice = await sqlGet("SELECT n.id FROM sysbuild_notices n JOIN sysbuild_members m ON m.id = n.recipient_member_id WHERE n.project_id = ? AND n.kind = 'schedule_change' AND m.user_id = ?", [pid, U.own]);
         assert.ok(notice, '必须生成发给第一需求部门负责人的改期知会');
-        await post(U.own, '/notices/' + notice.id + '/object', { reason: '本部门仍有资源冲突，请PM协调后再安排' }, 201);
+        // C6：知会异议随 S7 删除——不再提异议、详情没有 objection 键；读知会详情与读 /my/notices 列表都不写浏览记录（接替 stage8.js:246 与 entries.js:733 的两条保留断言：前后各取一次 sysbuild_views 行数，覆盖成功读与非成员 404 读）
+        const viewCount = async () => (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_views', [])).n;
+        const viewsBefore = await viewCount();
         for (const uid of [U.own, U.pm, U.admin]) {
             const detail = (await call(uid, 'GET', '/notices/' + notice.id)).notice;
-            assert.strictEqual(detail.objection.reason, '本部门仍有资源冲突，请PM协调后再安排');
-            assert.strictEqual(detail.objection.actor_user_id, U.own);
+            assert.ok(!('objection' in detail), '详情没有 objection 键（C6-RC54）');
+            assert.strictEqual(detail.kind, 'schedule_change');
+            assert.strictEqual((await api(uid, 'GET', '/sysbuild/my/notices')).status, 200, '读 /my/notices 列表');
         }
         const absent = await api(U.ro, 'GET', '/sysbuild/notices/999999999');
         for (const uid of [U.ro, U.m1, U.x1, U.out]) {
             const denied = await api(uid, 'GET', '/sysbuild/notices/' + notice.id);
             expectErr(denied, 404, 'SYSBUILD_NOT_FOUND');
-            assert.deepStrictEqual(denied.body, absent.body, '其他可见者不能枚举异议详情');
+            assert.deepStrictEqual(denied.body, absent.body, '其他可见者不能枚举知会详情');
         }
+        assert.deepStrictEqual((await call(U.out, 'GET', '/my/notices')).items, [], '非成员读 /my/notices 为空（接替 entries.js:733）');
+        assert.strictEqual(await viewCount(), viewsBefore, '读知会详情与 /my/notices 列表（含非成员 404 读）不写浏览记录');
+        // 已移出项目的接收人读不到详情：上面的拒绝循环（U.ro / U.m1 / U.x1 / U.out）靠详情路由自带的「接收人 / PM / admin」校验就是 404，打不到项目可见性这道门；
+        // 唯一的差异样本是已被移出的接收人（接收人校验的 SQL 不看 removed_at，只有项目可见性会拦）。移出成员不碰知会表，知会行仍在（#212 C6 CA5g M1993）
+        const ownMemberId = (await sqlGet('SELECT id FROM sysbuild_members WHERE project_id = ? AND user_id = ? AND removed_at IS NULL', [pid, U.own])).id;
+        await post(U.pm, '/members/' + ownMemberId + '/remove', { reason: '移出改期知会接收人' });
+        assert.ok(await sqlGet('SELECT id FROM sysbuild_notices WHERE id = ?', [notice.id]), '前置：移出成员后知会行仍在');
+        const gone = await api(U.own, 'GET', '/sysbuild/notices/' + notice.id);
+        expectErr(gone, 404, 'SYSBUILD_NOT_FOUND');
+        assert.deepStrictEqual(gone.body, absent.body, '已移出项目的接收人读不到知会详情（项目可见性）');
     });
     test(CASE_CAPS + '：返回建项 / 全部项目 / 代建指定 PM 的服务端能力，三字段与手写身份矩阵逐项全等；viewer 与只读 admin 不获建项权限；只读查询不写事件或浏览', async () => {
         const projectCount = (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects', [])).n;
@@ -99,7 +105,6 @@ function defineFrontendCases(T) {
     test(CASE_EVENTS + '：仅项目可见者读取，游标分页不重复、不串项目，只给事实元数据，不带 payload / 文件名；读取不写事件或浏览', async () => {
         const pid = await mkProject(U.pm);
         await addMember(pid, U.m1);
-        await addMember(pid, U.x1, { pending: true });
         await addMember(pid, U.x2, { removed: true });
         for (const goal of ['第一条事实', '第二条事实', '第三条事实']) assert.strictEqual((await api(U.pm, 'PATCH', '/sysbuild/projects/' + pid, { goal })).status, 200);
         const other = await mkProject(U.pm);
@@ -141,61 +146,43 @@ function defineFrontendCases(T) {
         assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_events', [])).n, eventCount);
         assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_views', [])).n, viewCount);
     });
-    test(CASE_EVENT_VIS + '：成员页不可见的未接受 / 拒绝加入与未生效授权不得从事件旁路读取；本人和本方负责人按详情范围读取；生效后及撤销后的授权历史仍可见', async () => {
-        const post = async (uid, url, body, status) => {
-            const response = await api(uid, 'POST', '/sysbuild' + url, body || {});
-            assert.strictEqual(response.status, status || 200, response.text);
+    test(CASE_EVENT_VIS + '：已移出人员不从时间线旁路可见；跨过隐藏记录后仍能读取早期项目；生效及撤销后的授权历史可读', async () => {
+        const post = async (uid, url, body, status = 200) => {
+            const response = await api(uid, 'POST', '/sysbuild' + url, body);
+            assert.strictEqual(response.status, status, response.text);
             return response.body;
         };
-        const pid = (await post(U.pm, '/projects', { system_name: '时间线权限对照', build_type: 'inhouse' }, 201)).project.id;
-        const party = (await post(U.pm, '/projects/' + pid + '/parties', { side: 'demand', name: '授权方' }, 201)).party.id;
-        const members = {};
-        for (const uid of [U.m1, U.own, U.del, U.out]) {
-            const added = await post(U.pm, '/projects/' + pid + '/members', { user_id: uid, party_id: uid === U.out ? null : party }, 201);
-            members[uid] = added;
-            if (uid !== U.out) await post(uid, '/my/invitations/' + added.invitation.id + '/accept');
-        }
+        const pid = (await post(U.pm, '/projects', {
+            system_name: '时间线权限对照', build_type: 'inhouse',
+            demand_parties: [{ name: '授权方', leader_user_id: U.own, representative_user_id: U.del }],
+        }, 201)).project.id;
+        await post(U.pm, '/projects/' + pid + '/members', { user_id: U.m1 }, 201);
         const detail = async (uid) => (await api(uid, 'GET', '/sysbuild/projects/' + pid)).body;
         const timeline = async (uid) => {
             const result = await api(uid, 'GET', '/sysbuild/projects/' + pid + '/events?limit=100');
             assert.strictEqual(result.status, 200, result.text);
-            assert.strictEqual(result.body.next_before, null, '本用例不超过 100 个可见事件');
             return result.body.items;
         };
-        const hidden = await sqlAll("SELECT id FROM sysbuild_events WHERE project_id = ? AND ((object_type = 'member' AND object_id = ?) OR (object_type = 'invitation' AND object_id = ?))", [pid, members[U.out].member.id, members[U.out].invitation.id]);
-        assert.ok(!(await detail(U.m1)).members.some((m) => m.id === members[U.out].member.id));
-        assert.ok((await timeline(U.pm)).some((e) => hidden.some((h) => h.id === e.id)), 'PM 可以管理未接受意图');
-        for (const uid of [U.m1, U.ro]) assert.ok(!(await timeline(uid)).some((e) => hidden.some((h) => h.id === e.id)), '普通成员 / 只读账号不能借时间线看到未接受加入意图');
-        await post(U.out, '/my/invitations/' + members[U.out].invitation.id + '/decline');
-        assert.ok(!(await timeline(U.m1)).some((e) => e.operator_id === U.out), '未加入者拒绝邀请的名字也不能从操作人字段泄漏');
-        // 正常生产路径造出超过一批的隐藏意图，确认过滤不能截断更早的可见事实。
-        for (let i = 0; i < 24; i += 1) {
-            const added = await post(U.pm, '/projects/' + pid + '/members', { user_id: U.out }, 201);
-            await post(U.out, '/my/invitations/' + added.invitation.id + '/decline');
+        const original = await detail(U.pm);
+        const lastIds = [];
+        for (let i = 0; i < 52; i += 1) {
+            const added = (await post(U.pm, '/projects/' + pid + '/members', { user_id: U.out }, 201)).member;
+            lastIds.push(added.id);
+            await post(U.pm, '/members/' + added.id + '/remove', { reason: '成员已离开' });
         }
-        const afterHidden = await timeline(U.m1);
-        assert.ok(afterHidden.some((e) => e.event_type === 'project_created' && e.object_id === pid), '跨过隐藏事件的原始分片后仍须读到早期项目建立事实');
-        assert.ok(!afterHidden.some((e) => e.operator_id === U.out));
-        const appointment = await post(U.pm, '/parties/' + party + '/appointments', { member_id: members[U.own].member.id }, 201);
-        await post(U.own, '/my/invitations/' + appointment.invitation.id + '/accept');
-        const first = (await post(U.pm, '/parties/' + party + '/delegations', { member_id: members[U.del].member.id }, 201)).delegation.id;
-        const eventsOfDelegation = async (id) => sqlAll("SELECT id FROM sysbuild_events WHERE project_id = ? AND object_type = 'delegation' AND object_id = ?", [pid, id]);
-        const pendingEvents = await eventsOfDelegation(first);
-        assert.ok(!(await detail(U.m1)).delegations.some((d) => d.id === first));
-        assert.ok(!(await timeline(U.m1)).some((e) => pendingEvents.some((h) => h.id === e.id)));
-        assert.ok((await timeline(U.own)).some((e) => pendingEvents.some((h) => h.id === e.id)), '本方负责人可读自己待批准的提议');
-        await post(U.own, '/delegations/' + first + '/approve');
-        assert.ok((await timeline(U.del)).some((e) => pendingEvents.some((h) => h.id === e.id)), '被授权人可读待本人接受的提议');
-        await post(U.del, '/delegations/' + first + '/decline');
-        const rejectedEvents = await eventsOfDelegation(first);
-        assert.ok(!(await timeline(U.m1)).some((e) => rejectedEvents.some((h) => h.id === e.id)));
-        const second = (await post(U.own, '/parties/' + party + '/delegations', { member_id: members[U.del].member.id }, 201)).delegation.id;
-        await post(U.del, '/delegations/' + second + '/accept');
-        const activeEvents = await eventsOfDelegation(second);
-        assert.ok((await timeline(U.m1)).some((e) => activeEvents.some((h) => h.id === e.id)), '正式生效授权可见');
-        await post(U.own, '/delegations/' + second + '/revoke', { reason: '人员调整，保留历史' });
-        assert.ok((await detail(U.m1)).delegations.some((d) => d.id === second && d.status === 'revoked'));
-        assert.ok((await timeline(U.m1)).some((e) => activeEvents.some((h) => h.id === e.id)), '撤销后的正式授权历史仍可见');
+        assert.ok((await timeline(U.pm)).some((row) => row.object_type === 'member' && lastIds.includes(row.object_id)));
+        for (const uid of [U.m1, U.ro]) {
+            assert.ok(!(await detail(uid)).members.some((row) => lastIds.includes(row.id)));
+            const visible = await timeline(uid);
+            assert.ok(!visible.some((row) => row.object_type === 'member' && lastIds.includes(row.object_id)));
+            assert.ok(visible.some((row) => row.event_type === 'project_created' && row.object_id === pid), '跨过隐藏事件后仍读到项目建立');
+        }
+        const id = original.parties[0].delegate.delegation_id;
+        const visible = async () => (await timeline(U.m1)).filter((row) => row.object_type === 'delegation' && row.object_id === id);
+        assert.deepStrictEqual((await visible()).map((row) => row.event_type), ['delegation_activated']);
+        await post(U.pm, '/delegations/' + id + '/revoke', { reason: '人员调整，保留历史' });
+        assert.ok((await detail(U.m1)).delegations.some((row) => row.id === id && row.status === 'revoked'));
+        assert.deepStrictEqual((await visible()).map((row) => row.event_type), ['delegation_revoked', 'delegation_activated']);
     });
 }
 const FRONTEND_MUTATIONS = [
@@ -208,7 +195,7 @@ const FRONTEND_MUTATIONS = [
     { id: 'C7 时间线串项目', expect: [CASE_EVENTS], edits: [{ file: 'projects.js', from: 'FROM sysbuild_events WHERE project_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?', to: 'FROM sysbuild_events WHERE ? IS NOT NULL AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?' }] },
     { id: 'C7 时间线游标包含上一页末项', expect: [CASE_EVENTS], edits: [{ file: 'projects.js', from: 'FROM sysbuild_events WHERE project_id = ? AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?', to: 'FROM sysbuild_events WHERE project_id = ? AND (? IS NULL OR id <= ?) ORDER BY id DESC LIMIT ?' }] },
     { id: 'C7 时间线不继续分页', expect: [CASE_EVENTS], edits: [{ file: 'projects.js', from: 'next_before: hasMore && items.length ? items[items.length - 1].id : null', to: 'next_before: null' }] },
-    { id: 'C7 时间线多给一项', expect: [CASE_EVENTS], edits: [{ file: 'projects.js', from: 'const items = visibleRows.slice(0, limit);', to: 'const items = visibleRows;' }] },
+  {"id":"C7 时间线多给一项","expect":["C7 时间线元数据"],"edits":[{"file":"projects.js","from":"visibleRows.slice(0, limit).map","to":"visibleRows.slice(0, limit + 1).map"}]},
     { id: 'C7 时间线不按对象可见性过滤', expect: [CASE_EVENT_VIS], edits: [{ file: 'projects.js', from: 'if (await visibleTimelineEvent(event)) visibleRows.push(event);', to: 'visibleRows.push(event);' }] },
     { id: 'C7 时间线丢弃已撤销授权历史', expect: [CASE_EVENT_VIS], edits: [{ file: 'projects.js', from: 'new Set(detail.delegations.map((d) => d.id))', to: "new Set(detail.delegations.filter((d) => d.status !== 'revoked').map((d) => d.id))" }] },
     { id: 'C7 时间线过滤后只看第一批原始事件', expect: [CASE_EVENT_VIS], edits: [{ file: 'projects.js', from: 'if (visibleRows.length > limit || rows.length < 100) break;', to: 'if (true) break;' }] },

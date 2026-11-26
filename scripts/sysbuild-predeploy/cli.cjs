@@ -4,10 +4,10 @@ const path = require('path');
 const Module = require('module');
 const archive = require('./archive-core.cjs');
 const safe = require('./archive-fs.cjs');
-const HELP = `sysbuild 部署前准备工具（默认不写源数据）
+const helpText = () => `sysbuild 部署前准备工具（默认不写源数据）
 
 schema-inspect --db <绝对路径> [--report <新JSON文件>]
-schema-apply --db <绝对路径> --backup-dir <既有目录> --expected-version <0..6> --maintenance-confirmed [--report <新JSON文件>]
+schema-apply --db <绝对路径> --backup-dir <既有目录> --expected-version <0..${require('./schema-migration-core.cjs').VERSION}> --maintenance-confirmed [--report <新JSON文件>]
 archive --source <既有3002数据目录> --out <新存档目录> --phase <prearchive|final> [--read-only-proof <JSON文件> --service-port <实际待切换端口>]
 verify --archive <存档目录> [--manifest <指定最终清单>] [--report <新JSON文件>]
 diff --before <预存档清单> --after <最终清单> --report <新差异JSON>
@@ -57,15 +57,18 @@ function portNumber(value) {
     return Number(value);
 }
 async function main(args) {
-    if (args.length === 1 && args[0] === '--help') { console.log(HELP); return; }
+    if (args.length === 1 && args[0] === '--help') { console.log(helpText()); return; }
     const { command, options: o } = parse(args); let result;
     if (o.report) checkReportTarget(o.report);
     if (command.startsWith('schema-')) {
         const fromServer = Module.createRequire(path.join(path.resolve(__dirname, '../..'), 'wbs-server/server.js'));
-        const migrator = require('./schema-migration-core.cjs').createMigrator({ sqlite3: fromServer('sqlite3'), schemaObjects: fromServer('./routes/sysbuild/schema').SCHEMA_OBJECTS, normalizeSql: fromServer('./routes/sysbuild/db').normalizeSchemaSql, materialReader: fromServer('./routes/sysbuild/materials-core') });
+        const core = require('./schema-migration-core.cjs');
+        const migrator = core.createMigrator({ sqlite3: fromServer('sqlite3'), schemaObjects: fromServer('./routes/sysbuild/schema').SCHEMA_OBJECTS, normalizeSql: fromServer('./routes/sysbuild/db').normalizeSchemaSql, materialReader: fromServer('./routes/sysbuild/materials-core') });
         if (command === 'schema-inspect') result = await migrator.inspect({ dbPath: o.db });
         else {
-            if (!/^[0-6]$/.test(o['expected-version'])) throw safe.fail('INVALID_VERSION', '来源版本必须是0到6的整数');
+            if (!/^(?:0|[1-9]\d*)$/.test(o['expected-version']) || Number(o['expected-version']) > core.VERSION) {
+                throw safe.fail('INVALID_VERSION', `来源版本必须是0到${core.VERSION}的整数`);
+            }
             result = await migrator.apply({ dbPath: o.db, backupDir: o['backup-dir'], expectedVersion: Number(o['expected-version']), maintenanceConfirmed: o['maintenance-confirmed'] });
         }
     } else if (command === 'archive') result = await archive.exportArchive({ sourceDir: o.source, outputDir: o.out, phase: o.phase, servicePort: o['service-port'] === undefined ? undefined : portNumber(o['service-port']), readOnlyProof: o['read-only-proof'] ? safe.json(safe.existing(o['read-only-proof'], 'file')) : undefined });

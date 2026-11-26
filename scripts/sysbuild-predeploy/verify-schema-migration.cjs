@@ -39,11 +39,14 @@ const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file
 const history = new Map();
 const historyFixture = require('./fixtures/schema-v1-v6.json');
 function schemaAt(commit) {
+    if (commit === core.KNOWN[core.VERSION - 1].commit) return schema.SCHEMA_OBJECTS;
     if (!history.has(commit)) {
         assert.strictEqual(historyFixture.format, 'sysbuild-schema-history-fixture'); assert.strictEqual(historyFixture.schemaVersion, 1);
-        assert.strictEqual(historyFixture.versions.length, core.KNOWN.length);
+        assert.strictEqual(historyFixture.versions.length, core.KNOWN.length - 1);
         const known=core.KNOWN.find(v=>v.commit===commit), entry=historyFixture.versions.find(v=>v.knownCommit===commit);
-        assert.ok(known && entry && entry.version===known.version && /^[a-f0-9]{40}$/.test(entry.commit) && entry.commit.startsWith(commit), '完整历史来源必须匹配登记版本');
+        assert.ok(known && entry && entry.version===known.version , '完整历史来源必须匹配登记版本');
+        if (known.version < 7) assert.ok(/^[a-f0-9]{40}$/.test(entry.commit) && entry.commit.startsWith(commit));
+        else assert.strictEqual(entry.schemaBlobSha1, known.schemaBlobSha1, 'V7 及后续历史夹具须对应已钉住的结构源 blob');
         assert.match(entry.schemaBlobSha1, /^[a-f0-9]{40}$/); assert.match(entry.schemaSourceSha256, /^[a-f0-9]{64}$/);
         const objects=entry.objectRefs.map(i=>{assert.ok(Number.isSafeInteger(i) && i>=0 && i<historyFixture.objects.length); return Object.freeze({...historyFixture.objects[i]});});
         assert.strictEqual(new Set(objects.map(o=>o.name)).size, objects.length);
@@ -55,6 +58,15 @@ function schemaAt(commit) {
     return history.get(commit);
 }
 async function query(file, statement, values) { const db = await connect(file); try { return await all(db, statement, values); } finally { await close(db); } }
+async function legacyV6WithLedger() {
+    const f = await fixture(schemaAt(core.KNOWN[5].commit));
+    const v1 = fromServer('./routes/sysbuild/migration-schema').LEDGER_SQL_V1;
+    await query(f.file, v1);
+    const insert = 'INSERT INTO sysbuild_schema_migrations (id, from_version, to_version, contract_sha256, backup_sha256, applied_at) VALUES (?, ?, ?, ?, ?, ?)';
+    await query(f.file, insert, [3, 0, 4, core.KNOWN[3].digest, 'a'.repeat(64), '2026-11-01 12:00:00']);
+    await query(f.file, insert, [9, 4, 6, core.KNOWN[5].digest, 'b'.repeat(64), '2026-11-02 12:00:00']);
+    return f;
+}
 async function packageFixture(snapshot, status) {
     const f = await fixture(schema.SCHEMA_OBJECTS, true); const state = status || 'draft';
     const db = await connect(f.file);
@@ -106,26 +118,138 @@ function faultDriver(onRun) {
             assert.strictEqual(before.sourceVersion, version.version); assert.strictEqual(before.digest, version.digest);
             assert.strictEqual(digest(f.file), hashBefore, '只读检查不改源文件');
             const receipt = await migrator.apply({ ...f.apply, expectedVersion: version.version });
-            assert.strictEqual(receipt.applied, true); assert.strictEqual(receipt.contractSha256, core.KNOWN[5].digest);
+            assert.strictEqual(receipt.applied, true); assert.strictEqual(receipt.contractSha256, core.KNOWN[core.VERSION - 1].digest);
             assert.strictEqual(digest(receipt.backup.path), receipt.backup.sha256);
             assert.strictEqual((await migrator.inspect({ dbPath: receipt.backup.path })).sourceVersion, version.version);
             const after = await migrator.inspect({ dbPath: f.file });
-            assert.strictEqual(after.sourceVersion, 6); assert.strictEqual(after.tables.length, 42); assert.strictEqual(after.objects, 109); assert.strictEqual(after.action, 'none');
+            assert.strictEqual(after.sourceVersion, 9); assert.strictEqual(after.tables.length, 32); assert.strictEqual(after.objects, 87); assert.strictEqual(after.action, 'none');
             assert.deepStrictEqual(await query(f.file, 'SELECT * FROM platform_sentinel'), [{ id: 1, value: '平台既有数据必须保留' }]);
             const stable = digest(f.file);
-            assert.strictEqual((await migrator.apply({ ...f.apply, expectedVersion: 6 })).applied, false);
+            assert.strictEqual((await migrator.apply({ ...f.apply, expectedVersion: 9 })).applied, false);
             assert.strictEqual(digest(f.file), stable, '第二次执行不写入也不追加账本');
         });
-        await test('尚无模块结构的库初始化 V6，保留其他模块数据', async () => {
+        await test('尚无模块结构的库初始化 V9，保留其他模块数据', async () => {
             const f = await fixture([]); assert.strictEqual((await migrator.inspect({ dbPath: f.file })).sourceVersion, 0);
             await migrator.apply({ ...f.apply, expectedVersion: 0 });
-            assert.strictEqual((await migrator.inspect({ dbPath: f.file })).sourceVersion, 6);
+            assert.strictEqual((await migrator.inspect({ dbPath: f.file })).sourceVersion, 9);
             assert.strictEqual((await query(f.file, 'SELECT COUNT(*) AS n FROM platform_sentinel'))[0].n, 1);
+        });
+        await test('V6 账本演进保留历史行与来源备份，空业务表重建到 V9', async () => {
+            const f = await legacyV6WithLedger();
+            await query(f.file, "UPDATE sqlite_sequence SET seq = 20 WHERE name = 'sysbuild_schema_migrations'");
+            const snapshot = digest(f.file);
+            const before = await migrator.inspect({ dbPath: f.file });
+            assert.strictEqual(digest(f.file), snapshot);
+            assert.deepStrictEqual([before.sourceVersion, before.totalRows, before.ledgerDefinition], [6, 0, 1]);
+            const receipt = await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            assert.deepStrictEqual(await migrator.inspect({ dbPath: receipt.backup.path }), before);
+            const after = await migrator.inspect({ dbPath: f.file });
+            assert.deepStrictEqual([after.sourceVersion, after.ledgerDefinition, after.tables.length, after.totalRows], [9, 4, 32, 0]);
+            assert.deepStrictEqual(after.ledger.slice(0, -1), before.ledger);
+            assert.deepStrictEqual([after.ledger[2].from_version, after.ledger[2].to_version], [6, 9]);
+            assert.strictEqual(after.ledger[2].id, 21);
+            assert.strictEqual(after.ledgerSequence, 21);
+            assert.strictEqual(after.ledger[2].backup_sha256, receipt.backup.sha256);
+            assert.strictEqual((await migrator.apply({ ...f.apply, expectedVersion: 9 })).applied, false);
+        });
+        const { LEDGER_SQL_V2, LEDGER_SQL_V3 } = fromServer('./routes/sysbuild/migration-schema');
+        for (const [version, ledgerSQL] of [[7, LEDGER_SQL_V2], [8, LEDGER_SQL_V3]]) await test(`V${version} 账本定义 ${version - 5} 升级到 V9 后保留链和序号，非空来源拒绝`, async () => {
+            const known = core.KNOWN[version - 1];
+            for (const nonempty of [false, true]) {
+                const f = await fixture(schemaAt(known.commit), nonempty);
+                await query(f.file, ledgerSQL);
+                await query(f.file, 'INSERT INTO sysbuild_schema_migrations (id, from_version, to_version, contract_sha256, backup_sha256) VALUES (9, 0, ?, ?, ?)', [version, known.digest, 'a'.repeat(64)]);
+                await query(f.file, "UPDATE sqlite_sequence SET seq = 20 WHERE name = 'sysbuild_schema_migrations'");
+                const before = await migrator.inspect({ dbPath: f.file });
+                assert.deepStrictEqual([before.sourceVersion, before.ledgerDefinition], [version, version - 5]);
+                if (nonempty) {
+                    assert.ok(before.blocked.includes('NONEMPTY_LEGACY_REQUIRES_MAPPING'));
+                    const beforeHash = digest(f.file);
+                    await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: version }), { code: 'MIGRATION_BLOCKED' });
+                    assert.strictEqual(digest(f.file), beforeHash);
+                } else {
+                    const receipt = await migrator.apply({ ...f.apply, expectedVersion: version });
+                    const after = await migrator.inspect({ dbPath: f.file });
+                    assert.deepStrictEqual(await migrator.inspect({ dbPath: receipt.backup.path }), before);
+                    assert.deepStrictEqual([after.sourceVersion, after.ledgerDefinition, after.ledgerSequence], [9, 4, 21]);
+                    assert.deepStrictEqual(after.ledger.slice(0, -1), before.ledger);
+                    const appended = after.ledger[1];
+                    assert.deepStrictEqual([appended.id, appended.from_version, appended.to_version], [21, version, 9]);
+                    assert.strictEqual((await migrator.apply({ ...f.apply, expectedVersion: 9 })).applied, false);
+                }
+            }
+        });
+        await test('V6 中途失败回滚旧账本和业务结构，重新预检后可重试', async () => {
+            const f = await legacyV6WithLedger();
+            await query(f.file, "UPDATE sqlite_sequence SET seq = 20 WHERE name = 'sysbuild_schema_migrations'");
+            const before = await migrator.inspect({ dbPath: f.file });
+            let injected = false;
+            const driver = faultDriver(({ db, statement, done }) => {
+                if (!statement.startsWith('CREATE TABLE IF NOT EXISTS sysbuild_projects (')) return false;
+                injected = true;
+                queueMicrotask(() => done.call({}, new Error('C8 临时夹具的重建失败')));
+                return db;
+            });
+            const probe = core.createMigrator({ sqlite3: driver, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader });
+            await assert.rejects(() => probe.apply({ ...f.apply, expectedVersion: 6 }), (error) => error.outcome === 'rolled_back' && error.backup.verified);
+            assert.strictEqual(injected, true);
+            assert.deepStrictEqual(await migrator.inspect({ dbPath: f.file }), before);
+            const receipt = await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            assert.strictEqual(receipt.applied, true);
+            assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.at(-1).id, 21);
+        });
+        await test('账本存在而业务结构缺失时拒绝初始化', async () => {
+            const f = await fixture([]);
+            await query(f.file, fromServer('./routes/sysbuild/migration-schema').LEDGER_SQL_V1);
+            const before = digest(f.file);
+            assert.deepStrictEqual((await migrator.inspect({ dbPath: f.file })).blocked, ['LEDGER_WITHOUT_BUSINESS_SCHEMA']);
+            assert.strictEqual(digest(f.file), before);
+        });
+        await test('V6 有无账号成员、已转出批次或旧枚举行时分别拒绝重建', async () => {
+            const inserts = [
+                "INSERT INTO sysbuild_members (project_id, person_name, added_by) VALUES (1, '夹具外部成员', 1)",
+                "INSERT INTO sysbuild_batches (project_id, seq, name, status, transfer_change_id) VALUES (1, 1, '夹具批次', 'transferred', 7)",
+                "INSERT INTO sysbuild_notices (project_id, kind, ref_type, ref_id, recipient_member_id, created_by) VALUES (1, 'for_reference', 'entry', 1, 1, 1)",
+            ];
+            for (const insert of inserts) {
+                const f = await fixture(schemaAt(core.KNOWN[5].commit));
+                await query(f.file, insert);
+                const before = digest(f.file);
+                const report = await migrator.inspect({ dbPath: f.file });
+                assert.deepStrictEqual([report.sourceVersion, report.totalRows, report.blocked], [6, 1, ['NONEMPTY_LEGACY_REQUIRES_MAPPING']]);
+                await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 6 }), { code: 'MIGRATION_BLOCKED' });
+                assert.strictEqual(digest(f.file), before);
+            }
+        });
+        await test('账本版本配对、空迁移链和序号倒退分别阻断', async () => {
+            const { LEDGER_SQL, LEDGER_SQL_V1 } = fromServer('./routes/sysbuild/migration-schema');
+            const insert = 'INSERT INTO sysbuild_schema_migrations (id, from_version, to_version, contract_sha256, backup_sha256) VALUES (9, 0, ?, ?, ?)';
+            const check = async (f, expectedVersion, code) => {
+                const before = digest(f.file);
+                assert.deepStrictEqual((await migrator.inspect({ dbPath: f.file })).blocked, code.split(','));
+                await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion }), { code: 'MIGRATION_BLOCKED' });
+                assert.strictEqual(digest(f.file), before);
+            };
+            const v6WrongDefinition = await fixture(schemaAt(core.KNOWN[5].commit));
+            await query(v6WrongDefinition.file, LEDGER_SQL);
+            await query(v6WrongDefinition.file, insert, [6, core.KNOWN[5].digest, 'a'.repeat(64)]);
+            await check(v6WrongDefinition, 6, 'LEDGER_DEFINITION_VERSION_MISMATCH');
+            const v7WrongDefinition = await fixture(schemaAt(core.KNOWN[6].commit));
+            await query(v7WrongDefinition.file, LEDGER_SQL_V1);
+            // The old constraint cannot record V7. It therefore fails both definition and version.
+            await query(v7WrongDefinition.file, insert, [6, core.KNOWN[5].digest, 'a'.repeat(64)]);
+            await check(v7WrongDefinition, 7, 'LEDGER_DEFINITION_VERSION_MISMATCH,LEDGER_VERSION_MISMATCH');
+            const emptyLedger = await fixture(schemaAt(core.KNOWN[5].commit));
+            await query(emptyLedger.file, LEDGER_SQL_V1);
+            await check(emptyLedger, 6, 'LEDGER_CHAIN_EMPTY');
+            const badSequence = await legacyV6WithLedger();
+            await query(badSequence.file, "UPDATE sqlite_sequence SET seq = 2 WHERE name = 'sysbuild_schema_migrations'");
+            await check(badSequence, 6, 'LEDGER_SEQUENCE_MISMATCH');
         });
         await test('当前结构只登记版本，已有业务行逐字保留', async () => {
             const f = await fixture(schema.SCHEMA_OBJECTS, true);
             const before = await query(f.file, 'SELECT * FROM sysbuild_projects');
-            const result = await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            const result = await migrator.apply({ ...f.apply, expectedVersion: 9 });
             assert.strictEqual(result.businessCountsBefore.sysbuild_projects, 1);
             assert.deepStrictEqual(await query(f.file, 'SELECT * FROM sysbuild_projects'), before);
         });
@@ -144,7 +268,7 @@ function faultDriver(onRun) {
             await query(f.file, 'CREATE TRIGGER surprise AFTER INSERT ON sysbuild_projects BEGIN SELECT 1; END');
             const before = digest(f.file);
             assert.deepStrictEqual((await migrator.inspect({ dbPath: f.file })).blocked, ['UNKNOWN_SCHEMA']);
-            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 6 }), { code: 'MIGRATION_BLOCKED' });
+            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 9 }), { code: 'MIGRATION_BLOCKED' });
             assert.strictEqual(digest(f.file), before);
         });
         await test('错误预期版本、未确认维护和相对路径都在写入前拒绝', async () => {
@@ -152,7 +276,7 @@ function faultDriver(onRun) {
             await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 1 }), (error) => {
                 assert.strictEqual(error.code, 'SOURCE_VERSION_MISMATCH'); assert.strictEqual(error.applied, false); assert.strictEqual(error.outcome, 'not_started'); return true;
             });
-            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 6, maintenanceConfirmed: false }), { code: 'MAINTENANCE_CONFIRMATION_REQUIRED' });
+            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 9, maintenanceConfirmed: false }), { code: 'MAINTENANCE_CONFIRMATION_REQUIRED' });
             await assert.rejects(() => migrator.inspect({ dbPath: 'task_pool.db' }), { code: 'EXPLICIT_ABSOLUTE_PATH_REQUIRED' });
             assert.strictEqual(digest(f.file), before);
         });
@@ -182,16 +306,16 @@ function faultDriver(onRun) {
         });
         await test('账本声称旧版而实际是新版时拒绝，不以账本代替实际合约', async () => {
             const f = await fixture(schema.SCHEMA_OBJECTS);
-            await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            await migrator.apply({ ...f.apply, expectedVersion: 9 });
             await query(f.file, 'UPDATE sysbuild_schema_migrations SET to_version = 5, contract_sha256 = ?', [core.KNOWN[4].digest]);
             assert.deepStrictEqual((await migrator.inspect({ dbPath: f.file })).blocked, ['LEDGER_VERSION_MISMATCH']);
             const before = digest(f.file);
-            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 6 }), { code: 'MIGRATION_BLOCKED' });
+            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 9 }), { code: 'MIGRATION_BLOCKED' });
             assert.strictEqual(digest(f.file), before);
         });
         await test('迁移链断裂时拒绝，即使最后一条伪称当前版本', async () => {
             const f = await fixture(schema.SCHEMA_OBJECTS);
-            await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            await migrator.apply({ ...f.apply, expectedVersion: 9 });
             await query(f.file, 'INSERT INTO sysbuild_schema_migrations (from_version, to_version, contract_sha256, backup_sha256) VALUES (1, 6, ?, ?)', [core.KNOWN[5].digest, '0'.repeat(64)]);
             const before = digest(f.file);
             await assert.rejects(() => migrator.inspect({ dbPath: f.file }), { code: 'LEDGER_CHAIN_MISMATCH' });
@@ -199,7 +323,7 @@ function faultDriver(onRun) {
         });
         await test('账本首条必须从未登记版本0起步，不能缺少迁移链起点', async () => {
             const f = await fixture(schema.SCHEMA_OBJECTS);
-            await migrator.apply({ ...f.apply, expectedVersion: 6 });
+            await migrator.apply({ ...f.apply, expectedVersion: 9 });
             await query(f.file, 'UPDATE sysbuild_schema_migrations SET from_version = 1');
             const before = digest(f.file);
             await assert.rejects(() => migrator.inspect({ dbPath: f.file }), { code: 'LEDGER_CHAIN_MISMATCH' });
@@ -217,7 +341,7 @@ function faultDriver(onRun) {
                 });
             });
             const probe = core.createMigrator({ sqlite3: driver, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader });
-            await assert.rejects(() => probe.apply({ ...f.apply, expectedVersion: 6 }), { code: 'SOURCE_CHANGED_AFTER_BACKUP' });
+            await assert.rejects(() => probe.apply({ ...f.apply, expectedVersion: 9 }), { code: 'SOURCE_CHANGED_AFTER_BACKUP' });
             assert.strictEqual(injected, true); assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.length, 0);
             assert.strictEqual((await query(f.file, 'SELECT value FROM platform_sentinel'))[0].value, '备份后的并发写入');
         });
@@ -240,18 +364,18 @@ function faultDriver(onRun) {
             assert.throws(() => cli.parse(['schema-inspect', '--unknown', 'x']), { code: 'INVALID_ARGUMENT' });
             assert.throws(() => cli.parse(['schema-apply', '--db', 'x']), { code: 'MISSING_ARGUMENT' });
             const f = await fixture(schema.SCHEMA_OBJECTS); const before = digest(f.file);
-            await assert.rejects(() => cli.main(['schema-apply', '--db', f.file, '--backup-dir', f.dir, '--expected-version', '6', '--maintenance-confirmed', '--report', f.file]), { code: 'REPORT_EXISTS' });
+            await assert.rejects(() => cli.main(['schema-apply', '--db', f.file, '--backup-dir', f.dir, '--expected-version', '9', '--maintenance-confirmed', '--report', f.file]), { code: 'REPORT_EXISTS' });
             assert.strictEqual(digest(f.file), before); assert.deepStrictEqual(fs.readdirSync(f.dir), ['隔离库.sqlite']);
         });
         await test('CLI真实迁移已提交而外部报告失败时明确标记applied并保留备份', async () => {
             const f = await fixture(schema.SCHEMA_OBJECTS); const report = path.join(f.dir, '模拟不可写报告.json');
             const original = fs.writeFileSync; let observed;
             fs.writeFileSync = function (file) { if (file === report) throw new Error('演练：外部报告写入失败'); return original.apply(this, arguments); };
-            try { await cli.main(['schema-apply', '--db', f.file, '--backup-dir', f.dir, '--expected-version', '6', '--maintenance-confirmed', '--report', report]); }
+            try { await cli.main(['schema-apply', '--db', f.file, '--backup-dir', f.dir, '--expected-version', '9', '--maintenance-confirmed', '--report', report]); }
             catch (error) { observed = error; }
             finally { fs.writeFileSync = original; }
             assert.ok(observed); assert.strictEqual(observed.applied, true); assert.ok(observed.backup && fs.existsSync(observed.backup.path));
-            assert.strictEqual((await migrator.inspect({ dbPath: f.file })).sourceVersion, 6); assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.length, 1);
+            assert.strictEqual((await migrator.inspect({ dbPath: f.file })).sourceVersion, 9); assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.length, 1);
         });
         await test('C8旧快照预留字段不兼容时阻塞，原文不写进报告也不改写', async () => {
             const f = await packageFixture({ text: '私有正文-SENTINEL', material_version_ids: '旧系统自定义值-SENTINEL' });
@@ -259,7 +383,7 @@ function faultDriver(onRun) {
             assert.deepStrictEqual(report.blocked, ['C8_SNAPSHOT_COMPATIBILITY']); assert.strictEqual(report.compatibility.checkedVersions, 1);
             assert.deepStrictEqual(report.compatibility.issues.map((r) => [r.packageVersionId, r.field]), [[1, 'material_version_ids']]);
             assert.ok(!JSON.stringify(report).includes('SENTINEL'));
-            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 6 }), { code: 'MIGRATION_BLOCKED' }); assert.strictEqual(digest(f.file), before);
+            await assert.rejects(() => migrator.apply({ ...f.apply, expectedVersion: 9 }), { code: 'MIGRATION_BLOCKED' }); assert.strictEqual(digest(f.file), before);
         });
         await test('C8材料与内容包冻结检查同源，合法遮蔽历史保留，缺冻结阻塞', async () => {
             const f = await packageFixture({ material_version_ids: [1] });
@@ -273,14 +397,14 @@ function faultDriver(onRun) {
             await query(f.file, "UPDATE sysbuild_attachments SET masked_at = '2020-01-03 10:00:00', masked_by = 1, mask_reason = '私有演练遮蔽' WHERE id = 1");
             const report = await migrator.inspect({ dbPath: f.file }); assert.deepStrictEqual(report.blocked, []); assert.strictEqual(report.compatibility.checkedVersions, 1);
             const before = await query(f.file, 'SELECT snapshot_json FROM sysbuild_package_versions WHERE id = 1');
-            const applied = await migrator.apply({ ...f.apply, expectedVersion: 6 }); assert.strictEqual(applied.compatibility.checkedVersions, 1);
+            const applied = await migrator.apply({ ...f.apply, expectedVersion: 9 }); assert.strictEqual(applied.compatibility.checkedVersions, 1);
             assert.deepStrictEqual(await query(f.file, 'SELECT snapshot_json FROM sysbuild_package_versions WHERE id = 1'), before);
         });
         await test('兼容读取助手在读写迁移连接上也不能执行写SQL', async () => {
             const f = await packageFixture({}); const before = digest(f.file);
             const badReader = { selectedMaterials: async (q) => q.all("UPDATE platform_sentinel SET value = '不得写入'"), assertMaterialFreezes: async () => [] };
             const probe = core.createMigrator({ sqlite3, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader: badReader });
-            await assert.rejects(() => probe.apply({ ...f.apply, expectedVersion: 6 }), { code: 'MIGRATION_BLOCKED' }); assert.strictEqual(digest(f.file), before);
+            await assert.rejects(() => probe.apply({ ...f.apply, expectedVersion: 9 }), { code: 'MIGRATION_BLOCKED' }); assert.strictEqual(digest(f.file), before);
             assert.strictEqual((await probe.inspect({ dbPath: f.file })).compatibility.issues[0].code, 'READ_ONLY_QUERY_REQUIRED');
         });
         await test('备份检出未知结构时先阻塞，来源不迁移，备份明确标未验证', async () => {
@@ -293,7 +417,7 @@ function faultDriver(onRun) {
                 });
             });
             const probe = core.createMigrator({ sqlite3: driver, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader }); let observed;
-            try { await probe.apply({ ...f.apply, expectedVersion: 6 }); } catch (error) { observed = error; }
+            try { await probe.apply({ ...f.apply, expectedVersion: 9 }); } catch (error) { observed = error; }
             assert.strictEqual(observed && observed.code, 'BACKUP_VALIDATION_MISMATCH'); assert.strictEqual(observed.backup.verified, false); assert.strictEqual(digest(f.file), before);
         });
         await test('提交确认丢失且回滚不明时报告unknown，实际账本可核对，备份保留', async () => {
@@ -303,7 +427,7 @@ function faultDriver(onRun) {
                 return original.call(db, statement, params, function (error) { done.call(this, error || new Error('演练：提交已执行但确认丢失')); });
             });
             const probe = core.createMigrator({ sqlite3: driver, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader }); let observed;
-            try { await probe.apply({ ...f.apply, expectedVersion: 6 }); } catch (error) { observed = error; }
+            try { await probe.apply({ ...f.apply, expectedVersion: 9 }); } catch (error) { observed = error; }
             assert.strictEqual(observed && observed.code, 'ROLLBACK_FAILED'); assert.strictEqual(observed.applied, null); assert.strictEqual(observed.outcome, 'unknown');
             assert.strictEqual(observed.backup.verified, true); assert.ok(fs.existsSync(observed.backup.path));
             assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.length, 1, '实际已提交，不能误称未执行');
@@ -318,22 +442,22 @@ function faultDriver(onRun) {
                 return db;
             };
             const probe = core.createMigrator({ sqlite3: driver, schemaObjects: schema.SCHEMA_OBJECTS, normalizeSql, materialReader }); let observed;
-            try { await probe.apply({ ...f.apply, expectedVersion: 6 }); } catch (error) { observed = error; }
+            try { await probe.apply({ ...f.apply, expectedVersion: 9 }); } catch (error) { observed = error; }
             assert.strictEqual(observed && observed.code, 'CONNECTION_CLOSE_FAILED'); assert.strictEqual(observed.applied, true); assert.strictEqual(observed.outcome, 'committed');
             assert.strictEqual(observed.backup.verified, true); assert.strictEqual((await migrator.inspect({ dbPath: f.file })).ledger.length, 1);
         });
         await test('部署前步骤：显式来源迁移、回执hash、复核和幂等noop', async () => {
             const f = await fixture(schemaAt(core.KNOWN[0].commit)); const reportPath = path.join(f.dir, 'prestart-first.json');
-            const first = await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 1, toVersion: 6, reportPath, maintenanceConfirmed: true });
-            assert.strictEqual(first.fromVersion, 1); assert.strictEqual(first.toVersion, 6); assert.strictEqual(first.applied, true); assert.strictEqual(first.outcome, 'committed'); assert.strictEqual(first.reportSha256, digest(reportPath));
+            const first = await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 1, toVersion: 9, reportPath, maintenanceConfirmed: true });
+            assert.strictEqual(first.fromVersion, 1); assert.strictEqual(first.toVersion, 9); assert.strictEqual(first.applied, true); assert.strictEqual(first.outcome, 'committed'); assert.strictEqual(first.reportSha256, digest(reportPath));
             const before = digest(f.file);
-            const second = await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 6, toVersion: 6, reportPath: path.join(f.dir, 'prestart-second.json'), maintenanceConfirmed: true });
+            const second = await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 9, toVersion: 9, reportPath: path.join(f.dir, 'prestart-second.json'), maintenanceConfirmed: true });
             assert.strictEqual(second.applied, false); assert.strictEqual(second.outcome, 'noop'); assert.strictEqual(second.backup, null); assert.strictEqual(digest(f.file), before);
         });
         await test('部署前步骤：未批准目标或维护状态在任何迁移前拒绝', async () => {
-            const f = await fixture(schema.SCHEMA_OBJECTS); const before = digest(f.file); const options = { dbPath: f.file, backupDir: f.dir, fromVersion: 6, toVersion: 6, reportPath: path.join(f.dir, 'prestart.json'), maintenanceConfirmed: true };
+            const f = await fixture(schema.SCHEMA_OBJECTS); const before = digest(f.file); const options = { dbPath: f.file, backupDir: f.dir, fromVersion: 9, toVersion: 9, reportPath: path.join(f.dir, 'prestart.json'), maintenanceConfirmed: true };
             let observed;
-            try { await prestart.execute({ ...options, toVersion: 7 }); } catch (error) { observed = error; }
+            try { await prestart.execute({ ...options, toVersion: 10 }); } catch (error) { observed = error; }
             assert.strictEqual(observed && observed.code, 'UNSUPPORTED_MIGRATION_SCOPE'); assert.strictEqual(observed.applied, false); assert.strictEqual(observed.outcome, 'not_started'); assert.strictEqual(digest(f.file), before);
             await assert.rejects(() => prestart.execute({ ...options, maintenanceConfirmed: false }), { code: 'UNSUPPORTED_MIGRATION_SCOPE' }); assert.strictEqual(digest(f.file), before);
             assert.throws(() => prestart.parse([]), { code: 'MISSING_ARGUMENT' });
@@ -342,11 +466,11 @@ function faultDriver(onRun) {
             const f = await fixture(schema.SCHEMA_OBJECTS); const baseCore = require('./schema-migration-core.cjs'); const factory = baseCore.createMigrator; let observed;
             baseCore.createMigrator = function (dependencies) { const actual = factory(dependencies); return { apply: actual.apply, inspect: async (options) => ({ ...await actual.inspect(options), action: 'blocked', blocked: ['PRIVATE_POSTCHECK_FAULT'] }) }; };
             const reportPath = path.join(f.dir, 'prestart-postcheck.json');
-            try { await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 6, toVersion: 6, reportPath, maintenanceConfirmed: true }); }
+            try { await prestart.execute({ dbPath: f.file, backupDir: f.dir, fromVersion: 9, toVersion: 9, reportPath, maintenanceConfirmed: true }); }
             catch (error) { observed = error; }
             finally { baseCore.createMigrator = factory; }
             assert.strictEqual(observed && observed.code, 'POSTCHECK_FAILED'); assert.strictEqual(observed.applied, true); assert.strictEqual(observed.outcome, 'committed'); assert.strictEqual(fs.existsSync(reportPath), false);
-            assert.strictEqual(prestart.failureRecord(observed, { fromVersion: 6, toVersion: 6, reportPath }).kind, 'SYSBUILD_MIGRATION_FAIL');
+            assert.strictEqual(prestart.failureRecord(observed, { fromVersion: 9, toVersion: 9, reportPath }).kind, 'SYSBUILD_MIGRATION_FAIL');
         });
         const passed = results.filter((r) => r.passed).length;
         fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ at: new Date().toISOString(), scope: 'C9 draft / private SQLite fixtures only', passed, total: results.length, results }, null, 2));

@@ -17,35 +17,36 @@ const G_STAGES = Object.freeze(['G0', 'CONTRACT', 'G1', 'G2', 'G3', 'G4', 'G5', 
 const PROJECT_NODES = Object.freeze([
   Object.freeze({ key: 'p_initiation', name: '立项与授权', g: 'G0', sort: 10, types: Object.freeze(['outsource', 'procurement', 'inhouse']) }),
   Object.freeze({ key: 'p_contract', name: '采购与合同', g: 'CONTRACT', sort: 20, types: Object.freeze(['outsource', 'procurement']) }),
-  Object.freeze({ key: 'p_overall', name: '总体范围与批次规划', g: 'G1', sort: 30, types: Object.freeze(['outsource', 'procurement', 'inhouse']) }),
-  Object.freeze({ key: 'p_closing', name: '整体验收结项', g: 'G6', sort: 40, types: Object.freeze(['outsource', 'procurement', 'inhouse']) }),
+  Object.freeze({ key: 'p_overall', name: '需求与范围确认', g: 'G1', sort: 30, types: Object.freeze(['outsource', 'procurement', 'inhouse']) }),
+  Object.freeze({ key: 'p_closing', name: '结项', g: 'G6', sort: 40, types: Object.freeze(['outsource', 'procurement', 'inhouse']) }),
 ]);
 
 // 批次层节点（挂默认批次）。顺序即 sort_order 10、20…；milestone = 正式上线里程碑（每批恰一个）。
 const n = (key, name, g, milestone) => Object.freeze({ key, name, g, milestone: milestone === true });
 const BATCH_NODES = Object.freeze({
   outsource: Object.freeze([
-    n('b_req', '需求确认', 'G1'),
-    n('b_design', '原型 / 设计确认', 'G2'),
-    n('b_dev', '开发完成', 'G3'),
-    n('b_test', '测试完成', 'G4'),
-    n('b_uat', '用户验收测试', 'G4'),
+    n('b_design', '设计阶段', 'G2'),
+    n('b_dev', '开发阶段', 'G3'),
+    n('b_test', '测试阶段', 'G4'),
+    n('b_uat', '验收阶段', 'G4'),
     n('b_golive', '上线', 'G5'),
-    n('b_trial', '试运行结束（正式上线）', 'G5', true),
+    n('b_trial', '试运行阶段（结束即正式上线）', 'G5', true),
   ]),
   procurement: Object.freeze([
     n('b_req', '需求调研', 'G1'),
-    n('b_config', '系统配置（含设计与开发）', 'G2+G3'),
-    n('b_training', '用户培训（含测试与验收）', 'G4'),
+    n('b_config', '配置阶段', 'G2+G3'),
+    n('b_training', '培训与验收阶段', 'G4'),
     n('b_golive', '上线', 'G5'),
-    n('b_trial', '试运行结束（正式上线）', 'G5', true),
+    n('b_trial', '试运行阶段（结束即正式上线）', 'G5', true),
   ]),
   inhouse: Object.freeze([
-    n('b_req', '需求确认', 'G1'),
-    n('b_dev', '开发完成（含设计）', 'G2+G3'),
+    n('b_dev', '开发阶段（含设计）', 'G2+G3'),
     n('b_golive', '上线（含测试与验收）', 'G4+G5', true),
   ]),
 });
+
+const ACCEPTANCE_NODE_KEYS = Object.freeze({ outsource: 'b_uat', procurement: 'b_training', inhouse: 'b_golive' });
+const ACTIVE_BATCH_STATUSES = Object.freeze(['planning', 'active', 'live']);
 
 // L2：模板开发节点由模板本身导出，节点改名、改序不改变汇报承载节点。
 const DEVELOPMENT_NODE_KEYS = Object.freeze([...new Set(Object.values(BATCH_NODES)
@@ -90,4 +91,4 @@ async function seedProjectStructure(q, args) {
   return batchId;
 }
 
-module.exports = { G_STAGES, PROJECT_NODES, BATCH_NODES, DEVELOPMENT_NODE_KEYS, DEFAULT_BATCH_NAME, seedProjectStructure };
+module.exports = { G_STAGES, PROJECT_NODES, BATCH_NODES, ACCEPTANCE_NODE_KEYS, ACTIVE_BATCH_STATUSES, DEVELOPMENT_NODE_KEYS, DEFAULT_BATCH_NAME, seedProjectStructure };

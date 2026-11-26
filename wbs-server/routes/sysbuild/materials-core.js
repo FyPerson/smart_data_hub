@@ -22,6 +22,10 @@ function materialIdsOf(raw) {
   if (new Set(ids).size !== ids.length) throw invalid('材料版本编号不能重复');
   return ids.slice();
 }
+
+function isQualifiedVersion(version) {
+  return version.attachments.length > 0 && version.attachments.every((att) => !att.deleted && !att.masked && !att.missing);
+}
 async function boundMaterialAttachments(q, versionId) {
   return q.all(
     `SELECT a.id AS attachment_id, a.project_id AS project_id, a.sha256 AS sha256, a.original_name AS original_name,
@@ -55,7 +59,7 @@ async function materialVersionRecord(q, versionId) {
     [versionId]
   );
 }
-// 所有引用入口共用：草稿编辑 / 普通提交 / 历史导入 / 生效（含变更派生）都核同一项目与同一材料不得选两版。
+// 所有引用入口共用：草稿编辑 / 提交 / 生效（含变更派生）都核同一项目与同一材料不得选两版。
 // usable=true：新增引用或发起时拒绝已删除 / 已遮蔽的附件；纯读旧快照不重写、不丢失已遮蔽事实。
 async function selectedMaterials(q, projectId, snapshot, options) {
   const ids = materialIdsOf(snapshot);
@@ -73,12 +77,6 @@ async function selectedMaterials(q, projectId, snapshot, options) {
     out.push(Object.assign({}, record, { attachments: bound.map((a, i) => attachmentPublicView(a, frozen[i].sha256)), frozen }));
   }
   return out;
-}
-// 包版本冻结不读最新材料、不重新计算已冻结附件的hash。只追加原材料版本的冻结编号与hash。
-async function freezeSelectedMaterials(q, args) {
-  const snapshot = await packageMaterialSnapshot(q, args.projectId, args.versionId);
-  const selected = await selectedMaterials(q, args.projectId, snapshot, { usable: true });
-  return freezeMaterialRows(q, args, selected);
 }
 // 提交经送审范围助手取数后只消费同一份材料与冻结散列，不再另读一次快照。
 async function freezeMaterialRows(q, args, selected) {
@@ -122,4 +120,4 @@ async function assertMaterialFreezes(q, projectId, version) {
   }
   return selected;
 }
-module.exports = { snapshotObject, materialIdsOf, selectedMaterials, freezeSelectedMaterials, freezeMaterialRows, assertMaterialFreezes, boundMaterialAttachments, materialVersionRecord, materialView, attachmentPublicView };
+module.exports = { snapshotObject, materialIdsOf, selectedMaterials, isQualifiedVersion, freezeMaterialRows, assertMaterialFreezes, boundMaterialAttachments, materialVersionRecord, materialView, attachmentPublicView };

@@ -16,6 +16,7 @@ const os = require('os');
 const path = require('path');
 const sqlite3 = require('sqlite3');
 const { spawnSync } = require('child_process');
+const rec = require('./lib/sysbuild-mut-record'); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@CASE / @@MUT 行
 
 const DB_MODULE_DEFAULT = path.join(__dirname, '..', 'routes', 'sysbuild', 'db.js');
 const argModIdx = process.argv.indexOf('--module');
@@ -882,6 +883,7 @@ async function runAll() {
     } catch (e) {
       failed += 1;
       console.log(`  ✗ ${c.name}\n      ${e && e.message}`);
+      if (rec.enabled()) console.log(rec.caseLine(c.name, e));
     }
   }
   console.log(`\n${cases.length - failed}/${cases.length} 通过`);
@@ -927,7 +929,7 @@ function runChild(args) {
   const passedN = m ? Number(m[1]) : null;
   const totalN = m ? Number(m[2]) : null;
   if (r.error || r.signal || m === null) return { kind: 'abnormal', detail: (r.error && r.error.message) || r.signal || ((r.stderr || '').split('\n').slice(-4).join(' | ') || '无汇总行') };
-  if (r.status === 1 && passedN < totalN) return { kind: 'red', detail: `${passedN}/${totalN}` };
+  if (r.status === 1 && passedN < totalN) return { kind: 'red', detail: `${passedN}/${totalN}`, caseDetails: rec.parseCaseLines(r.stdout) };
   if (r.status === 0 && passedN === totalN) return { kind: 'green', detail: `${passedN}/${totalN}` };
   return { kind: 'abnormal', detail: `退出码 ${r.status} 与汇总 ${passedN}/${totalN} 不一致` };
 }
@@ -955,7 +957,7 @@ function selfTest() {
   let weak = 0;
   for (const mu of MUTATIONS) {
     const count = src.split(mu.from).length - 1;
-    if (count !== 1) { console.log(`  ✗ [${mu.id}] 变异锚点出现 ${count} 次（应恰好 1 次）`); weak += 1; continue; }
+    if (count !== 1) { console.log(`  ✗ [${mu.id}] 变异锚点出现 ${count} 次（应恰好 1 次）`); weak += 1; if (rec.enabled()) console.log(rec.mutLine('db', mu.id, rec.VERDICT.ANCHOR, [], `变异锚点出现 ${count} 次（应恰好 1 次）`)); continue; }
     const mutated = src.replace(mu.from, mu.to).replace("require('sqlite3')", `require(${JSON.stringify(sqliteAbs)})`);
     const file = path.join(dir, 'db.js');
     fs.writeFileSync(file, mutated);
@@ -963,6 +965,7 @@ function selfTest() {
     const label = res.kind === 'red' ? `判红（${res.detail}）` : res.kind === 'green' ? '未判红（断言无判别力）' : `异常（${res.detail}），不计为检出`;
     console.log(`  ${res.kind === 'red' ? '✓' : '✗'} [${mu.id}] ${label}`);
     if (res.kind !== 'red') weak += 1;
+    if (rec.enabled()) console.log(rec.mutLine('db', mu.id, res.kind === 'red' ? rec.VERDICT.RED : (res.kind === 'green' ? rec.VERDICT.WEAK : rec.VERDICT.ABNORMAL), res.kind === 'red' ? (res.caseDetails || []) : (res.kind === 'abnormal' ? [{ case: null, errorClass: null, message: res.detail }] : []), null));
     fs.unlinkSync(file);
   }
   fs.rmdirSync(dir);
@@ -970,7 +973,9 @@ function selfTest() {
   return weak;
 }
 
-(async () => {
+// 只读导出（#212 C1b，供 scripts/sysbuild-step1/mutation-check.js 读取）：变异登记与用例名清单；下面的入口只在直接运行本脚本时执行。
+module.exports = { MUTATIONS, CASE_NAMES: cases.map((c) => c.name) };
+if (require.main === module) (async () => {
   if (SELF_TEST) {
     const weak = selfTest();
     process.exitCode = weak === 0 ? 0 : 1;

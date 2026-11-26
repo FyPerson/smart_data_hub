@@ -1,0 +1,1003 @@
+{
+  "format": "sysbuild-mutation-provenance/1",
+  "generatedAt": "2026-11-19T15:40:43.534Z",
+  "mode": "run",
+  "modeNote": "文件哈希与产品源码快照在运行前后各取一次，两次一致才生成",
+  "repoHead": "0edb31b506e79efa15e21a5c8e4a4b62ac258c48",
+  "repoHeadAfterRun": "5c77882d5fce724404ba9ce39a5c29ddc9bc5456",
+  "repoHeadMovedDuringRun": true,
+  "productTree": {
+    "head": "0edb31b506e79efa15e21a5c8e4a4b62ac258c48",
+    "routesSysbuildTree": "959b67262ce669bfb99952dfe5095648fd50690a",
+    "publicTree": "9ca2c39abbfe306c5762e5855b249eff9624d66f",
+    "routesTree": "162469503443c4bd0793be9d2babeeade20e1e8b",
+    "serverJsBlob": "85d0854b59797e87432fe03f58f2289f62739463",
+    "statusPaths": [
+      "wbs-server/routes",
+      "wbs-server/public",
+      "wbs-server/server.js"
+    ],
+    "statusPorcelain": [],
+    "clean": true,
+    "afterRun": {
+      "head": "5c77882d5fce724404ba9ce39a5c29ddc9bc5456",
+      "routesSysbuildTree": "959b67262ce669bfb99952dfe5095648fd50690a",
+      "publicTree": "9ca2c39abbfe306c5762e5855b249eff9624d66f",
+      "routesTree": "162469503443c4bd0793be9d2babeeade20e1e8b",
+      "serverJsBlob": "85d0854b59797e87432fe03f58f2289f62739463",
+      "clean": true,
+      "statusPorcelain": []
+    }
+  },
+  "testFiles": [
+    {
+      "path": "scripts/deploy-ssh.ps1",
+      "loadedByRun": true,
+      "gitHashObject": "b0b01421bb731b701bd32efd5a263605c7404316",
+      "sha256": "a7b3242f125673a491f7f4c943b90f6b124c157155999c09583ce642dd51a2de"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/archive-core.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "77ef4892c9e98097786535375d32e15e730f7777",
+      "sha256": "06749a21c100bd417e1dbd6b7a7fcd04c12150b4ad9b7be1dfcd926b99607f5a"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/archive-fs.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "873a654c2d0b9d36e554be7f8c09e2870be7d9ca",
+      "sha256": "5b929c67910615341d33aec8d093c65c9ec39c44e820605b2bfb2507a9a835f4"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/cli.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "8e6d60c7dc802abe1e470239e290dbefb6a63e92",
+      "sha256": "41b8dd86deb6a31abdcac4e604296f2abe4771bd5e0a28a71076f8026f42a3f7"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/deploy-guard-unit.ps1.txt",
+      "loadedByRun": true,
+      "gitHashObject": "739c50000581620923e21b57682c12ae795f8dbb",
+      "sha256": "718a7731050523a8d614ed7b5c7f67ce3d6a8e1a175e63bf2ae4de9682f65b0b"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/deploy-prestart.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "fe17786512765c44f7a0cd741e95d44368c707db",
+      "sha256": "d8e8ab019cd53b6adf0a31dd6cfb0944f049b1c9ff73b3349337dee16dbf65ce"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/fixtures/schema-v1-v6.json",
+      "loadedByRun": true,
+      "gitHashObject": "53d71e6566fc8b6cb2b215fabbfba1532f752bc0",
+      "sha256": "0192270c7030860d53b85ba7e3234079dd0995278a74ae92fb2e3b1ec6793dad"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/run-archive-self-test.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "9b9ef46ac262731606e3a9057827cd021a9fd011",
+      "sha256": "5ee4b8bca66341785cfe9f729d2efeab426f7c3f5a66c1341ceb53917917fdac"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/run-migration-self-test.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "0294271393859a1c4c10f62f8db38b16d8faa35f",
+      "sha256": "cede68b0258188c11e2d8704177c3ce899c6d779428c07373cef56a3d9ff2fd2"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/run-readonly-self-test.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "b8b7f5afec83f0d53df928161e4696f457e05f7e",
+      "sha256": "f12b887db25a67ec18cb92c37750f04d75ab76753b836e68d9bd698d233f1b8a"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/schema-migration-core.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "c8a9c6ba2141ee93ba35d97efee4728c2bf510d8",
+      "sha256": "fe9848f793dba38af781ff1589591719720ce83717a24d716a0ded43570b3e79"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/schema-migration-mutations.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "59dd20d7049074c7783e70cd888f72370c84e2f3",
+      "sha256": "6137ad08a04cc7020a0b0d657dde8cc5a5b3bbfe41ab7a6058f8fb5b94d7fd68"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/temp-service/ecosystem.config.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "efdbd3e81aea42cf1bda67e0d0c89440899419e8",
+      "sha256": "a5fbd7c73e9d9b2533728fe75e202b73974d5f26d31968401cd0a545808ed613"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/temp-service/package.json",
+      "loadedByRun": true,
+      "gitHashObject": "0c6cf747376331f8e4e5ffaf9f55e6d4900e12cb",
+      "sha256": "13923fdd4ba8e2f5238336a3bfbe60366100330a9ed64ed5558ab15f9147ff1d"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/temp-service/server-client.js",
+      "loadedByRun": true,
+      "gitHashObject": "2b2dcc5a9d843c6ef6511b3d0fb361f7cd4864f3",
+      "sha256": "7cce92dfd08089ffebac38d439d875c1bc713f54322c41127f1c2ca3a58d570d"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/temp-service/server.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "81bf3126e0a1dc91a0a62bc411cc31bda7a6ccf7",
+      "sha256": "89950c537f8e46a7fa10fbd36c92a72dba8d3795f34b88629e0316c878b5a262"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/verify-archive.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "a7152af7a9f89640f35cdd1c0efab7b836a3cacc",
+      "sha256": "662a0e2649ce75c03be231732490a70671d38b5343b2afa410f6cc182737ef47"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/verify-deploy-migration.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "1d89d006b5d4868bef989ff828ed50e049aca095",
+      "sha256": "0b6014c2fb7b8d3611e1a7ec7b6f5e7c58f7abea647e7f625753c75b288cb753"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/verify-readonly.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "1884345c4adc1fe5c926626a3eff60e6f20e03ca",
+      "sha256": "ed937121a0a89c746d0cc719d1f382f955f1cbb1d0bd27f0d0c69f241b646be1"
+    },
+    {
+      "path": "scripts/sysbuild-predeploy/verify-schema-migration.cjs",
+      "loadedByRun": true,
+      "gitHashObject": "44e07c32bb629f98a85a267f9654a93dda0bca31",
+      "sha256": "4840253d1c1c0dddc686568e38b96bfaad2172eeb060d47cdf78bfdd04a3e654"
+    },
+    {
+      "path": "wbs-server/scripts/_test-fixture.js",
+      "loadedByRun": true,
+      "gitHashObject": "16bef3ea7c25155707e8f4287e2d1b369e108068",
+      "sha256": "f01c673b31119a3edb7e7c4386ebd07eac2296cb4f5278c440f02a9ea94e1a10"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-changes.js",
+      "loadedByRun": true,
+      "gitHashObject": "43e910f1ceac4f38350ec87566da70354dced479",
+      "sha256": "650f475c37b4ec12aadc93bee77eeeedb6746eb1d335672b321438422a0503ae"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-confirm.js",
+      "loadedByRun": true,
+      "gitHashObject": "9d535953a80f79dd0f1c6b0f527142790bb25d16",
+      "sha256": "1b3991a8ccfa9850dc881d0c677fec8bd529fe118a6c803142f3f58560fa1c5b"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-devkey.js",
+      "loadedByRun": true,
+      "gitHashObject": "a4468cf7c7d958a9f86958b53ea62f9637aad74f",
+      "sha256": "d900872b42e893ce464744c671f18abae02c89dee64ad4cb7d6beccc9ab58de3"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-entries.js",
+      "loadedByRun": true,
+      "gitHashObject": "7a550eca97563939a61d9e07c5d9c4183f99020b",
+      "sha256": "6dd59bf65dff56acde19ac8da0ad52d0cdab8c3e5fe5bba68bb71aa002d5a451"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-frontend.js",
+      "loadedByRun": true,
+      "gitHashObject": "4a67d8f02a3b605cdea176352ffd361e23d1795f",
+      "sha256": "8a3f6e074ac6d6ed3374251d016f67691dfb9af5e7642111097369b089b0b5b4"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-golive.js",
+      "loadedByRun": true,
+      "gitHashObject": "4184990afdc31d1a35b3285695bc9c1aea914069",
+      "sha256": "c79f18e87583718714c0fdec25e17bb2e47dde806c12540cf212dfa37f504aec"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-history.js",
+      "loadedByRun": true,
+      "gitHashObject": "961a20238252b33ff3c4195e488995efb4f80de9",
+      "sha256": "e89a1ccb4a94e1e4d1e7a6b94cd9919e11de2bcc372b651627d9638ef19286d4"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-items.js",
+      "loadedByRun": true,
+      "gitHashObject": "c6fccb654c423462329ea29de9115dc0dfed5976",
+      "sha256": "b5c46e30180cf733505ef19923a9fc0f3ffd2558fd9781f0b5dac747fc19a19a"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-membership.js",
+      "loadedByRun": true,
+      "gitHashObject": "5989c466863e1969fdc0f88dc832269db7aae3ce",
+      "sha256": "549cf4078a38145f91c3d5187a8f1e184353877a11f7744956e9be017c10813c"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-notify.js",
+      "loadedByRun": true,
+      "gitHashObject": "598fe9bead081ec65246822528341c080e02b5ab",
+      "sha256": "5d056ff75e78c7c3e64eb0717ed53310029ebd3ca25bfeacf5f3009eaeea3be7"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-plan.js",
+      "loadedByRun": true,
+      "gitHashObject": "ea2c80046ec109bfca59b36590f96cfc8fa934d9",
+      "sha256": "491e350842ccec5badc3cb82fc088262c9b0f4eeb8e8a26ff5d7785cb4de4d37"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-proxy.js",
+      "loadedByRun": true,
+      "gitHashObject": "1f74eb69e904a12ea6ea71dd7bad3387e38d9a86",
+      "sha256": "b6d87527e51f1c184e363b5c1a5218ca12913f1e7a928b52d47946ace168743a"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-routing.js",
+      "loadedByRun": true,
+      "gitHashObject": "82f81a9cf1e485db70dcbe7164e2636d4c5b6886",
+      "sha256": "416fabce62ac6ff14bada30309adecd7a49cdc1a6c99a28ca0259317bc5a0eaf"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-sheet.js",
+      "loadedByRun": true,
+      "gitHashObject": "279cc32b43d4a24465d43f2ef1a20baad5f1dcc4",
+      "sha256": "6b422636554942136267f387d473082fc0e7a2d1e8c385c91644525f1887ab49"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-stage8.js",
+      "loadedByRun": true,
+      "gitHashObject": "36e903cbc48c6eb897aa33c569b98497ab71c697",
+      "sha256": "31ae9e620388b8f9044e83a1e74a4087a4f4431ec1302e0d593e31541e426e04"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-trace-l1.js",
+      "loadedByRun": true,
+      "gitHashObject": "1aaef8886cd86a9e95b593e7a18d9a8fb8bdd6f5",
+      "sha256": "00ddb6f80fe1ae2b782077440700000833676b5d72aa25df0f2e1f1e5c3921f2"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-trace-l2.js",
+      "loadedByRun": true,
+      "gitHashObject": "8d517b2a2fd3806bd99b1833e6e640fec8bb10b7",
+      "sha256": "3e07d203719851e94cd9d3ddb2fc48f80ea4a276db4bf1b6ac4aa5e535786fdf"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite-trace-l3.js",
+      "loadedByRun": true,
+      "gitHashObject": "dfff313cf9757a5ca1e9901392e284f8d51df0d6",
+      "sha256": "0915bcaee0bd059068c4afc0858380a732072718ef9e67cc0948509c7157fe28"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-api-suite.js",
+      "loadedByRun": true,
+      "gitHashObject": "d402af683b05c45ecd81ccab1ec2dad00df80a30",
+      "sha256": "a0db5f2069399a06d7f3cc95eab2f750d62df487fb60219679366f5636f63da0"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-browser-stage8.js",
+      "loadedByRun": true,
+      "gitHashObject": "965496d758d168447a9f41dd4eb2311d86ab6dd7",
+      "sha256": "489bea2e536e1fb5647196427a850a01eba2948242b6f53b8e836a1bd5d64ab7"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-browser-suite.js",
+      "loadedByRun": true,
+      "gitHashObject": "64c96a3c9a144929b06f6fb60b52ec10ff9dd1dc",
+      "sha256": "153d50fb48668d7adf9b3e8f13878d3af92ed63ba904927a47fd4eeb84b746e5"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-browser-trace-confirm.js",
+      "loadedByRun": true,
+      "gitHashObject": "334d7acabfc0a5901de59c07bb8af283c250b6aa",
+      "sha256": "10d2a0c7488a79a9b99c7c86bc27b8a7552bb9da5d60dfdb1b6acc67f3f98d1d"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-browser-trace-forms.js",
+      "loadedByRun": true,
+      "gitHashObject": "0baaf9c13e51ffc336fe4436d98c2e4de272f223",
+      "sha256": "9175dffd257daa7d7eddd5327c3d9eec6923f6c8494d36fe77be3c703421c5b2"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-browser-trace-setup.js",
+      "loadedByRun": true,
+      "gitHashObject": "6dddf1fd59cb0549508838cb86da6a5e4e1d65fe",
+      "sha256": "0e8f32b7861dc62503373431bcd754e00b31376e4e48929cc2f156f795147d09"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-frontend-static.js",
+      "loadedByRun": true,
+      "gitHashObject": "a00dceb541f90718cb86f37cd680bbabd34f13a2",
+      "sha256": "d80ef6f6b7e9c5146b37ea976defa8587b714b90b7b82b4b471a72a3923cdcd1"
+    },
+    {
+      "path": "wbs-server/scripts/lib/sysbuild-mut-record.js",
+      "loadedByRun": true,
+      "gitHashObject": "6505c99f467f432cf03cef6dd7e64e4bff16e66a",
+      "sha256": "9fabda1cf4ef03f38f97333ab8b64959ca2e973df73dc8e0c65d35bf2af7d63a"
+    },
+    {
+      "path": "wbs-server/scripts/lib/test-env.js",
+      "loadedByRun": true,
+      "gitHashObject": "91b013684da57c9abfdec5a9cd8b32f3dd8aafde",
+      "sha256": "201ab2f96fdc8adfcef5c0e2b066b59c7c4a2effa1b941961ec3c7d0ee5acd49"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/build-impl-list.js",
+      "loadedByRun": false,
+      "gitHashObject": "4d0154c2efeb43aa399f4b328e355f0385e38944",
+      "sha256": "0aff7b770bc13753bcc125e860abfd968ab2054aaee587a72226e22df482934e"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/build-mutation-baseline.js",
+      "loadedByRun": true,
+      "gitHashObject": "5f2e77e92157ed7fff7dc9d62803fd0ca2c102c8",
+      "sha256": "5dc668776546fff9e84a0c9b82f2f46aa79718e4961b04ef4d7a839f111518c0"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/build-test-disposition.js",
+      "loadedByRun": false,
+      "gitHashObject": "66a45951f2f56d1d58139185adcca1eca7f9a936",
+      "sha256": "869c51ec9d8ed90759ca19035432706375b77ccf4457ae5285a2f0bf49b642e4"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/inv-parse.js",
+      "loadedByRun": false,
+      "gitHashObject": "ffe99a1cb1366567c44c71c6de6ac5e3bd8da0f2",
+      "sha256": "02da4614248ff6edaa14e55bde7737e81102b3d4ada461da1442cd82e9fb7ca0"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/mutation-check.js",
+      "loadedByRun": true,
+      "gitHashObject": "65ffeaf47f2e0042dcf247f0c2e5546939e4dcc3",
+      "sha256": "5a4edeb4eff06821f2ba5894f0d2407d47975c0633ede97a10b78c6f122177bf"
+    },
+    {
+      "path": "wbs-server/scripts/sysbuild-step1/xref-exports.js",
+      "loadedByRun": false,
+      "gitHashObject": "e1aa92c2d3c8aa73d87a0aa4d3569dfd1771569a",
+      "sha256": "7902b3a4d19845cdd57242fb594b86521acb2f1ca5bdae0d5efa15eb62dbe5d4"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-api.js",
+      "loadedByRun": true,
+      "gitHashObject": "4138fbcc97a57e4df88b7615dcc4525d8516ae28",
+      "sha256": "46e57aa5771262aad107322a338a9464b3ed773115bc133ddf9d3d7c50765f84"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-attachments.js",
+      "loadedByRun": true,
+      "gitHashObject": "dc9f785178200d04548fbad31331f5451387c3ab",
+      "sha256": "92e500fe0eff76b20cf832efa892250d47f21e96f90914c5211eee34858a2f38"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-browser.js",
+      "loadedByRun": true,
+      "gitHashObject": "3c16f9a68d8f60a6929c81d81bd82f5d6b67e9ad",
+      "sha256": "91d36a5651ebbd067cf63b411d20509e1204fd84c4d0948339081164de094acb"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-db.js",
+      "loadedByRun": true,
+      "gitHashObject": "4f21f9d79957a9eb0425b7c955a6edfdbfb4e36b",
+      "sha256": "3baf796793f6ca42b816d057276d157b9c9072c83d203c4df9b3793194421b54"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-e2e.js",
+      "loadedByRun": true,
+      "gitHashObject": "20041396ad7db1978b2ec6128c5a132c86c6c6f5",
+      "sha256": "6d272ac6dc0501990aec65ece13ed388c80b1998882f618f4633db02ccd47260"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-predeploy.js",
+      "loadedByRun": true,
+      "gitHashObject": "736bbe531a034798a5a2ffb42dc0ed6a72997e45",
+      "sha256": "32f4255d9ef8dcba33a52ca203ff05424ff9d9b72a1e48ea5cea5aa10d375153"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-schema.js",
+      "loadedByRun": true,
+      "gitHashObject": "237161c94ae6858811447c8695132af7c6aabcca",
+      "sha256": "b36c0ac3e4ee31761c915f2aac4c66c02f8ccc92c9b039ce1bbdad886381421b"
+    },
+    {
+      "path": "wbs-server/scripts/verify-sysbuild-static.js",
+      "loadedByRun": true,
+      "gitHashObject": "e1c2f747775113a7d6076ed35d06a021a7344359",
+      "sha256": "9ce5b7006f7d73c2b01f626b3ea445f14b65573c604d6536f8041ffb8c3a315a"
+    }
+  ],
+  "testFilesCount": 62,
+  "testFilesChangedDuringRun": {
+    "loadedByRun": [],
+    "notLoadedByRun": [
+      {
+        "path": "wbs-server/scripts/sysbuild-step1/build-impl-list.js",
+        "sha256Before": "0aff7b770bc13753bcc125e860abfd968ab2054aaee587a72226e22df482934e",
+        "sha256After": "8214e4c74f6ed507471e20186120cd7637dd857e74357226f48eaf6208a3c86d"
+      },
+      {
+        "path": "wbs-server/scripts/sysbuild-step1/build-test-disposition.js",
+        "sha256Before": "869c51ec9d8ed90759ca19035432706375b77ccf4457ae5285a2f0bf49b642e4",
+        "sha256After": "1d7afdc8b841e1ebb1098b514a79d68f41745036d175a5bf31a02385c2b07b56"
+      },
+      {
+        "path": "wbs-server/scripts/sysbuild-step1/inv-parse.js",
+        "sha256Before": "02da4614248ff6edaa14e55bde7737e81102b3d4ada461da1442cd82e9fb7ca0",
+        "sha256After": "2da13b60b2b0344e1d1b3fb749aa6f8f30ae2f6c93bf776715c614246ff8df08"
+      }
+    ]
+  },
+  "workingTree": {
+    "before": [
+      " M wbs-server/scripts/lib/sysbuild-mut-record.js",
+      " M wbs-server/scripts/sysbuild-step1/build-impl-list.js",
+      " M wbs-server/scripts/sysbuild-step1/build-mutation-baseline.js",
+      " M wbs-server/scripts/sysbuild-step1/build-test-disposition.js",
+      " M wbs-server/scripts/sysbuild-step1/inv-parse.js",
+      " M wbs-server/scripts/verify-sysbuild-browser.js"
+    ],
+    "after": [
+      " M wbs-server/scripts/lib/sysbuild-mut-record.js",
+      " M wbs-server/scripts/sysbuild-step1/build-mutation-baseline.js",
+      " M wbs-server/scripts/sysbuild-step1/inv-parse.js",
+      " M wbs-server/scripts/verify-sysbuild-browser.js"
+    ],
+    "same": false,
+    "snapshotAt": "2026-11-19T14:57:15.491Z",
+    "afterAt": "2026-11-19T15:40:43.085Z"
+  },
+  "runtime": {
+    "node": "v24.11.1",
+    "platform": "win32",
+    "arch": "x64",
+    "osRelease": "10.0.26300",
+    "generator": "wbs-server/scripts/sysbuild-step1/build-mutation-baseline.js",
+    "stackLimitOption": "--stack-trace-limit=80"
+  },
+  "groups": {
+    "api": {
+      "command": "node wbs-server/scripts/verify-sysbuild-api.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-api.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "过滤模式（不加 --full）",
+      "startedAt": "2026-11-19T14:57:15.740Z",
+      "endedAt": "2026-11-19T15:25:19.293Z",
+      "seconds": 1684,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/api.log",
+        "bytes": 2831042,
+        "sha256": "8aa9e23c14bb6cc1ec71ab13badc22d175a19ee370035ef4cd680f57d8a25732"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/api.meta.json",
+        "bytes": 410,
+        "sha256": "aa28d4554259e2e8d00671417ecd8080358b5548a7bfea8b421eb75ffc785da6"
+      },
+      "driverBaselineLine": "  ✓ 未变异基线（进程内）485/485 全绿",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "变异自检：2140/2140 判红（挑选 2140 / 共 2140；过滤模式）",
+      "registered": 2140,
+      "mutRecords": 2140,
+      "registeredIdsSha256": "98059f68ee5e4af059364920c3b61f0b420e5cc4f6a6364b6aeeb946ca0c159a",
+      "ranIdsSha256": "98059f68ee5e4af059364920c3b61f0b420e5cc4f6a6364b6aeeb946ca0c159a",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "browser": {
+      "command": "node wbs-server/scripts/verify-sysbuild-browser.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-browser.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T14:57:15.729Z",
+      "endedAt": "2026-11-19T15:25:14.410Z",
+      "seconds": 1679,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/browser.log",
+        "bytes": 180509,
+        "sha256": "e4c33b23bc73c49abfc19b5047a70962b767c94b76826dd765fe55933369c15f"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/browser.meta.json",
+        "bytes": 418,
+        "sha256": "88440c4a70686cc5983e042b4098975f7c86ec2dd920149d0bcf9806513d7090"
+      },
+      "driverBaselineLine": "浏览器检查 37/37 通过；成功后已清理进程私有临时目录",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "浏览器变异 104/104 判红",
+      "registered": 104,
+      "mutRecords": 104,
+      "registeredIdsSha256": "33320b6cb338025388e947525cb4528c4a9faa06006533067a94f6c6eadbb80c",
+      "ranIdsSha256": "33320b6cb338025388e947525cb4528c4a9faa06006533067a94f6c6eadbb80c",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "static": {
+      "command": "node wbs-server/scripts/verify-sysbuild-static.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-static.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:25:19.295Z",
+      "endedAt": "2026-11-19T15:26:06.102Z",
+      "seconds": 47,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/static.log",
+        "bytes": 61231,
+        "sha256": "48140f247a32b8d8a661c943f9848d57cbfdb8316d6af59350f91f925c2de92e"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/static.meta.json",
+        "bytes": 414,
+        "sha256": "9b976b04744ab8effc692dff0a62d5b5e80b3280f653e1f0ba03ec7218c71490"
+      },
+      "driverBaselineLine": "  ✓ 未变异基线（真实 routes/sysbuild/）14/14 全绿",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "252/252 通过",
+      "registered": 109,
+      "mutRecords": 109,
+      "registeredIdsSha256": "ece89819b1ca9a39b4fb65f733abf3d642f13c217073f0d4e7a843f26a1d80de",
+      "ranIdsSha256": "ece89819b1ca9a39b4fb65f733abf3d642f13c217073f0d4e7a843f26a1d80de",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "schema": {
+      "command": "node wbs-server/scripts/verify-sysbuild-schema.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-schema.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:26:06.103Z",
+      "endedAt": "2026-11-19T15:27:39.300Z",
+      "seconds": 93,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/schema.log",
+        "bytes": 78420,
+        "sha256": "d0e7eab98560c7872dea4e0fe4c3a7ff4df41e96aa48afbaeaa3453897659618"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/schema.meta.json",
+        "bytes": 414,
+        "sha256": "86961300742044583bd405f4788a137d35e69347d0048daf72d7d2eb9f158ad9"
+      },
+      "driverBaselineLine": "  ✓ 未变异基线 20/20 全绿",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "变异自检：78/78 判红",
+      "registered": 78,
+      "mutRecords": 78,
+      "registeredIdsSha256": "6bff8a545747cd1e85b16492ee9a03b506812951c24e32208157e3d90e8369ed",
+      "ranIdsSha256": "6bff8a545747cd1e85b16492ee9a03b506812951c24e32208157e3d90e8369ed",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "db": {
+      "command": "node wbs-server/scripts/verify-sysbuild-db.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-db.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:27:39.301Z",
+      "endedAt": "2026-11-19T15:31:54.615Z",
+      "seconds": 255,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/db.log",
+        "bytes": 36429,
+        "sha256": "8f9a84abd9cccdb01ce00411fb680e27990f570fe1fd27942916b5f7209718d7"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/db.meta.json",
+        "bytes": 407,
+        "sha256": "ce9b28f84b2a10337b02f1e49d369a1ffba55aa66f0d0a5e441c15338d696a2d"
+      },
+      "driverBaselineLine": "  ✓ 未变异基线 40/40 全绿",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "变异自检：27/27 判红",
+      "registered": 27,
+      "mutRecords": 27,
+      "registeredIdsSha256": "58d611cd31df545a18f4510fb222bec52e104a2968e38fdf1b6d09597426307b",
+      "ranIdsSha256": "58d611cd31df545a18f4510fb222bec52e104a2968e38fdf1b6d09597426307b",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "attachments": {
+      "command": "node wbs-server/scripts/verify-sysbuild-attachments.js --self-test",
+      "argv": [
+        "wbs-server/scripts/verify-sysbuild-attachments.js",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:31:54.622Z",
+      "endedAt": "2026-11-19T15:33:31.282Z",
+      "seconds": 97,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/attachments.log",
+        "bytes": 149443,
+        "sha256": "f323d714a2d541ba69ed94d5176feeac5a9db7ceb67d1bf62def8dbb799d21ce"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/attachments.meta.json",
+        "bytes": 424,
+        "sha256": "4ed51aba42e3c4dfc2f12f6f1a53cc01cc3dbb4b7f1ca6eda478c9b818cdbfbd"
+      },
+      "driverBaselineLine": "  ✓ 未变异基线 51/51 全绿",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "变异自检：95/95 判红",
+      "registered": 95,
+      "mutRecords": 95,
+      "registeredIdsSha256": "e19f5ea111d4e28cb526604e8af17b13a5634cb8d90600c3a3514ff4190b7749",
+      "ranIdsSha256": "e19f5ea111d4e28cb526604e8af17b13a5634cb8d90600c3a3514ff4190b7749",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "migration": {
+      "command": "node scripts/sysbuild-predeploy/run-migration-self-test.cjs",
+      "argv": [
+        "scripts/sysbuild-predeploy/run-migration-self-test.cjs"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:33:31.282Z",
+      "endedAt": "2026-11-19T15:37:29.859Z",
+      "seconds": 239,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/migration.log",
+        "bytes": 26971,
+        "sha256": "0278d50fd3a1991d37ff9d7999996897c7b85f4ffa5772daf36aff0c5c05f43a"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/migration.meta.json",
+        "bytes": 404,
+        "sha256": "13016884a61fc100119f6b62bbc0bd864bda606649ad976b57a8faa6720edfea"
+      },
+      "driverBaselineLine": "迁移未变异基线 30/30",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "迁移变异 27/27 判红；证据 C:\\Users\\FY\\AppData\\Local\\Temp\\sysbuild-migration-mut-iBLhkZ",
+      "registered": 27,
+      "mutRecords": 27,
+      "registeredIdsSha256": "60da20523e1c6f9b8004681708eeaeb1d8e4c70aa31f777850e15ab015b6ba7d",
+      "ranIdsSha256": "60da20523e1c6f9b8004681708eeaeb1d8e4c70aa31f777850e15ab015b6ba7d",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "deploy": {
+      "command": "node scripts/sysbuild-predeploy/verify-deploy-migration.cjs --script scripts/deploy-ssh.ps1 --self-test",
+      "argv": [
+        "scripts/sysbuild-predeploy/verify-deploy-migration.cjs",
+        "--script",
+        "scripts/deploy-ssh.ps1",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:37:29.863Z",
+      "endedAt": "2026-11-19T15:38:50.236Z",
+      "seconds": 80,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/deploy.log",
+        "bytes": 33130,
+        "sha256": "1925c2d3eafd48a5666a16467c8c3b9bf9eeab6c631b809558be777307624ec9"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/deploy.meta.json",
+        "bytes": 512,
+        "sha256": "b17491ee621136e8dc574f472ee968f41915abc8a7bf55f3fcc9d1798210b33d"
+      },
+      "driverBaselineLine": "部署迁移守卫检查 81/81；证据 C:\\Users\\FY\\AppData\\Local\\Temp\\sysbuild-deploy-guard-SFJqod",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "部署迁移变异 23/23 判红；证据 C:\\Users\\FY\\AppData\\Local\\Temp\\sysbuild-deploy-guard-SFJqod",
+      "registered": 23,
+      "mutRecords": 23,
+      "registeredIdsSha256": "84b7dd1498a467cd49f6961ca3fc177da9f5684dc91c11b060fdc5ed0e4d77b4",
+      "ranIdsSha256": "84b7dd1498a467cd49f6961ca3fc177da9f5684dc91c11b060fdc5ed0e4d77b4",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "archive": {
+      "command": "node scripts/sysbuild-predeploy/run-archive-self-test.cjs",
+      "argv": [
+        "scripts/sysbuild-predeploy/run-archive-self-test.cjs"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:38:50.237Z",
+      "endedAt": "2026-11-19T15:39:06.668Z",
+      "seconds": 16,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/archive.log",
+        "bytes": 15568,
+        "sha256": "7102a67d97839ae26ecdc0f9fedba31b27950c1738b3e5e039dbc85e9a694425"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/archive.meta.json",
+        "bytes": 399,
+        "sha256": "b366a8d0ccca2630740cbde090a67e8eb351f1195bc27b2df1dc9d1671e55e19"
+      },
+      "driverBaselineLine": "存档未变异基线 12/12",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "存档变异 21/21 判红；证据 C:\\Users\\FY\\AppData\\Local\\Temp\\sysbuild-archive-mut-JQSm68",
+      "registered": 21,
+      "mutRecords": 21,
+      "registeredIdsSha256": "903c10a1e96fb0cecc99439d59fc12449c978894dcc10c78054a898b167f7921",
+      "ranIdsSha256": "903c10a1e96fb0cecc99439d59fc12449c978894dcc10c78054a898b167f7921",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    },
+    "readonly": {
+      "command": "node scripts/sysbuild-predeploy/verify-readonly.cjs --self-test",
+      "argv": [
+        "scripts/sysbuild-predeploy/verify-readonly.cjs",
+        "--self-test"
+      ],
+      "env": {
+        "SYSBUILD_MUT_RECORD": "1",
+        "NODE_OPTIONS": "--stack-trace-limit=80"
+      },
+      "mode": "--self-test 全量",
+      "startedAt": "2026-11-19T15:39:06.668Z",
+      "endedAt": "2026-11-19T15:40:43.055Z",
+      "seconds": 96,
+      "exitCode": 0,
+      "signal": null,
+      "rawLog": {
+        "file": "tmp/c1c/raw-20261119225714/readonly.log",
+        "bytes": 30594,
+        "sha256": "783a7650c4123ef4ac5f27f476e0620579ed920d0fb2d41c758ba13e1a5aa870"
+      },
+      "rawMeta": {
+        "file": "tmp/c1c/raw-20261119225714/readonly.meta.json",
+        "bytes": 418,
+        "sha256": "67f29207a80534bb24c34b3bff18d52260f69918ea065c2745bae5fe9a3a54a9"
+      },
+      "driverBaselineLine": "只读未变异基线 9/9",
+      "driverBaselineGreen": true,
+      "driverFinishLine": "只读变异 22/22 判红；证据 C:\\Users\\FY\\AppData\\Local\\Temp\\sysbuild-3002-ro-mut-tumlw8",
+      "registered": 22,
+      "mutRecords": 22,
+      "registeredIdsSha256": "e7d69e8d344ff9ffef6e5be043a2c048349f3df40902503a445ea96898503be0",
+      "ranIdsSha256": "e7d69e8d344ff9ffef6e5be043a2c048349f3df40902503a445ea96898503be0",
+      "ranIdsEqualRegisteredInOrder": true,
+      "ranIdsEqualRegisteredAsSet": true
+    }
+  },
+  "reconcile": [
+    {
+      "group": "api",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "browser",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "static",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "schema",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "db",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "attachments",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "migration",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "deploy",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "archive",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    },
+    {
+      "group": "readonly",
+      "missing": 0,
+      "extra": 0,
+      "duplicates": 0,
+      "dupRegistered": 0,
+      "ok": true
+    }
+  ],
+  "attachmentsFix": {
+    "fixCommit": "b4cf6527fb6fee76a6ca4e43f99a53dc2701e5e3",
+    "fixCommitGiven": "b4cf6527",
+    "before": {
+      "file": "tmp/c1b/main-attachments-selftest.log",
+      "bytes": 6921,
+      "sha256": "e6ae15eb347eb4dd90ea2b2801d357e3346a39c9105a2fbae6de05cd2d765a3e",
+      "summaryLine": "变异自检：88/95 判红",
+      "mutations": [
+        {
+          "id": "C4b D1 代录确认凭据（confirmation）可软删除",
+          "lines": [
+            "  ✗ [C4b D1 代录确认凭据（confirmation）可软删除] 变异锚点出现 0 次（应恰好 1 次）: \"owner_type IN ('confirmation', 'history_import', 'schedule_r\""
+          ]
+        },
+        {
+          "id": "C4b D1 历史导入凭据（history_import）可软删除",
+          "lines": [
+            "  ✗ [C4b D1 历史导入凭据（history_import）可软删除] 变异锚点出现 0 次（应恰好 1 次）: \"owner_type IN ('confirmation', 'history_import', 'schedule_r\""
+          ]
+        },
+        {
+          "id": "C4b D1 改期证据（schedule_record）可软删除",
+          "lines": [
+            "  ✗ [C4b D1 改期证据（schedule_record）可软删除] 变异锚点出现 0 次（应恰好 1 次）: \"owner_type IN ('confirmation', 'history_import', 'schedule_r\""
+          ]
+        },
+        {
+          "id": "C4b Q-S2 窗口凭据（event）可软删除",
+          "lines": [
+            "  ✗ [C4b Q-S2 窗口凭据（event）可软删除] 变异锚点出现 0 次（应恰好 1 次）: \"owner_type IN ('confirmation', 'history_import', 'schedule_r\""
+          ]
+        },
+        {
+          "id": "冻结不查同项目",
+          "lines": [
+            "  ✗ [冻结不查同项目] 变异锚点出现 2 次（应恰好 1 次）: \"if (r.project_id !== projectId) throw\""
+          ]
+        },
+        {
+          "id": "冻结不校验 ownerId（L7）",
+          "lines": [
+            "  ✗ [冻结不校验 ownerId（L7）] 变异锚点出现 3 次（应恰好 1 次）: \"if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeEr\""
+          ]
+        },
+        {
+          "id": "冻结不校验 objectVersionId（L7）",
+          "lines": [
+            "  ✗ [冻结不校验 objectVersionId（L7）] 变异锚点出现 2 次（应恰好 1 次）: \"if (!Number.isInteger(objectVersionId) || objectVersionId <=\""
+          ]
+        }
+      ]
+    },
+    "after": {
+      "file": "tmp/patt/attachments-selftest.log",
+      "bytes": 6198,
+      "sha256": "37c38c2d403020dd5654bb9aaa5785c58858791014605ada94241a7f87b48de6",
+      "summaryLine": "变异自检：95/95 判红",
+      "mutations": [
+        {
+          "id": "C4b D1 代录确认凭据（confirmation）可软删除",
+          "lines": [
+            "  ✓ [C4b D1 代录确认凭据（confirmation）可软删除] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "C4b D1 历史导入凭据（history_import）可软删除",
+          "lines": [
+            "  ✓ [C4b D1 历史导入凭据（history_import）可软删除] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "C4b D1 改期证据（schedule_record）可软删除",
+          "lines": [
+            "  ✓ [C4b D1 改期证据（schedule_record）可软删除] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "C4b Q-S2 窗口凭据（event）可软删除",
+          "lines": [
+            "  ✓ [C4b Q-S2 窗口凭据（event）可软删除] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "冻结不查同项目",
+          "lines": [
+            "  ✓ [冻结不查同项目] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "冻结不校验 ownerId（L7）",
+          "lines": [
+            "  ✓ [冻结不校验 ownerId（L7）] 判红（50/51）"
+          ]
+        },
+        {
+          "id": "冻结不校验 objectVersionId（L7）",
+          "lines": [
+            "  ✓ [冻结不校验 objectVersionId（L7）] 判红（50/51）"
+          ]
+        }
+      ]
+    }
+  },
+  "entriesSha256": "8534b78a0d48cee1b2a83a25c871f2e8c7f48ebf9bebdb12e85fa2eb1e018dc2"
+}

@@ -2,13 +2,18 @@
 (function () {
     'use strict';
     const A = window.SysBuildUI;
-    const purposes = { confirm_request: '发起确认', confirm_reissue: '改发确认', decision_objected: '异议 / 不认可告知 PM', invitation: '加入 / 任职邀请', delegation_accept: '请本人接受授权', schedule_notice: '改期知会' };
+    const purposes = {
+        confirm_request: '发起确认', confirm_reissue: '改发确认', decision_objected: '异议 / 不认可告知 PM',
+        schedule_notice: '改期知会', leader_confirmation_notice: '确认发起知悉', opinion_assess_notice: '意见评估知悉',
+        opinion_ready_notice: '开发意见知悉', opinion_result_notice: '意见结论知悉', opinion_cut_notice: '砍需求待同意知悉',
+    };
     const statuses = { pending: '待发送', sent: '已发送', failed: '发送失败' };
     function intentLink(detail, row) {
+        if (row.purpose === 'leader_confirmation_notice') return A.link('打开项目', { project: detail.project.id });
         if (row.ref_type === 'confirm_revision') return A.link('核对对应修订', { rev: row.ref_id });
-        if (row.ref_type === 'invitation') return A.link('核对邀请', { invitation: row.ref_id });
-        if (row.ref_type === 'delegation') return A.link('核对授权', { delegation: row.ref_id });
         if (row.ref_type === 'notice') return A.link('核对知会', { notice: row.ref_id });
+        if (row.ref_type === 'opinion') return A.link('查看意见', { project: detail.project.id, tab: 'opinions', opinion: row.ref_id });
+        if (row.ref_type === 'cut_approval') return A.link('查看意见列表', { project: detail.project.id, tab: 'opinions' });
         return A.link('打开项目', { project: detail.project.id });
     }
     async function notificationsTab(detail, params, c) {
@@ -24,10 +29,9 @@
             A.assertCurrent(next);
             A.notice('本次补发完成，请核对通知列表。成功：' + (result.counts.sent || 0) + '；失败：' + (result.counts.failed || 0) + '；跳过：' + (result.counts.skipped || 0));
         }, 'primary', c));
-        host.appendChild(A.panel('通知发送与线下通知', [A.facts([['补发可处理的失败 / 超时', data.failed_count + ' 条'], ['需要线下通知', data.needs_offline_count + ' 条']]), A.hint('发送失败不改变业务决定。补发会重核当前收件资格；无账号负责人须线下通知，补发不能清除该类事项。')], controls));
+        host.appendChild(A.panel('通知发送', [A.facts([['补发可处理的失败 / 超时', data.failed_count + ' 条']]), A.hint('发送失败不改变业务决定。补发会重核当前收件资格。')], controls));
         host.appendChild(A.panel('筛选发送意图', [A.row(A.link('全部', { project: detail.project.id, tab: 'notifications' }), ...Object.entries(statuses).map(([key, title]) => A.link(title, { project: detail.project.id, tab: 'notifications', send_status: key })))]));
         host.appendChild(A.panel('发送意图与结果', [A.table(['用途', '收件人', '结果', '次数 / 最近时间', '最近原因', '关联记录'], data.items.map((row) => [purposes[row.purpose] || '业务通知', row.recipient_name, statuses[row.status] || row.status, row.attempts + ' 次 · ' + row.updated_at, row.last_error || '—', intentLink(detail, row)]))]));
-        host.appendChild(A.panel('需线下通知 · 无平台账号', [A.table(['用途', '原因', '最近记录时间', '操作'], data.offline_items.map((row) => [purposes[row.purpose] || '业务通知', row.last_error, row.updated_at, A.link('核对知会与原改期', { notice: row.notice_id })]))]));
         return host;
     }
     async function manageAttachment(id, c, onUpdated) {

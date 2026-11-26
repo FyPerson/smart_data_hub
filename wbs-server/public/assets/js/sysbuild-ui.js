@@ -107,6 +107,8 @@
         urls.clear();
         state.detail = null;
         state.plan = null;
+        state.materials = null;
+        state.opinions = null;
         const dlg = $('sbuiDialog');
         if (dlg && dlg.open) dlg.close();
         if ($('sbuiDialogContent')) $('sbuiDialogContent').replaceChildren();
@@ -172,7 +174,7 @@
         else notice(msg, true);
         if (err && (err.status === 403 || err.status === 404) && state.route && state.route.get('project')) {
             clearView();
-            $('sbuiView').appendChild(panel('当前操作不可用', [hint(msg), link('返回项目列表', {})]));
+            $('sbuiView').appendChild(panel('当前操作不可用', [hint(msg), link('返回项目列表', { scope: 'mine' })]));
         }
     }
     function field(def) {
@@ -212,7 +214,7 @@
         const c = ctx || context();
         const f = el('form');
         const grid = el('div', 'sbui-form-grid');
-        const fields = defs.map(field);
+        const fields = defs.map((def) => def.render ? def.render(c) : field(def));
         fields.forEach((x) => { grid.appendChild(x.label); if (window.SysBuildUI.mountEvidenceField) window.SysBuildUI.mountEvidenceField(x, c); });
         if (window.SysBuildUI.bindEvidenceFields) window.SysBuildUI.bindEvidenceFields(fields);
         const error = el('p', 'sbui-error'); error.setAttribute('role', 'alert');
@@ -322,16 +324,71 @@
         const b = button(label, async () => {
             if (b.disabled) return;
             b.disabled = true;
+            b.dataset.submitting = 'true';
             try { assertCurrent(c); await work(c); }
             catch (err) { fail(err, c); }
-            finally { if (valid(c) && b.isConnected) b.disabled = false; }
+            finally {
+                delete b.dataset.submitting;
+                if (valid(c) && b.isConnected) b.disabled = false;
+            }
         }, cls);
         return b;
+    }
+    let acceptedHash = location.hash;
+    let previousHash = null;
+    let acceptedHistoryState = history.state;
+    let acceptedEntry = window.navigation?.currentEntry?.index;
+    let programmaticHash = null;
+    function drawerBusy() {
+        const pane = $('sbuiView').querySelector('.sbui-drawer');
+        return !!pane && (pane.querySelector('[data-submitting="true"]') !== null ||
+            ($('sbuiDialog').open && $('sbuiDialog').querySelector('form[data-submitting="true"]') !== null));
+    }
+    function drawer(content, title, back, c) {
+        const close = () => {
+            if (drawerBusy()) { notice('正在提交，请稍候。'); return; }
+            navigate(back);
+        };
+        const shade = button('', close);
+        shade.className = 'sbui-drawer-shade';
+        shade.setAttribute('aria-label', '关闭抽屉遮罩');
+        shade.setAttribute('tabindex', '-1');
+        const pane = el('section', 'sbui-drawer');
+        pane.setAttribute('role', 'dialog');
+        pane.setAttribute('aria-modal', 'true');
+        pane.setAttribute('aria-label', title);
+        pane.setAttribute('tabindex', '-1');
+        const bar = append(el('header', 'sbui-drawer-header'), [el('h2', '', title), button('关闭抽屉', close)]);
+        append(pane, [bar, append(el('div', 'sbui-drawer-body'), [content])]);
+        const handleKey = (event) => {
+            if (document.querySelector('dialog[open]') || !valid(c)) return;
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                close();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusable = Array.from(pane.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex]'))
+                .filter((node) => node.tabIndex >= 0 && !node.matches(':disabled') && node.getClientRects().length);
+            const active = document.activeElement;
+            const boundary = event.shiftKey ? focusable[0] : focusable.at(-1);
+            if (active === boundary || !focusable.includes(active)) {
+                event.preventDefault();
+                ((event.shiftKey ? focusable.at(-1) : focusable[0]) || pane).focus();
+            }
+        };
+        window.addEventListener('keydown', handleKey);
+        onDispose(c, () => window.removeEventListener('keydown', handleKey));
+        requestAnimationFrame(() => { if (pane.isConnected && valid(c)) pane.focus({ preventScroll: true }); });
+        return append(el('div', 'sbui-drawer-layer'), [shade, pane]);
     }
     function navigate(params) {
         const next = new URLSearchParams(params).toString();
         if (location.hash.slice(1) === next) render().catch((err) => fail(err));
-        else location.hash = next;
+        else {
+            programmaticHash = '#' + next;
+            location.hash = next;
+        }
     }
     function setView(node, ctx) {
         assertCurrent(ctx);
@@ -339,14 +396,18 @@
         $('sbuiView').setAttribute('aria-busy', 'false');
     }
     async function render() {
+        if (location.hash !== acceptedHash) previousHash = acceptedHash;
+        acceptedHash = location.hash;
+        acceptedHistoryState = history.state;
+        acceptedEntry = window.navigation?.currentEntry?.index;
         clearView();
         const c = context();
         const params = new URLSearchParams(location.hash.slice(1));
         state.route = params;
         $('sbuiView').setAttribute('aria-busy', 'true');
         $('sbuiView').appendChild(el('p', 'sbui-state', '正在加载…'));
-        const key = params.has('invitation') ? 'invitation' : params.has('delegation') ? 'delegation' : params.has('rev') ? 'revision' : params.has('notice') ? 'notice' : params.has('task') ? 'task' : params.has('new') ? 'new' : params.has('help') ? 'help' : params.has('todo') ? 'todo' : params.has('project') ? 'project' : 'list';
-        const moduleTab = key === 'help' ? 'help' : ['todo', 'task', 'revision', 'notice', 'invitation', 'delegation'].includes(key) ? 'todo' : 'list';
+        const key = params.has('rev') ? 'revision' : params.has('notice') ? 'notice' : params.has('task') ? 'task' : params.has('new') ? 'new' : params.has('help') ? 'help' : params.has('todo') ? 'todo' : params.has('project') ? 'project' : 'list';
+        const moduleTab = key === 'help' ? 'help' : ['todo', 'task', 'revision', 'notice'].includes(key) ? 'todo' : 'list';
         for (const anchor of $('sbuiNav').querySelectorAll('a')) {
             const route = new URLSearchParams(anchor.hash.slice(1));
             const tab = route.has('help') ? 'help' : route.has('todo') ? 'todo' : 'list';
@@ -369,10 +430,39 @@
         state.userId = Number(currentUser.id);
         // C6 通知链接用 query。首次接入后统一成 hash 并移除 query，之后返回列表不会重新打开旧通知。
         if (!location.hash && location.search) history.replaceState(null, '', location.pathname + '#' + location.search.slice(1));
-        $('sbuiNav').replaceChildren(link('项目列表', {}), link('我的待办', { todo: '1' }), link('帮助', { help: '1' }));
+        $('sbuiNav').replaceChildren(link('项目列表', { scope: 'mine' }), link('等我处理', { todo: '1' }), link('帮助', { help: '1' }));
         await render();
     }
-    window.addEventListener('hashchange', () => { render().catch((err) => fail(err)); });
+    window.addEventListener('hashchange', () => {
+        if (drawerBusy() && location.hash !== acceptedHash && location.hash !== programmaticHash) {
+            const index = window.navigation?.currentEntry?.index;
+            if (Number.isInteger(index) && Number.isInteger(acceptedEntry) && index !== acceptedEntry) {
+                history.go(acceptedEntry - index);
+            } else {
+                const url = location.pathname + location.search + acceptedHash;
+                if (location.hash === previousHash) history.pushState(acceptedHistoryState, '', url);
+                else history.replaceState(acceptedHistoryState, '', url);
+                acceptedEntry = index;
+            }
+            notice('正在提交，请稍候。');
+            return;
+        }
+        if (drawerBusy() && location.hash === acceptedHash) return;
+        programmaticHash = null;
+        render().catch((err) => fail(err));
+    });
+    document.addEventListener('click', (event) => {
+        const anchor = event.target.closest?.('#sysbuildApp a[href^="#"]');
+        if (!anchor || anchor.hash === acceptedHash || !drawerBusy()) return;
+        event.preventDefault();
+        notice('正在提交，请稍候。');
+    }, true);
+    window.addEventListener('beforeunload', (event) => {
+        if (drawerBusy()) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+    });
     window.addEventListener('storage', (e) => {
         if (e.key !== 'token' && e.key !== 'user' && e.key !== null) return;
         clearSession();
@@ -391,7 +481,7 @@
         disposeInvalid();
         $('sbuiDialogContent').replaceChildren();
     });
-    window.SysBuildUI = { state, $, el, append, row, text, hint, button, link, panel, table, facts, disclosure, context, valid, assertCurrent, request, fail, errorText, notice, form, dialog, reserveDialog, closeDialog, guardDialogUnsaved, stageFiles, perform, command, navigate, render, onDispose, releaseUrl,
+    window.SysBuildUI = { state, $, el, append, row, text, hint, button, link, panel, table, facts, disclosure, context, valid, assertCurrent, request, fail, errorText, notice, form, dialog, drawer, reserveDialog, closeDialog, guardDialogUnsaved, stageFiles, perform, command, navigate, render, onDispose, releaseUrl,
         registerRoute: (key, fn) => routes.set(key, fn), registerTab: (key, label, fn, visible) => tabs.set(key, { label, render: fn, visible }), tabs,
         objectUrl: (blob) => { const u = URL.createObjectURL(blob); urls.add(u); return u; },
         id: (raw) => { if (!/^[1-9][0-9]*$/.test(String(raw)) || !Number.isSafeInteger(Number(raw))) throw new Error('编号不合法'); return Number(raw); },

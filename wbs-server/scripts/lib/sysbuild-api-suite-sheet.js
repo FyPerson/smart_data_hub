@@ -3,7 +3,7 @@
 //   派单：docs/local/系统建设记录/送审准备/C4c_R-S1_确认单导出_派单_20261105.md（契约 2.1–2.5；R-D2：草稿 409，R-D3：页面内容与顺序）
 //
 // 本文件只放用例与变异，由 sysbuild-api-suite.js 登记（同一套夹具、同一个变异自检）。期望值一律手写，不取自被测代码。
-// 夹具规则：建项走 POST /projects；无账号成员走 POST /members（person_name）；条目、包、版本、提交、平台确认、代录、历史补录、历史导入、撤回、改发全部走生产端点。
+// 夹具规则：建项走 POST /projects；无账号成员走 POST /members（person_name）；包、版本、提交、平台确认、代录、历史补录、历史导入、撤回、改发全部走生产端点。
 //   只有这几类直接写库：① 需求部门参与方、现任任职 / 生效授权；② 附件行（暂存）与附件的原名 / 遮蔽（构造被遮蔽、带特殊字符原名的附件）；
 //   ③ 把任务修订的创建时间回拨到固定日期（代录外部日期的下限取修订创建日）；④ 改项目名（构造带特殊字符的项目名）。
 // 时间：进程内夹具的「今天」由统一todayProvider固定注入，外部确认日期用固定的 2026-10-25；导出时间是服务器当前时刻，用例只断格式，不断值。
@@ -20,17 +20,11 @@ const T_HEAD = `${P}响应头与页面安全`;
 const T_READ = `${P}纯读`;
 const T_PENDING = `${P}待确认版本`;
 const T_MIXED = `${P}生产路径生效 混合方式`;
-const T_IMPORT = `${P}历史导入生效`;
 const T_SUPER = `${P}已被替代`;
 const T_MASK = `${P}遮蔽`;
 const T_ESC = `${P}转义`;
-const T_PROPOSER = `${P}提出人`;
-const T_REISSUE = `${P}改发后的提出人确认`;
-const T_HISTREASON = `${P}历史补录原因`;
 const T_TAG = `${P}模板助手调用形态`;
-const T_ITEMFROZEN = `${P}条目的两份冻结清单`;
 const T_CARD = `${P}钉钉卡片确认`;
-const T_PROPOSERREV = `${P}条目提出人修订`;
 const T_MAP = `${P}映射兜底`;
 const T_ACTIONS = `${P}actions 同源`;
 
@@ -72,36 +66,13 @@ function liBy(h, attr) {
   while (m !== null) { out.push({ attrs: attrsOf(m[1]), inner: m[2], text: strip(m[2]) }); m = re.exec(h); }
   return out;
 }
-// 带某 data-* 属性的 <div>（条目块里的历史补录记录；内部没有嵌套 div）
+// 带某 data-* 属性的 <div>（内部没有嵌套 div）
 function divBy(h, attr) {
   const out = [];
   const re = new RegExp(`<div\\b([^>]*\\b${attr}="[^"]*"[^>]*)>([\\s\\S]*?)</div>`, 'g');
   let m = re.exec(h);
   while (m !== null) { out.push({ attrs: attrsOf(m[1]), inner: m[2], text: strip(m[2]) }); m = re.exec(h); }
   return out;
-}
-function itemBlock(h, ivid) {
-  const m = h.match(new RegExp(`<article class="item" data-item-version-id="${ivid}"[^>]*>[\\s\\S]*?</article>`));
-  assert.ok(m, `页面缺少条目版本 ${ivid} 的块`);
-  return { html: m[0], attrs: attrsOf(m[0].slice(0, m[0].indexOf('>') + 1)), text: strip(m[0]) };
-}
-// 条目块里「冻结附件」主清单小节的 HTML（到下一个小节标题为止；不含提出人确认明细里的凭据附件、条目版本冻结清单单列小节、历史补录小节）
-function itemFrozenPart(blockHtml) {
-  const head = '<div class="sub">冻结附件</div>';
-  const start = blockHtml.indexOf(head);
-  assert.ok(start >= 0, '条目块缺少冻结附件小节');
-  const rest = blockHtml.slice(start + head.length);
-  const end = rest.indexOf('<div class="sub">');
-  return end >= 0 ? rest.slice(0, end) : rest;
-}
-// 条目块里「条目版本冻结清单（提出人确认 / 历史补录时冻结）」单列小节的 HTML；没有该小节返回空串
-function itemExtraPart(blockHtml) {
-  const head = '<div class="sub">条目版本冻结清单（提出人确认 / 历史补录时冻结）</div>';
-  const start = blockHtml.indexOf(head);
-  if (start < 0) return '';
-  const rest = blockHtml.slice(start + head.length);
-  const end = rest.indexOf('<div class="sub">');
-  return end >= 0 ? rest.slice(0, end) : rest;
 }
 const headingsOf =(h) => (h.match(/<h2>[^<]*<\/h2>/g) || []).map((x) => x.slice(4, -5));
 const headerTag = (h) => {
@@ -113,7 +84,7 @@ const headerTag = (h) => {
 function defineSheetCases(T) {
   const { test, U, api, sqlRun, sqlGet, sqlAll, expectErr, addMember, addParty, addAppointment, addDelegation, getMods, confirm: H } = T;
   const stageAtt = (pid, uid, ch) => H.stageAtt(pid, uid, /^[0-9a-f]$/.test(ch) ? ch : (ch.charCodeAt(0) % 16).toString(16));
-  const { newProject, defaultBatchId, mkItem, mkPackage, mkVersion, addToSet, tasksOf, openAndDecide, confirmAll, planAllNodes, seedEffectiveInitiation, seedParty, PLAN_START, PLAN_END } = H;
+  const { newProject, mkPackage, mkPreparedVersion: mkVersion, tasksOf, openAndDecide, confirmAll, planAllNodes, seedEffectiveInitiation, seedParty, seedHistoricalLeaderTask, PLAN_START, PLAN_END } = H;
   const post = (uid, url, body) => api(uid, 'POST', url, body === undefined ? {} : body);
   const get = (uid, url) => api(uid, 'GET', url);
   const sheetUrl = (vid) => `/sysbuild/package-versions/${vid}/confirmation-sheet`;
@@ -125,124 +96,63 @@ function defineSheetCases(T) {
   };
   const countOf = async (s, p) => (await sqlGet(s, p)).n;
   const nameOf = async (uid) => (await sqlGet('SELECT COALESCE(display_name, username) AS n FROM users WHERE id = ?', [uid])).n;
-  const winUrl = (pid) => `/sysbuild/projects/${pid}/history-window`;
-  const confUrl = (pid) => `/sysbuild/projects/${pid}/history-confirmations`;
-  const impUrl = (pid) => `/sysbuild/projects/${pid}/history-imports`;
-  const backdate = async (table, ids) => { for (const id of ids) await sqlRun(`UPDATE ${table} SET created_at = ? WHERE id = ?`, [FLOOR_AT, id]); };
 
-  async function addNaMember(pid, party, name) {
-    const r = await post(U.pm, `/sysbuild/projects/${pid}/members`, { party_id: party, person_name: name });
-    assert.strictEqual(r.status, 201, r.text);
-    assert.strictEqual(r.body.member.user_id, null);
-    return r.body.member.id;
-  }
-  // 凭据四字段（代录用）；extra 覆盖
-  async function proxyEvid(pid, extra) {
-    return Object.assign({ external_date: OK_DATE, actual_confirmer: '甲部张主任', identity_basis: '甲部现任负责人，微信确认截图', attachment_ids: [await stageAtt(pid, U.pm, 'c')] }, extra || {});
-  }
-  // 历史补录 / 历史导入的凭据三字段
-  async function histEvid(pid, ch, extra) {
-    return Object.assign({ actual_confirmer: '甲部张主任', identity_basis: '甲部现任负责人，当年的会议纪要', attachment_ids: [await stageAtt(pid, U.pm, ch)] }, extra || {});
-  }
-  async function openWin(pid) {
-    const r = await post(U.pm, winUrl(pid), { action: 'open', attachment_ids: [await stageAtt(pid, U.pm, 'f')] });
-    assert.strictEqual(r.status, 200, r.text);
-  }
-  const itemTaskOf = (ivid) => sqlGet(
-    `SELECT t.id AS tid, r.id AS rid FROM sysbuild_confirm_tasks t JOIN sysbuild_confirm_task_revisions r ON r.task_id = t.id
-      WHERE t.object_type = 'item_version' AND t.object_version_id = ? ORDER BY r.rev_no DESC LIMIT 1`,
-    [ivid]
-  );
+  // 夹具（#212 C7）：包版本自己的附件直接写库绑定（owner_type = package_version；没有条目这一路，提交时进冻结清单，写法同 confirm 套件的 mkSubmitted）
+  const bindToVersion = (att, vid) => sqlRun("INSERT INTO sysbuild_attachment_bindings (attachment_id, owner_type, owner_id, bound_by) VALUES (?, 'package_version', ?, ?)", [att, vid, U.pm]);
+  const pairedAttachment = async (vid) => (await sqlGet(
+    `SELECT b.attachment_id FROM sysbuild_package_versions v
+       JOIN json_each(v.snapshot_json, '$.material_version_ids') j
+       JOIN sysbuild_attachment_bindings b ON b.owner_id = j.value AND b.owner_type = 'material_version'
+      WHERE v.id = ?`, [vid])).attachment_id;
 
-  // 待确认的总体规划包：甲部（负责人 own / 代表人 del，都有账号）+ 一条提出人为有账号成员 m1 的条目；提交后两个任务待确认。
+  // 同时覆盖旧任职任务与现行授权任务的确认单保留行为。
   async function mkPendingScene() {
     const pid = await newProject();
     const A = await seedParty(pid, '甲部', U.own, U.del);
     await seedEffectiveInitiation(pid);
-    const mProp = await addMember(pid, U.m1);
-    const item = await mkItem(pid, { proposer_name: undefined, proposer_member_id: mProp });
-    const ivid = item.versions[0].id;
+    const mProp = await addMember(pid, U.m1); // 一般成员（原为条目提出人；用例「参数与可见性」要求一般成员 m1 在本项目里）
     const pk = await mkPackage(pid, 'overall');
     const pv = await mkVersion(pk);
-    await addToSet(pv, ivid, await defaultBatchId(pid));
+    await seedHistoricalLeaderTask(pid, pk, pv, A);
     await planAllNodes(pid);
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
-    return { pid, A, mProp, ivid, pk, pv, tasks: await tasksOf(pv) };
+    return { pid, A, mProp, pk, pv, tasks: await tasksOf(pv) };
   }
   let pendingMemo = null;
   const pendingScene = () => { if (pendingMemo === null) pendingMemo = mkPendingScene(); return pendingMemo; };
 
-  // 生产路径生效的总体规划包（混合方式）：负责人 own 平台确认、无账号代表人代录；三条条目——
-  //   i1 无账号提出人（代录确认 → proxy_confirmed，带附件、提出人参与方）、i2 有账号提出人 m1（平台不认可 → denied，带附件）、i3 只填姓名（无任务、无附件、「无书面证据」声明）、
-  //   i4 只填姓名（无任务、带附件、无声明）。已附证据附件就不能再声明无书面证据（400），所以声明只在 i3 上。
-  //   生效后开启历史补录窗口：包版本一条历史补录（确认）、i1 一条历史补录（有异议）。
+  // 生产路径生效的总体规划包：负责人 own、代表人 del 都在平台确认；包版本自己绑定三个附件（原名各不相同，SHA-256 起头字符 a / b / 9，便于断言）。
+  //   #212 C7：需求条目没有了，原来的条目块与提出人任务随之删除；附件直接写库绑到包版本（卡写「材料版本」，实作取 M10 同口径：材料版本会多出材料块、可用性拒绝与生效时的材料冻结核对）。
   async function mkMixedScene() {
     const pid = await newProject();
     const party = await addParty(pid, '甲部', 'demand');
     const mOwn = await addMember(pid, U.own, { party });
     const apt = await addAppointment(party, mOwn, 'active');
-    const mDel = await addNaMember(pid, party, '无账号代表人');
+    const mDel = await addMember(pid, U.del, { party });
     await addDelegation(party, mDel, apt, 'active');
     await seedEffectiveInitiation(pid);
-    const mPropNa = await addNaMember(pid, party, '无账号提出人');
-    const mPropAcct = await addMember(pid, U.m1);
-    const attItem = await stageAtt(pid, U.pm, 'a');
-    const i1 = await mkItem(pid, {
-      content: '需求一：按部门导出', proposer_name: undefined, proposer_member_id: mPropNa, // 提出方由成员所属参与方带出（带 proposer_party_id 会 400）
-      attachment_ids: [attItem], no_written_evidence: undefined, no_evidence_reason: undefined,
-    });
-    // 每个条目各挂自己的附件（i3 不挂）：条目块只能列自己的附件（A2）。原名各不相同，便于断言。
-    const attI2 = await stageAtt(pid, U.pm, 'b');
-    const attI4 = await stageAtt(pid, U.pm, '9');
-    await sqlRun("UPDATE sysbuild_attachments SET original_name = '条目一附件.txt' WHERE id = ?", [attItem]);
-    await sqlRun("UPDATE sysbuild_attachments SET original_name = '条目二附件.txt' WHERE id = ?", [attI2]);
-    await sqlRun("UPDATE sysbuild_attachments SET original_name = '条目四附件.txt' WHERE id = ?", [attI4]);
-    const i2 = await mkItem(pid, { content: '需求二：导出加水印', proposer_name: undefined, proposer_member_id: mPropAcct, attachment_ids: [attI2], no_written_evidence: undefined, no_evidence_reason: undefined }); // 已附证据附件就不能再声明无书面证据
-    const i3 = await mkItem(pid, { content: '需求三：支持邮件通知', quote_text: '会上口头提出' });
-    // i4：只填姓名的提出人（没有提出人任务、没有条目版本自己的冻结清单），附件只随包版本冻结；不声明无书面证据
-    const i4 = await mkItem(pid, { content: '需求四：支持批量导入', attachment_ids: [attI4], no_written_evidence: undefined, no_evidence_reason: undefined });
-    const iv1 = i1.versions[0].id;
-    const iv2 = i2.versions[0].id;
-    const iv3 = i3.versions[0].id;
-    const iv4 = i4.versions[0].id;
-    const t1 = await itemTaskOf(iv1);
-    const t2 = await itemTaskOf(iv2);
-    assert.ok(t1 && t2, '无账号 / 有账号提出人都应生成提出人任务');
-    assert.strictEqual(await itemTaskOf(iv3), undefined, '只填姓名的提出人没有任务');
-    assert.strictEqual(await itemTaskOf(iv4), undefined, 'i4 只填姓名的提出人没有任务');
-    await backdate('sysbuild_confirm_task_revisions', [t1.rid, t2.rid]);
-    // i1：PM 代录确认
-    const pr = await post(U.pm, `/sysbuild/confirm-tasks/${t1.tid}/proxy`, Object.assign({ revision_id: t1.rid, object_version_id: iv1, decision: 'confirm' }, await proxyEvid(pid, { actual_confirmer: '提出人本人（电话）', identity_basis: '条目提出人' })));
-    assert.strictEqual(pr.status, 200, pr.text);
-    // i2：m1 本人在平台不认可
-    const dr = await openAndDecide(U.m1, t2.tid, 'reject');
-    assert.strictEqual(dr.status, 200, dr.text);
+    const attA = await stageAtt(pid, U.pm, 'a');
+    const attB = await stageAtt(pid, U.pm, 'b');
+    const attC = await stageAtt(pid, U.pm, '9');
+    await sqlRun("UPDATE sysbuild_attachments SET original_name = '附件一.txt' WHERE id = ?", [attA]);
+    await sqlRun("UPDATE sysbuild_attachments SET original_name = '附件二.txt' WHERE id = ?", [attB]);
+    await sqlRun("UPDATE sysbuild_attachments SET original_name = '附件三.txt' WHERE id = ?", [attC]);
     const pk = await mkPackage(pid, 'overall');
     const pv = await mkVersion(pk);
-    const batch = await defaultBatchId(pid);
-    for (const iv of [iv1, iv2, iv3, iv4]) await addToSet(pv, iv, batch);
+    for (const att of [attA, attB, attC]) await bindToVersion(att, pv);
     await planAllNodes(pid);
+    await seedHistoricalLeaderTask(pid, pk, pv, { party, mOwn, apt });
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
     const tasks = await tasksOf(pv);
-    assert.deepStrictEqual(tasks.map((t) => t.user_id), [U.own, null]);
-    await backdate('sysbuild_confirm_task_revisions', tasks.map((t) => t.rev_id));
+    assert.deepStrictEqual(tasks.map((t) => t.user_id), [U.own, U.del]);
     const d1 = await openAndDecide(U.own, tasks[0].task_id, 'confirm');
     assert.strictEqual(d1.status, 200, d1.text);
-    const d2 = await post(U.pm, `/sysbuild/confirm-tasks/${tasks[1].task_id}/proxy`, Object.assign({ revision_id: tasks[1].rev_id, object_version_id: pv, decision: 'confirm' }, await proxyEvid(pid, { actual_confirmer: '甲部李代表', identity_basis: '甲部授权代表人' })));
+    const d2 = await openAndDecide(U.del, tasks[1].task_id, 'confirm');
     assert.strictEqual(d2.status, 200, d2.text);
     assert.strictEqual(d2.body.effective, true);
-    // 历史补录（窗口开启后）
-    await openWin(pid);
-    const hc1 = await post(U.pm, confUrl(pid), Object.assign({ object_type: 'package_version', object_version_id: pv, decision: 'confirm', external_date: '2026-10-21' }, await histEvid(pid, 'd', { actual_confirmer: '历史确认人' })));
-    assert.strictEqual(hc1.status, 201, hc1.text);
-    const hc2 = await post(U.pm, confUrl(pid), Object.assign({ object_type: 'item_version', object_version_id: iv1, decision: 'object', external_date: '2026-10-22', reason: '当年对方提出过异议' }, await histEvid(pid, 'e', { actual_confirmer: '条目历史确认人' })));
-    assert.strictEqual(hc2.status, 201, hc2.text);
-    // 包版本再补录一条「不认可」（带原因）：历史补录节必须输出原因（C9）
-    const hc3 = await post(U.pm, confUrl(pid), Object.assign({ object_type: 'package_version', object_version_id: pv, decision: 'reject', external_date: '2026-10-23', reason: '当年对方不认可范围表述' }, await histEvid(pid, '8', { actual_confirmer: '历史不认可人' })));
-    assert.strictEqual(hc3.status, 201, hc3.text);
-    return { pid, party, pk, pv, tasks, iv1, iv2, iv3, iv4, attItem, attI2, attI4, hc1: hc1.body.confirmation.id, hc2: hc2.body.confirmation.id, hc3: hc3.body.confirmation.id };
+    return { pid, party, pk, pv, tasks, attA, attB, attC };
   }
   let mixedMemo = null;
   const mixedScene = () => { if (mixedMemo === null) mixedMemo = mkMixedScene(); return mixedMemo; };
@@ -285,11 +195,14 @@ function defineSheetCases(T) {
     // 同项目再建一个待确认版本（对照：非草稿 200）
     await seedParty(pid, '甲部', U.own, U.del);
     // L2 fixture：只在正向提交对照前补声明，前面的草稿 / 非成员拒绝原样保留。
-    const basis = await api(U.pm, 'PATCH', `/sysbuild/package-versions/${pv}`, { snapshot_json: { no_written_basis_reason: '确认单用例的立项来源为线下讨论，尚无书面原件' } });
-    assert.strictEqual(basis.status, 200, basis.text);
+    await H.declareInitiationBasis(pv);
     const sub = await post(U.pm, `/sysbuild/package-versions/${pv}/submit`);
     assert.strictEqual(sub.status, 200, sub.text);
-    assert.strictEqual((await sheet(U.pm, pv)).status, 200, '提交后可导出');
+    const exported = await sheet(U.pm, pv);
+    assert.strictEqual(exported.status, 200, '提交后可导出');
+    // #212 C2f（codex 102 L2）：无引用材料的立项包（没有「引用材料版本全文」节、没有节点计划节）：五节 + 附录，序号连续
+    //   #212 C7：「引用条目」小节随需求条目流程删除，必需确认人前移为第四节（M-SHEET 授权的序号前移）
+    assert.deepStrictEqual(headingsOf(exported.text), ['一、包内容快照', '二、立项依据', '三、冻结附件清单（本包版本）', '四、必需确认人', '附录：修订历史'], '无引用材料的立项包小节序号连续');
   });
 
   // ── 3 响应头与页面安全 ───────────────────────────────────────────────────────────────────────
@@ -329,11 +242,11 @@ function defineSheetCases(T) {
   });
 
   // ── 5 待确认版本 ─────────────────────────────────────────────────────────────────────────────
-  test(`${T_PENDING}——页头状态 pending 与徽标「待确认 · 未生效」、导出人 / 导出时间；每个任务一行 data-method=none；节次顺序；节点计划与条目`, async () => {
+  test(`${T_PENDING}——页头状态 pending 与徽标「待确认 · 未生效」、导出人 / 导出时间；每个任务一行 data-method=none；节次顺序；节点计划`, async () => {
     const s = await pendingScene();
     const body = await sheetOk(U.pm, s.pv);
     const hd = headerTag(body);
-    assert.deepStrictEqual([hd['version-status'], hd['history-import']], ['pending', '0']);
+    assert.strictEqual(hd['version-status'], 'pending');
     const head = strip(sectionOfHeader(body));
     assert.ok(head.includes('需求确认单'), '标题');
     assert.ok(head.includes('待确认 · 未生效'), `徽标文字，实际 ${head}`);
@@ -344,35 +257,32 @@ function defineSheetCases(T) {
     assert.ok(/导出时间\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?!:)/.test(head), `导出时间到分钟，实际 ${head}`);
     // 单批项目的总体规划包：形态 = 单批合并
     assert.ok(head.includes('单批合并'), '形态：单批合并');
-    // 九节顺序
-    const ids = ['sec-snapshot', 'sec-plans', 'sec-frozen', 'sec-items', 'sec-confirmers', 'sec-history', 'sec-appendix'].map((id) => body.indexOf(`<section id="${id}">`));
+    // 节次顺序（#212 C2 删历史补录节、C7 删引用条目节后共四节加附录：快照、节点计划、冻结附件、必需确认人）
+    const ids = ['sec-snapshot', 'sec-plans', 'sec-frozen', 'sec-materials', 'sec-confirmers', 'sec-appendix'].map((id) => body.indexOf(`<section id="${id}">`));
     assert.ok(ids.every((x, i) => x > 0 && (i === 0 || x > ids[i - 1])), `节次顺序，实际 ${ids}`);
-    assert.ok(body.indexOf('本单按提交时冻结的快照生成；附件以 SHA-256 核对；确认方式以平台记录为准') > ids[6], '页脚固定说明在最后');
-    assert.deepStrictEqual(headingsOf(body), ['一、包内容快照', '二、节点计划快照', '三、冻结附件清单（本包版本）', '四、引用条目', '五、必需确认人', '六、历史补录的确认', '附录：修订历史'], '总体规划包的小节序号连续');
+    assert.ok(!body.includes('<section id="sec-items">'), '没有「引用条目」节');
+    assert.ok(body.indexOf('本单按提交时冻结的快照生成；附件以 SHA-256 核对；确认方式以平台记录为准') > ids[5], '页脚固定说明在最后');
+    assert.deepStrictEqual(headingsOf(body), ['一、包内容快照', '二、节点计划快照', '三、冻结附件清单（本包版本）', '四、引用材料版本全文', '五、必需确认人', '附录：修订历史'], '总体规划包的小节序号连续');
     assert.ok(body.indexOf('<meta charset="utf-8">') > 0 && body.indexOf('<meta charset="utf-8">') < body.indexOf('<title>'), 'meta charset 在 title 之前');
     assert.ok(/<head>\s*<meta charset="utf-8">/.test(body), 'meta charset 是 head 的第一个元素');
-    assert.ok(strip(sectionOf(body, 'sec-snapshot')).includes('（无）'), '快照为空写（无）');
-    // 节点计划：自研项目 6 个节点，计划起止为 planAllNodes 统一写入的固定日期
+    assert.ok(strip(sectionOf(body, 'sec-snapshot')).includes('本次需要确认的内容及依据'), '确认单展示保存的确认正文');
+    assert.ok(strip(sectionOf(body, 'sec-materials')).includes('需求文档'), '配对材料在独立材料段展示');
+    // 节点计划：自研项目 5 个节点，计划起止为 planAllNodes 统一写入的固定日期。
     const plans = strip(sectionOf(body, 'sec-plans'));
     const nodeCount = await countOf("SELECT COUNT(*) AS n FROM sysbuild_nodes WHERE project_id = ? AND status <> 'cancelled'", [s.pid]);
-    assert.strictEqual(nodeCount, 6);
-    assert.strictEqual((plans.match(new RegExp(PLAN_START, 'g')) || []).length, 6, '六个节点的计划开始');
-    assert.strictEqual((plans.match(new RegExp(PLAN_END, 'g')) || []).length, 6, '六个节点的计划结束');
+    assert.strictEqual(nodeCount, 5);
+    assert.strictEqual((plans.match(new RegExp(PLAN_START, 'g')) || []).length, 2, '自研两个节点的计划开始');
+    assert.strictEqual((plans.match(new RegExp(PLAN_END, 'g')) || []).length, 2, '自研两个节点的计划结束');
+    assert.ok(plans.includes('验收和正式上线'));
     // 确认人：每个任务一行，method / decision 均为 none
     const rows = rowsBy(sectionOf(body, 'sec-confirmers'), 'data-task-id');
     assert.deepStrictEqual(rows.map((r) => [r.attrs['task-id'], r.attrs['revision-id'], r.attrs.method, r.attrs.decision]), s.tasks.map((t) => [String(t.task_id), String(t.rev_id), 'none', 'none']));
     assert.ok(rows[0].text.includes(await nameOf(U.own)) && rows[0].text.includes('负责人') && rows[0].text.includes('待确认') && rows[0].text.includes('尚无确认记录'), `负责人行：${rows[0].text}`);
     assert.ok(rows[1].text.includes(await nameOf(U.del)) && rows[1].text.includes('代表人'), `代表人行：${rows[1].text}`);
     assert.ok(rows.every((r) => r.text.includes('甲部') && r.text.includes('内容包确认')), '参与方与用途');
-    assert.ok(!rows.some((r) => r.text.includes('只能代录')), '有账号的确认人不标只能代录');
-    // 条目：提出人是有账号成员，状态待确认；「无书面证据」声明与原因显著标出
-    const it = itemBlock(body, s.ivid);
-    assert.strictEqual(it.attrs['proposer-status'], 'pending');
-    assert.ok(it.text.includes(await nameOf(U.m1)) && it.text.includes('待确认') && it.text.includes('无书面证据') && it.text.includes('口头电话确认了本次需求内容'), it.text);
-    assert.ok(it.html.includes('<div class="muted">当前修订：待确认 · 尚无确认记录</div>') && !it.text.includes('无提出人确认任务'), `有任务无记录：${it.text}`);
-    assert.ok(it.text.includes('当前修订：待确认 · 尚无确认记录') && !it.text.includes('待确认 待确认 ·'), `状态词与明细分行，不再连写成「待确认 · 尚无确认记录」紧跟在状态词后：${it.text}`);
-    assert.ok(it.text.includes('承诺批次'), '承诺批次');
-    assert.ok(strip(sectionOf(body, 'sec-history')).includes('（无）'), '无历史补录写（无）');
+    assert.ok(!rows.some((r) => r.text.includes('只能代录') || r.text.includes('无平台账号')));
+    // #212 C7：页面里没有条目块（原此处核条目的提出人状态、无书面证据声明与承诺批次，随需求条目流程删除）
+    assert.ok(!body.includes('data-item-version-id') && !body.includes('data-proposer-status') && !body.includes('承诺批次'), '页面没有任何条目块的痕迹');
   });
   function sectionOfHeader(h) {
     const m = h.match(/<header id="sheet-header"[\s\S]*?<\/header>/);
@@ -381,78 +291,42 @@ function defineSheetCases(T) {
   }
 
   // ── 6 生产路径生效 + 混合方式 ────────────────────────────────────────────────────────────────
-  test(`${T_MIXED}——平台确认与代录两行的 data-method；代录行带外部确认日 / 实际确认人 / 录入人 / 凭据 SHA-256 全 64 位；历史补录节与历史补录标记；冻结附件清单；普通生效的 data-history-import=0`, async () => {
+  test(`${T_MIXED}——两个平台确认行各自显示平台方式，冻结附件和散列可核对`, async () => {
     const s = await mixedScene();
     const body = await sheetOk(U.admin, s.pv);
     const hd = headerTag(body);
-    assert.deepStrictEqual([hd['version-status'], hd['history-import']], ['effective', '0'], '普通生效不是历史导入');
+    assert.strictEqual(hd['version-status'], 'effective');
     const eff = (await sqlGet('SELECT effective_at FROM sysbuild_package_versions WHERE id = ?', [s.pv])).effective_at;
     const head = strip(sectionOfHeader(body));
     assert.ok(head.includes('已生效') && head.includes(`生效时间 ${eff.slice(0, 16)}`), `已生效徽标与生效时间，实际 ${head}`);
     const rows = rowsBy(sectionOf(body, 'sec-confirmers'), 'data-task-id');
-    assert.deepStrictEqual(rows.map((r) => [r.attrs['task-id'], r.attrs.method, r.attrs.decision]), [[String(s.tasks[0].task_id), 'platform', 'confirm'], [String(s.tasks[1].task_id), 'proxy', 'confirm']]);
+    assert.deepStrictEqual(rows.map((r) => [r.attrs['task-id'], r.attrs.method, r.attrs.decision]), [[String(s.tasks[0].task_id), 'platform', 'confirm'], [String(s.tasks[1].task_id), 'platform', 'confirm']]);
     const plat = rows[0].text;
     assert.ok(plat.includes('方式： 平台确认') && !plat.includes('方式： 代录'), `平台确认行的方式文字：${plat}`);
     assert.ok(rows[0].inner.includes('<td>负责人</td>') && !rows[0].inner.includes('<td>代表人</td>'), '平台确认行的身份单元格是负责人');
     assert.ok(plat.includes(`勾选声明：${CHECKBOX}`) && plat.includes(`操作人：${await nameOf(U.own)}`) && plat.includes('已确认'), `平台确认行：${plat}`);
     assert.ok(!plat.includes('外部确认日期'), '平台确认没有外部确认信息');
-    const prox = rows[1].text;
-    assert.ok(prox.includes('方式： 代录') && !prox.includes('方式： 平台确认'), `代录行的方式文字：${prox}`);
-    assert.ok(rows[1].inner.includes('<td>代表人</td>') && !rows[1].inner.includes('<td>负责人</td>'), '代录行的身份单元格精确是代表人');
-    assert.ok(prox.includes(`外部确认日期：${OK_DATE}`) && prox.includes('实际确认人：甲部李代表') && prox.includes('身份依据：甲部授权代表人'), `代录行：${prox}`);
-    assert.ok(prox.includes(`录入人：${await nameOf(U.pm)}（录入时间`), `录入人姓名：${prox}`);
-    assert.ok(/录入时间 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(prox), `录入时间到分钟：${prox}`);
-    assert.ok(prox.includes(`SHA-256 ${'c'.repeat(64)}`), '代录凭据 SHA-256 全 64 位');
-    assert.ok(prox.includes('该确认人无平台账号，只能代录'), '无账号代表人标注只能代录');
-    assert.ok(!plat.includes('只能代录'), '有账号的平台确认人不标只能代录');
-    // 历史补录节（包版本）：两条（确认、不认可），方式与决策连在一起
-    const hist = sectionOf(body, 'sec-history');
-    const hrows = rowsBy(hist, 'data-history-confirmation-id');
-    assert.deepStrictEqual(hrows.map((r) => r.attrs['history-confirmation-id']), [String(s.hc1), String(s.hc3)]);
-    assert.ok(hrows[0].text.includes('历史补录 · 确认') && !hrows[0].text.includes('历史补录 · 不认可') && hrows[0].text.includes('历史确认人') && hrows[0].text.includes('2026-10-21') && hrows[0].text.includes(`SHA-256 ${'d'.repeat(64)}`), hrows[0].text);
-    assert.ok(hrows[1].text.includes('历史补录 · 不认可') && hrows[1].text.includes('历史不认可人') && hrows[1].text.includes('2026-10-23') && hrows[1].text.includes(`SHA-256 ${'8'.repeat(64)}`), hrows[1].text);
-    // 冻结附件：三个条目各自的附件随包冻结（i1 / i2 / i4），按附件编号升序
+    const plat2 = rows[1].text;
+    assert.ok(plat2.includes('方式： 平台确认') && rows[1].inner.includes('<td>代表人</td>') && !rows[1].inner.includes('<td>负责人</td>'), `第二行：平台确认，身份单元格精确是代表人：${plat2}`);
+    assert.ok(plat2.includes(`操作人：${await nameOf(U.del)}`), `第二行操作人：${plat2}`);
+    // 冻结附件：包版本绑定的三个附件随包冻结，按附件编号升序
     const frozen = liBy(sectionOf(body, 'sec-frozen'), 'data-attachment-id');
-    assert.deepStrictEqual(frozen.map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(s.attItem), '0'], [String(s.attI2), '0'], [String(s.attI4), '0']]);
-    assert.ok(frozen[0].text.includes('条目一附件.txt') && frozen[0].text.includes('3 字节') && frozen[0].text.includes(`SHA-256 ${'a'.repeat(64)}`), frozen[0].text);
-    assert.ok(frozen[1].text.includes('条目二附件.txt') && frozen[1].text.includes(`SHA-256 ${'b'.repeat(64)}`), frozen[1].text);
-    assert.ok(frozen[2].text.includes('条目四附件.txt') && frozen[2].text.includes(`SHA-256 ${'9'.repeat(64)}`), frozen[2].text);
-    // 每个条目块只列自己的附件（全等；i3 没有附件）
-    const own = (iv) => liBy(itemFrozenPart(itemBlock(body, iv).html), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs.masked]);
-    assert.deepStrictEqual(own(s.iv1), [[String(s.attItem), '0']], 'i1 只列自己的附件');
-    assert.deepStrictEqual(own(s.iv2), [[String(s.attI2), '0']], 'i2 只列自己的附件');
-    assert.deepStrictEqual(own(s.iv3), [], 'i3 没有附件');
-    assert.deepStrictEqual(own(s.iv4), [[String(s.attI4), '0']], 'i4（没有提出人任务）只列自己的附件');
+    assert.deepStrictEqual(frozen.map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(s.attA), '0'], [String(s.attB), '0'], [String(s.attC), '0'], [String(await pairedAttachment(s.pv)), '0']]);
+    assert.ok(frozen[0].text.includes('附件一.txt') && frozen[0].text.includes('3 字节') && frozen[0].text.includes(`SHA-256 ${'a'.repeat(64)}`), frozen[0].text);
+    assert.ok(frozen[1].text.includes('附件二.txt') && frozen[1].text.includes(`SHA-256 ${'b'.repeat(64)}`), frozen[1].text);
+    assert.ok(frozen[2].text.includes('附件三.txt') && frozen[2].text.includes(`SHA-256 ${'9'.repeat(64)}`), frozen[2].text);
     // 节点计划与快照：生效版本仍显示提交时的计划
-    assert.strictEqual((strip(sectionOf(body, 'sec-plans')).match(new RegExp(PLAN_START, 'g')) || []).length, 6);
+    // C5 N-SHEET（承接被删的 changes 套件 T_W_PLANS :1053，导出对象唯一为本场景的 s.pv：自己有提交事件、首版总体规划已生效）：按节点名定位「立项与授权」行，
+    //   计划开始 / 结束 = planAllNodes 统一写入的固定日期，先按节点名核所在行，再核全部计划的条数。
+    const planRow = (sectionOf(body, 'sec-plans').match(/<tr><td>结项<\/td>(?:<td>[^<]*<\/td>)*<\/tr>/) || [])[0];
+    assert.ok(planRow, '生效确认单中有结项职责节点');
+    const planCells = (planRow.match(/<td>[^<]*<\/td>/g) || []).map((x) => x.slice(4, -5));
+    assert.deepStrictEqual([planCells[0], planCells[4], planCells[5]], ['结项', PLAN_START, PLAN_END], '「结项」行的计划开始 / 计划结束');
+    assert.strictEqual((strip(sectionOf(body, 'sec-plans')).match(new RegExp(PLAN_START, 'g')) || []).length, 2);
     // 附录：每个任务一个修订（都只有 1 条）
     const app = rowsBy(sectionOf(body, 'sec-appendix'), 'data-appendix-revision-id');
     assert.deepStrictEqual(app.map((r) => r.attrs['appendix-revision-id']), s.tasks.map((t) => String(t.rev_id)));
-    assert.ok(app[0].text.includes('平台确认') && app[1].text.includes('代录'), '附录的确认记录摘要带方式');
-  });
-
-  // ── 7 历史导入生效 ───────────────────────────────────────────────────────────────────────────
-  test(`${T_IMPORT}——经历史导入生效的版本 data-history-import=1，页头带原日期 / 实际确认人 / 身份依据 / 导入人 / 导入时间 / 凭据；生效时间是原日期 00:00；普通生效的版本为 0`, async () => {
-    const pid = await newProject();
-    await openWin(pid);
-    const ipv = await mkVersion(await mkPackage(pid, 'initiation'));
-    const ri = await post(U.pm, impUrl(pid), Object.assign({ fact_type: 'package_effective', object_id: ipv, original_date: '2026-10-20' }, await histEvid(pid, 'e', { actual_confirmer: '甲部历史确认人', identity_basis: '立项会议纪要' })));
-    assert.strictEqual(ri.status, 201, ri.text);
-    const body = await sheetOk(U.pm, ipv);
-    const hd = headerTag(body);
-    assert.deepStrictEqual([hd['version-status'], hd['history-import']], ['effective', '1']);
-    const head = strip(sectionOfHeader(body));
-    assert.ok(head.includes('历史导入') && head.includes('原日期：2026-10-20') && head.includes('实际确认人：甲部历史确认人') && head.includes('身份依据：立项会议纪要'), head);
-    assert.ok(head.includes(`导入人：${await nameOf(U.pm)}`) && /导入时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(head), `导入人与导入时间：${head}`);
-    assert.ok(head.includes(`SHA-256 ${'e'.repeat(64)}`), '导入凭据 SHA-256');
-    assert.ok(head.includes('已生效 · 生效时间 2026-10-20 00:00'), `生效时间是原日期 00:00，实际 ${head}`);
-    assert.ok(head.includes('立项包'), '立项包类型');
-    assert.ok(!body.includes('id="sec-plans"'), '立项包没有节点计划节');
-    assert.deepStrictEqual(headingsOf(body), ['一、包内容快照', '二、立项依据', '三、冻结附件清单（本包版本）', '四、引用条目', '五、必需确认人', '六、历史补录的确认', '附录：修订历史'], '立项包的小节序号连续（不因缺节点计划节而跳号）');
-    assert.deepStrictEqual(rowsBy(sectionOf(body, 'sec-confirmers'), 'data-task-id'), [], '导入生效的版本没有确认任务');
-    // 对照：普通生效的版本为 0
-    const m = await mixedScene();
-    assert.strictEqual(headerTag(await sheetOk(U.pm, m.pv))['history-import'], '0');
+    assert.ok(app[0].text.includes('平台确认') && app[1].text.includes('平台确认'), '附录的确认记录摘要带方式');
   });
 
   // ── 8 已被替代 ───────────────────────────────────────────────────────────────────────────────
@@ -513,62 +387,94 @@ function defineSheetCases(T) {
     await seedEffectiveInitiation(pid);
     const a1 = await stageAtt(pid, U.pm, 'a');
     const a2 = await stageAtt(pid, U.pm, 'b');
+    await sqlRun("UPDATE sysbuild_attachments SET original_name = '需遮蔽原文件.txt' WHERE id = ?", [a1]);
     await sqlRun("UPDATE sysbuild_attachments SET original_name = '保留可见.txt' WHERE id = ?", [a2]);
-    const item = await mkItem(pid, { attachment_ids: [a1, a2], no_written_evidence: undefined, no_evidence_reason: undefined });
     const pv = await mkVersion(await mkPackage(pid, 'overall'));
-    await addToSet(pv, item.versions[0].id, await defaultBatchId(pid));
+    await bindToVersion(a1, pv);
+    await bindToVersion(a2, pv);
     await planAllNodes(pid);
     assert.strictEqual((await post(U.pm, `/sysbuild/package-versions/${pv}/submit`)).status, 200);
     // 对照：遮蔽前两个附件都显示原名
     const before = await sheetOk(U.pm, pv);
-    assert.ok(before.includes('确认证据.txt') && before.includes('保留可见.txt'), '遮蔽前显示原名（对照）');
-    assert.deepStrictEqual(liBy(sectionOf(before, 'sec-frozen'), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(a1), '0'], [String(a2), '0']]);
+    assert.ok(before.includes('需遮蔽原文件.txt') && before.includes('保留可见.txt'), '遮蔽前显示原名（对照）');
+    const paired = await pairedAttachment(pv);
+    assert.deepStrictEqual(liBy(sectionOf(before, 'sec-frozen'), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(a1), '0'], [String(a2), '0'], [String(paired), '0']]);
     await sqlRun("UPDATE sysbuild_attachments SET masked_at = '2026-10-30 10:00:00', masked_by = ?, mask_reason = '含敏感信息，经 PM 受控遮蔽' WHERE id = ?", [U.pm, a1]);
     for (const [uid, label] of [[U.pm, 'PM'], [U.admin, 'admin']]) {
       const body = await sheetOk(uid, pv);
-      assert.ok(!body.includes('确认证据'), `${label}：页面任何位置不含被遮蔽附件的原名`);
+      assert.ok(!body.includes('需遮蔽原文件'), `${label}：页面任何位置不含被遮蔽附件的原名`);
       const fr = liBy(sectionOf(body, 'sec-frozen'), 'data-attachment-id');
-      assert.deepStrictEqual(fr.map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(a1), '1'], [String(a2), '0']], `${label}：冻结清单的遮蔽标记`);
+      assert.deepStrictEqual(fr.map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(a1), '1'], [String(a2), '0'], [String(paired), '0']], `${label}：冻结清单的遮蔽标记`);
       assert.ok(fr[0].text.includes('已遮蔽') && fr[0].text.includes('遮蔽原因：含敏感信息，经 PM 受控遮蔽') && fr[0].text.includes(`SHA-256 ${'a'.repeat(64)}`) && fr[0].text.includes('3 字节'), `${label}：${fr[0].text}`);
       assert.ok(fr[1].text.includes('保留可见.txt') && fr[1].text.includes(`SHA-256 ${'b'.repeat(64)}`), `${label}：未遮蔽的附件照常显示：${fr[1].text}`);
-      // 条目块里同一个附件同样遮蔽
-      const it = liBy(itemBlock(body, item.versions[0].id).html, 'data-attachment-id');
-      assert.deepStrictEqual(it.map((a) => [a.attrs['attachment-id'], a.attrs.masked]), [[String(a1), '1'], [String(a2), '0']], `${label}：条目块的遮蔽标记`);
     }
   });
 
+  // ── 9b C5 N-SHEET ─────────────────────────────────────────────────────────────────────────────
+  //   承接被删的 changes 套件 T_SHEET（待确认总体规划版本导出）与 T_W_FREEZE 的保留部分（冻结清单照冻结值展示，不读附件现值）。
+  test(`C5 N-SHEET：待确认的总体规划版本导出 200、页头 data-version-status = pending 且含「总体规划包」；附件现值在提交之后被改，冻结附件清单（sec-frozen）仍按冻结的 SHA-256 展示`, async () => {
+    const pid = await newProject();
+    await seedParty(pid, '甲部', U.own, U.del);
+    await seedEffectiveInitiation(pid);
+    const a1 = await stageAtt(pid, U.pm, 'f');
+    const pv = await mkVersion(await mkPackage(pid, 'overall'));
+    await bindToVersion(a1, pv);
+    await planAllNodes(pid);
+    assert.strictEqual((await post(U.pm, `/sysbuild/package-versions/${pv}/submit`)).status, 200);
+    const before = await sheetOk(U.pm, pv);
+    assert.strictEqual(headerTag(before)['version-status'], 'pending', '页头 data-version-status = pending');
+    assert.ok(strip(sectionOfHeader(before)).includes('总体规划包'), '页头含「总体规划包」');
+    const frozenBefore = liBy(sectionOf(before, 'sec-frozen'), 'data-attachment-id');
+    const expectedIds = [String(a1), String(await pairedAttachment(pv))];
+    assert.deepStrictEqual(frozenBefore.map((a) => a.attrs['attachment-id']), expectedIds, '冻结清单包含包附件和配对材料附件');
+    assert.ok(frozenBefore[0].text.includes(`SHA-256 ${'f'.repeat(64)}`), `前置：冻结时的 SHA-256，实际 ${frozenBefore[0].text}`);
+    // 附件现值在提交之后被改（模拟现值与冻结时不同）：确认单仍按冻结值展示
+    await sqlRun('UPDATE sysbuild_attachments SET sha256 = ? WHERE id = ?', ['a'.repeat(64), a1]);
+    const after = await sheetOk(U.pm, pv);
+    const frozenAfter = liBy(sectionOf(after, 'sec-frozen'), 'data-attachment-id');
+    assert.deepStrictEqual(frozenAfter.map((a) => a.attrs['attachment-id']), expectedIds);
+    assert.ok(frozenAfter[0].text.includes(`SHA-256 ${'f'.repeat(64)}`) && !frozenAfter[0].text.includes('a'.repeat(64)), `现值被改后仍按冻结 SHA-256 展示，实际 ${frozenAfter[0].text}`);
+    assert.ok(!sectionOf(after, 'sec-frozen').includes('a'.repeat(64)), '冻结清单任何位置都不出现附件现值');
+  });
+
   // ── 10 转义 ──────────────────────────────────────────────────────────────────────────────────
-  test(`${T_ESC}——项目名 / 参与方名 / 成员名 / 条目内容 / 引用原文 / 提出人 / 代录实际确认人 / 身份依据 / 原因 / 附件原名 / 遮蔽原因 / 快照键与值里的 HTML 与引号串全部被转义；转义助手五个字符直测`, async () => {
+  test(`${T_ESC}——项目名 / 参与方名 / 成员名 / 原因 / 附件原名 / 遮蔽原因 / 快照键与值里的 HTML 与引号串全部被转义；转义助手五个字符直测`, async () => {
     const pid = await newProject();
     await sqlRun('UPDATE sysbuild_projects SET system_name = ? WHERE id = ?', [`${X_SCRIPT}项目`, pid]);
     const party = await addParty(pid, X_ATTR, 'demand');
-    const mOwn = await addNaMember(pid, party, X_IMG);
+    const mOwn = await addMember(pid, U.own, { party });
     const apt = await addAppointment(party, mOwn, 'active');
-    const mDel = await addNaMember(pid, party, X_SCRIPT);
+    const mDel = await addMember(pid, U.del, { party });
     await addDelegation(party, mDel, apt, 'active');
     await seedEffectiveInitiation(pid);
     const att1 = await stageAtt(pid, U.pm, 'a');
     const att2 = await stageAtt(pid, U.pm, 'b');
     await sqlRun('UPDATE sysbuild_attachments SET original_name = ? WHERE id = ?', [`${X_IMG}.txt`, att1]);
-    const item = await mkItem(pid, { content: X_SCRIPT, quote_text: X_ATTR, proposer_name: X_IMG, attachment_ids: [att1, att2], no_written_evidence: undefined, no_evidence_reason: undefined });
     const pk = await mkPackage(pid, 'overall');
     const pv = await mkVersion(pk);
-    await addToSet(pv, item.versions[0].id, await defaultBatchId(pid));
+    await bindToVersion(att1, pv);
+    await bindToVersion(att2, pv);
     await planAllNodes(pid);
     const patch = await api(U.pm, 'PATCH', `/sysbuild/package-versions/${pv}`, { snapshot_json: { 范围: X_SCRIPT, [X_ATTR]: '值', 嵌套: { a: X_IMG } } });
     assert.strictEqual(patch.status, 200, patch.text);
+    await H.prepareBasisVersion(pv);
+    await seedHistoricalLeaderTask(pid, pk, pv, { party, mOwn, apt });
     assert.strictEqual((await post(U.pm, `/sysbuild/package-versions/${pv}/submit`)).status, 200);
     // 已遮蔽的暂存附件不能再绑定，所以提交后再遮蔽 att2
     await sqlRun("UPDATE sysbuild_attachments SET masked_at = '2026-10-30 10:00:00', masked_by = ?, mask_reason = ? WHERE id = ?", [U.pm, X_SCRIPT, att2]);
     const tasks = await tasksOf(pv);
-    await backdate('sysbuild_confirm_task_revisions', tasks.map((t) => t.rev_id));
-    const evAtt = await stageAtt(pid, U.pm, 'c');
-    await sqlRun('UPDATE sysbuild_attachments SET original_name = ? WHERE id = ?', [`${X_ATTR}.txt`, evAtt]);
-    const pr = await post(U.pm, `/sysbuild/confirm-tasks/${tasks[0].task_id}/proxy`, {
-      revision_id: tasks[0].rev_id, object_version_id: pv, decision: 'object', reason: X_SCRIPT, external_date: OK_DATE, actual_confirmer: X_ATTR, identity_basis: X_IMG, attachment_ids: [evAtt],
-    });
+    const pr = await openAndDecide(U.own, tasks[0].task_id, 'object', { reason: X_SCRIPT });
     assert.strictEqual(pr.status, 200, pr.text);
-    const body = await sheetOk(U.pm, pv);
+    // 测试库中临时修改平台账号显示名，导出完成后恢复。
+    const users = await sqlAll('SELECT id, display_name FROM users WHERE id IN (?, ?)', [U.own, U.del]);
+    let body;
+    try {
+      await sqlRun('UPDATE users SET display_name = ? WHERE id = ?', [X_IMG, U.own]);
+      await sqlRun('UPDATE users SET display_name = ? WHERE id = ?', [X_SCRIPT, U.del]);
+      body = await sheetOk(U.pm, pv);
+    } finally {
+      for (const user of users) await sqlRun('UPDATE users SET display_name = ? WHERE id = ?', [user.display_name, user.id]);
+    }
     for (const raw of [X_SCRIPT, X_ATTR, X_IMG]) assert.ok(!body.includes(raw), `页面不含原文串 ${raw}`);
     assert.ok(!/<script/i.test(body) && !/<img/i.test(body), '没有被注入的标签');
     assert.ok(!/<[^>]*\son[a-z]+\s*=/i.test(body), '没有被注入的内联事件属性');
@@ -578,12 +484,10 @@ function defineSheetCases(T) {
     assert.ok(text('sec-snapshot').includes(`<th>范围</th><td class="pre-wrap">${E_SCRIPT}</td>`), '快照字符串值转义');
     assert.ok(text('sec-snapshot').includes(`<th>${E_ATTR}</th>`), '快照键转义');
     assert.ok(text('sec-snapshot').includes(`&quot;a&quot;: &quot;${E_IMG}&quot;`), '快照嵌套值：JSON 文本再转义');
-    const it = itemBlock(body, item.versions[0].id).html;
-    assert.ok(it.includes(`<td class="pre-wrap">${E_SCRIPT}</td>`) && it.includes(`<td class="pre-wrap">${E_ATTR}</td>`) && it.includes(E_IMG), '条目内容 / 引用原文 / 提出人转义');
     const fr = text('sec-frozen');
     assert.ok(fr.includes(`${E_IMG}.txt`) && fr.includes(`遮蔽原因：${E_SCRIPT}`), '附件原名与遮蔽原因转义');
     const row = rowsBy(text('sec-confirmers'), 'data-task-id')[0];
-    assert.ok(row.inner.includes(`实际确认人：${E_ATTR}`) && row.inner.includes(`身份依据：${E_IMG}`) && row.inner.includes(`原因：${E_SCRIPT}`) && row.inner.includes(`${E_ATTR}.txt`), '代录实际确认人 / 身份依据 / 原因 / 凭据原名转义');
+    assert.ok(row.inner.includes(`原因：${E_SCRIPT}`), '确认记录的原因转义');
     assert.ok(row.inner.includes(`>${E_IMG}`) || row.inner.includes(E_IMG), '成员名转义');
     assert.ok(row.inner.includes(E_ATTR), '参与方名转义');
     // 转义助手直测（五个字符 + 空值 + 非字符串 + 片段嵌套 + 不信任的对象）
@@ -602,94 +506,6 @@ function defineSheetCases(T) {
     assert.strictEqual(toText(html`${'<b>'}`), '&lt;b&gt;', '长得像 HTML 的字符串不被信任');
     assert.strictEqual(toText(html`${{ x: 1 }}`), '[object Object]', '普通对象按字符串转义，不被当作片段');
     assert.strictEqual(toText(html`${{ toString: () => '<i>' }}`), '&lt;i&gt;', '自带 toString 的对象也转义');
-  });
-
-  // ── 11 提出人 ────────────────────────────────────────────────────────────────────────────────
-  test(`${T_PROPOSER}——代录确认的条目 proxy_confirmed 且显示「已确认（代录）」与代录明细；平台否认的条目显示否认与原因；「无书面证据」声明与原因显著标出；有附件的条目没有该声明；条目版本的历史补录带标记`, async () => {
-    const s = await mixedScene();
-    const body = await sheetOk(U.pm, s.pv);
-    const i1 = itemBlock(body, s.iv1);
-    assert.strictEqual(i1.attrs['proposer-status'], 'proxy_confirmed');
-    assert.ok(i1.text.includes('已确认（代录）') && i1.text.includes('无账号提出人') && i1.text.includes('甲部'), i1.text);
-    assert.ok(i1.text.includes('方式： 代录') && i1.text.includes('实际确认人：提出人本人（电话）') && i1.text.includes('身份依据：条目提出人') && i1.text.includes(`SHA-256 ${'c'.repeat(64)}`), i1.text);
-    assert.ok(i1.text.includes('需求一：按部门导出'), '内容');
-    assert.ok(!i1.text.includes('无书面证据'), '有附件的条目没有「无书面证据」声明（对照）');
-    assert.ok(i1.text.includes('条目一附件.txt') && i1.text.includes(`SHA-256 ${'a'.repeat(64)}`), '条目冻结附件');
-    assert.ok(i1.text.includes('提出人确认'), '提出人确认行');
-    assert.ok(!i1.text.includes('无提出人确认任务') && !i1.text.includes('尚无确认记录'), 'i1 有任务且有确认记录');
-    assert.ok(i1.html.includes('<div class="proposer-confirmation"><ul class="detail">'), '有确认记录时明细放在独立 div 内');
-    // 每个条目块的「冻结附件」小节全等于自己的附件（提出人确认明细里的凭据附件不在此小节）
-    const frozenOf = (iv) => liBy(itemFrozenPart(itemBlock(body, iv).html), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs.masked]);
-    assert.deepStrictEqual(frozenOf(s.iv1), [[String(s.attItem), '0']]);
-    assert.deepStrictEqual(frozenOf(s.iv2), [[String(s.attI2), '0']]);
-    assert.deepStrictEqual(frozenOf(s.iv3), []);
-    assert.deepStrictEqual(frozenOf(s.iv4), [[String(s.attI4), '0']]);
-    const h = divBy(i1.html, 'data-history-confirmation-id');
-    assert.deepStrictEqual(h.map((x) => x.attrs['history-confirmation-id']), [String(s.hc2)]);
-    assert.ok(h[0].text.includes('历史补录') && h[0].text.includes('条目历史确认人') && h[0].text.includes('2026-10-22') && h[0].text.includes('有异议') && h[0].text.includes('当年对方提出过异议'), h[0].text);
-    const i2 = itemBlock(body, s.iv2);
-    assert.strictEqual(i2.attrs['proposer-status'], 'denied');
-    assert.ok(i2.text.includes('否认') && i2.text.includes('否认原因：内容有出入，需要说明') && i2.text.includes('方式： 平台确认') && i2.text.includes(await nameOf(U.m1)), i2.text);
-    assert.ok(!i2.text.includes('无书面证据'), 'i2 有附件，没有「无书面证据」声明（对照）');
-    const i3 = itemBlock(body, s.iv3);
-    assert.strictEqual(i3.attrs['proposer-status'], 'pending');
-    assert.ok(i3.text.includes('外部张三') && i3.text.includes('会上口头提出') && i3.text.includes('无提出人确认任务') && !i3.text.includes('尚无确认记录'), `没有提出人任务的条目：${i3.text}`);
-    assert.ok(i3.html.includes('<div class="muted">无提出人确认任务</div>') && itemBlock(body, s.iv4).html.includes('<div class="muted">无提出人确认任务</div>'), '无任务的提示放在独立 div 内');
-    const i4 = itemBlock(body, s.iv4);
-    assert.strictEqual(i4.attrs['proposer-status'], 'pending');
-    assert.ok(i4.text.includes('无提出人确认任务') && !i4.text.includes('无书面证据') && i4.text.includes('条目四附件.txt'), i4.text);
-    assert.ok(i2.text.includes('条目二附件.txt') && !i2.text.includes('条目一附件.txt') && !i2.text.includes('条目四附件.txt'), 'i2 只含自己的附件名');
-    assert.ok(i3.text.includes('无书面证据') && i3.text.includes('口头电话确认了本次需求内容'), '无书面证据声明与原因');
-    assert.ok(i3.html.includes('<strong class="warn">该条目声明无书面证据</strong>'), '无书面证据显著标出（醒目样式）');
-    // 条目顺序按 item_id 升序
-    const order = [s.iv1, s.iv2, s.iv3, s.iv4].map((iv) => body.indexOf(`data-item-version-id="${iv}"`));
-    assert.ok(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1])), `条目按编号升序，实际 ${order}`);
-  });
-
-  // ── 11b 提出人任务改发后再代录 ───────────────────────────────────────────────────────────────
-  test(`${T_REISSUE}——提出人任务：修订 1 平台有异议、PM 改发出修订 2 并代录确认，确认单「提出人确认」取当前修订（代录 · 确认），不显示首条修订的记录；一个条目版本有多个提出人任务时 fail-closed 500`, async () => {
-    const pid = await newProject();
-    await seedParty(pid, '甲部', U.own, U.del);
-    await seedEffectiveInitiation(pid);
-    const mProp = await addMember(pid, U.m1);
-    const item = await mkItem(pid, { content: '需求：改发后确认', proposer_name: undefined, proposer_member_id: mProp });
-    const ivid = item.versions[0].id;
-    const t = await itemTaskOf(ivid);
-    assert.ok(t, '有账号提出人应生成提出人任务');
-    const od = await openAndDecide(U.m1, t.tid, 'object');
-    assert.strictEqual(od.status, 200, od.text);
-    const rr = await post(U.pm, `/sysbuild/confirm-tasks/${t.tid}/reissue`, { reason: '请提出人重新确认' });
-    assert.strictEqual(rr.status, 200, rr.text);
-    const rev2 = rr.body.revision.id;
-    assert.notStrictEqual(rev2, t.rid, '改发出新修订');
-    await backdate('sysbuild_confirm_task_revisions', [rev2]);
-    const pr = await post(U.pm, `/sysbuild/confirm-tasks/${t.tid}/proxy`, Object.assign({ revision_id: rev2, object_version_id: ivid, decision: 'confirm' }, await proxyEvid(pid, { actual_confirmer: '提出人本人（改发后电话）' })));
-    assert.strictEqual(pr.status, 200, pr.text);
-    const pv = await mkVersion(await mkPackage(pid, 'overall'));
-    await addToSet(pv, ivid, await defaultBatchId(pid));
-    await planAllNodes(pid);
-    assert.strictEqual((await post(U.pm, `/sysbuild/package-versions/${pv}/submit`)).status, 200);
-    const body = await sheetOk(U.pm, pv);
-    const it = itemBlock(body, ivid);
-    assert.strictEqual(it.attrs['proposer-status'], 'proxy_confirmed');
-    assert.ok(it.text.includes('方式： 代录') && it.text.includes('决策：确认') && it.text.includes('实际确认人：提出人本人（改发后电话）'), `当前修订的记录：${it.text}`);
-    assert.ok(!it.text.includes('方式： 平台确认') && !it.text.includes('有异议') && !it.text.includes('尚无确认记录'), `不显示首条修订的平台异议：${it.text}`);
-    // 多个提出人任务（库内异常）：fail-closed
-    await sqlRun("INSERT INTO sysbuild_confirm_tasks (project_id, object_type, object_id, object_version_id, purpose, party_id, created_by) VALUES (?, 'item_version', ?, ?, 'proposer_confirm', NULL, ?)", [pid, item.id, ivid, U.pm]);
-    expectErr(await sheet(U.pm, pv), 500, 'SYSBUILD_INTERNAL', '一个条目版本两个提出人任务');
-    await sqlRun("DELETE FROM sysbuild_confirm_tasks WHERE object_version_id = ? AND object_type = 'item_version' AND id <> ?", [ivid, t.tid]);
-    assert.strictEqual((await sheet(U.pm, pv)).status, 200, '清掉多余任务后恢复');
-  });
-
-  // ── 11c 历史补录的原因 ───────────────────────────────────────────────────────────────────────
-  test(`${T_HISTREASON}——包版本的历史补录决策为「不认可」时，历史补录节输出原因；确认的那条没有原因（显示「—」）`, async () => {
-    const s = await mixedScene();
-    const body = await sheetOk(U.pm, s.pv);
-    const hrows = rowsBy(sectionOf(body, 'sec-history'), 'data-history-confirmation-id');
-    assert.deepStrictEqual(hrows.map((r) => r.attrs['history-confirmation-id']), [String(s.hc1), String(s.hc3)]);
-    assert.ok(hrows[1].text.includes('历史补录 · 不认可') && hrows[1].text.includes('当年对方不认可范围表述'), `不认可的原因：${hrows[1].text}`);
-    assert.ok(!hrows[0].text.includes('当年对方不认可范围表述'), '确认的那条不带别条的原因');
-    assert.ok(hrows[0].inner.includes('<td>—</td>'), '确认的那条原因单元格显示「—」');
   });
 
   // ── 11d html 助手只能作模板标签调用 ──────────────────────────────────────────────────────────
@@ -761,57 +577,6 @@ function defineSheetCases(T) {
     }
   });
 
-  // ── 11e 条目的两份冻结清单 ───────────────────────────────────────────────────────────────────
-  test(`${T_ITEMFROZEN}——条目块主清单以包版本冻结清单为上限（只在包冻结清单里的 i4 也在主清单，行带 data-frozen-source=package_version）；条目版本自身冻结清单的多出部分单列小节（data-frozen-source=item_version）；两份清单 SHA-256 不一致 500（受控写库，用完恢复）`, async () => {
-    const s = await mixedScene();
-    const mainOf = (body, iv) => liBy(itemFrozenPart(itemBlock(body, iv).html), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs['frozen-source']]);
-    const extraOf = (body, iv) => liBy(itemExtraPart(itemBlock(body, iv).html), 'data-attachment-id').map((a) => [a.attrs['attachment-id'], a.attrs['frozen-source']]);
-    // 基线：有提出人任务的条目（i1 / i2）自身清单 ⊆ 包清单，单列小节不出现（全等于空）；没有任务的 i3 / i4 没有自身清单
-    const base = await sheetOk(U.pm, s.pv);
-    assert.deepStrictEqual(mainOf(base, s.iv1), [[String(s.attItem), 'package_version']]);
-    assert.deepStrictEqual(mainOf(base, s.iv2), [[String(s.attI2), 'package_version']]);
-    assert.deepStrictEqual(mainOf(base, s.iv3), []);
-    assert.deepStrictEqual(mainOf(base, s.iv4), [[String(s.attI4), 'package_version']], '附件只在包冻结清单里的条目：主清单有');
-    for (const iv of [s.iv1, s.iv2, s.iv3, s.iv4]) {
-      assert.strictEqual(itemExtraPart(itemBlock(base, iv).html), '', `条目版本 ${iv}：没有单列小节`);
-      assert.deepStrictEqual(extraOf(base, iv), [], `条目版本 ${iv}：单列小节为空`);
-    }
-    assert.ok(!base.includes('data-frozen-source="item_version"') && !base.includes('条目版本冻结清单（'), '基线页面没有任何来自条目版本自身清单的行');
-    assert.strictEqual((await sqlGet("SELECT COUNT(*) AS n FROM sysbuild_frozen_attachments WHERE object_type = 'item_version' AND object_version_id IN (?, ?)", [s.iv3, s.iv4])).n, 0, '前置：i3 / i4 没有自身冻结清单');
-    // 受控写库（覆盖存量合法值之外的状态）：造「条目自身清单有、包清单没有」「自身清单与包清单一致」「SHA 不一致」三种状态，用完恢复
-    const attX = await stageAtt(s.pid, U.pm, '7');
-    await sqlRun("UPDATE sysbuild_attachments SET original_name = '条目三冻结多出.txt' WHERE id = ?", [attX]);
-    const ins = (iv, att, sha) => sqlRun("INSERT INTO sysbuild_frozen_attachments (object_type, object_version_id, attachment_id, sha256) VALUES ('item_version', ?, ?, ?)", [iv, att, sha]);
-    const clean = () => sqlRun("DELETE FROM sysbuild_frozen_attachments WHERE object_type = 'item_version' AND object_version_id IN (?, ?)", [s.iv3, s.iv4]);
-    try {
-      // (a) i3 自身清单有 attX，包清单没有 attX → 单列小节显示，主清单不含
-      await ins(s.iv3, attX, '7'.repeat(64));
-      const a = await sheetOk(U.pm, s.pv);
-      assert.deepStrictEqual(mainOf(a, s.iv3), [], '主清单不含包清单之外的附件');
-      assert.deepStrictEqual(extraOf(a, s.iv3), [[String(attX), 'item_version']], '单列小节显示条目自身清单多出的附件');
-      const part = strip(itemExtraPart(itemBlock(a, s.iv3).html));
-      assert.ok(part.includes('条目三冻结多出.txt') && part.includes(`SHA-256 ${'7'.repeat(64)}`), part);
-      assert.ok(itemBlock(a, s.iv3).html.includes('条目版本冻结清单（提出人确认 / 历史补录时冻结）'), '单列小节标题');
-      assert.ok(!strip(sectionOf(a, 'sec-frozen')).includes('条目三冻结多出.txt'), '包版本冻结清单不含它');
-      for (const iv of [s.iv1, s.iv2, s.iv4]) assert.deepStrictEqual(extraOf(a, iv), [], `其余条目 ${iv} 不受影响`);
-      await clean();
-      // (b) i4 自身清单 = 包清单里它自己的附件、SHA 一致 → 主清单仍只有一行（自身清单不并进主清单），没有单列小节
-      await ins(s.iv4, s.attI4, '9'.repeat(64));
-      const b = await sheetOk(U.pm, s.pv);
-      assert.deepStrictEqual(mainOf(b, s.iv4), [[String(s.attI4), 'package_version']], '一致的自身清单不重复出现在主清单');
-      assert.deepStrictEqual(extraOf(b, s.iv4), [], '一致的自身清单没有多出部分');
-      await clean();
-      // (c) 同一附件两份清单 SHA-256 不同 → 500
-      await ins(s.iv4, s.attI4, 'f'.repeat(64));
-      expectErr(await sheet(U.pm, s.pv), 500, 'SYSBUILD_INTERNAL', '两份冻结清单 SHA-256 不一致');
-    } finally {
-      await clean();
-    }
-    const after = await sheetOk(U.pm, s.pv);
-    assert.deepStrictEqual(mainOf(after, s.iv4), [[String(s.attI4), 'package_version']], '恢复后与基线一致');
-    assert.ok(!after.includes('data-frozen-source="item_version"'), '恢复后没有单列小节');
-  });
-
   // ── 11f 钉钉卡片确认（受控写库）─────────────────────────────────────────────────────────────
   test(`${T_CARD}（受控写库：覆盖存量合法值，生产暂无 card 写入口（C10））——card 确认记录：data-method=card、方式「钉钉卡片」、有操作人与时间，不含平台勾选声明与代录字段`, async () => {
     const s = await mkPendingScene();
@@ -836,46 +601,16 @@ function defineSheetCases(T) {
     assert.ok(app[0].text.includes('钉钉卡片 · 确认'), `附录摘要带方式：${app[0].text}`);
   });
 
-  // ── 11g 提出人任务修订缺失 / 项目终止后失效 ──────────────────────────────────────────────────
-  test(`${T_PROPOSERREV}——项目终止后提出人修订已失效，显示「当前修订：已失效 · 尚无确认记录」；提出人任务的修订被删（库内异常，受控写库，用完恢复）→ 500，不当成「无任务」`, async () => {
-    const s = await mkPendingScene();
-    const tk = await itemTaskOf(s.ivid);
-    assert.ok(tk, '有账号提出人应生成提出人任务');
-    const st = await post(U.admin, `/sysbuild/projects/${s.pid}/status`, { to: 'terminated', reason: '确认单用例' });
-    assert.strictEqual(st.status, 200, st.text);
-    const body = await sheetOk(U.pm, s.pv);
-    const it = itemBlock(body, s.ivid);
-    assert.ok(it.html.includes('<div class="muted">当前修订：已失效 · 尚无确认记录</div>') && !it.text.includes('无提出人确认任务'), `终止后提出人修订失效：${it.text}`);
-    const rev = await sqlGet('SELECT * FROM sysbuild_confirm_task_revisions WHERE id = ?', [tk.rid]);
-    assert.ok(rev, '前置：取到提出人修订整行');
-    try {
-      await sqlRun('DELETE FROM sysbuild_confirm_task_revisions WHERE id = ?', [tk.rid]);
-      expectErr(await sheet(U.pm, s.pv), 500, 'SYSBUILD_INTERNAL', '提出人任务没有修订');
-    } finally {
-      await sqlRun(
-        'INSERT INTO sysbuild_confirm_task_revisions (id, task_id, rev_no, required_member_id, basis_appointment_id, basis_delegation_id, status, status_reason, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [rev.id, rev.task_id, rev.rev_no, rev.required_member_id, rev.basis_appointment_id, rev.basis_delegation_id, rev.status, rev.status_reason, rev.created_by, rev.created_at, rev.updated_at]
-      );
-    }
-    const again = await sheetOk(U.pm, s.pv);
-    assert.ok(itemBlock(again, s.ivid).html.includes('<div class="muted">当前修订：已失效 · 尚无确认记录</div>'), '恢复后与删除前一致');
-  });
-
   // ── 12 映射兜底 ──────────────────────────────────────────────────────────────────────────────
   test(`${T_MAP}——各代码 → 中文映射：手写全表逐项核对；表外值（含 null / undefined / 数字）一律抛 500 SYSBUILD_INTERNAL；版本状态徽标与时间格式同样 fail-closed`, async () => {
     const { maps, badgeText, fmtTime } = getMods().sheet._internals;
     const full = {
-      packageType: [['initiation', '立项包'], ['overall', '总体规划包'], ['batch_req', '批次需求包'], ['batch_accept', '批次验收包'], ['change', '范围变更包'], ['closing', '结项包']],
+      packageType: [['initiation', '立项包'], ['overall', '总体规划包'], ['batch_accept', '批次验收包'], ['closing', '结项包']],
       form: [['overall', '总体'], ['overall_batch_req', '单批合并']],
       revisionStatus: [['pending', '待确认'], ['confirmed', '已确认'], ['objected', '有异议'], ['rejected', '不认可'], ['invalid', '已失效'], ['superseded', '已替代']],
-      method: [['platform', '平台确认'], ['card', '钉钉卡片'], ['proxy', '代录'], ['history', '历史补录']],
+      method: [['platform', '平台确认'], ['card', '钉钉卡片']],
       decision: [['confirm', '确认'], ['object', '有异议'], ['reject', '不认可']],
-      proposerStatus: [['pending', '待确认'], ['confirmed', '已确认'], ['proxy_confirmed', '已确认（代录）'], ['denied', '否认']],
-      purpose: [
-        ['package_confirm', '内容包确认'], ['proposer_confirm', '提出人确认'], ['accept_invitation', '接受邀请'], ['delegation_grant', '授权批准'], ['delegation_accept', '授权接受'],
-        ['dev_key_confirm', '开发方关键事项确认'], ['conclusion_confirm', '办理结论确认'], ['adjudicate', '裁定'], ['handover_accept', '运维交接接收'],
-        ['handover_accept_issue', '交接确认（接受带此问题上线）'], ['handover_no_further', '交接确认（业务确认不再处理）'], // C6a
-      ],
+      purpose: [['package_confirm', '内容包确认']],
       layer: [['project', '项目层'], ['batch', '批次层']],
     };
     for (const [name, pairs] of Object.entries(full)) {
@@ -885,7 +620,7 @@ function defineSheetCases(T) {
       }
     }
     // 全部确认方式 / 修订状态枚举都有映射（与 schema 的枚举全等，手写）
-    assert.deepStrictEqual(['platform', 'card', 'proxy', 'history'].map(maps.method), ['平台确认', '钉钉卡片', '代录', '历史补录']);
+    assert.deepStrictEqual(['platform', 'card'].map(maps.method), ['平台确认', '钉钉卡片']);
     // 身份：依据任职 → 负责人；依据授权 → 代表人；都没有 → 「—」并说明；两者都有 → 500
     assert.strictEqual(maps.identity({ basis_appointment_id: 5, basis_delegation_id: null }), '负责人');
     assert.strictEqual(maps.identity({ basis_appointment_id: null, basis_delegation_id: 7 }), '代表人');
@@ -951,11 +686,8 @@ const SHEET_MUTATIONS = [
   sm('去掉项目可见性判定（assertVisible）', [T_PARAM], 'confirmation-sheet.js', 'rules.assertVisible(access);', ''),
   sm('转义助手不转义双引号', [T_ESC], 'confirmation-sheet.js', "'\"': '&quot;',", "'\"': '\"',"),
   sm('转义助手不转义单引号', [T_ESC], 'confirmation-sheet.js', "\"'\": '&#39;',", "\"'\": \"'\","),
-  sm('代录方式映射成「平台确认」', [T_MIXED, T_MAP], 'confirmation-sheet.js', "proxy: '代录', history", "proxy: '平台确认', history"),
   sm('正文取第一条修订而不是当前修订', [T_SUPER], 'confirmation-sheet.js', 'const cur = await core.latestRevision(q, t.id);',
     "const cur = (await q.all('SELECT id, task_id, rev_no, required_member_id, basis_appointment_id, basis_delegation_id, status, status_reason, created_by, created_at, updated_at FROM sysbuild_confirm_task_revisions WHERE task_id = ? ORDER BY rev_no LIMIT 1', [t.id]))[0];"),
-  sm('漏掉历史补录节的内容', [T_MIXED], 'confirmation-sheet.js', "'历史补录的确认', historySection)", "'历史补录的确认', EMPTY)"),
-  sm('漏掉历史导入标记（页头恒为 0）', [T_IMPORT], 'confirmation-sheet.js', "data-history-import=\"${imports.length > 0 ? '1' : '0'}\"", 'data-history-import="0"'),
   {
     id: 'C4c 确认单：遮蔽时输出原名（渲染分支与附件视图两层都拆掉）',
     expect: [T_MASK],
@@ -971,28 +703,12 @@ const SHEET_MUTATIONS = [
   sm('versionActions.export_sheet 不再调用同源判定（恒真）', [T_ACTIONS], 'packages.js', 'export_sheet: rules.canExportConfirmationSheet(access, ver),', 'export_sheet: true,'),
   sm('映射兜底改为原样返回', [T_MAP], 'confirmation-sheet.js', "if (typeof key !== 'string' || !hasKey(table, key)) throw internalError(`${what}未登记`);", "if (typeof key !== 'string' || !hasKey(table, key)) return key;"),
   sm('SHA-256 只显示前 16 位', [T_MIXED, T_MASK], 'confirmation-sheet.js', 'out.push(Object.assign({}, a, { mask_reason: reason }));', 'out.push(Object.assign({}, a, { mask_reason: reason, sha256: String(a.sha256).slice(0, 16) }));'),
-  sm('「无书面证据」声明不再显示', [T_PROPOSER], 'confirmation-sheet.js', '${it.no_written_evidence ? html`<tr><th>无书面证据', '${false ? html`<tr><th>无书面证据'),
-  sm('代录行漏掉外部确认日期', [T_MIXED], 'confirmation-sheet.js', 'html`<li>外部确认日期：${c.external_date}</li>`,\n      ', ''),
-  sm('提出人否认时不显示原因', [T_PROPOSER], 'confirmation-sheet.js', "${it.proposer_status === 'denied' ? html` · 否认原因：", "${false ? html` · 否认原因："),
   sm('被撤回的版本徽标写成「曾于 生效」', [T_SUPER], 'confirmation-sheet.js', 'return ver.effective_at ? `已被替代', 'return true ? `已被替代'),
   sm('附录只列最新一条修订', [T_SUPER], 'confirmation-sheet.js', 'WHERE task_id = ? ORDER BY rev_no`,', 'WHERE task_id = ? ORDER BY rev_no DESC LIMIT 1`,'),
   // ── 预筛修订批（A–C）新增 ──
-  sm('条目块列出全部包冻结附件（附件交集过滤去掉）', [T_PROPOSER, T_MIXED], 'confirmation-sheet.js', 'if (ownedIds.includes(f.attachment_id) && !main.some(', 'if (!main.some('),
-  sm('条目块不列包冻结清单里自己的附件（没有提出人任务的条目丢附件）', [T_PROPOSER, T_MIXED], 'confirmation-sheet.js', 'if (ownedIds.includes(f.attachment_id) && !main.some(', 'if (false && !main.some('),
-  sm('确认记录明细里代录显示成平台确认（只改明细，不改映射表）', [T_MIXED], 'confirmation-sheet.js', 'const method = mapMethod(c.method);', "const method = c.method === 'proxy' ? '平台确认' : mapMethod(c.method);"),
+  // C3f（codex 120 H）：M895 重新登记，挂 T_MIXED 的旧代录行可见方式名断言；锚点是当前明细渲染语句
   sm('html 助手不再校验调用形态', [T_TAG], 'confirmation-sheet.js', "if (!(Array.isArray(strings) && Array.isArray(strings.raw) && Object.isFrozen(strings) && Object.isFrozen(strings.raw) && strings.length === vals.length + 1)) throw internalError('html 只能作为模板标签调用');", ''),
-  sm('提出人任务取首条修订而不是当前修订', [T_REISSUE], 'confirmation-sheet.js', 'const cur = task ? await core.latestRevision(q, task.id) : null;',
-    "const cur = task ? (await q.all('SELECT id, task_id, rev_no, required_member_id, basis_appointment_id, basis_delegation_id, status, status_reason, created_by, created_at, updated_at FROM sysbuild_confirm_task_revisions WHERE task_id = ? ORDER BY rev_no LIMIT 1', [task.id]))[0] : null;"),
-  sm('一个条目版本有多个提出人任务时不再 fail-closed', [T_REISSUE], 'confirmation-sheet.js', "if (itemTasks.length > 1) throw internalError(", "if (false) throw internalError("),
-  sm('历史补录节不输出原因', [T_HISTREASON], 'confirmation-sheet.js', "<td>${h.reason || '—'}</td><td>${attList(h.attachments)}</td>", '<td>—</td><td>${attList(h.attachments)}</td>'),
   // ── codex 23 / 预筛复看修订批新增 ──
-  { // M1：主清单不再以包清单为上限（并回条目版本自身清单）
-    id: 'C4c 确认单：条目块主清单不再以包冻结清单为上限（并回条目版本自身冻结清单）',
-    expect: [T_ITEMFROZEN],
-    edits: [{ file: 'confirmation-sheet.js', from: 'const extra = selfFrozen.filter(', to: 'for (const f of selfFrozen) if (!main.some((x) => x.attachment_id === f.attachment_id)) main.push(f);\n    const extra = selfFrozen.filter(' }],
-  },
-  sm('条目两份冻结清单 SHA-256 不一致时不再 500', [T_ITEMFROZEN], 'confirmation-sheet.js', 'if (p && p.sha256 !== f.sha256) throw internalError(', 'if (false) throw internalError('),
-  sm('条目版本冻结清单单列小节漏输出', [T_ITEMFROZEN], 'confirmation-sheet.js', "${it.extra_frozen.length === 0 ? '' : html`", "${true ? '' : html`"),
   { // M2：isSafe 改回「带某键的对象也算片段」
     id: 'C4c 确认单：isSafe 把带同名属性的普通对象也当片段',
     expect: [T_TAG],
@@ -1005,9 +721,7 @@ const SHEET_MUTATIONS = [
   sm('html 助手不再校验 raw 已冻结', [T_TAG], 'confirmation-sheet.js', 'Object.isFrozen(strings) && Object.isFrozen(strings.raw) && strings.length', 'Object.isFrozen(strings) && strings.length'),
   sm('card 确认显示平台勾选声明', [T_CARD], 'confirmation-sheet.js', "if (c.method === 'platform') lines.push(", "if (c.method === 'platform' || c.method === 'card') lines.push("),
   sm('card 确认漏掉操作人', [T_CARD], 'confirmation-sheet.js', "if (c.method === 'platform' || c.method === 'card') {", "if (c.method === 'platform') {"),
-  sm('确认任务用途映射写错一个非 package_confirm / proposer_confirm 的中文', [T_MAP], 'confirmation-sheet.js', "handover_accept: '运维交接接收'", "handover_accept: '运维交接'"),
-  sm('提出人确认任务没有修订时不再 500（当成无任务）', [T_PROPOSERREV], 'confirmation-sheet.js', 'if (task && !cur) throw internalError(', 'if (false) throw internalError('),
-  sm('非总体规划包跳过节点计划节时序号跳号', [T_IMPORT], 'confirmation-sheet.js', "section('sec-plans', '节点计划快照', renderPlans(m.plans)) : ''}", "section('sec-plans', '节点计划快照', renderPlans(m.plans)) : (no++, '')}"),
+  sm('非总体规划包跳过节点计划节时序号跳号', ['L3 留痕：立项依据确认单——选入立项节点材料冻结版与声明同时展示'], 'confirmation-sheet.js', "section('sec-plans', '节点计划快照', renderPlans(m.plans)) : ''}", "section('sec-plans', '节点计划快照', renderPlans(m.plans)) : (no++, '')}"),
 ];
 
 module.exports = { defineSheetCases, SHEET_MUTATIONS };

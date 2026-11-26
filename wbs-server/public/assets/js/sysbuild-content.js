@@ -1,125 +1,130 @@
-/* 需求条目与候选材料；现行依据消费服务端明确引用的版本。 */
+/* 候选材料；现行依据消费服务端明确引用的版本。 */
 (function () {
     'use strict';
     const A = window.SysBuildUI;
-    const proposerStates = { pending: '待提出人确认', confirmed: '提出人已确认', proxy_confirmed: '凭据代录确认', denied: '提出人否认' };
     const versionStates = { draft: '草稿', pending: '待确认', effective: '已生效', superseded: '已被替代' };
-    const packageTypes = { initiation: '立项', overall: '总体规划', batch_req: '批次需求', batch_accept: '批次验收', closing: '整体验收结项', change: '正式变更' };
+    const packageTypes = { initiation: '立项', overall: '总体规划', batch_accept: '批次验收', closing: '整体验收结项' };
     const prose = (s) => A.el('div', 'sbui-longtext', s || '未填写');
     const uniqueAttachments = (versions) => Array.from(new Map(versions.flatMap((v) => v.attachments || []).map((att) => [att.attachment_id, att])).values());
-    function evidenceFields(previous, versions) {
-        const attachments = uniqueAttachments(versions || []);
-        return [
-            { name: 'files', label: '新上传的原始证据 / 截图', type: 'file', multiple: true, full: true },
-            ...(versions ? [{ name: 'ref_attachment_ids', label: '从旧版本沿用的附件', type: 'checklist', value: (previous.attachments || []).filter((a) => !a.masked && !a.deleted).map((a) => a.attachment_id), options: attachments.filter((a) => !a.masked && !a.deleted).map((a) => [a.attachment_id, a.name || a.original_name || '附件 #' + a.attachment_id]), full: true }] : []),
-            { name: 'no_written_evidence', label: '确无书面证据', type: 'checkbox', value: previous && previous.no_written_evidence === true },
-            { name: 'no_evidence_reason', label: '无书面证据原因', type: 'textarea', max: 500, value: previous && previous.no_evidence_reason || '', full: true, hint: '证据附件与声明二选一；声明原因至少10个字。' },
-        ];
-    }
-    async function itemForm(detail, data, item, c) {
-        A.assertCurrent(c);
-        const previous = item ? item.versions[item.versions.length - 1] : {};
-        const defs = [
-            { name: 'content', label: '本版需求全文', type: 'textarea', required: true, max: 4000, value: previous.content || '', full: true },
-            { name: 'quote_text', label: '提出人原话要点', type: 'textarea', max: 2000, value: previous.quote_text || '', full: true },
-            { name: 'proposer_mode', label: '提出人记录方式', value: item ? 'inherit' : '', required: true, options: [['', '请明确选择'], ...(item ? [['inherit', '沿用上版提出人事实']] : []), ['member', '选择本项目已加入成员'], ['name', '记录无账号提出人的姓名']] },
-            { name: 'proposer_member_id', label: '提出人成员', options: [['', '请选择'], ...detail.members.filter((m) => m.status === 'joined').map((m) => [m.id, m.name])] },
-            { name: 'proposer_name', label: '无账号提出人姓名', max: 60 },
-            { name: 'proposer_party_id', label: '无账号提出人所属方（可选）', options: [['', '未记录'], ...detail.parties.map((p) => [p.id, p.name])] },
-            { name: 'occasion', label: '提出场合', max: 200, value: previous.occasion || '' },
-            { name: 'proposed_on', label: '提出日期', type: 'date', value: previous.proposed_on || '' },
-        ];
-        if (!item) defs.push({ name: 'module_id', label: '所属模块（可选）', options: [['', '尚未归属模块'], ...data.modules.map((m) => [m.id, m.name])] });
-        defs.push(...evidenceFields(previous, item ? item.versions : null));
-        const form = A.dialog(item ? item.code + ' 追加新版本' : '登记需求条目', defs, async (v, cc) => {
-            const refIds = (v.ref_attachment_ids || []).map(A.id);
-            if (v.no_written_evidence && v.files.length + refIds.length > 0) throw new Error('证据附件与无书面证据声明应二选一');
-            const attachment_ids = await A.stageFiles(detail.project.id, v.files, cc);
-            const body = { content: v.content, quote_text: v.quote_text || null, occasion: v.occasion || null, proposed_on: v.proposed_on || null, attachment_ids, ...A.evidencePayload(v) };
-            if (!item) body.module_id = v.module_id ? A.id(v.module_id) : null;
-            if (item) body.ref_attachment_ids = refIds;
-            if (v.proposer_mode === 'member') body.proposer_member_id = A.id(v.proposer_member_id);
-            else if (v.proposer_mode === 'name') { body.proposer_name = v.proposer_name; if (v.proposer_party_id) body.proposer_party_id = A.id(v.proposer_party_id); }
-            else if (!item || v.proposer_mode !== 'inherit') throw new Error('请明确选择提出人记录方式');
-            const result = await A.request(item ? '/items/' + item.id + '/versions' : '/projects/' + detail.project.id + '/items', { method: 'POST', body }, cc);
-            A.navigate({ project: detail.project.id, tab: 'items', item: result.item.id });
-        }, item ? '保存新版本并保留旧版' : '保存条目');
-        form.prepend(A.hint('保存后按提出人资格生成相应任务；保存本身不代表提出人已确认。新版本不会直接替换生效总体规划中的执行依据。'));
-        const mode = form.querySelector('[name="proposer_mode"]');
-        const update = () => {
-            const map = { proposer_member_id: mode.value === 'member', proposer_name: mode.value === 'name', proposer_party_id: mode.value === 'name' };
-            Object.entries(map).forEach(([key, shown]) => { const input = form.querySelector('[name="' + key + '"]'); input.closest('label').hidden = !shown; input.required = shown && key !== 'proposer_party_id'; });
-        };
-        mode.addEventListener('change', update); update();
-    }
-    async function itemsTab(detail, params, c) {
-        const data = await A.request('/projects/' + detail.project.id + '/items', null, c);
-        const host = A.el('div');
-        const ops = A.row();
-        if (data.actions.create_item === true) ops.appendChild(A.button('登记需求条目', () => itemForm(detail, data, null, c)));
-        if (data.actions.create_module === true) ops.appendChild(A.button('添加模块', () => { A.assertCurrent(c); A.dialog('添加需求模块', [{ name: 'name', label: '模块名称', required: true, max: 60 }], async (v, cc) => { await A.request('/projects/' + detail.project.id + '/modules', { method: 'POST', body: v }, cc); await A.render(); }); }));
-        host.appendChild(A.panel('需求条目与提出人确认', [A.hint(data.overall_version_id ? '现行条目以生效总体规划引用为准。之后的候选版保留待处理。' : '尚无生效总体规划；已登记条目目前均为候选内容。')], ops));
-        host.appendChild(A.panel('模块', [A.table(['模块', '操作'], data.modules.map((m) => [m.name, m.actions.rename === true ? A.button('修改模块名', () => { A.assertCurrent(c); A.dialog('修改模块名', [{ name: 'name', label: '模块名称', required: true, max: 60, value: m.name }], async (v, cc) => { await A.request('/modules/' + m.id, { method: 'PATCH', body: v }, cc); await A.render(); }); }) : '—']))]));
-        const selected = params.has('item') ? A.id(params.get('item')) : null;
-        const items = selected ? data.items.filter((item) => item.id === selected) : data.items;
-        if (selected && !items.length) throw new Error('该条目不属于当前项目');
-        if (selected) host.appendChild(A.row(A.link('查看全部需求条目', { project: detail.project.id, tab: 'items' })));
-        for (const item of items) {
-            const controls = A.row();
-            if (item.actions.new_version === true) controls.appendChild(A.button('追加新版本', () => itemForm(detail, data, item, c)));
-            if (item.actions.set_module === true) controls.appendChild(A.button('调整所属模块', () => { A.assertCurrent(c); A.dialog('调整所属模块', [{ name: 'module_id', label: '模块', value: item.module_id || '', options: [['', '尚未归属'], ...data.modules.map((m) => [m.id, m.name])] }], async (v, cc) => { await A.request('/items/' + item.id, { method: 'PATCH', body: { module_id: v.module_id ? A.id(v.module_id) : null } }, cc); await A.render(); }); }));
-            const part = A.panel(item.code + (item.in_effective_plan ? ' · 已在生效总体规划中' : ' · 尚未纳入生效总体规划'), [A.hint('当前执行版本：' + (item.current_version_id ? 'v' + item.versions.find((v) => v.id === item.current_version_id).version_no : '无'))], controls);
-            for (const version of item.versions.slice().reverse()) {
-                const current = item.current_version_id === version.id;
-                const status = current ? '当前执行依据' : item.pending_version_ids.includes(version.id) ? '待处理候选版' : item.current_version_id ? '历史版本' : '候选版本';
-                const tasks = version.confirm_tasks || [];
-                part.appendChild(A.panel('v' + version.version_no + ' · ' + status, [prose(version.content), A.facts([['提出人', version.proposer_display_name || version.proposer_name], ['提出场合', version.occasion], ['提出日期', version.proposed_on], ['提出人状态', proposerStates[version.proposer_status] || version.proposer_status]]), version.quote_text ? A.panel('原话要点', [prose(version.quote_text)]) : null, version.deny_reason ? A.hint('否认原因：' + version.deny_reason) : null,
-                    version.no_written_evidence ? A.hint('无书面证据：' + version.no_evidence_reason) : null,
-                    A.attachmentList(version.attachments, c),
-                    A.row(...tasks.map((task) => A.link('打开提出人确认 · ' + (task.required_name || '必需确认人'), { task: task.task_id, revision_id: task.revision_id }))),
-                ]));
-            }
-            host.appendChild(part);
-        }
-        if (!items.length) host.appendChild(A.panel('暂无需求条目', [A.hint('条目可在规划确认前整理；各版原文与提出人确认分别保留。')]));
-        return host;
-    }
     function newMaterialKey() {
         return 'm-' + Date.now().toString(36) + '-' + Array.from(window.crypto.getRandomValues(new Uint32Array(2)), (n) => n.toString(36)).join('-');
     }
-    function materialForm(detail, data, material, c) {
+    function materialForm(detail, data, material, c, card, inlineBasis = false) {
         A.assertCurrent(c);
         const previous = material && material.versions[material.versions.length - 1];
-        const attachments = material ? uniqueAttachments(material.versions).filter((a) => !a.masked && !a.deleted) : [];
-        const defs = material ? [] : [
+        const usable = (a) => !a.masked && !a.deleted && (!inlineBasis || !a.missing);
+        const attachments = material ? uniqueAttachments(material.versions).filter(usable) : [];
+        const defs = material || card ? [] : [
             { name: 'node_id', label: '所属节点', required: true, options: [['', '请选择可维护材料的节点'], ...data.nodes.filter((n) => n.actions.create_version).map((n) => [n.id, n.name])] },
             { name: 'name', label: '材料名称', max: 100, required: true },
         ];
-        defs.push({ name: 'body', label: '本版材料正文', type: 'textarea', max: 12000, full: true, value: previous && previous.body || '', hint: '正文或附件至少一项；保存后只追加，不覆盖旧版。' }, { name: 'files', label: '本版材料附件 / 截图', type: 'file', multiple: true, full: true });
-        if (material) defs.push({ name: 'ref_attachment_ids', label: '沿用本材料旧版附件', type: 'checklist', options: attachments.map((a) => [a.attachment_id, a.name || a.original_name || '附件 #' + a.attachment_id]), value: (previous.attachments || []).filter((a) => !a.masked && !a.deleted).map((a) => a.attachment_id), full: true });
-        const key = material ? material.material_key : newMaterialKey();
-        const form = A.dialog(material ? material.name + ' · 追加版本' : '建立候选材料', defs, async (v, cc) => {
+        defs.push({ name: 'body', label: inlineBasis ? '立项依据补充说明' : '本版材料正文', type: 'textarea', max: 12000, full: true, value: previous && previous.body || '', hint: '正文或附件至少一项；保存后只追加，不覆盖旧版。' }, { name: 'files', label: inlineBasis ? '立项依据附件' : '本版材料附件 / 截图', type: 'file', multiple: true, full: true });
+        if (material) defs.push({ name: 'ref_attachment_ids', label: inlineBasis ? '沿用立项依据旧版附件' : '沿用本材料旧版附件', type: 'checklist', options: attachments.map((a) => [a.attachment_id, a.name || a.original_name || '附件 #' + a.attachment_id]), value: (previous?.attachments || []).filter(usable).map((a) => a.attachment_id), full: true });
+        const key = card?.key ?? (material ? material.material_key : newMaterialKey());
+        const save = async (v, cc) => {
             const body = { body: v.body || null, attachment_ids: await A.stageFiles(detail.project.id, v.files, cc), ref_attachment_ids: (v.ref_attachment_ids || []).map(A.id) };
-            const nodeId = material ? material.node_id : A.id(v.node_id);
-            if (!material) body.name = v.name;
+            const nodeId = card?.node_id ?? (material ? material.node_id : A.id(v.node_id));
+            if (!material && (!card || inlineBasis)) body.name = inlineBasis ? card.name : v.name;
             const result = await A.request('/nodes/' + nodeId + '/materials/' + key + '/versions', { method: 'POST', body }, cc);
-            A.navigate({ project: detail.project.id, tab: 'materials', material_version: result.version.id });
-        }, '保存候选材料版本');
+            if (card) await A.render();
+            else A.navigate({ project: detail.project.id, tab: 'materials', material_version: result.version.id });
+        };
+        if (inlineBasis) return A.form(defs, save, '保存立项依据版本', c);
+        const form = A.dialog(card ? card.name + ' · 上传材料' : material ? material.name + ' · 追加版本' : '建立候选材料', defs, save, '保存候选材料版本');
         form.prepend(A.hint('本版附件会一并冻结以便复核。新增候选版不代表内容包已采纳；执行依据仍由生效内容包引用的版本决定。'));
     }
+    function markMaterialCard(card, c) {
+        A.assertCurrent(c);
+        const isBasis = card.key === 'initiation-basis';
+        const title = isBasis ? '填写无书面依据原因' : '标为不适用';
+        A.dialog(title, [{ name: 'reason', label: isBasis ? '无书面依据原因' : '不适用原因', required: true, max: 500, type: 'textarea', value: card.declaration?.reason || '' }], async (value, cc) => {
+            await A.request('/nodes/' + card.node_id + '/materials/' + card.key + '/not-applicable', { method: 'POST', body: { reason: value.reason } }, cc);
+            await A.render();
+        }, title, c);
+    }
+    function stageCardView(detail, node, data, packageData, initiationDraft, c, cardKey) {
+        const panels = [];
+        for (const card of data.cards.filter((item) => item.node_id === node.id)) {
+            if (cardKey && card.key !== cardKey) continue;
+            const basis = card.key === 'initiation-basis';
+            const declarationStatus = basis ? '已声明无书面依据' : '不适用';
+            const initiationEffective = basis && packageData.packages.some((item) => item.type === 'initiation' && item.versions.some((v) => v.status === 'effective'));
+            const status = card.complete ? (card.declaration && !initiationEffective ? declarationStatus : '已完成') : card.required ? (card.kind === 'material' ? '待补材料' : '未完成') : '推荐';
+            const content = [];
+            if (card.kind === 'material') {
+                content.push(A.hint(status));
+                const material = data.materials.find((item) => item.id === card.material_id);
+                for (const v of (material?.versions || []).slice().reverse()) {
+                    const label = 'v' + v.version_no + (card.after_confirmation_version_ids.includes(v.id) ? ' · 确认之后的版本' : '');
+                    const link = A.link(label, { project: detail.project.id, tab: 'materials', material_version: v.id });
+                    if (!basis) content.push(link);
+                    else if (cardKey) content.push(A.disclosure(card.name + ' ' + label, A.append(A.el('div'), [link, prose(v.body), A.attachmentList(v.attachments, c)])));
+                }
+                if (card.actions.upload) {
+                    if (basis && cardKey) content.push(materialForm(detail, data, material, c, card, true));
+                    if (!basis) content.push(A.button(material?.versions.length ? '再传一版' : '上传材料', () => materialForm(detail, data, material, c, card)));
+                }
+                if (card.actions.mark_not_applicable) content.push(A.command(basis ? '填写无书面依据原因' : '标为不适用', (cc) => markMaterialCard(card, cc), '', c));
+                if (card.declaration) content.push(prose(card.declaration.reason));
+            } else if (card.kind === 'confirmation') {
+                const pkg = packageData.packages.find((item) => item.type === card.key && item.batch_id === card.batch_id);
+                const open = pkg?.versions.find((v) => ['draft', 'pending'].includes(v.status));
+                const effective = pkg?.versions.find((v) => v.status === 'effective');
+                const draft = initiationDraft?.version.id === open?.id ? initiationDraft : null;
+                if (open?.status === 'draft' && (!effective || cardKey)) {
+                    const blocked = draft?.submit_block?.message;
+                    content.push(A.hint(draft?.actions.submit === true ? '草稿 · 可提交' : blocked ? '草稿 · 当前不能发起确认：' + blocked : '草稿'));
+                    content.push(A.link('进入确认草稿', { project: detail.project.id, tab: 'packages', version: open.id }));
+                } else if (open?.status === 'pending' && (!effective || cardKey)) {
+                    content.push(A.hint('待确认'));
+                    content.push(A.link('查看待确认版本', { project: detail.project.id, tab: 'packages', version: open.id }));
+                }
+                if (effective) content.push(A.hint('已生效'), A.link('查看确认记录', { project: detail.project.id, tab: 'packages', version: effective.id }));
+                if (!open && !effective) content.push(A.hint(status));
+                if (pkg ? pkg.actions.new_version : packageData.actions.create_package_types.includes(card.key)) {
+                    if (effective && ['initiation', 'batch_accept', 'closing'].includes(card.key)) {
+                        if (cardKey) content.push(A.command('重新发起确认', (cc) => A.createPackageDraft(detail, card, pkg, cc), '', c));
+                    } else {
+                        content.push(A.command('建立确认草稿', (cc) => A.createPackageDraft(detail, card, pkg, cc), '', c));
+                    }
+                }
+            } else content.push(A.hint(status));
+            const open = cardKey ? null : A.link('查看卡片', { project: detail.project.id, tab: 'plan', node: node.id, card: card.key });
+            const panel = A.panel(card.name, content, open);
+            panel.classList.add('sbui-stage-card');
+            if (!card.required) panel.classList.add('recommended');
+            panels.push(panel);
+        }
+        if (!cardKey && data.nodes.find((item) => item.id === node.id)?.actions.create_card) panels.push(A.command('自建必做材料卡片', (cc) => {
+            A.dialog('自建必做材料卡片', [{ name: 'name', label: '材料名称', max: 100, required: true }], async (value, lease) => {
+                await A.request('/nodes/' + node.id + '/material-cards', { method: 'POST', body: { name: value.name } }, lease);
+                await A.render();
+            }, '建立卡片', cc);
+        }, '', c));
+        return panels;
+    }
+    async function stageCardDetail(detail, node, materials, key, c) {
+        if (!materials.cards.some((card) => card.node_id === node.id && card.key === key)) throw new Error('该卡片不属于当前阶段');
+        const packages = await A.request('/projects/' + detail.project.id + '/packages', null, c);
+        const draft = key === 'initiation'
+            ? packages.packages.find((pkg) => pkg.type === 'initiation')?.versions.find((version) => version.status === 'draft') : null;
+        const draftView = draft ? await A.request('/package-versions/' + draft.id, null, c) : null;
+        return A.append(A.el('div'), stageCardView(detail, node, materials, packages, draftView, c, key));
+    }
     async function materialsTab(detail, params, c) {
-        const data = await A.request('/projects/' + detail.project.id + '/materials', null, c);
+        const data = A.state.materials;
         const host = A.el('div');
         const ops = A.row();
         if (data.nodes.some((n) => n.actions.create_version === true)) ops.appendChild(A.button('建立候选材料', () => materialForm(detail, data, null, c)));
         host.appendChild(A.panel('材料版本与采纳依据', [A.hint('各版内容与附件分别保留。下方列出哪些内容包引用了该版；候选最新版不会自动取代已确认内容。')], ops));
         const selected = params.has('material_version') ? A.id(params.get('material_version')) : null;
-        const items = selected ? data.materials.filter((m) => m.versions.some((v) => v.id === selected)) : data.materials;
+        const cardMaterials = new Set(data.cards.map((card) => card.material_id));
+        const items = selected ? data.materials.filter((m) => m.versions.some((v) => v.id === selected)) : data.materials.filter((m) => !cardMaterials.has(m.id));
         if (selected && !items.length) throw new Error('该材料版本不属于当前项目');
         if (selected) host.appendChild(A.row(A.link('查看全部材料', { project: detail.project.id, tab: 'materials' })));
         for (const material of items) {
             const node = data.nodes.find((n) => n.id === material.node_id);
-            const part = A.panel(material.name + ' · ' + (node ? node.name : '所属节点'), null, material.actions.new_version === true ? A.button('追加候选版本', () => materialForm(detail, data, material, c)) : null);
+            const part = A.panel(material.name + ' · ' + (node ? node.name : '所属节点'), null, material.actions.new_version === true && !cardMaterials.has(material.id) ? A.button('追加候选版本', () => materialForm(detail, data, material, c)) : null);
             for (const version of material.versions.slice().reverse()) {
                 if (selected && version.id !== selected) continue;
                 const uses = version.uses || [];
@@ -133,6 +138,7 @@
         if (!items.length) host.appendChild(A.panel('暂无材料版本', [A.hint('PM 可在允许维护的节点下建立候选材料。')]));
         return host;
     }
-    A.registerTab('items', '需求条目', itemsTab);
     A.registerTab('materials', '材料版本', materialsTab);
+    A.stageCardView = stageCardView;
+    A.stageCardDetail = stageCardDetail;
 }());

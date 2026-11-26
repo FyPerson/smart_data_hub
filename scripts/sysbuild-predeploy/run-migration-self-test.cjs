@@ -8,6 +8,7 @@ const mutations = require('./schema-migration-mutations.cjs');
 const root = path.resolve(__dirname, '../..');
 const test = path.join(__dirname, 'verify-schema-migration.cjs');
 const testEnv = Module.createRequire(path.join(root, 'wbs-server/server.js'))('./scripts/lib/test-env');
+const rec = require(path.join(root, 'wbs-server/scripts/lib/sysbuild-mut-record.js')); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@MUT 行
 let out, childEnv, finished = false;
 function run(name, args) {
     const result = spawnSync(process.execPath, [test, ...args], { cwd: root, windowsHide: true, env: { ...process.env, ...childEnv }, encoding: 'utf8', timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
@@ -28,7 +29,7 @@ const results = [];
 for (const [index, mutation] of mutations.entries()) {
     const source = fs.readFileSync(path.join(__dirname, mutation.file || 'schema-migration-core.cjs'), 'utf8').replace(/\r\n/g, '\n');
     const count = source.split(mutation.from).length - 1;
-    if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); continue; }
+    if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); if (rec.enabled()) console.log(rec.mutLine('migration', mutation.id, rec.VERDICT.ANCHOR, [], 'anchor count ' + count)); continue; }
     const file = path.join(out, 'candidate-' + index + '.cjs');
     fs.writeFileSync(file, source.replace(mutation.from, () => mutation.to), { flag: 'wx' });
     const candidateFlag = mutation.file === 'cli.cjs' ? '--candidate-cli' : mutation.file === 'deploy-prestart.cjs' ? '--candidate-step' : '--candidate';
@@ -37,6 +38,7 @@ for (const [index, mutation] of mutations.entries()) {
     const red = result.status === 1 && !result.signal && !result.error && result.summary && result.summary.total === baseline.summary.total && failed.some((name) => name.startsWith(mutation.expect));
     results.push({ id: mutation.id, red: !!red, status: result.status, failed, evidence: result.evidence, error: result.error });
     console.log((red ? '变异判红 ' : '变异未检出 ') + mutation.id);
+    if (rec.enabled()) console.log(rec.mutLine('migration', mutation.id, red ? rec.VERDICT.RED : (result.error || result.signal || !result.summary ? rec.VERDICT.ABNORMAL : rec.VERDICT.WEAK), rec.failuresOfSummary(result.summary), red ? null : (result.error || result.signal || (!result.summary ? '没有结果文件' : null))));
 }
 const red = results.filter((r) => r.red).length;
 fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ at: new Date().toISOString(), scope: 'C9 draft, private fixtures only', baseline: { passed: baseline.summary.passed, total: baseline.summary.total, evidence: baseline.evidence }, red, total: results.length, results }, null, 2));

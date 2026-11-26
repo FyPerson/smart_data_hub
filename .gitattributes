@@ -13,3 +13,7 @@ scripts/sysbuild-predeploy/temp-service/server-client.js -text
 scripts/sysbuild-predeploy/temp-service/offline.html -text
 scripts/sysbuild-predeploy/temp-service/package.json -text
 scripts/sysbuild-predeploy/temp-service/ecosystem.config.cjs -text
+
+# #212 第一步机器基线与来源清单按原字节存取（2026-11-19·C1c 预筛 HIGH-1）：基线顶层的
+#   provenanceSha256 是来源清单文件原始字节的 sha256，autocrlf 检出成 CRLF 后 --compare 恒报不一致。
+wbs-server/scripts/fixtures/sysbuild-step1/*.json -text

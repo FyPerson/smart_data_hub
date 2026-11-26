@@ -238,8 +238,8 @@ function selfTest(sheetSource) {
 const NAV_PAGE = 'Sys_Build.html';
 const NAV_REF = 'Legacy_Archive.html';
 const NAV_LOGO_ID = 'logo-gradient-sb';
-// 2026-11-18（用户定）：流程简化并入第二期之前，入口文字带「（开发中）」，避免能看到入口的登录用户误以为功能已正式启用。
-const NAV_ENTRY_LABEL = '项目管理（开发中）';
+// #212 B7.2 N1（2026-11-26）：第七步恢复正式入口名称。
+const NAV_ENTRY_LABEL = '项目管理';
 const NAV_ENTRY_STYLE = 'style="color:#d97706; font-weight:600;"';
 const NAV_ENTRY_OPEN = '<a href="/Sys_Build.html" class="nav-item active" aria-current="page" ' + NAV_ENTRY_STYLE + '>';
 const NAV_CSS = 'assets/css/sysbuild.css';
@@ -382,7 +382,7 @@ function navSelfTest(publicDir) {
         ['复制一份项目管理入口应红', (h) => change(h, entryRe, (e) => e + '\n            ' + e), '入口（href="/Sys_Build.html"）应恰好 1 个'],
         ['项目管理入口去掉 aria-current 应红', (h) => change(h, entryRe, (e) => e.replace(' aria-current="page"', '')), '应带 aria-current="page"'],
         ['项目管理入口去掉选中样式应红', (h) => change(h, entryRe, (e) => e.replace(' ' + NAV_ENTRY_STYLE, '')), '应带选中样式'],
-        ['项目管理入口文字改名应红', (h) => change(h, entryRe, (e) => e.replace('项目管理（开发中）</a>', '项目管理</a>')), '入口文字应为'],
+        ['项目管理入口文字改名应红', (h) => change(h, entryRe, (e) => e.replace('项目管理</a>', '项目管理（开发中）</a>')), '入口文字应为'],
         ['导航起始标签去掉 aria-label 应红', (h) => change(h, /<nav class="navbar fixed-header" aria-label="平台导航">/, () => '<nav class="navbar fixed-header">'), '导航起始标签应为'],
         ['LOGO 渐变 id 改名应红', (h) => {
             const out = h.split(NAV_LOGO_ID).join('logo-gradient-x');
@@ -396,7 +396,7 @@ function navSelfTest(publicDir) {
         ['项目管理入口换掉图标的 path 应红', (h) => change(h, entryRe, (e) => e.replace('<path d="M16 4h2a2', '<path d="M16 4h3a2')), '与 app.js 的 SVG_ICONS.clipboard 不逐字相等'],
         ['项目管理入口的 svg 去掉 width="14" 应红', (h) => change(h, entryRe, (e) => e.replace(' width="14"', '')), '与 app.js 的 SVG_ICONS.clipboard 不逐字相等'],
         ['项目管理入口的 svg 前多一个 <i class="x"></i> 应红', (h) => change(h, entryRe, (e) => e.replace('<svg', '<i class="x"></i><svg')), '入口整段与约定写法不逐字相等'],
-        ['项目管理入口文字后多一个 <span class="badge"></span> 应红', (h) => change(h, entryRe, (e) => e.replace('项目管理（开发中）</a>', '项目管理（开发中）<span class="badge"></span></a>')), '入口整段与约定写法不逐字相等'],
+        ['项目管理入口文字后多一个 <span class="badge"></span> 应红', (h) => change(h, entryRe, (e) => e.replace('项目管理</a>', '项目管理<span class="badge"></span></a>')), '入口整段与约定写法不逐字相等'],
     ];
     const results = cases.map(([name, mutate, expect]) => {
         const label = 'S11 导航：' + name;

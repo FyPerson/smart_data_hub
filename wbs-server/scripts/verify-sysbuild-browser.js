@@ -2,6 +2,7 @@
 const fx = require('./_test-fixture');
 const testEnv = require('./lib/test-env');
 const suite = require('./lib/sysbuild-browser-suite');
+const rec = require('./lib/sysbuild-mut-record'); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@MUT 行
 (async () => {
     await fx.ready();
     let failed = 1;
@@ -24,6 +25,12 @@ const suite = require('./lib/sysbuild-browser-suite');
                 if (control.failures.length || control.pageErrors.length || control.passed !== 1) throw new Error('变异空跑对照异常：' + mutation.id);
                 const result = await suite.run({ fx, env: testEnv.env(), mutation });
                 const targetFailure = result.failures.length === 1 && result.failures[0].name === mutation.expect && result.failures[0].error.includes(mutation.expectFailure);
+                if (rec.enabled()) { // C1c 机器基线：verdict 与下面的分支同一判定；label = 断言信息里命中的 expectFailure 原文（命不中为 null，message 仍填首行）
+                    const redNow = targetFailure && result.pageErrors.length === 0 && result.selected.length === 1 && result.selected[0] === mutation.expect;
+                    const fails = result.failures.map((f) => ({ case: f.name, errorClass: f.errorName || rec.headOfStack(f.stack || f.error).errorClass, message: rec.firstLine(f.error), ...rec.callSites(f.stack), label: f.error.includes(mutation.expectFailure) ? mutation.expectFailure : null }))
+                        .concat(result.pageErrors.map((p) => ({ case: '(页面错误)', errorClass: 'PageError', message: rec.firstLine(p), site: null, label: null })));
+                    console.log(rec.mutLine('browser', mutation.id, redNow ? rec.VERDICT.RED : (result.failures.length || result.pageErrors.length ? rec.VERDICT.ABNORMAL : rec.VERDICT.WEAK), fails, null));
+                }
                 if (targetFailure && result.pageErrors.length === 0 && result.selected.length === 1 && result.selected[0] === mutation.expect) {
                     red += 1; console.log('变异判红 ' + mutation.id);
                     if (result.out) suite.cleanupArtifacts(result.out);

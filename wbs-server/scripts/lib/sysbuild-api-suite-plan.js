@@ -13,8 +13,8 @@ const assert = require('assert');
 const PROJECT_TPL = {
   p_initiation: ['立项与授权', 'G0', 10],
   p_contract: ['采购与合同', 'CONTRACT', 20],
-  p_overall: ['总体范围与批次规划', 'G1', 30],
-  p_closing: ['整体验收结项', 'G6', 40],
+  p_overall: ['需求与范围确认', 'G1', 30],
+  p_closing: ['结项', 'G6', 40],
 };
 const PROJECT_KEYS = {
   outsource: ['p_initiation', 'p_contract', 'p_overall', 'p_closing'],
@@ -23,15 +23,15 @@ const PROJECT_KEYS = {
 };
 const BATCH_TPL = {
   outsource: [
-    ['b_req', '需求确认', 'G1', false], ['b_design', '原型 / 设计确认', 'G2', false], ['b_dev', '开发完成', 'G3', false], ['b_test', '测试完成', 'G4', false],
-    ['b_uat', '用户验收测试', 'G4', false], ['b_golive', '上线', 'G5', false], ['b_trial', '试运行结束（正式上线）', 'G5', true],
+    ['b_design', '设计阶段', 'G2', false], ['b_dev', '开发阶段', 'G3', false], ['b_test', '测试阶段', 'G4', false],
+    ['b_uat', '验收阶段', 'G4', false], ['b_golive', '上线', 'G5', false], ['b_trial', '试运行阶段（结束即正式上线）', 'G5', true],
   ],
   procurement: [
-    ['b_req', '需求调研', 'G1', false], ['b_config', '系统配置（含设计与开发）', 'G2+G3', false], ['b_training', '用户培训（含测试与验收）', 'G4', false],
-    ['b_golive', '上线', 'G5', false], ['b_trial', '试运行结束（正式上线）', 'G5', true],
+    ['b_req', '需求调研', 'G1', false], ['b_config', '配置阶段', 'G2+G3', false], ['b_training', '培训与验收阶段', 'G4', false],
+    ['b_golive', '上线', 'G5', false], ['b_trial', '试运行阶段（结束即正式上线）', 'G5', true],
   ],
   inhouse: [
-    ['b_req', '需求确认', 'G1', false], ['b_dev', '开发完成（含设计）', 'G2+G3', false], ['b_golive', '上线（含测试与验收）', 'G4+G5', true],
+    ['b_dev', '开发阶段（含设计）', 'G2+G3', false], ['b_golive', '上线（含测试与验收）', 'G4+G5', true],
   ],
 };
 const MILESTONE_KEY = { outsource: 'b_trial', procurement: 'b_trial', inhouse: 'b_golive' };
@@ -46,6 +46,8 @@ function addDays(dateStr, n) {
   return fmt(new Date(y, m - 1, d + n));
 }
 
+const T_C6_R2 = 'C6 R2：排计划与改期不收 dev_key_entry_id';
+
 function definePlanCases(T) {
   const { test, U, api, sqlRun, sqlGet, sqlAll, expectErr, eventsOf, addMember, addParty, addAppointment } = T;
   const post = (uid, url, body) => api(uid, 'POST', url, body === undefined ? {} : body);
@@ -58,9 +60,7 @@ function definePlanCases(T) {
 
   async function newProject(buildType, pm) {
     projSeq += 1;
-    const r = await post(pm || U.pm, '/sysbuild/projects', { system_name: `计划测试项目${projSeq}`, build_type: buildType || 'outsource' });
-    assert.strictEqual(r.status, 201, r.text);
-    return r.body.project.id;
+    return T.createEmptyProjectFixture(pm || U.pm, { system_name: `计划测试项目${projSeq}`, build_type: buildType || 'outsource' });
   }
   async function planOf(uid, pid) {
     const r = await get(uid, `/sysbuild/projects/${pid}/plan`);
@@ -124,7 +124,7 @@ function definePlanCases(T) {
   async function serverToday() {
     if (cachedToday) return cachedToday;
     const pid = await newProject('inhouse');
-    const r = await startNode(U.pm, await idOf(pid, 'b_req'));
+    const r = await startNode(U.pm, await idOf(pid, 'p_initiation'));
     assert.strictEqual(r.status, 200, r.text);
     cachedToday = r.body.node.actual_start;
     const fixed = T.getFixedToday ? T.getFixedToday() : null;
@@ -142,43 +142,32 @@ function definePlanCases(T) {
     return r.lastID;
   }
   // C4a 交接 ②：原夹具①（直接插 effective 的总体规划版本 + baseline）已全部改走生产路径——T.confirm.produceEffectiveOverall(pid)：
-  //   补需求部门参与方 + 条目 + 总体规划包草稿，提交并由各必需确认人确认后生效，生效时按各节点当前计划形成基线；生效之后尚无基线的节点第一次设计划 = 基线。
+  //   补需求部门参与方 + 总体规划包草稿，提交并由各必需确认人确认后生效，生效时按各节点当前计划形成基线；生效之后尚无基线的节点第一次设计划 = 基线。
 
   // ── 手写期望：动作 → 项目状态类别（rules.OP_KIND）与状态表 close 行 ─────────────────────────────
   test('rules：OP_KIND 与状态表——键集合与 OBJECT_OPS 全等；每个动作的类别手写核对；close 行四态手写；checkOp 对未登记动作 500', async () => {
     const R = T.getMods().rules;
     const expected = {
       party_add: 'membership', party_rename: 'membership', member_add: 'membership', member_remove: 'membership',
-      appointment_propose: 'membership', appointment_withdraw: 'membership', appointment_end: 'membership',
-      delegation_propose: 'membership', delegation_approve: 'membership', delegation_reject: 'membership', delegation_revoke: 'membership',
-      delegation_withdraw: 'membership', delegation_accept: 'membership', delegation_decline: 'membership',
-      invitation_accept: 'membership', invitation_decline: 'membership',
+      party_people: 'membership', appointment_end: 'membership', delegation_revoke: 'membership',
       batch_update: 'maintain', node_start: 'maintain', node_close: 'close', node_reopen: 'maintain', node_cancel: 'maintain',
       node_rename: 'maintain', node_add: 'maintain', node_reorder: 'maintain', schedule_plan: 'maintain', schedule_correct: 'maintain',
-      // C3b 新动作（本测试断言键集合全等，随 OBJECT_OPS 同步；C3b 围栏外的一处改动，见 C3b 报告「偏离」）
-      module_create: 'maintain', module_rename: 'maintain', item_create: 'maintain', item_version_create: 'maintain', item_set_module: 'maintain',
-      package_create: 'maintain', package_version_create: 'maintain', package_version_edit: 'maintain', package_item_add: 'maintain', package_item_remove: 'maintain',
+      // C3b 新动作（本测试断言键集合全等，随 OBJECT_OPS 同步；C3b 围栏外的一处改动，见 C3b 报告「偏离」；#212 C7 起模块 / 条目 / 条目集合修订的七个键删除）
+      package_create: 'maintain', package_version_create: 'maintain', package_version_edit: 'maintain',
       material_version_create: 'maintain', // C8材料候选版本仍是维护类，不因只追加而允许已终止/结项写入。
       // C4a 新动作（同上：本测试断言键集合全等，随 OBJECT_OPS 同步）
       package_version_submit: 'maintain', package_version_withdraw: 'maintain', confirm_reissue: 'maintain', confirm_decide: 'accept',
-      // C4b Q-S1 代录三个新动作（同上：随 OBJECT_OPS 同步；类别手写：确认任务代录 = 作出推进类确认 accept 行，任职接受 / 授权代录 = membership 行）
-      confirm_proxy: 'accept', appointment_proxy_accept: 'membership', delegation_proxy: 'membership',
-      // C4b Q-S2 窗口三动作 / 历史补录 / 历史事实导入（同上；类别手写：history_import 行）
-      history_window_open: 'history_import', history_window_close: 'history_close', history_window_reopen: 'history_import', // P67：关闭不受项目状态限制，单列 history_close 行
-      history_confirmation_record: 'history_import', history_fact_import: 'history_import',
-      // C5 S-S1a 登记与办理（同上：随 OBJECT_OPS 同步；类别手写：写登记按时段分 register_process / register_supplement，其余办理 / 知会异议 / 结论确认 / 裁定 = resolve 行）
+      // C5 S-S1a 登记与办理（同上：随 OBJECT_OPS 同步；类别手写：写登记按时段分 register_process / register_supplement，其余办理 = resolve 行）；#212 C6 起办理动作只剩更正与作废，
+      //   办理规则键（结论 / 仅供参考 / 标记 / 交裁定 / 知会异议 / 结论确认 / 拆分 / 归属 / 记单号 / 对已有结论提异议 / 改期知会异议，共 15 个）随 S4 / S7 删除
       entry_create_process: 'register_process', entry_create_supplement: 'register_supplement',
-      entry_correct: 'resolve', entry_void: 'resolve', entry_conclude: 'resolve', entry_for_reference: 'resolve', entry_mark_commitment: 'resolve', entry_unmark_commitment: 'resolve',
-      entry_mark_risk: 'resolve', entry_unmark_risk: 'resolve', entry_escalate: 'resolve', notice_object: 'resolve',
-      entry_conclusion_decide: 'resolve', entry_conclusion_proxy: 'resolve', entry_conclusion_reissue: 'resolve',
-      // C5 S-S1b（同上：随 OBJECT_OPS 同步；类别手写）：拆分 / 待判定归属 / 记系统迭代单号 / 对已有有效结论的登记提异议 = 既有登记继续办理（resolve）
-      entry_split: 'resolve', entry_assign_items: 'resolve', entry_link_sys_issue: 'resolve', entry_object: 'resolve',
-      // C5 S-S1c（同上：随 OBJECT_OPS 同步；类别手写）：挂靠变更 = resolve；写开发方关键事项 = accept（需要负责人认可，已终止 / 已结项否）；建变更 / 变更出新版本 = maintain（§4.5「正式变更」与维护类同行）
-      entry_link_change: 'resolve', entry_create_dev: 'accept', change_create: 'maintain', change_new_version: 'maintain',
-      // C6a（同上：随 OBJECT_OPS 同步；类别手写，矩阵在 sysbuild-api-suite-golive.js 的 rules 用例）：确认试运行结束 = golive 行（只有进行中）；撤销上线 / 发起交接确认 = maintain
-      golive: 'golive', revoke_golive: 'maintain', handover_request: 'maintain',
-      // C6b（同上：随 OBJECT_OPS 同步；类别手写）：对改期知会提异议 = 既有登记继续办理（resolve，四态都可）
-      schedule_notice_object: 'resolve',
+      opinion_create: 'maintain', opinion_triage: 'maintain', opinion_assess: 'maintain',
+      opinion_dispose: 'maintain', opinion_cut_decide: 'accept', opinion_cut_withdraw: 'maintain',
+      work_task_create: 'maintain', work_task_result: 'maintain',
+      entry_correct: 'resolve', entry_void: 'resolve',
+      // C5 S-S1c（同上：随 OBJECT_OPS 同步；类别手写）：写开发方关键事项（C6 后只服务进度汇报登记权限）= accept（已终止 / 已结项否）；挂靠变更 / 建变更 / 变更出新版本三个规则随 C5 删除
+      entry_create_dev: 'accept',
+      // C6a（同上：随 OBJECT_OPS 同步；类别手写，矩阵在 sysbuild-api-suite-golive.js 的 rules 用例）：确认试运行结束 = golive 行（只有进行中）；撤销上线 = maintain
+      golive: 'golive', revoke_golive: 'maintain',
     };
     assert.deepStrictEqual(Object.keys(R.OP_KIND).sort(), Object.keys(expected).sort(), 'OP_KIND 键集合');
     assert.deepStrictEqual(Object.keys(R.OP_KIND).sort(), Object.keys(R.OBJECT_OPS).sort(), 'OP_KIND 与 OBJECT_OPS 全等');
@@ -211,13 +200,29 @@ function definePlanCases(T) {
     assert.throws(() => load(src.replace(anchor, "  node_close: 'no_such_kind',")), (e) => /OP_KIND/.test(e.message), '类别不在状态表');
     assert.throws(() => load(src.replace(anchor, `${anchor}\n  no_such_op: 'maintain',`)), (e) => /OP_KIND/.test(e.message) && /no_such_op/.test(e.message), '多出未知动作');
   });
+  // H1：模板表保持，项目层结项是唯一需检查确认的阶段。
+  test('收口前置：普通阶段无内容包条件，仅项目层结项保留', async () => {
+    const dir = T.getModuleDir();
+    const planMod = require(require('path').join(dir, 'plan.js'));
+    const tpl = require(require('path').join(dir, 'templates.js'));
+    const keys = new Set([...tpl.PROJECT_NODES.map((x) => x.key), ...Object.values(tpl.BATCH_NODES).flatMap((arr) => arr.map((x) => x.key))]);
+    for (const key of keys) {
+      const node = { id: 1, batch_id: key.startsWith('b_') ? 7 : null, template_key: key, status: 'in_progress' };
+      const blockers = planMod.closeBlockers(node, {});
+      if (key === 'p_closing') assert.ok(blockers.some((b) => b.code === 'PACKAGE_NOT_EFFECTIVE'));
+      else assert.deepStrictEqual(blockers, [], key + ' 普通阶段没有包或计划前置');
+    }
+  });
 
   // ── 1 建项带出结构 ───────────────────────────────────────────────────────────────────────────
   test('建项带出结构：三种建设方式——默认批次恰 1 个、项目层节点集合（自研无 p_contract）、批次层模板键与顺序、里程碑恰一个且键正确、合并节点 g_stage、事件 batch_created ×1 与 node_created × 节点数', async () => {
     for (const bt of ['outsource', 'procurement', 'inhouse']) {
       const pid = await newProject(bt);
       const plan = await planOf(U.pm, pid);
-      assert.deepStrictEqual(plan.project, { id: pid, build_type: bt, status: 'active', golive_progress: { live: 0, total: 1, transferred: 0 } }); // C6a：上线进度 n/m（已正式上线的有效批次数 / 有效批次数；转出单列）
+      const { estimated_completion: completion, ...planProject } = plan.project;
+      assert.deepStrictEqual(planProject, { id: pid, build_type: bt, status: 'active', golive_progress: { live: 0, total: 1 } });
+      assert.deepStrictEqual([completion.date, completion.days_remaining, completion.tone, completion.delay_days], [null, null, null, null]);
+      assert.match(completion.as_of, /^\d{4}-\d\d-\d\d$/);
       assert.strictEqual(plan.batches.length, 1, `${bt} 默认批次恰 1 个`);
       const b = plan.batches[0];
       assert.deepStrictEqual({ seq: b.seq, name: b.name, is_default: b.is_default, status: b.status, dev: b.dev_assignee_member_id }, { seq: 1, name: '第 1 批', is_default: true, status: 'planning', dev: null });
@@ -243,15 +248,22 @@ function definePlanCases(T) {
       assert.deepStrictEqual(created.map((p) => p.template_key).sort(), [...PROJECT_KEYS[bt], ...BATCH_TPL[bt].map((x) => x[0])].sort());
       const mile = created.find((p) => p.template_key === MILESTONE_KEY[bt]);
       assert.deepStrictEqual(mile, { template_key: MILESTONE_KEY[bt], name: BATCH_TPL[bt].find((x) => x[3])[1], g_stage: BATCH_TPL[bt].find((x) => x[3])[2], batch_id: b.id, is_golive_milestone: true, source: 'template' });
-      const proj = created.find((p) => p.template_key === 'p_overall');
-      assert.deepStrictEqual(proj, { template_key: 'p_overall', name: '总体范围与批次规划', g_stage: 'G1', batch_id: null, is_golive_milestone: false, source: 'template' });
+      const expectedEvents = [
+        ...PROJECT_KEYS[bt].map((key) => ({ template_key: key, name: PROJECT_TPL[key][0], g_stage: PROJECT_TPL[key][1], batch_id: null, is_golive_milestone: false, source: 'template' })),
+        ...BATCH_TPL[bt].map(([key, name, g, milestone]) => ({ template_key: key, name, g_stage: g, batch_id: b.id, is_golive_milestone: milestone, source: 'template' })),
+      ];
+      assert.deepStrictEqual(created, expectedEvents, `${bt} 节点事件按模板写入顺序完整核对`);
       assert.deepStrictEqual((await payloads(pid, 'batch_created'))[0], { seq: 1, name: '第 1 批', is_default: true });
       // PM 的初始动作标志：可开始、不可收口 / 重开 / 取消里程碑
-      const req = keyOf(plan, 'b_req');
-      assert.strictEqual(req.actions.start, true);
-      assert.strictEqual(req.actions.close, false);
-      assert.strictEqual(req.actions.reopen, false);
-      assert.strictEqual(req.actions.cancel, true);
+      const firstBatchNode = keyOf(plan, BATCH_TPL[bt][0][0]);
+      assert.strictEqual(firstBatchNode.actions.start, true, `${bt} 新建阶段无需计划和节奏即可开始`);
+      if (bt === 'inhouse') {
+        assert.strictEqual((await startNode(U.pm, firstBatchNode.id)).status, 200, '自研开发节点可先开工');
+        assert.strictEqual((await startNode(U.pm, keyOf(plan, 'p_initiation').id)).status, 200, '立项节点可以开始');
+      }
+      assert.strictEqual(firstBatchNode.actions.close, false);
+      assert.strictEqual(firstBatchNode.actions.reopen, false);
+      assert.strictEqual(firstBatchNode.actions.cancel, true);
       assert.strictEqual(keyOf(plan, MILESTONE_KEY[bt]).actions.cancel, false, '里程碑不可取消');
     }
   });
@@ -321,7 +333,7 @@ function definePlanCases(T) {
     assert.strictEqual(sched.status, 200, sched.text);
     assert.deepStrictEqual(sched.body.records.map((x) => x.kind), ['actual_start', 'actual_end']);
     assert.deepStrictEqual(sched.body.records.map((x) => x.attachment_ids), [[], []]);
-    assert.deepStrictEqual(sched.body.node, { id: nid, name: '原型 / 设计确认', status: 'in_progress' });
+    assert.deepStrictEqual(sched.body.node, { id: nid, name: '设计阶段', status: 'in_progress' });
   });
 
   // ── 4 暂停 ─────────────────────────────────────────────────────────────────────────────────
@@ -394,84 +406,23 @@ function definePlanCases(T) {
   });
 
   // ── 6 收口前置 ─────────────────────────────────────────────────────────────────────────────
-  test('收口前置：b_req 本批有节点缺计划 → 409 SYSBUILD_CLOSE_BLOCKED 且 blockers 列出缺计划节点（已取消的不算）；补齐后成功；p_overall 同理（项目层）；其他节点缺计划不阻塞', async () => {
-    const pid = await newProject('outsource');
-    const plan0 = await planOf(U.pm, pid);
-    const batchNodes = plan0.nodes.filter((n) => n.batch_id !== null);
-    const projectNodes = plan0.nodes.filter((n) => n.batch_id === null);
-    const req = keyOf(plan0, 'b_req');
-    // 预筛 L3：阻塞项只对进行中节点计算——未开始的 b_req（本批其他节点全缺计划）close_blockers 必须是空数组。
-    assert.deepStrictEqual(req.close_blockers, [], '未开始的 b_req 不算阻塞项');
-    assert.strictEqual((await startNode(U.pm, req.id)).status, 200);
-    let r = await closeNode(U.pm, req.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', 'b_req 全部缺计划');
-    // C4a 修订批：总体规划包还没生效，另有一条 PACKAGE_NOT_EFFECTIVE（排在 PLAN_MISSING 之后；其断言见 confirm 套件的收口前置用例）
-    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['PLAN_MISSING', 'PACKAGE_NOT_EFFECTIVE']);
-    assert.strictEqual(r.body.blockers[0].code, 'PLAN_MISSING');
-    assert.deepStrictEqual([...r.body.blockers[0].node_ids].sort((a, b) => a - b), batchNodes.map((n) => n.id).sort((a, b) => a - b), '阻塞项列出本批全部节点（含它自己）');
-    assert.strictEqual(typeof r.body.blockers[0].message, 'string');
-    assert.strictEqual((await nodeRow(req.id)).status, 'in_progress', '被拒的收口不改节点');
-    assert.strictEqual((await recordsOf(req.id)).length, 1);
-    // 读接口的 close_blockers 与收口端点同一结果
-    const view = keyOf(await planOf(U.pm, pid), 'b_req');
-    assert.deepStrictEqual(view.close_blockers, r.body.blockers);
-    assert.strictEqual(view.actions.close, true, 'close 标志不并入前置检查结果');
-    assert.deepStrictEqual(keyOf(await planOf(U.pm, pid), 'b_design').close_blockers, [], '非 in_progress 节点不算阻塞项');
-    // 取消一个未开始节点：不再要求它有计划
-    const test_ = keyOf(plan0, 'b_test');
-    assert.strictEqual((await cancelNode(U.pm, test_.id, '本批不做')).status, 200);
-    for (const n of batchNodes) {
-      if (n.id === test_.id || n.template_key === 'b_trial') continue;
-      assert.strictEqual((await setPlan(U.pm, n.id, '2026-11-02', '2026-11-20')).status, 201, n.template_key);
+  test('收口前置：需求调研、范围、立项、验收没有计划和确认前置', async () => {
+    for (const [buildType, keys] of [['procurement', ['b_req', 'p_overall', 'p_initiation']], ['outsource', ['b_uat']]]) {
+      const pid = await newProject(buildType);
+      const base = await planOf(U.pm, pid);
+      for (const key of keys) {
+        const nid = keyOf(base, key).id;
+        assert.deepStrictEqual(keyOf(base, key).close_blockers, []);
+        assert.strictEqual((await startNode(U.pm, nid)).status, 200);
+        const view = keyOf(await planOf(U.pm, pid), key);
+        assert.deepStrictEqual(view.close_blockers, []);
+        assert.strictEqual(view.actions.close, true);
+        const close = await closeNode(U.pm, nid);
+        assert.strictEqual(close.status, 200, close.text);
+        assert.strictEqual((await nodeRow(nid)).status, 'closed');
+        assert.deepStrictEqual((await recordsOf(nid)).map((row) => row.kind), ['actual_start', 'actual_end']);
+      }
     }
-    r = await closeNode(U.pm, req.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', '只剩里程碑缺计划');
-    assert.deepStrictEqual(r.body.blockers[0].node_ids, [keyOf(plan0, 'b_trial').id], '只列缺计划的节点；已取消的 b_test 不在其中');
-    assert.strictEqual((await setPlan(U.pm, keyOf(plan0, 'b_trial').id, '2026-12-01', '2026-12-10')).status, 201);
-    // 计划齐了，但总体规划包还没生效：仍被 PACKAGE_NOT_EFFECTIVE 挡住（只剩这一条）；经生产路径生效后放行
-    r = await closeNode(U.pm, req.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', '计划齐了但总体规划包未生效');
-    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['PACKAGE_NOT_EFFECTIVE']);
-    // 项目层：p_overall。修订批三 H-1 之后总体规划包提交前项目层节点计划须齐全，所以「项目层全缺计划」只能出现在总体规划生效之前——先在生效前核对，补齐后才能让总体规划包生效。
-    const overall = keyOf(plan0, 'p_overall');
-    assert.strictEqual((await startNode(U.pm, overall.id)).status, 200);
-    r = await closeNode(U.pm, overall.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', 'p_overall 全部缺计划');
-    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['PLAN_MISSING', 'PACKAGE_NOT_EFFECTIVE']);
-    assert.deepStrictEqual([...r.body.blockers[0].node_ids].sort((a, b) => a - b), projectNodes.map((n) => n.id).sort((a, b) => a - b), '只列项目层节点，不含批次层');
-    for (const n of projectNodes) assert.strictEqual((await setPlan(U.pm, n.id, '2026-11-02', '2026-11-30')).status, 201);
-    await ensureEffective(pid, 'overall');
-    r = await closeNode(U.pm, req.id);
-    assert.strictEqual(r.status, 200, r.text);
-    r = await closeNode(U.pm, overall.id);
-    assert.strictEqual(r.status, 200, r.text);
-    // p_overall 只看项目层：批次层节点都没有计划时，项目层补齐后仍可收口；缺计划的阻塞项只列项目层节点
-    const pid3 = await newProject('outsource');
-    const plan3 = await planOf(U.pm, pid3);
-    const overall3 = keyOf(plan3, 'p_overall');
-    const project3 = plan3.nodes.filter((n) => n.batch_id === null);
-    assert.strictEqual((await startNode(U.pm, overall3.id)).status, 200);
-    r = await closeNode(U.pm, overall3.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', 'p_overall（批次层也全缺计划）');
-    assert.deepStrictEqual([...r.body.blockers[0].node_ids].sort((a, b) => a - b), project3.map((n) => n.id).sort((a, b) => a - b), '阻塞项只列项目层节点，不含批次层');
-    for (const n of project3) assert.strictEqual((await setPlan(U.pm, n.id, '2026-11-02', '2026-11-30')).status, 201);
-    // 项目层补齐、批次层节点仍全部没有计划：缺计划的阻塞项消失，只剩总体规划包未生效这一条——批次层缺计划不阻塞 p_overall
-    r = await closeNode(U.pm, overall3.id);
-    expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', '批次层缺计划不阻塞 p_overall，但总体规划包未生效');
-    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['PACKAGE_NOT_EFFECTIVE'], `批次层节点缺计划不阻塞 p_overall: ${JSON.stringify(r.body.blockers)}`);
-    await ensureEffective(pid3, 'overall'); // 计划之外的另一个前置：总体规划包已生效（H-1：提交前计划齐全，生产路径助手把批次层节点也补成了计划）
-    r = await closeNode(U.pm, overall3.id);
-    assert.strictEqual(r.status, 200, `总体规划包生效后放行: ${r.text}`);
-    // L2 §10：普通节点缺计划仍可收口；开发节点现在有开始门，改用无 G3 的普通自定义节点保留此断言的判别力。
-    const pid2 = await newProject('inhouse');
-    const ordinary = await post(U.pm, `/sysbuild/batches/${await defaultBatchId(pid2)}/nodes`, { name: '无计划普通节点' });
-    assert.strictEqual(ordinary.status, 201, ordinary.text);
-    assert.strictEqual((await startNode(U.pm, ordinary.body.node.id)).status, 200);
-    assert.strictEqual((await closeNode(U.pm, ordinary.body.node.id)).status, 200, '普通节点缺计划不阻塞');
-    // 单批自研：b_req 前置覆盖里程碑节点
-    const req2 = await idOf(pid2, 'b_req');
-    assert.strictEqual((await startNode(U.pm, req2)).status, 200);
-    expectErr(await closeNode(U.pm, req2), 409, 'SYSBUILD_CLOSE_BLOCKED', '自研 b_req');
   });
 
   // ── 7 里程碑 ───────────────────────────────────────────────────────────────────────────────
@@ -512,15 +463,29 @@ function definePlanCases(T) {
     assert.strictEqual((await planOf(U.pm, pid)).nodes.find((n) => n.id === mile).actions.reopen, false);
   });
 
-  // ── 8 重开级联 ─────────────────────────────────────────────────────────────────────────────
-  test('重开级联：同批已收口 A < B < C，重开 A → B、C 退回进行中、closed_at 为空、各一条 node_cascade_reopened；项目层节点与排在 A 之前的节点不受影响；项目层重开只级联项目层', async () => {
+  // 为级联场景加一个已存在节点之前的普通批次节点，保持同批次与排序的判别力。
+  async function prependBatchNode(pid) {
+    const batchId = await defaultBatchId(pid);
+    const plan = await planOf(U.pm, pid);
+    const oldOrder = plan.nodes.filter((node) => node.batch_id === batchId).map((node) => node.id);
+    const created = await post(U.pm, `/sysbuild/batches/${batchId}/nodes`, { name: '前置普通节点', g_stage: 'G1' });
+    assert.strictEqual(created.status, 201, created.text);
+    const first = created.body.node.id;
+    const reordered = await post(U.pm, `/sysbuild/batches/${batchId}/node-order`, { node_ids: [first, ...oldOrder] });
+    assert.strictEqual(reordered.status, 200, reordered.text);
+    return first;
+  }
+
+  // ── 8 单节点重开 ─────────────────────────────────────────────────────────────────────────────
+  test('重开只改当前阶段：同层、不同层与兄弟项目原样', async () => {
     const pid = await newProject('outsource');
+    const earlier = await prependBatchNode(pid);
     const plan = await planOf(U.pm, pid);
     const id = (k) => keyOf(plan, k).id;
     const [design, dev, tst] = [id('b_design'), id('b_dev'), id('b_test')];
-    // 先给两层全部节点写计划（b_req / p_overall 收口前置要求），再让 b_req 排在 A 之前并保持已收口
+    // 先给两层全部节点写计划，再让排在 A 之前的普通节点保持已收口。
     await planAll(pid);
-    await ensureEffective(pid, 'overall'); // C4a 修订批：收口 b_req / p_initiation / p_overall 的内容包前置（生产路径生效）
+    await ensureEffective(pid, 'overall'); // 收口 p_initiation / p_overall 的内容包前置。
     // 预筛 L11：自建兄弟项目，让「级联只限本项目」不靠别的用例遗留的数据——兄弟项目的项目层 p_overall（sort 30）已收口，
     //   项目层节点的 batch_id 都是 NULL，级联 SQL 若丢了 project_id 条件，重开本项目 p_initiation 时会把它也退回。
     const sibling = await newProject('outsource');
@@ -529,7 +494,9 @@ function definePlanCases(T) {
     const sibOverall = await idOf(sibling, 'p_overall');
     assert.strictEqual((await startNode(U.pm, sibOverall)).status, 200);
     assert.strictEqual((await closeNode(U.pm, sibOverall)).status, 200);
-    for (const k of ['b_req', 'b_design', 'b_dev', 'b_test']) {
+    assert.strictEqual((await startNode(U.pm, earlier)).status, 200);
+    assert.strictEqual((await closeNode(U.pm, earlier)).status, 200);
+    for (const k of ['b_design', 'b_dev', 'b_test']) {
       if (k === 'b_dev') await T.confirm.prepareDevStart(pid, id(k));
       assert.strictEqual((await startNode(U.pm, id(k))).status, 200, k);
       assert.strictEqual((await closeNode(U.pm, id(k))).status, 200, `${k} 收口`);
@@ -540,44 +507,46 @@ function definePlanCases(T) {
     // b_uat 保持未开始：级联只动已收口的
     const r = await reopenNode(U.pm, design, '设计返工');
     assert.strictEqual(r.status, 200, r.text);
-    assert.deepStrictEqual(r.body.cascaded_node_ids, [dev, tst]);
-    for (const nid of [design, dev, tst]) {
+    assert.deepStrictEqual(r.body.cascaded_node_ids, []);
+    assert.strictEqual((await nodeRow(dev)).status, 'closed');
+    assert.strictEqual((await nodeRow(tst)).status, 'closed');
+    for (const nid of [design]) {
       const row = await nodeRow(nid);
       assert.strictEqual(row.status, 'in_progress');
       assert.strictEqual(row.closed_at, null);
     }
-    assert.strictEqual((await nodeRow(id('b_req'))).status, 'closed', '排在 A 之前的节点不受影响');
+    assert.strictEqual((await nodeRow(earlier)).status, 'closed', '排在 A 之前的节点不受影响');
     assert.strictEqual((await nodeRow(id('p_initiation'))).status, 'closed', '项目层节点不受影响');
     assert.strictEqual((await nodeRow(id('b_uat'))).status, 'not_started', '未收口的节点不动');
     assert.deepStrictEqual(await payloads(pid, 'node_reopened'), [{ reason: '设计返工' }]);
     const casc = await eventsOf(pid, 'node_cascade_reopened');
-    assert.deepStrictEqual(casc.map((e) => [e.object_id, JSON.parse(e.payload_json)]), [[dev, { cause_node_id: design, reason: '设计返工' }], [tst, { cause_node_id: design, reason: '设计返工' }]]);
-    assert.ok(casc.every((e) => e.object_type === 'node' && e.operator_id === U.pm));
+    assert.deepStrictEqual(casc, []);
     assert.strictEqual((await recordsOf(dev)).filter((x) => x.kind.startsWith('actual_')).length, 2, '级联不写实际记录（只有开始 / 收口各一条；另有一条是 planAll 写的计划）');
     // 重新按顺序收口后，重开中间节点只级联它之后的
-    for (const nid of [design, dev, tst]) assert.strictEqual((await closeNode(U.pm, nid)).status, 200);
+    assert.strictEqual((await closeNode(U.pm, design)).status, 200);
     const r2 = await reopenNode(U.pm, dev, '开发返工');
     assert.strictEqual(r2.status, 200, r2.text);
-    assert.deepStrictEqual(r2.body.cascaded_node_ids, [tst]);
+    assert.deepStrictEqual(r2.body.cascaded_node_ids, []);
+    assert.strictEqual((await nodeRow(tst)).status, 'closed');
     assert.strictEqual((await nodeRow(design)).status, 'closed', '更早的节点不退回');
     // 项目层重开：p_overall（sort 30）已收口 → 重开 p_initiation（sort 10）只级联项目层，批次层已收口节点不动
     assert.strictEqual((await startNode(U.pm, id('p_overall'))).status, 200);
     assert.strictEqual((await closeNode(U.pm, id('p_overall'))).status, 200);
     const r3 = await reopenNode(U.pm, id('p_initiation'), '立项补充');
     assert.strictEqual(r3.status, 200, r3.text);
-    assert.deepStrictEqual(r3.body.cascaded_node_ids, [id('p_overall')]);
+    assert.deepStrictEqual(r3.body.cascaded_node_ids, []);
+    assert.strictEqual((await nodeRow(id('p_overall'))).status, 'closed');
     assert.strictEqual((await nodeRow(design)).status, 'closed', '项目层重开不波及批次层');
-    assert.strictEqual((await nodeRow(id('b_req'))).status, 'closed');
+    assert.strictEqual((await nodeRow(earlier)).status, 'closed');
     assert.strictEqual((await nodeRow(sibOverall)).status, 'closed', '级联只限本项目：兄弟项目的项目层节点不受影响');
     assert.strictEqual((await eventsOf(sibling, 'node_cascade_reopened')).length, 0);
   });
 
-  // ── 预筛 D2：级联范围里有已收口的正式上线里程碑 → 整个重开不发生 ─────────────────────────────────
-  test('重开级联（D2）：下游含已收口的正式上线里程碑 → 409「须先撤销上线」，整个重开不发生（节点 / 事件都不变）；夹具：里程碑直接写成已收口（批次非 live）', async () => {
+  test('重开普通阶段不修改已关闭的里程碑，自身仍受原规则', async () => {
     const pid = await newProject('inhouse');
+    const req = await prependBatchNode(pid);
     await planAll(pid);
-    await ensureEffective(pid, 'overall'); // C4a 修订批：收口 b_req 的内容包前置
-    const req = await idOf(pid, 'b_req');
+    await ensureEffective(pid, 'overall'); // 批次经合并包生效进入 active。
     const dev = await idOf(pid, 'b_dev');
     const mile = await idOf(pid, 'b_golive');
     for (const nid of [req, dev]) {
@@ -588,32 +557,33 @@ function definePlanCases(T) {
     // 夹具：里程碑已收口（正式上线事件在后续提交；这里批次保持 active（合并包生效时由 planning 推进，M-1），不是 live，免得被 live 检查遮蔽）
     await sqlRun("UPDATE sysbuild_nodes SET status = 'closed', opened_at = '2026-10-30 10:00:00', closed_at = '2026-10-30 11:00:00' WHERE id = ?", [mile]);
     const r = await reopenNode(U.pm, req, '需求变化');
-    expectErr(r, 409, 'SYSBUILD_STATE', '下游含已收口里程碑');
-    assert.ok(/正式上线里程碑/.test(r.body.message) && /撤销上线/.test(r.body.message), r.body.message);
-    assert.strictEqual((await nodeRow(req)).status, 'closed', '整个重开不发生：本节点仍已收口');
+    assert.strictEqual(r.status, 200, r.text);
+    assert.strictEqual((await nodeRow(req)).status, 'in_progress');
     assert.strictEqual((await nodeRow(dev)).status, 'closed', '整个重开不发生：中间节点仍已收口');
     assert.strictEqual((await nodeRow(mile)).status, 'closed');
-    assert.strictEqual((await eventsOf(pid, 'node_reopened')).length, 0);
+    assert.strictEqual((await eventsOf(pid, 'node_reopened')).length, 1);
     assert.strictEqual((await eventsOf(pid, 'node_cascade_reopened')).length, 0);
     // 中间节点 dev 排在里程碑之前，重开它同样会级联到里程碑，同样被拦
-    expectErr(await reopenNode(U.pm, dev, '再试'), 409, 'SYSBUILD_STATE', '重开 dev 也在里程碑之前');
+    assert.strictEqual((await reopenNode(U.pm, dev, '只重开开发')).status, 200);
+    expectErr(await reopenNode(U.pm, mile, '不能重开里程碑'), 409, 'SYSBUILD_STATE');
   });
 
   // ── 预筛 D3 → C6a：p_closing 的收口随整体结项实现（对象规则不再拒绝，前置在 closeBlockers；成功路径与项目转入已结项见 sysbuild-api-suite-golive.js）──────────────────────────
-  test('整体验收结项（D3 → C6a）：p_closing 进行中走节点收口端点，结项包未生效且批次未正式上线 → 409 SYSBUILD_CLOSE_BLOCKED（blockers 列出两项）；close 标志只承诺权限与状态（为真），阻塞项单独给；节点与记录不变；项目状态不变', async () => {
+  test('整体验收结项（D3 → C6a）：p_closing 进行中走节点收口端点，结项包未生效且批次未正式上线 → 409 SYSBUILD_CLOSE_BLOCKED（blockers 列出两项）；close 标志只承诺权限与状态（为真），卡片缺项使标志为假；节点与记录不变；项目状态不变', async () => {
     const pid = await newProject('outsource');
     const closing = await idOf(pid, 'p_closing');
+    assert.deepStrictEqual(keyOf(await planOf(U.pm, pid), 'p_closing').close_blockers, [], '只有进行中的节点展示结项阻塞');
     assert.strictEqual((await startNode(U.pm, closing)).status, 200, 'p_closing 可以开始');
     const r = await closeNode(U.pm, closing);
     expectErr(r, 409, 'SYSBUILD_CLOSE_BLOCKED', 'p_closing 收口');
-    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['PACKAGE_NOT_EFFECTIVE', 'BATCH_NOT_LIVE'], '结项包未生效 + 批次未正式上线（项目整体没有未结登记）');
-    assert.ok(r.body.blockers[0].message.includes('结项包'), r.body.blockers[0].message);
-    assert.ok(r.body.blockers[1].message.includes('第 1 批'), r.body.blockers[1].message);
+    assert.deepStrictEqual(r.body.blockers.map((b) => b.code), ['REQUIRED_CARDS_INCOMPLETE'], '结项包未生效 + 批次未正式上线（项目整体没有未结登记）');
+    assert.ok(r.body.blockers[0].message.includes('结项 · 结项确认'), r.body.blockers[0].message);
+    assert.ok(r.body.blockers[0].message.includes('第 1 批'), r.body.blockers[0].message);
     assert.strictEqual((await nodeRow(closing)).status, 'in_progress');
     assert.strictEqual((await recordsOf(closing)).length, 1, '被拒的收口不写 actual_end');
     const cn = (await planOf(U.pm, pid)).nodes.find((n) => n.id === closing);
-    assert.strictEqual(cn.actions.close, true, 'close 标志不并入前置检查（阻塞项单独给）');
-    assert.deepStrictEqual(cn.close_blockers.map((b) => b.code), ['PACKAGE_NOT_EFFECTIVE', 'BATCH_NOT_LIVE'], '读接口的阻塞项与收口端点同一个函数');
+    assert.strictEqual(cn.actions.close, false, '卡片缺项正式阻止收口');
+    assert.deepStrictEqual(cn.close_blockers.map((b) => b.code), ['REQUIRED_CARDS_INCOMPLETE'], '读接口的阻塞项与收口端点同一个函数');
     assert.strictEqual((await sqlGet('SELECT status FROM sysbuild_projects WHERE id = ?', [pid])).status, 'active', '被拒不结项');
     // 其他项目层节点（p_initiation）不受影响（收口它的前置：立项包已生效）
     const init = await idOf(pid, 'p_initiation');
@@ -660,7 +630,7 @@ function definePlanCases(T) {
   // ── 10 取消 ────────────────────────────────────────────────────────────────────────────────
   test('取消：未开始可取消（原因必填）；进行中 409；项目层节点 409；取消后 actions 全 false、改计划 / 改名 409；事件手写核对', async () => {
     const pid = await newProject('outsource');
-    const uat = await idOf(pid, 'b_uat');
+    const uat = await idOf(pid, 'b_test');
     const dev = await idOf(pid, 'b_dev');
     const contract = await idOf(pid, 'p_contract');
     const init = await idOf(pid, 'p_initiation');
@@ -696,15 +666,18 @@ function definePlanCases(T) {
     const pid = await newProject('outsource');
     const batchId = await defaultBatchId(pid);
     const url = `/sysbuild/batches/${batchId}/nodes`;
+    const templateCount = BATCH_TPL.outsource.length;
     const r = await post(U.pm, url, { name: '  数据迁移演练  ', g_stage: 'G3' });
     assert.strictEqual(r.status, 201, r.text);
     const nn = r.body.node;
-    assert.deepStrictEqual([nn.name, nn.g_stage, nn.sort_order, nn.template_key, nn.is_golive_milestone, nn.status, nn.batch_id], ['数据迁移演练', 'G3', 80, null, false, 'not_started', batchId]);
+    assert.deepStrictEqual([nn.name, nn.g_stage, nn.sort_order, nn.template_key, nn.is_golive_milestone, nn.status, nn.batch_id], ['数据迁移演练', 'G3', (templateCount + 1) * 10, null, false, 'not_started', batchId]);
     const evs = await payloads(pid, 'node_created');
     assert.deepStrictEqual(evs[evs.length - 1], { template_key: null, name: '数据迁移演练', g_stage: 'G3', batch_id: batchId, is_golive_milestone: false, source: 'custom' });
     const r2 = await post(U.pm, url, { name: '无环节节点' });
     assert.strictEqual(r2.status, 201, r2.text);
-    assert.deepStrictEqual([r2.body.node.g_stage, r2.body.node.sort_order], [null, 90]);
+    assert.deepStrictEqual([r2.body.node.g_stage, r2.body.node.sort_order], [null, (templateCount + 2) * 10]);
+    const count = async () => (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_nodes WHERE batch_id = ?', [batchId])).n;
+    assert.strictEqual(await count(), templateCount + 2);
     for (const [body, field, label] of [
       [{ name: '   ' }, 'name', '名称空白'], [{}, 'name', '缺名称'], [{ name: 'n'.repeat(61) }, 'name', '名称 61 字'], [{ name: 5 }, 'name', '名称非文本'],
       [{ name: 'x', g_stage: 'G9' }, 'g_stage', 'G9'], [{ name: 'x', g_stage: 'G2+G3' }, 'g_stage', '合并写法不对自定义节点开放'], [{ name: 'x', g_stage: 3 }, 'g_stage', '非文本'], [{ name: 'x', foo: 1 }, 'foo', '多余的键'],
@@ -713,9 +686,10 @@ function definePlanCases(T) {
       expectErr(rr, 400, 'SYSBUILD_INVALID_INPUT', label);
       assert.strictEqual(rr.body.field, field, `${label} 的 field`);
     }
+    assert.strictEqual(await count(), templateCount + 2, '被拒的新增不留行');
     for (const g of ['G0', 'CONTRACT', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7']) assert.strictEqual((await post(U.pm, url, { name: `环节${g}`, g_stage: g })).status, 201, g);
     assert.strictEqual((await post(U.pm, url, { name: 'n'.repeat(60) })).status, 201, '名称 60 字通过');
-    assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_nodes WHERE batch_id = ?', [batchId])).n, 7 + 2 + 9 + 1, '被拒的新增不留行');
+    assert.strictEqual(await count(), templateCount + 2 + 9 + 1, '通过的新增各写一行');
     // 改名
     const nid = nn.id;
     let rn = await patch(U.pm, `/sysbuild/nodes/${nid}`, { name: '  数据迁移（改名）  ' });
@@ -732,7 +706,7 @@ function definePlanCases(T) {
     }
     assert.strictEqual((await patch(U.pm, `/sysbuild/nodes/${await idOf(pid, 'b_trial')}`, { name: '试运行结束（改名）' })).status, 200, '里程碑可改名');
     // 重排：含已取消节点的整批
-    const uat = await idOf(pid, 'b_uat');
+    const uat = await idOf(pid, 'b_test');
     assert.strictEqual((await cancelNode(U.pm, uat, '本批不做')).status, 200);
     const cur = (await sqlAll('SELECT id FROM sysbuild_nodes WHERE batch_id = ? ORDER BY sort_order, id', [batchId])).map((x) => x.id);
     const orderUrl = `/sysbuild/batches/${batchId}/node-order`;
@@ -829,12 +803,18 @@ function definePlanCases(T) {
     assert.strictEqual(closedPlan.body.node.status, 'closed', '补计划不改节点状态');
     assert.strictEqual(closedPlan.body.node.actions.schedule_plan, true);
     // C4a 交接 ②：该节点形成 baseline 改走生产路径（总体规划包提交 + 全部确认，生效时按当前计划形成基线）后，已收口节点不能再改计划
+    const acceptance = await idOf(pid, 'b_uat');
+    assert.strictEqual((await setPlan(U.pm, acceptance, '2026-12-01', '2026-12-09')).status, 201);
     await T.confirm.produceEffectiveOverall(pid);
-    const designBase = await recordsOf(design);
+    assert.strictEqual((await recordsOf(design)).filter((x) => x.kind === 'baseline').length, 0);
+    await T.confirm.acceptEffective(pid, await defaultBatchId(pid));
+    assert.strictEqual((await startNode(U.pm, acceptance)).status, 200);
+    assert.strictEqual((await closeNode(U.pm, acceptance)).status, 200);
+    const designBase = await recordsOf(acceptance);
     assert.deepStrictEqual(designBase.filter((x) => x.kind === 'baseline').map((x) => [x.planned_start, x.planned_end]), [['2026-12-01', '2026-12-09']], '生效时按最后一条草稿计划形成基线');
-    expectErr(await setPlan(U.pm, design, '2026-12-02', '2026-12-10'), 409, 'SYSBUILD_STATE', '已收口且有基线改计划');
-    assert.strictEqual((await planOf(U.pm, pid)).nodes.find((n) => n.id === design).actions.schedule_plan, false);
-    const uat = await idOf(pid, 'b_uat');
+    expectErr(await setPlan(U.pm, acceptance, '2026-12-02', '2026-12-10'), 409, 'SYSBUILD_STATE', '已收口且有基线改计划');
+    assert.strictEqual((await planOf(U.pm, pid)).nodes.find((n) => n.id === acceptance).actions.schedule_plan, false);
+    const uat = await idOf(pid, 'b_test');
     assert.strictEqual((await cancelNode(U.pm, uat, '不做')).status, 200);
     expectErr(await setPlan(U.pm, uat, '2026-12-01', '2026-12-09'), 409, 'SYSBUILD_STATE', '已取消改计划');
   });
@@ -842,14 +822,14 @@ function definePlanCases(T) {
   // ── 13 夹具 baseline 改期 ──────────────────────────────────────────────────────────────────────
   test('baseline 改期（生产路径生效后）：缺原因 400；无证据 400 SYSBUILD_EVIDENCE_REQUIRED；无书面证据原因 < 10 字 400；带暂存附件成功且绑定 owner_type=schedule_record；开发方来源 409；成功后当前计划 = 新值、基线不变、差值正确', async () => {
     const pid = await newProject('outsource');
-    const dev = await idOf(pid, 'b_dev');
-    // C4a 交接 ②：基线经生产路径形成——先写草稿期计划（11-01 ~ 11-20），总体规划包提交（H-1：其余节点的计划由助手补齐）+ 全部确认生效时按它形成基线，此时节点上只有这一条 baseline
+    const dev = await idOf(pid, 'p_closing');
+    // 基线经实际确认路径形成；推迟结项的计划止须提供证据。
     //   （修订批三 H-1 撤销了「生效后首次设计划直接写基线」，所以不能再先生效、后设计划）
     assert.strictEqual((await setPlan(U.pm, dev, '2026-11-01', '2026-11-20')).status, 201);
     await T.confirm.produceEffectiveOverall(pid);
     const url = `/sysbuild/nodes/${dev}/schedule`;
     const plan = (start, end, extra) => post(U.pm, url, Object.assign({ kind: 'plan', planned_start: start, planned_end: end }, extra || {}));
-    let v = keyOf(await planOf(U.pm, pid), 'b_dev');
+    let v = keyOf(await planOf(U.pm, pid), 'p_closing');
     assert.deepStrictEqual([v.baseline, v.current_plan, v.diff_days], [{ start: '2026-11-01', end: '2026-11-20' }, { start: '2026-11-01', end: '2026-11-20' }, 0]);
     // 缺原因
     expectErr(await plan('2026-11-01', '2026-11-25', { no_written_evidence: true, no_evidence_reason: '口头电话确认了本次顺延安排' }), 400, 'SYSBUILD_INVALID_INPUT', '缺原因');
@@ -881,7 +861,7 @@ function definePlanCases(T) {
     const otherPid = await newProject('inhouse');
     const foreign = await addParty(otherPid, '外部门', 'demand');
     const goodEvidence = { no_written_evidence: true, no_evidence_reason: '口头电话确认了本次顺延安排' };
-    expectErr(await plan('2026-11-01', '2026-11-25', Object.assign({ reason: '开发延期', source_party_id: devParty }, goodEvidence)), 409, 'SYSBUILD_STATE', '开发方来源');
+    // C6（R2，甲类）：开发方来源的改期不再要求引用已认可的关键事项（旧版 409 SYSBUILD_STATE 随 R2 取消），不带 dev_key_entry_id 的开发方来源改期成功——断言移到「C6 R2」用例的 R2-ctl-resched-dev-nokey；本用例不再核这一条（避免它写一条记录改变下面的记录数）
     rr = await plan('2026-11-01', '2026-11-25', Object.assign({ reason: '需求变化', source_party_id: foreign }, goodEvidence));
     expectErr(rr, 400, 'SYSBUILD_INVALID_INPUT', '他项目参与方');
     assert.strictEqual(rr.body.field, 'source_party_id');
@@ -896,7 +876,7 @@ function definePlanCases(T) {
     let ev = await payloads(pid, 'node_rescheduled');
     assert.deepStrictEqual(ev[0], {
       record_id: recs[2].id, before: { start: '2026-11-01', end: '2026-11-20' }, after: { start: '2026-11-01', end: '2026-11-25' }, reason: '业务方要求加做一项',
-      source_party_id: demandParty, dev_key_entry_id: null, no_written_evidence: true, no_evidence_reason: '口头电话确认了本次顺延安排', attachment_ids: [],
+      source_party_id: demandParty, no_written_evidence: true, no_evidence_reason: '口头电话确认了本次顺延安排', attachment_ids: [],
     });
     // 成功 2：暂存附件；PM / 信息技术部提出（来源空）
     const att = await stageAttachment(pid, U.pm);
@@ -907,7 +887,7 @@ function definePlanCases(T) {
     assert.deepStrictEqual([recs[3].source_party_id, recs[3].no_written_evidence, recs[3].no_evidence_reason], [null, 0, null]);
     const bind = await sqlGet('SELECT owner_type, owner_id, bound_by FROM sysbuild_attachment_bindings WHERE attachment_id = ?', [att]);
     assert.deepStrictEqual(bind, { owner_type: 'schedule_record', owner_id: recs[3].id, bound_by: U.pm });
-    assert.strictEqual((await eventsOf(pid, 'attachment_bound')).length, 1);
+    assert.strictEqual((await eventsOf(pid, 'attachment_bound')).filter((event) => event.object_id === att).length, 1);
     ev = await payloads(pid, 'node_rescheduled');
     assert.deepStrictEqual(ev[1].attachment_ids, [att]);
     // 他人的暂存附件 / 同一附件重复使用 → 400，记录不留
@@ -922,16 +902,15 @@ function definePlanCases(T) {
     assert.strictEqual(sched.body.records[1].package_version_id > 0, true);
     // 基线不变（至多一条 baseline）
     assert.strictEqual((await sqlGet("SELECT COUNT(*) AS n FROM sysbuild_node_schedule_records WHERE node_id = ? AND kind = 'baseline'", [dev])).n, 1);
-    // 总体规划生效之后新增的节点（尚无基线）写计划同样走改期规则（H-1 / P43：要原因与证据，不写基线；草稿期的写法由「草稿期计划」用例覆盖，完整覆盖见 confirm 套件 H-1 用例）
+    // 总体规划生效后，新增节点先保存初始计划，改期从下一条开始。
     const added = await post(U.pm, `/sysbuild/batches/${await defaultBatchId(pid)}/nodes`, { name: '生效后新增的节点' });
     assert.strictEqual(added.status, 201, added.text);
     const addedId = added.body.node.id;
     const noBase = await setPlan(U.pm, addedId, '2026-11-02', '2026-11-09');
-    expectErr(noBase, 400, 'SYSBUILD_INVALID_INPUT', '尚无基线的新节点写计划缺原因');
-    assert.strictEqual(noBase.body.field, 'reason');
-    const noBaseOk = await setPlan(U.pm, addedId, '2026-11-02', '2026-11-09', Object.assign({ reason: '新增节点排期' }, goodEvidence));
+    assert.strictEqual(noBase.status, 201, noBase.text);
+    const noBaseOk = await setPlan(U.pm, addedId, '2026-11-02', '2026-11-10', { reason: '调整新增节点排期' });
     assert.strictEqual(noBaseOk.status, 201, noBaseOk.text);
-    assert.deepStrictEqual((await recordsOf(addedId)).map((x) => x.kind), ['plan_change'], '尚无基线的节点写计划只写改期式 plan_change，不写 baseline');
+    assert.deepStrictEqual((await recordsOf(addedId)).map((x) => x.kind), ['plan_change', 'plan_change']);
     assert.strictEqual((await payloads(pid, 'node_rescheduled')).length, 3);
   });
 
@@ -1005,7 +984,7 @@ function definePlanCases(T) {
     assert.strictEqual(r.status, 200, r.text);
     assert.strictEqual(r.body.node.actual_end, day, '再收口取新值');
     // 已取消
-    const uat = await idOf(pid, 'b_uat');
+    const uat = await idOf(pid, 'b_test');
     assert.strictEqual((await cancelNode(U.pm, uat, '不做')).status, 200);
     expectErr(await post(U.pm, `/sysbuild/nodes/${uat}/schedule`, { kind: 'actual_correct', corrects: 'actual_start', actual_date: '2026-10-01', reason: '错' }), 409, 'SYSBUILD_STATE', '已取消');
   });
@@ -1185,11 +1164,10 @@ function definePlanCases(T) {
     const mDev = await addMember(pid, U.m1, { party: devParty });
     const mDemand = await addMember(pid, U.m2, { party: demandParty });
     const mGone = await addMember(pid, U.cand, { party: devParty, removed: true });
-    const mPending = await addMember(pid, U.cand2, { party: devParty, pending: true });
     const otherPid = await newProject('inhouse');
     const otherDev = await addParty(otherPid, '别家开发', 'dev');
     const mOther = await addMember(otherPid, U.x1, { party: otherDev });
-    for (const [mid, label] of [[mDemand, '需求方成员'], [mGone, '已移出'], [mPending, '待接受'], [mOther, '他项目成员'], [99999999, '不存在']]) {
+    for (const [mid, label] of [[mDemand, '需求方成员'], [mGone, '已移出'], [mOther, '他项目成员'], [99999999, '不存在']]) {
       expectErr(await patch(U.pm, url, { dev_assignee_member_id: mid }), 409, 'SYSBUILD_STATE', `承接人 ${label}`);
     }
     assert.strictEqual((await sqlGet('SELECT dev_assignee_member_id AS d FROM sysbuild_batches WHERE id = ?', [batchId])).d, null);
@@ -1210,59 +1188,99 @@ function definePlanCases(T) {
     assert.deepStrictEqual((await payloads(pid, 'batch_updated')).pop(), { before: { name: '一期首批', dev_assignee_member_id: mDev }, after: { name: '两项一起', dev_assignee_member_id: null } });
     assert.strictEqual((await sqlGet('SELECT dev_assignee_member_id AS d FROM sysbuild_batches WHERE id = ?', [batchId])).d, null, '可置空');
     assert.strictEqual((await planOf(U.pm, pid)).batches[0].dev_assignee_active, false, '没有承接人时为 false');
-    // 已转出的批次不能再改批次信息（夹具：转出状态在后续提交才产生；本批节点的全部写动作由「批次冻结」用例逐项核对）
-    await sqlRun("UPDATE sysbuild_batches SET status = 'transferred', transfer_change_id = 1 WHERE id = ?", [batchId]);
-    expectErr(await patch(U.pm, url, { name: '转出后改名' }), 409, 'SYSBUILD_STATE', '已转出');
+    await sqlRun("UPDATE sysbuild_batches SET status = 'live' WHERE id = ?", [batchId]);
+    assert.strictEqual((await patch(U.pm, url, { name: '已上线后改名' })).status, 200);
   });
 
-  // ── 预筛 D4 / L2：批次已转出 / 被替代 → 本批节点的全部写动作拒绝 ─────────────────────────────────
-  test('批次冻结（夹具：转出 / 被替代状态直接写库）：transferred 与 superseded 的批次，批次改名与本批节点的开始、收口、重开、取消、改名、新增、重排、改计划、更正实际全部 409，actions 全 false，库不变', async () => {
-    for (const frozen of ['transferred', 'superseded']) {
-      const pid = await newProject('outsource');
-      const batchId = await defaultBatchId(pid);
-      const closedNode = await idOf(pid, 'b_design');
-      const running = await idOf(pid, 'b_dev');
-      const idle = await idOf(pid, 'b_uat');
-      const named = await idOf(pid, 'b_test');
-      assert.strictEqual((await startNode(U.pm, closedNode)).status, 200);
-      assert.strictEqual((await closeNode(U.pm, closedNode)).status, 200);
-      await T.confirm.prepareDevStart(pid, running);
-      assert.strictEqual((await startNode(U.pm, running)).status, 200);
-      if (frozen === 'transferred') await sqlRun("UPDATE sysbuild_batches SET status = 'transferred', transfer_change_id = 1 WHERE id = ?", [batchId]);
-      else await sqlRun("UPDATE sysbuild_batches SET status = 'superseded', superseded_by = ? WHERE id = ?", [batchId + 100000, batchId]);
-      const order = (await sqlAll('SELECT id FROM sysbuild_nodes WHERE batch_id = ? ORDER BY sort_order, id', [batchId])).map((r) => r.id);
-      const before = await sqlAll('SELECT id, name, status, sort_order FROM sysbuild_nodes WHERE batch_id = ? ORDER BY id', [batchId]);
-      const recBefore = (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_node_schedule_records WHERE node_id IN (SELECT id FROM sysbuild_nodes WHERE batch_id = ?)', [batchId])).n;
-      const calls = [
-        ['批次改名', () => patch(U.pm, `/sysbuild/batches/${batchId}`, { name: '冻结后改名' })],
-        ['开始', () => startNode(U.pm, idle)],
-        ['收口', () => closeNode(U.pm, running)],
-        ['重开', () => reopenNode(U.pm, closedNode, '冻结后重开')],
-        ['取消', () => cancelNode(U.pm, idle, '冻结后取消')],
-        ['改名', () => patch(U.pm, `/sysbuild/nodes/${named}`, { name: '冻结后改名' })],
-        ['新增节点', () => post(U.pm, `/sysbuild/batches/${batchId}/nodes`, { name: '冻结后新增' })],
-        ['重排', () => post(U.pm, `/sysbuild/batches/${batchId}/node-order`, { node_ids: [...order].reverse() })],
-        ['改计划', () => setPlan(U.pm, idle, '2026-11-02', '2026-11-09')],
-        ['更正实际开始', () => post(U.pm, `/sysbuild/nodes/${running}/schedule`, { kind: 'actual_correct', corrects: 'actual_start', actual_date: '2026-10-01', reason: '冻结后更正' })],
-        ['更正实际结束', () => post(U.pm, `/sysbuild/nodes/${closedNode}/schedule`, { kind: 'actual_correct', corrects: 'actual_end', actual_date: '2026-10-05', reason: '冻结后更正' })],
-      ];
-      for (const [label, fn] of calls) expectErr(await fn(), 409, 'SYSBUILD_STATE', `${frozen} ${label}`);
-      assert.deepStrictEqual(await sqlAll('SELECT id, name, status, sort_order FROM sysbuild_nodes WHERE batch_id = ? ORDER BY id', [batchId]), before, `${frozen}：被拒的请求不改任何节点`);
-      assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_node_schedule_records WHERE node_id IN (SELECT id FROM sysbuild_nodes WHERE batch_id = ?)', [batchId])).n, recBefore, `${frozen}：被拒的请求不留排期记录`);
-      const plan = await planOf(U.pm, pid);
-      for (const n of plan.nodes.filter((x) => x.batch_id === batchId)) {
-        assert.deepStrictEqual(NODE_FLAGS.map((f) => n.actions[f]), NODE_FLAGS.map(() => false), `${frozen} ${n.template_key} actions 全 false`);
-      }
-      assert.deepStrictEqual(plan.batches[0].actions, { update: false, add_node: false, reorder: false, golive: false, revoke_golive: false });
-      // 项目层节点不受批次冻结影响
-      assert.strictEqual((await startNode(U.pm, await idOf(pid, 'p_initiation'))).status, 200, `${frozen}：项目层节点照常`);
+  // 已上线批次：用私有夹具命中未开始、进行中节点上的批次限制，再走真实上线补验已收口节点。
+  test('C8 已上线批次动作矩阵：批次与节点自身限制分别生效', async () => {
+    const pid = await newProject('outsource');
+    const bid = await defaultBatchId(pid);
+    const closed = await idOf(pid, 'b_design');
+    const idle = await idOf(pid, 'b_golive');
+    const running = await idOf(pid, 'b_dev');
+    assert.strictEqual((await startNode(U.pm, closed)).status, 200);
+    assert.strictEqual((await closeNode(U.pm, closed)).status, 200);
+    await T.confirm.prepareDevStart(pid, running);
+    assert.strictEqual((await startNode(U.pm, running)).status, 200);
+    await sqlRun("UPDATE sysbuild_batches SET status = 'live' WHERE id = ?", [bid]);
+    const plan = await planOf(U.pm, pid);
+    const batch = plan.batches.find((b) => b.id === bid);
+    assert.deepStrictEqual([batch.actions.update, batch.actions.add_node, batch.actions.reorder], [true, false, false]);
+    assert.strictEqual(plan.nodes.find((n) => n.id === closed).actions.reopen, false);
+    assert.strictEqual(plan.nodes.find((n) => n.id === idle).actions.cancel, false);
+    const order = plan.nodes.filter((n) => n.batch_id === bid).map((n) => n.id).reverse();
+    const stateOf = async (batchId) => ({
+      nodes: await sqlAll('SELECT id, name, status, sort_order FROM sysbuild_nodes WHERE batch_id = ? ORDER BY id', [batchId]),
+      scheduleCount: (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_node_schedule_records WHERE node_id IN (SELECT id FROM sysbuild_nodes WHERE batch_id = ?)', [batchId])).n,
+    });
+    const before = await stateOf(bid);
+    const blocked = [
+      await reopenNode(U.pm, closed, '仍未结束'),
+      await cancelNode(U.pm, idle, '取消普通上线阶段'),
+      await post(U.pm, `/sysbuild/batches/${bid}/nodes`, { name: '新增节点' }),
+      await post(U.pm, `/sysbuild/batches/${bid}/node-order`, { node_ids: order }),
+    ];
+    for (const result of blocked) {
+      expectErr(result, 409, 'SYSBUILD_STATE');
+      assert.ok(result.body.message.includes('批次已正式上线'), result.text);
     }
+    assert.deepStrictEqual(await stateOf(bid), before, '被拒的动作没有修改节点或排期');
+    assert.deepStrictEqual([plan.nodes.find((n) => n.id === idle).actions.rename,
+      plan.nodes.find((n) => n.id === idle).actions.schedule_plan,
+      plan.nodes.find((n) => n.id === running).actions.correct_actual_start], [true, true, true]);
+    assert.strictEqual((await patch(U.pm, `/sysbuild/nodes/${idle}`, { name: '调整测试名称' })).status, 200);
+    assert.strictEqual((await setPlan(U.pm, idle, '2026-11-02', '2026-11-09')).status, 201);
+    assert.strictEqual((await post(U.pm, `/sysbuild/nodes/${running}/schedule`, { kind: 'actual_correct', corrects: 'actual_start', actual_date: '2026-10-01', reason: '更正开工日期' })).status, 201);
+    const cancelled = await idOf(pid, 'b_test');
+    await sqlRun("UPDATE sysbuild_nodes SET status = 'cancelled' WHERE id = ?", [cancelled]);
+    const denied = await patch(U.pm, `/sysbuild/nodes/${cancelled}`, { name: '不应改名' });
+    expectErr(denied, 409, 'SYSBUILD_STATE');
+    assert.strictEqual(denied.body.message, '已取消的节点不能改名');
+
+    const actualProject = await newProject('inhouse');
+    await T.confirm.produceEffectiveOverall(actualProject);
+    const actualBatch = await defaultBatchId(actualProject);
+    await T.confirm.readyForGolive(actualProject, actualBatch);
+    await T.confirm.productionGolive(actualBatch);
+    const actualPlan = await planOf(U.pm, actualProject);
+    const actualBatchView = actualPlan.batches.find((b) => b.id === actualBatch);
+    assert.deepStrictEqual([actualBatchView.live, actualBatchView.actions.add_node, actualBatchView.actions.reorder], [true, false, false]);
+    const finished = keyOf(actualPlan, 'b_dev');
+    assert.strictEqual(finished.status, 'closed');
+    assert.strictEqual(finished.actions.reopen, false);
+    const realOrder = actualPlan.nodes.filter((n) => n.batch_id === actualBatch).map((n) => n.id).reverse();
+    const liveBefore = await stateOf(actualBatch);
+    const liveRequests = [
+      [() => reopenNode(U.pm, finished.id, '线上节点返工'), '批次已正式上线，本批节点不能重开，须先由 admin 撤销上线'],
+      [() => post(U.pm, '/sysbuild/batches/' + actualBatch + '/nodes', { name: '上线后新增节点' }), '批次已正式上线，不能新增节点'],
+      [() => post(U.pm, '/sysbuild/batches/' + actualBatch + '/node-order', { node_ids: realOrder }), '批次已正式上线，不能调整节点顺序'],
+    ];
+    for (const [send, message] of liveRequests) {
+      const rejected = await send();
+      expectErr(rejected, 409, 'SYSBUILD_STATE');
+      assert.strictEqual(rejected.body.message, message);
+      assert.deepStrictEqual(await stateOf(actualBatch), liveBefore);
+    }
+    assert.deepStrictEqual([finished.actions.rename, finished.actions.schedule_plan, finished.actions.correct_actual_end], [true, true, true]);
+    assert.strictEqual((await patch(U.pm, '/sysbuild/nodes/' + finished.id, { name: '上线后调整阶段名称' })).status, 200);
+    const noBaseline = await stateOf(actualBatch);
+    const reschedule = await setPlan(U.pm, finished.id, '2026-11-03', '2026-11-13');
+    expectErr(reschedule, 400, 'SYSBUILD_INVALID_INPUT');
+    assert.strictEqual(reschedule.body.field, 'reason');
+    assert.strictEqual(finished.has_baseline, false);
+    assert.deepStrictEqual(await stateOf(actualBatch), noBaseline);
+    const correction = await post(U.pm, '/sysbuild/nodes/' + finished.id + '/schedule', {
+      kind: 'actual_correct', corrects: 'actual_end', actual_date: finished.actual_start, reason: '上线后更正阶段结束日期',
+    });
+    assert.strictEqual(correction.status, 201, correction.text);
+    assert.strictEqual(correction.body.node.actual_end, finished.actual_start);
   });
 
   // ── 预筛 D6：草稿期计划的标记 ────────────────────────────────────────────────────────────────
   test('草稿期标记（D6，生产路径生效形成 baseline）：排期记录的 is_draft_plan = 写入时节点尚无 baseline；基线形成后的改期与基线本身不是草稿期；事件 node_plan_set 标 draft、node_rescheduled 不带', async () => {
     const pid = await newProject('outsource');
-    const nid = await idOf(pid, 'b_test');
+    const nid = await idOf(pid, 'b_uat');
     const url = `/sysbuild/nodes/${nid}/schedule`;
     assert.strictEqual((await setPlan(U.pm, nid, '2026-11-02', '2026-11-10')).status, 201);
     assert.strictEqual((await setPlan(U.pm, nid, '2026-11-03', '2026-11-12', { reason: '顺延一天' })).status, 201);
@@ -1371,7 +1389,7 @@ function definePlanCases(T) {
     const okGoal = await api(U.pm, 'PATCH', `/sysbuild/projects/${pid}`, { goal: OK_TEXT });
     assert.strictEqual(okGoal.status, 200, okGoal.text);
     assert.strictEqual(okGoal.body.project.goal, OK_TEXT);
-    const okParty = await post(U.pm, `/sysbuild/projects/${pid}/parties`, { side: 'demand', name: '甲\n乙' });
+    const okParty = await post(U.pm, `/sysbuild/projects/${pid}/parties`, { side: 'demand', name: '甲\n乙', leader_user_id: U.fixtureLeader, representative_user_id: U.fixtureRepresentative });
     assert.strictEqual(okParty.status, 201, okParty.text);
   });
 
@@ -1386,16 +1404,16 @@ function definePlanCases(T) {
     // 触发器只在本用例的 try 内存在；让 p_closing（项目层最后一个节点）写入失败，此时项目 / 成员 / 批次 / 前面的节点都已写入同一事务。
     await sqlRun("CREATE TRIGGER trg_c3a_atomic_probe BEFORE INSERT ON sysbuild_nodes WHEN NEW.template_key = 'p_closing' BEGIN SELECT RAISE(ABORT, 'c3a atomic probe'); END", []);
     try {
-      const r = await post(U.pm, '/sysbuild/projects', { system_name: name, build_type: 'inhouse' });
+      const r = await post(U.pm, '/sysbuild/projects', { system_name: name, build_type: 'inhouse', ...T.fixturePeople() });
       assert.strictEqual(r.status, 500, `带出结构失败应整体失败: ${r.text}`);
       assert.deepStrictEqual(await counts(), before, '整个建项回滚：项目 / 成员 / 批次 / 节点 / 事件行数都不变');
       assert.strictEqual((await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_projects WHERE system_name = ?', [name])).n, 0);
     } finally {
       await sqlRun('DROP TRIGGER IF EXISTS trg_c3a_atomic_probe', []);
     }
-    const ok = await post(U.pm, '/sysbuild/projects', { system_name: name, build_type: 'inhouse' });
+    const ok = await post(U.pm, '/sysbuild/projects', { system_name: name, build_type: 'inhouse', ...T.fixturePeople() });
     assert.strictEqual(ok.status, 201, ok.text);
-    assert.strictEqual((await planOf(U.pm, ok.body.project.id)).nodes.length, 3 + 3, '撤掉触发器后结构完整（自研 3 个项目层 + 3 个批次层）');
+    assert.strictEqual((await planOf(U.pm, ok.body.project.id)).nodes.length, 3 + 2, '撤掉触发器后结构完整（自研 3 个项目层 + 2 个批次层）');
   });
 
   // ── 17 actions 同源 ────────────────────────────────────────────────────────────────────────
@@ -1404,11 +1422,11 @@ function definePlanCases(T) {
     for (const projectStatus of ['active', 'paused']) {
       const pid = await newProject('outsource');
       await planAll(pid);
-      await seedEffectivePackagesFixture(pid); // 收口 b_req / p_initiation 的内容包前置（夹具）
+      await seedEffectivePackagesFixture(pid); // 收口 p_initiation 的内容包前置（夹具）。
       const plan = await planOf(U.pm, pid);
       const id = (k) => keyOf(plan, k).id;
-      // 造出各种状态：b_req 已收口、b_design 进行中、b_dev 已取消、b_uat 未开始、b_test 已收口、b_trial 进行中（里程碑）、p_initiation 已收口、p_contract 未开始
-      for (const k of ['b_req', 'b_test', 'p_initiation']) { assert.strictEqual((await startNode(U.pm, id(k))).status, 200, k); assert.strictEqual((await closeNode(U.pm, id(k))).status, 200, `${k} 收口`); }
+      // b_golive、b_test、p_initiation 已收口，b_design 进行中，b_dev 已取消，b_uat、p_contract 未开始，里程碑 b_trial 进行中。
+      for (const k of ['b_golive', 'b_test', 'p_initiation']) { assert.strictEqual((await startNode(U.pm, id(k))).status, 200, k); assert.strictEqual((await closeNode(U.pm, id(k))).status, 200, `${k} 收口`); }
       for (const k of ['b_design', 'b_trial']) assert.strictEqual((await startNode(U.pm, id(k))).status, 200, k);
       assert.strictEqual((await cancelNode(U.pm, id('b_dev'), '不做')).status, 200);
       if (projectStatus === 'paused') assert.strictEqual((await setStatus(pid, 'paused')).status, 200);
@@ -1457,6 +1475,124 @@ function definePlanCases(T) {
       assert.strictEqual((await post(U.pm, `/sysbuild/batches/${batchId}/node-order`, { node_ids: [...cur].reverse() })).status === 200, b.actions.reorder, 'reorder');
     }
   });
+
+  // ═══════════════════════ C6 新增（生效清单 4.3 第 1 条）：R2 排计划与改期不收 dev_key_entry_id ═══════════════════════
+  //   先采集后汇总（照 4.3 采集规则）：每个请求格记 { 请求标签、HTTP 状态、业务码、field、message、响应键集合 } 与该项目 sysbuild_node_schedule_records 增量，不预先断言状态码；汇总阶段按标签逐格断言。
+  //   请求集合：R2 原 23 个 + 缺 / 非法 kind 带键 14 个（R2K-*）+ 身份格 36 个（R2ID-*）= 73（另 4 个 actual_correct 格 RC12-*，单列）。
+  test(`${T_C6_R2}——键出现即拒（含 null、不看值），先于 kind、日期字段、可见性与权限；开发方来源不带键的改期 201（甲类）；被拒请求不落改期记录`, async () => {
+    const C = T.confirm;
+    // ── 夹具 ──
+    const mkModeProject = async (resched) => {
+      const pid = await newProject('outsource');
+      const dev = await idOf(pid, 'b_dev');
+      const demandParty = await C.seedParty(pid, '需求部门', U.own, U.del);
+      if (resched) {
+        await planAll(pid);
+        await ensureEffective(pid, 'overall'); // 总体规划生效后进入改期式写入（原因必填、方向类证据）；生效时按各节点当前计划形成基线
+      }
+      const devParty = await addParty(pid, '开发商', 'dev');
+      const mx1 = await addMember(pid, U.x1, { party: devParty });
+      await addAppointment(devParty, mx1, 'active');
+      await addMember(pid, U.x3, { party: devParty });
+      await addMember(pid, U.m1, { party: demandParty.party });
+      return { pid, dev, demand: demandParty.party, devParty };
+    };
+    const draft = await mkModeProject(false);
+    const rs = await mkModeProject(true);
+    const recCount = async (s) => (await sqlGet('SELECT COUNT(*) AS n FROM sysbuild_node_schedule_records WHERE node_id IN (SELECT id FROM sysbuild_nodes WHERE project_id = ?)', [s.pid])).n;
+    const EVI = { no_written_evidence: true, no_evidence_reason: '口头电话确认了本次顺延安排' };
+    const REC = {};
+    const send = async (label, s, uid, body, nodeId) => {
+      const before = await recCount(s);
+      const r = await post(uid, `/sysbuild/nodes/${nodeId || s.dev}/schedule`, body);
+      REC[label] = { r, delta: (await recCount(s)) - before, status: r.status, code: r.body && r.body.code, field: r.body && r.body.field, message: r.body && r.body.message, keys: Object.keys(r.body || {}).sort() };
+    };
+    const drf = (extra) => Object.assign({ kind: 'plan', planned_start: '2026-11-02', planned_end: '2027-01-11' }, extra || {});
+    const rsc = (extra) => Object.assign({ kind: 'plan', planned_start: '2026-11-03', planned_end: '2026-12-31', reason: '客户方要求顺延' }, EVI, extra || {});
+    const KEY_VAL = 7; // 有效编号取非 1 的值（D 批 -lit1 格另用字面编号 1，L-6）
+    // ① 键出现即拒、不看值
+    await send('R2-3a', draft, U.pm, drf({ dev_key_entry_id: null }));
+    await send('R2-3b', rs, U.pm, rsc({ source_party_id: rs.demand, dev_key_entry_id: null }));
+    await send('R2-3c', rs, U.pm, rsc({ dev_key_entry_id: null }));
+    await send('R2-3d', rs, U.pm, rsc({ source_party_id: rs.devParty, dev_key_entry_id: null }));
+    await send('R2-3e', draft, U.pm, drf({ dev_key_entry_id: KEY_VAL }));
+    await send('R2-2', rs, U.pm, rsc({ source_party_id: rs.devParty, dev_key_entry_id: KEY_VAL }));
+    for (const [tag, v] of [['empty', ''], ['zero', 0], ['abc', 'abc']]) {
+      await send(`R2-4-draft-${tag}`, draft, U.pm, drf({ dev_key_entry_id: v }));
+      for (const [src, sp] of [['dev', rs.devParty], ['demand', rs.demand], ['none', null]]) await send(`R2-4-resched-${src}-${tag}`, rs, U.pm, rsc(Object.assign({ dev_key_entry_id: v }, sp === null ? {} : { source_party_id: sp })));
+    }
+    // ② 先于其他字段校验：开始晚于结束 + 键，先报键
+    await send('R2-3f-null', draft, U.pm, drf({ planned_start: '2027-02-01', planned_end: '2027-01-11', dev_key_entry_id: null }));
+    await send('R2-3f-valid', draft, U.pm, drf({ planned_start: '2027-02-01', planned_end: '2027-01-11', dev_key_entry_id: KEY_VAL }));
+    // ③ 保留（对照）：不带键成功
+    await send('R2-ctl-draft-nokey', draft, U.pm, drf());
+    await send('R2-ctl-resched-demand-nokey', rs, U.pm, rsc({ source_party_id: rs.demand }));
+    // ④ 甲类 R2-1：开发方来源不带键 201（旧 409）
+    const rsDevBefore = await recCount(rs);
+    await send('R2-ctl-resched-dev-nokey', rs, U.pm, rsc({ planned_end: '2026-12-30', source_party_id: rs.devParty }));
+    REC.devRow = await sqlGet('SELECT source_party_id FROM sysbuild_node_schedule_records WHERE id = ?', [REC['R2-ctl-resched-dev-nokey'].r.body.record_id || 0]);
+    REC.devEv = (await payloads(rs.pid, 'node_rescheduled')).filter((p) => p.record_id === REC['R2-ctl-resched-dev-nokey'].r.body.record_id); // 193-M1：按 record_id 精确取本格事件，不取项目最后一条（漏发时会误取前一格需求方改期的事件）
+    REC.devBeforeN = rsDevBefore;
+    // ⑤ kind=actual_correct 带该键同样先被拒（旧值实采 RC12-actual-correct-*）
+    const reqNode = await idOf(rs.pid, 'p_initiation');
+    assert.strictEqual((await startNode(U.pm, reqNode)).status, 200, '夹具：立项节点开工（actual_correct 对照需要已开始的节点）');
+    const today0 = await serverToday();
+    const ac = (extra) => Object.assign({ kind: 'actual_correct', corrects: 'actual_start', actual_date: addDays(today0, -1), reason: '更正开始日期' }, extra || {});
+    await send('RC12-actual-correct-valuekey', rs, U.pm, ac({ dev_key_entry_id: KEY_VAL }), reqNode);
+    await send('RC12-actual-correct-nullkey', rs, U.pm, ac({ dev_key_entry_id: null }), reqNode);
+    await send('RC12-actual-correct-badbody', rs, U.pm, ac({ corrects: 'bogus', dev_key_entry_id: KEY_VAL }), reqNode);
+    await send('RC12-actual-correct-ctl', rs, U.pm, ac(), reqNode);
+    // ⑦ 缺 / 非法 kind 时键检查先于 kind 校验（R2K-*，每模式 7 格：不带 kind 带有效编号 / 字面编号 1 / null、kind: xyz 带 null / 有效编号、两个不带键的对照）
+    for (const [mode, s, build] of [['draft', draft, drf], ['resched', rs, rsc]]) {
+      const noKind = (extra) => { const b = build(extra); delete b.kind; return b; };
+      await send(`R2K-${mode}-nokind-key-valid`, s, U.pm, noKind({ dev_key_entry_id: KEY_VAL }));
+      await send(`R2K-${mode}-nokind-key-lit1`, s, U.pm, noKind({ dev_key_entry_id: 1 }));
+      await send(`R2K-${mode}-nokind-key-null`, s, U.pm, noKind({ dev_key_entry_id: null }));
+      await send(`R2K-${mode}-xyz-key-null`, s, U.pm, build({ kind: 'xyz', dev_key_entry_id: null }));
+      await send(`R2K-${mode}-xyz-key-valid`, s, U.pm, build({ kind: 'xyz', dev_key_entry_id: KEY_VAL }));
+      await send(`R2K-${mode}-nokind-nokey`, s, U.pm, noKind());
+      await send(`R2K-${mode}-xyz-nokey`, s, U.pm, build({ kind: 'xyz' }));
+    }
+    // ⑧ 身份格（R2ID-*）：6 个身份 × 草稿期 / 改期式 × 带键（null / 有效编号）+ 不带键对照
+    const IDS = [['out', U.out], ['ro', U.ro], ['m1', U.m1], ['x3', U.x3], ['own', U.own], ['x1', U.x1]];
+    for (const [mode, s, build] of [['draft', draft, drf], ['resched', rs, rsc]]) {
+      for (const [who, uid] of IDS) {
+        await send(`R2ID-${mode}-${who}-null`, s, uid, build({ dev_key_entry_id: null }));
+        await send(`R2ID-${mode}-${who}-valid`, s, uid, build({ dev_key_entry_id: KEY_VAL }));
+        await send(`R2ID-${mode}-${who}-nokey`, s, uid, build());
+      }
+    }
+    // ── 汇总 ──
+    const fails = [];
+    const c = (label, fn) => { try { fn(); } catch (e) { fails.push(`[${label}] ${String(e.message).split('\n')[0].slice(0, 300)}`); } };
+    const KEY_REJECT = (label) => c(label, () => {
+      const r = REC[label];
+      assert.deepStrictEqual([r.status, r.code, r.field, r.message], [400, 'SYSBUILD_INVALID_INPUT', 'dev_key_entry_id', '不支持的字段 dev_key_entry_id'], `${label}: ${r.r.text}`);
+      assert.deepStrictEqual(r.keys, ['code', 'field', 'message']);
+      assert.strictEqual(r.delta, 0, '被拒不落改期记录');
+    });
+    for (const l of ['R2-3a', 'R2-3b', 'R2-3c', 'R2-3d', 'R2-3e', 'R2-2', 'R2-3f-null', 'R2-3f-valid']) KEY_REJECT(l);
+    for (const tag of ['empty', 'zero', 'abc']) { KEY_REJECT(`R2-4-draft-${tag}`); for (const src of ['dev', 'demand', 'none']) KEY_REJECT(`R2-4-resched-${src}-${tag}`); }
+    for (const l of ['R2-ctl-draft-nokey', 'R2-ctl-resched-demand-nokey']) c(l, () => { assert.strictEqual(REC[l].status, 201, REC[l].r.text); assert.deepStrictEqual(REC[l].keys, ['node', 'record_id']); assert.strictEqual(REC[l].delta, 1); });
+    c('R2-ctl-resched-dev-nokey（甲类：旧 409，新 201）', () => {
+      const r = REC['R2-ctl-resched-dev-nokey']; assert.strictEqual(r.status, 201, r.r.text); assert.strictEqual(r.delta, 1);
+      assert.deepStrictEqual(REC.devRow, { source_party_id: rs.devParty }, '记录行的来源方是请求指定的开发方参与方');
+      assert.strictEqual(REC.devEv.length, 1, '本格改期恰发一条 node_rescheduled 事件');
+      assert.strictEqual(REC.devEv[0].source_party_id, rs.devParty, '事件 payload 的 source_party_id = 请求的开发方参与方');
+      assert.ok(!('dev_key_entry_id' in REC.devEv[0]), '事件 node_rescheduled 的 payload 无该键');
+    });
+    for (const l of ['RC12-actual-correct-valuekey', 'RC12-actual-correct-nullkey', 'RC12-actual-correct-badbody']) KEY_REJECT(l);
+    c('RC12-actual-correct-ctl（日期更正 201 对照，增量 +1）', () => { assert.strictEqual(REC['RC12-actual-correct-ctl'].status, 201, REC['RC12-actual-correct-ctl'].r.text); assert.strictEqual(REC['RC12-actual-correct-ctl'].delta, 1); });
+    for (const mode of ['draft', 'resched']) {
+      for (const k of ['nokind-key-valid', 'nokind-key-lit1', 'nokind-key-null', 'xyz-key-null', 'xyz-key-valid']) KEY_REJECT(`R2K-${mode}-${k}`);
+      for (const k of ['nokind-nokey', 'xyz-nokey']) c(`R2K-${mode}-${k}`, () => { const r = REC[`R2K-${mode}-${k}`]; assert.deepStrictEqual([r.status, r.code, r.field, r.message], [400, 'SYSBUILD_INVALID_INPUT', 'kind', 'kind 必须是 plan 或 actual_correct']); assert.strictEqual(r.delta, 0); });
+      for (const [who] of IDS) {
+        KEY_REJECT(`R2ID-${mode}-${who}-null`); KEY_REJECT(`R2ID-${mode}-${who}-valid`);
+        c(`R2ID-${mode}-${who}-nokey`, () => { const r = REC[`R2ID-${mode}-${who}-nokey`]; assert.deepStrictEqual([r.status, r.code, r.keys], who === 'out' ? [404, 'SYSBUILD_NOT_FOUND', ['code', 'message']] : [403, 'SYSBUILD_FORBIDDEN', ['code', 'message']]); assert.strictEqual(r.delta, 0); });
+      }
+    }
+    assert.strictEqual(fails.length, 0, fails.join(' ‖ '));
+  });
 }
 
 // ── 变异（锚点必须在被测文件副本里恰好出现一次）──────────────────────────────────────────────────
@@ -1473,26 +1609,11 @@ const PLAN_MUTATIONS = [
   { id: 'C3a OP_KIND 把 node_close 记成 maintain（暂停仍可收口）', expect: ['rules：OP_KIND', '暂停：'], edits: [{ file: 'rules.js', from: "  node_close: 'close',", to: "  node_close: 'maintain'," }] },
   { id: 'C3a 里程碑收口检查删掉', expect: ['里程碑：'], edits: [{ file: 'rules.js', from: "return t.isMilestone ? '正式上线里程碑以上线事件收口，不能走节点收口' : null;", to: 'return null;' }] },
   // C3a 原变异「p_closing 收口拦截删掉（D3）」随 C6a 去掉（对象规则不再拒绝 p_closing）；换成两条：结项包前置 / 批次上线前置被删，该用例判红
-  { id: 'C6a p_closing 收口前置：批次未正式上线也放行', expect: ['整体验收结项'], edits: [{ file: 'plan.js', from: 'if (cl.notLive.length > 0) out.push(', to: 'if (false) out.push(' }] },
-  { id: 'C6a p_closing 收口前置：结项包未生效也放行', expect: ['整体验收结项'], edits: [{ file: 'plan.js', from: "else if (node.template_key === 'p_closing' && !(f.closing && typeof f.closing.closingEffectiveAt === 'string')) pkgMessage =", to: "else if (false) pkgMessage =" }] },
+  {"id":"C6a p_closing 收口前置：批次未正式上线也放行","expect":["B3.2 结项保留未被卡片覆盖的批次阻塞"],"edits":[{"file":"plan.js","from":"if (unlistedBatches.length > 0) out.push(","to":"if (false) out.push("}]},
+  { id: 'C6a p_closing 收口前置：结项包未生效也放行', expect: ['C6a 上线：纯函数'], edits: [{ file: 'plan.js', from: "if (!(f.closing && typeof f.closing.closingEffectiveAt === 'string') && !closingCards.some", to: "if (false && !closingCards.some" }] },
   { id: 'C3a 重开里程碑检查只删该行（批次非 live，预筛 M2）', expect: ['里程碑：'], edits: [{ file: 'rules.js', from: "if (t.isMilestone) return '正式上线里程碑不能重开，请走撤销上线';", to: '' }] },
-  { id: 'C3a 重开级联遇已收口里程碑不拦（D2）', expect: ['重开级联（D2）'], edits: [{ file: 'plan.js', from: 'if (later.some((l) => l.is_golive_milestone === 1)) throw stateError(', to: 'if (false) throw stateError(' }] },
-  { id: 'C3a 级联范围去掉项目范围（预筛 L11：兄弟项目的项目层节点被退回）', expect: ['重开级联：'], edits: [{ file: 'plan.js', from: 'WHERE project_id = ? AND batch_id IS ? AND sort_order > ?', to: 'WHERE ? IS NOT NULL AND batch_id IS ? AND sort_order > ?' }] },
-  { id: 'C3a 收口前置：b_req 一条删掉', expect: ['收口前置：'], edits: [{ file: 'plan.js', from: "if (node.template_key === 'b_req') {", to: 'if (false) {' }] },
-  { id: 'C3a 收口前置：p_overall 一条删掉', expect: ['收口前置：'], edits: [{ file: 'plan.js', from: "} else if (node.template_key === 'p_overall') {", to: '} else if (false) {' }] },
-  { id: 'C3a 收口前置：已取消节点也要求有计划', expect: ['收口前置：'], edits: [{ file: 'plan.js', from: "scope = allNodes.filter((n) => n.batch_id === node.batch_id && n.status !== 'cancelled');", to: 'scope = allNodes.filter((n) => n.batch_id === node.batch_id);' }] },
-  { id: 'C3a 收口前置：p_overall 范围扩到批次层', expect: ['收口前置：'], edits: [{ file: 'plan.js', from: "scope = allNodes.filter((n) => n.batch_id === null && n.status !== 'cancelled');", to: "scope = allNodes.filter((n) => n.status !== 'cancelled');" }] },
-  { id: 'C3a 重开级联删掉', expect: ['重开级联：'], edits: [{ file: 'plan.js', from: 'for (const l of later) {', to: 'for (const l of []) {' }] },
-  { id: 'C3a 级联范围去掉「同一层」条件', expect: ['重开级联：'], edits: [
-    { file: 'plan.js', from: 'AND batch_id IS ? AND sort_order > ?', to: 'AND sort_order > ?' },
-    { file: 'plan.js', from: '[node.project_id, node.batch_id, node.sort_order]', to: '[node.project_id, node.sort_order]' },
-  ] },
-  { id: 'C3a 级联范围不看 sort_order（同层全部已收口节点退回）', expect: ['重开级联：'], edits: [
-    { file: 'plan.js', from: 'AND batch_id IS ? AND sort_order > ?', to: 'AND batch_id IS ? AND sort_order > -1 * ?' },
-    { file: 'plan.js', from: '[node.project_id, node.batch_id, node.sort_order]', to: '[node.project_id, node.batch_id, 0]' },
-  ] },
   { id: 'C3a 重开 live 批次检查删掉（N-D2）', expect: ['夹具 live'], edits: [{ file: 'rules.js', from: "return t.batchStatus === 'live' ? '批次已正式上线，本批节点不能重开，须先由 admin 撤销上线' : null;", to: 'return null;' }] },
-  { id: 'C3a 取消 / 新增 / 重排的 live 检查删掉', expect: ['夹具 live'], edits: [{ file: 'rules.js', from: "const BATCH_NO_EDIT_STATUSES = Object.freeze(['live', 'transferred', 'superseded']);", to: "const BATCH_NO_EDIT_STATUSES = Object.freeze(['transferred', 'superseded']);" }] },
+  { id: 'C3a 取消 / 新增 / 重排的 live 检查删掉', expect: ['夹具 live'], edits: [{ file: 'rules.js', from: "const batchNoEdit = (t) => t.batchStatus === 'live';", to: 'const batchNoEdit = () => false;' }] },
   { id: 'C3a 取消的「未开始」检查删掉（状态判断与条件更新一并去掉）', expect: ['取消：'], edits: [
     { file: 'rules.js', from: "if (t.nodeStatus !== 'not_started') return '只有未开始的节点可以取消';", to: '' },
     { file: 'plan.js', from: "SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'not_started'", to: "SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ?" },
@@ -1500,7 +1621,7 @@ const PLAN_MUTATIONS = [
   { id: 'C3a 项目层节点取消检查删掉', expect: ['取消：'], edits: [{ file: 'rules.js', from: "if (t.isProjectLayer) return '项目层节点按模板固定，不能取消';", to: '' }] },
   { id: 'C3a 里程碑取消检查删掉', expect: ['里程碑：'], edits: [{ file: 'rules.js', from: "if (t.isMilestone) return '正式上线里程碑不能取消';", to: '' }] },
   { id: 'C3a 已取消节点可改名（状态判断与条件更新一并去掉）', expect: ['取消：'], edits: [
-    { file: 'rules.js', from: "withFrozenBatch((t) => (t.nodeStatus === 'cancelled' ? '已取消的节点不能改名' : null))", to: 'withFrozenBatch(() => null)' },
+    { file: 'rules.js', from: "(t) => (t.nodeStatus === 'cancelled' ? '已取消的节点不能改名' : null)", to: '() => null' },
     { file: 'plan.js', from: "WHERE id = ? AND status <> 'cancelled'", to: 'WHERE id = ?' },
   ] },
   // D1：已收口节点没有基线时可补草稿期计划；有基线后不可。两条变异各只动一处。
@@ -1511,17 +1632,22 @@ const PLAN_MUTATIONS = [
   { id: 'C3a PATCH 恢复接受 build_type（D44）', expect: ['PATCH 项目：'], edits: [{ file: 'projects.js', from: "const BASIC_FIELDS = ['system_name', 'phase_name', 'goal', 'oa_number', 'initiated_on'];", to: "const BASIC_FIELDS = ['system_name', 'phase_name', 'build_type', 'goal', 'oa_number', 'initiated_on'];" }] },
   { id: 'C3a 建项不带出默认批次与节点', expect: ['建项带出结构'], edits: [{ file: 'projects.js', from: 'await seedProjectStructure(q, { projectId: pid, buildType: values.build_type, operatorId: uid, operatorName: operatorNameOf(user) });', to: '' }] },
   { id: 'C3a 自研里程碑键改错（落在 b_dev）', expect: ['建项带出结构'], edits: [
-    { file: 'templates.js', from: "n('b_dev', '开发完成（含设计）', 'G2+G3'),", to: "n('b_dev', '开发完成（含设计）', 'G2+G3', true)," },
+    { file: 'templates.js', from: "n('b_dev', '开发阶段（含设计）', 'G2+G3'),", to: "n('b_dev', '开发阶段（含设计）', 'G2+G3', true)," },
     { file: 'templates.js', from: "n('b_golive', '上线（含测试与验收）', 'G4+G5', true),", to: "n('b_golive', '上线（含测试与验收）', 'G4+G5')," },
   ] },
   { id: 'C3a 自研也生成 p_contract', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "types: Object.freeze(['outsource', 'procurement']) }),", to: "types: Object.freeze(['outsource', 'procurement', 'inhouse']) })," }] },
-  { id: 'C3a 采购的合并节点 g_stage 写成单值', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_config', '系统配置（含设计与开发）', 'G2+G3'),", to: "n('b_config', '系统配置（含设计与开发）', 'G2')," }] },
-  { id: 'C3a 改期证据校验删掉（无附件也无声明）', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: 'if (!noEvidence && attachmentIds.length === 0) {', to: 'if (false) {' }] },
+  { id: 'C3a 采购的合并节点 g_stage 写成单值', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_config', '配置阶段', 'G2+G3'),", to: "n('b_config', '配置阶段', 'G2')," }] },
+  { id: '#212 B2.1 外包恢复批次需求确认节点', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_design', '设计阶段', 'G2'),", to: "n('b_req', '需求确认', 'G1'),\n    n('b_design', '设计阶段', 'G2')," }] },
+  { id: '#212 B2.1 自研恢复批次需求确认节点', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_dev', '开发阶段（含设计）', 'G2+G3'),", to: "n('b_req', '需求确认', 'G1'),\n    n('b_dev', '开发阶段（含设计）', 'G2+G3')," }] },
+  { id: '#212 B2.1 采购漏建需求调研节点', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "    n('b_req', '需求调研', 'G1'),\n", to: '' }] },
+  { id: '#212 B2.1 外包正式上线里程碑提前到上线节点', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_uat', '验收阶段', 'G4'),\n    n('b_golive', '上线', 'G5'),\n    n('b_trial', '试运行阶段（结束即正式上线）', 'G5', true),", to: "n('b_uat', '验收阶段', 'G4'),\n    n('b_golive', '上线', 'G5', true),\n    n('b_trial', '试运行阶段（结束即正式上线）', 'G5')," }] },
+  { id: '#212 B2.1 采购正式上线里程碑提前到上线节点', expect: ['建项带出结构'], edits: [{ file: 'templates.js', from: "n('b_training', '培训与验收阶段', 'G4'),\n    n('b_golive', '上线', 'G5'),\n    n('b_trial', '试运行阶段（结束即正式上线）', 'G5', true),", to: "n('b_training', '培训与验收阶段', 'G4'),\n    n('b_golive', '上线', 'G5', true),\n    n('b_trial', '试运行阶段（结束即正式上线）', 'G5')," }] },
+  { id: 'C3a 改期证据校验删掉（无附件也无声明）', expect: ['baseline 改期', 'B4.2 首排并发'], edits: [{ file: 'plan.js', from: 'if (evidenceRequired && !noEvidence && attachmentIds.length === 0) {', to: 'if (false) {' }] },
   { id: 'C3a 无书面证据原因 10 字校验删掉', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: 'if (noEvidence && (noEvidenceReason === null || Array.from(noEvidenceReason).length < EVIDENCE_REASON_MIN)) {', to: 'if (false) {' }] },
   { id: 'C3a 改期原因必填检查删掉', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: "if (reason === null) throw invalid('改期必须填写原因', 'reason');", to: '' }] },
-  { id: 'C3a 开发方来源检查删掉', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: "if (party.side === 'dev') {", to: 'if (false) {' }] }, // S-S1c：开发方来源由「一律 409」改为「须引用已认可的关键事项」，锚点随之改到 if 块
+  // S-S1c：开发方来源由「一律 409」改为「须引用已认可的关键事项」，锚点随之改到 if 块
   { id: 'C3a 改期不绑定证据附件', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: "const bound = attachmentIds.length > 0\n        ? await attachmentHelpers.bindStagedAttachments(", to: "const bound = false\n        ? await attachmentHelpers.bindStagedAttachments(" }] },
-  { id: 'C3a 草稿期计划放过改期专用字段', expect: ['草稿期计划'], edits: [{ file: 'plan.js', from: 'if (sourcePartyId !== null || devKeyEntryId !== null || attachmentIds.length > 0 || body.no_written_evidence !== undefined || noEvidenceReason !== null) {', to: 'if (false) {' }] }, // S-S1c：判定里加了 devKeyEntryId
+  { id: 'C3a 草稿期计划放过改期专用字段', expect: ['草稿期计划'], edits: [{ file: 'plan.js', from: 'if (sourcePartyId !== null || attachmentIds.length > 0 || body.no_written_evidence !== undefined || noEvidenceReason !== null) {', to: 'if (false) {' }] }, // S-S1c：判定里加了 devKeyEntryId
   { id: 'C3a 草稿期同值不拒绝', expect: ['草稿期计划'], edits: [{ file: 'plan.js', from: "if (same) throw invalid('新计划与当前计划相同，无需修改', 'planned_start');", to: '' }] },
   { id: 'C3a 实际结束「仅收口时」条件删掉', expect: ['实际更正'], edits: [{ file: 'plan.js', from: "actual_end: node.status === 'closed' ? lastActual(recs, 'actual_end') : null,", to: "actual_end: lastActual(recs, 'actual_end')," }] },
   { id: 'C3a 更正不检查原记录存在', expect: ['实际更正'], edits: [{ file: 'rules.js', from: "return kinds.some((k) => has[k] === true) ? null : '该节点还没有可更正的实际日期记录';", to: 'return null;' }] },
@@ -1539,21 +1665,17 @@ const PLAN_MUTATIONS = [
   { id: 'C3a 更正先后校验：开始晚于结束放行（D7）', expect: ['实际更正'], edits: [{ file: 'plan.js', from: "throw invalid(corrects === 'actual_start' ? '更正后的实际开始不能晚于实际结束' : '更正后的实际结束不能早于实际开始', 'actual_date');", to: 'void 0;' }] },
   { id: 'C3a 更正先后校验：只校验开始不校验结束（D7）', expect: ['实际更正'], edits: [{ file: 'plan.js', from: "const endAfter = corrects === 'actual_end' ? actualDate : (node.status === 'closed' ? lastActual(recs, 'actual_end') : null);", to: "const endAfter = corrects === 'actual_end' ? null : (node.status === 'closed' ? lastActual(recs, 'actual_end') : null);" }] },
   // 预筛 D4：批次冻结统一判定
-  { id: 'C3a 批次冻结统一判定失效（withFrozenBatch 不再拦）', expect: ['批次冻结'], edits: [{ file: 'rules.js', from: "const withFrozenBatch = (stateFn) => (t) => stateFn(t) || (batchFrozen(t) ? '批次已转出或被替代，本批节点不能再写入' : null);", to: 'const withFrozenBatch = (stateFn) => (t) => stateFn(t);' }] },
-  { id: 'C3a 批次冻结集合漏掉 superseded（预筛 L2）', expect: ['批次冻结'], edits: [{ file: 'rules.js', from: "const BATCH_FROZEN_STATUSES = Object.freeze(['transferred', 'superseded']);", to: "const BATCH_FROZEN_STATUSES = Object.freeze(['transferred']);" }] },
-  { id: 'C3a 批次冻结集合漏掉 transferred（预筛 L2）', expect: ['批次冻结'], edits: [{ file: 'rules.js', from: "const BATCH_FROZEN_STATUSES = Object.freeze(['transferred', 'superseded']);", to: "const BATCH_FROZEN_STATUSES = Object.freeze(['superseded']);" }] },
-  { id: 'C3a 取消 / 新增 / 重排的冻结检查漏掉 transferred 与 superseded（预筛 L2）', expect: ['批次冻结'], edits: [{ file: 'rules.js', from: "const BATCH_NO_EDIT_STATUSES = Object.freeze(['live', 'transferred', 'superseded']);", to: "const BATCH_NO_EDIT_STATUSES = Object.freeze(['live']);" }] },
   // 预筛 D5 / D6
   { id: 'C3a dev_assignee_active 恒为 true（D5）', expect: ['批次 PATCH'], edits: [{ file: 'plan.js', from: 'dev_assignee_active: hasKey(data.activeAssignees, b.id),', to: 'dev_assignee_active: true,' }] },
   { id: 'C3a dev_assignee_active 查询不排除已移出成员（D5）', expect: ['批次 PATCH'], edits: [{ file: 'plan.js', from: "AND p.side = 'dev' AND ${rules.MEMBER_ACTIVE_SQL}`,\n      [projectId]", to: "AND p.side = 'dev'`,\n      [projectId]" }] },
   { id: 'C3a is_draft_plan 恒为 plan_change（基线之后的改期也算草稿，D6）', expect: ['草稿期标记'], edits: [{ file: 'plan.js', from: "is_draft_plan: r.kind === 'plan_change' && (!baseline || r.id < baseline.id),", to: "is_draft_plan: r.kind === 'plan_change'," }] },
-  { id: 'C3a 草稿计划事件不带 draft 标记（D6）', expect: ['草稿期计划', '草稿期标记'], edits: [{ file: 'plan.js', from: 'reason: reason === null ? DRAFT_PLAN_REASON : reason, draft: true,', to: 'reason: reason === null ? DRAFT_PLAN_REASON : reason,' }] },
-  { id: 'C3a 草稿计划事件原因仍写 null（D6）', expect: ['草稿期计划', '草稿期标记'], edits: [{ file: 'plan.js', from: 'reason: reason === null ? DRAFT_PLAN_REASON : reason, draft: true,', to: 'reason, draft: true,' }] },
+  { id: 'C3a 草稿计划事件不带 draft 标记（D6）', expect: ['草稿期计划', '草稿期标记'], edits: [{ file: 'plan.js', from: 'reason: loggedReason, draft: !hasEffectiveOverall,', to: 'reason: loggedReason,' }] },
+  { id: 'C3a 草稿计划事件原因仍写 null（D6）', expect: ['草稿期计划', '草稿期标记'], edits: [{ file: 'plan.js', from: 'reason: loggedReason, draft: !hasEffectiveOverall,', to: 'reason, draft: !hasEffectiveOverall,' }] },
   // 预筛 M1：互斥规则各自只删一处
   { id: 'C3a 删掉「附件与无书面证据互斥」（M1：真实暂存附件）', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: "if (noEvidence && attachmentIds.length > 0) throw invalid('已附证据附件，不应再声明无书面证据', 'no_written_evidence');", to: '' }] },
   { id: 'C3a 删掉「未声明无书面证据却给原因」', expect: ['baseline 改期'], edits: [{ file: 'plan.js', from: "if (!noEvidence && noEvidenceReason !== null) throw invalid('未声明无书面证据时不应填写无书面证据原因', 'no_evidence_reason');", to: '' }] },
   // 预筛 L3
-  { id: 'C3a close_blockers 对未开始节点也计算（L3）', expect: ['收口前置：'], edits: [{ file: 'plan.js', from: "close_blockers: n.status === 'in_progress' ? closeBlockers(n, brief, data.facts) : [],", to: 'close_blockers: closeBlockers(n, brief, data.facts),' }] },
+  { id: 'C3a close_blockers 对未开始节点也计算（L3）', expect: ['整体验收结项（D3'], edits: [{ file: 'plan.js', from: "close_blockers: n.status === 'in_progress' ? closeBlockers(n, data.facts) : [],", to: 'close_blockers: closeBlockers(n, data.facts),' }] },
   // 预筛 L5：建项结构原子性
   // 注：「吞掉带出结构的错误、事务照常提交」这种变异检不出来也不需要检——db.js 的事务标记会拒绝提交已出错语句的事务（等价变异，已试过：自检未判红）。
   //   能破坏原子性的诚实写法是把带出结构挪到建项事务之外的第二个事务：项目已提交，结构失败时留下没有批次 / 节点的半成品。
@@ -1562,8 +1684,8 @@ const PLAN_MUTATIONS = [
     { file: 'projects.js', from: 'res.status(201).json(out);', to: 'await db.withWriteTxn((q2) => seedProjectStructure(q2, { projectId: out.project.id, buildType: values.build_type, operatorId: uid, operatorName: operatorNameOf(user) }));\n    res.status(201).json(out);' },
   ] },
   // 预筛 L8：各端点的键白名单各删一处
-  { id: 'C3a start 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "router.post('/sysbuild/nodes/:nid/start', parseJsonBody, handle(async (req, res) => {\n    const nid = readIdParam(req.params.nid, 'nid', '节点编号');\n    onlyKeys(bodyOf(req), []);", to: "router.post('/sysbuild/nodes/:nid/start', parseJsonBody, handle(async (req, res) => {\n    const nid = readIdParam(req.params.nid, 'nid', '节点编号');" }] },
-  { id: 'C3a close 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "router.post('/sysbuild/nodes/:nid/close', parseJsonBody, handle(async (req, res) => {\n    const nid = readIdParam(req.params.nid, 'nid', '节点编号');\n    onlyKeys(bodyOf(req), []);", to: "router.post('/sysbuild/nodes/:nid/close', parseJsonBody, handle(async (req, res) => {\n    const nid = readIdParam(req.params.nid, 'nid', '节点编号');" }] },
+  { id: 'C3a start 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "onlyKeys(body, ['start_note', 'attachment_ids']);", to: '' }] },
+  { id: 'C3a close 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "onlyKeys(body, ['complete_node_ids']);", to: '' }] },
   { id: 'C3a reopen 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "onlyKeys(bodyOf(req), ['reason']);\n    const reason = readText(bodyOf(req).reason, 'reason', '重开原因'", to: "const reason = readText(bodyOf(req).reason, 'reason', '重开原因'" }] },
   { id: 'C3a cancel 端点放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "onlyKeys(bodyOf(req), ['reason']);\n    const reason = readText(bodyOf(req).reason, 'reason', '取消原因'", to: "const reason = readText(bodyOf(req).reason, 'reason', '取消原因'" }] },
   { id: 'C3a schedule(plan) 放过多余键（L8）', expect: ['严格键白名单'], edits: [{ file: 'plan.js', from: "if (kind === 'plan') onlyKeys(", to: 'if (false) onlyKeys(' }] },
@@ -1575,7 +1697,7 @@ const PLAN_MUTATIONS = [
   { id: 'C3a 控制字符判定连制表 / 换行也拒（L1：保留 \\n \\r \\t）', expect: ['文本入参拒收控制字符'], edits: [{ file: 'rules.js', from: '/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/;', to: '/[\\u0000-\\u001F\\u007F]/;' }] },
   { id: 'C3a plan.js 的 readText 不拒控制字符（L1）', expect: ['文本入参拒收控制字符'], edits: [{ file: 'plan.js', from: 'if (rules.hasControlChar(v)) throw invalid(', to: 'if (false) throw invalid(' }] },
   { id: 'C3a projects.js 的 readText 不拒控制字符（L1）', expect: ['文本入参拒收控制字符'], edits: [{ file: 'projects.js', from: 'if (rules.hasControlChar(v)) throw invalid(', to: 'if (false) throw invalid(' }] },
-  { id: 'C3a membership.js 的 readText 不拒控制字符（L1）', expect: ['文本入参拒收控制字符'], edits: [{ file: 'membership.js', from: 'if (rules.hasControlChar(v)) throw invalid(', to: 'if (false) throw invalid(' }] },
+  { id: 'C3a membership.js 的 readText 不拒控制字符（L1）', expect: ['文本入参拒收控制字符'], edits: [{ file: 'membership-people.js', from: 'if (rules.hasControlChar(text)) throw invalid(', to: 'if (false) throw invalid(' }] },
   // 预筛 L9：进程内固定 todayProvider 必须被服务端使用
   { id: 'C3a 开始节点记的实际日期不取 todayProvider（L9：进程内注入值被忽略）', expect: ['开始 / 收口 / 重开'], edits: [{ file: 'plan.js', from: "      const day = today();\n      await q.run(\"INSERT INTO sysbuild_node_schedule_records (node_id, kind, actual_date, created_by) VALUES (?, 'actual_start'", to: "      const day = localDateString(new Date());\n      await q.run(\"INSERT INTO sysbuild_node_schedule_records (node_id, kind, actual_date, created_by) VALUES (?, 'actual_start'" }] },
   // codex 17 号 M-1：实际日期不倒置
@@ -1584,15 +1706,20 @@ const PLAN_MUTATIONS = [
   // codex 17 号 L-1：三份 bodyOf 各自拒数组请求体
   { id: 'C3a plan.js 的 bodyOf 放过数组请求体（17 号 L-1）', expect: ['请求体不是对象'], edits: [{ file: 'plan.js', from: "if (typeof b !== 'object' || Array.isArray(b)) throw invalid(", to: 'if (false) throw invalid(' }] },
   { id: 'C3a projects.js 的 bodyOf 放过数组请求体（17 号 L-1）', expect: ['请求体不是对象'], edits: [{ file: 'projects.js', from: "if (typeof b !== 'object' || Array.isArray(b)) throw invalid(", to: 'if (false) throw invalid(' }] },
-  { id: 'C3a membership.js 的 bodyOf 放过数组请求体（17 号 L-1）', expect: ['请求体不是对象'], edits: [{ file: 'membership.js', from: "if (typeof b !== 'object' || Array.isArray(b)) throw invalid(", to: 'if (false) throw invalid(' }] },
+  { id: 'C3a membership.js 的 bodyOf 放过数组请求体（17 号 L-1）', expect: ['请求体不是对象'], edits: [{ file: 'membership.js', from: "if (typeof req.body !== 'object' || Array.isArray(req.body)) throw invalid(", to: 'if (false) throw invalid(' }] },
   { id: 'C3a canActAsPm 去掉只读否决', expect: ['权限：'], edits: [{ file: 'rules.js', from: '  if (identity.isReadonly) return false;\n  return !!identity.isPm;', to: '  return !!identity.isPm;' }] },
-  { id: 'C3a 节点动作改用「PM 或 admin」判定（admin 未接管可写）', expect: ['权限：'], edits: [{ file: 'rules.js', from: "node_start: Object.freeze({\n    can: canActAsPm,", to: "node_start: Object.freeze({\n    can: canManageMembership," }] },
+  { id: 'C3a 节点动作改用「PM 或 admin」判定（admin 未接管可写）', expect: ['权限：'], edits: [{ file: 'rules.js', from: "node_start: Object.freeze({\n    can: canActAsPm,", to: "node_start: Object.freeze({\n    can: (identity) => !identity.isReadonly && (identity.isPm || identity.isAdmin)," }] },
   { id: 'C3a 承接人校验删掉', expect: ['批次 PATCH'], edits: [{ file: 'plan.js', from: "if (!ok) throw stateError('开发承接人须是本项目开发方已加入、未移出的成员');", to: '' }] },
   { id: 'C3a 承接人校验不看参与方类别（需求方成员也放行）', expect: ['批次 PATCH'], edits: [{ file: 'plan.js', from: "WHERE m.id = ? AND m.project_id = ? AND p.project_id = ? AND p.side = 'dev' AND ${rules.MEMBER_ACTIVE_SQL}", to: 'WHERE m.id = ? AND m.project_id = ? AND p.project_id = ? AND ${rules.MEMBER_ACTIVE_SQL}' }] },
-  { id: 'C3a 转出批次可改名', expect: ['批次 PATCH'], edits: [{ file: 'rules.js', from: "batch_update: Object.freeze({ can: canActAsPm, state: (t) => (batchFrozen(t) ? '批次已转出或被替代，不能再修改' : null) }),", to: 'batch_update: Object.freeze({ can: canActAsPm, state: () => null }),' }] },
   { id: 'C3a 新增节点把里程碑标志写成 1', expect: ['新增 + 改名 + 重排'], edits: [{ file: 'plan.js', from: "VALUES (?, ?, NULL, ?, ?, ?, 0)',", to: "VALUES (?, ?, NULL, ?, ?, ?, 1)'," }] },
   { id: 'C3a 新增节点 g_stage 不校验', expect: ['新增 + 改名 + 重排'], edits: [{ file: 'plan.js', from: "if (typeof body.g_stage !== 'string' || !G_STAGES.includes(body.g_stage)) throw invalid(", to: "if (typeof body.g_stage !== 'string') throw invalid(" }] },
   { id: 'C3a 改名同名也写事件', expect: ['新增 + 改名 + 重排'], edits: [{ file: 'plan.js', from: 'if (name !== node.name) {', to: 'if (true) {' }] },
+  // #212 C2 新增（N1，清单 4.4 ②）：现有 confirm 套件 2550–2554 只守五键里各键「该报不报」，抓不到「多出一个键」
+  { id: '收口前置：上线节点也要求总体规划包生效', expect: ['收口前置：普通阶段无内容包条件'], edits: [{ file: 'plan.js', from: "if (node.template_key !== 'p_closing' || node.batch_id !== null) return [];", to: "if (node.template_key === 'b_golive') return [{ code: 'PACKAGE_NOT_EFFECTIVE' }]; if (node.template_key !== 'p_closing' || node.batch_id !== null) return [];" }] },
+  // ── #212 C6 新增变异（A.3 N1–N3：R2 键检查；N4 在 sysbuild-api-suite-golive.js 的 R3 / R5 用例旁）──
+  { id: 'C6 R2：排计划键检查被去掉', expect: [T_C6_R2], edits: [{ file: 'plan.js', from: "if (hasKey(body, 'dev_key_entry_id')) throw invalid('不支持的字段 dev_key_entry_id', 'dev_key_entry_id');", to: '' }] },
+  { id: 'C6 R2：键检查晚于 kind 校验', expect: [T_C6_R2], edits: [{ file: 'plan.js', from: "    if (hasKey(body, 'dev_key_entry_id')) throw invalid('不支持的字段 dev_key_entry_id', 'dev_key_entry_id');\n    const kind = body.kind;\n    if (kind !== 'plan' && kind !== 'actual_correct') throw invalid('kind 必须是 plan 或 actual_correct', 'kind');", to: "    const kind = body.kind;\n    if (kind !== 'plan' && kind !== 'actual_correct') throw invalid('kind 必须是 plan 或 actual_correct', 'kind');\n    if (hasKey(body, 'dev_key_entry_id')) throw invalid('不支持的字段 dev_key_entry_id', 'dev_key_entry_id');" }] },
+  { id: 'C6 R2：键检查按值判断', expect: [T_C6_R2], edits: [{ file: 'plan.js', from: "if (hasKey(body, 'dev_key_entry_id')) throw invalid(", to: "if (hasKey(body, 'dev_key_entry_id') && body.dev_key_entry_id !== null) throw invalid(" }] },
 ];
 
 module.exports = { definePlanCases, PLAN_MUTATIONS };

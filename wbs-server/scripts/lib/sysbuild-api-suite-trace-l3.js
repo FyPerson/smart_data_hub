@@ -43,7 +43,7 @@ function defineTraceL3Cases(T) {
     try {
       const control = await call('GET', `/sysbuild/projects/${pid}/plan`);
       assert.strictEqual(control.status, 200, control.text);
-      assert.strictEqual(control.body.nodes.find((n) => n.id === node.id).dev_start_ready, 'no_plan');
+      assert.strictEqual(control.body.nodes.find((n) => n.id === node.id).dev_start_ready, 'ok');
       broken = true;
       const viewed = await call('GET', `/sysbuild/projects/${pid}/plan`);
       assert.strictEqual(viewed.status, 200, viewed.text);
@@ -59,28 +59,6 @@ function defineTraceL3Cases(T) {
     } finally { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); }
   });
 
-  test(`${P}变更确认单影响——三项原文转义且不混入引用登记`, async () => {
-    const pid = await H.newProject(); await H.produceEffectiveOverall(pid);
-    const created = await post(`/sysbuild/projects/${pid}/changes`, {
-      title: '补充范围与排期说明', body: '本次调整部门报表输出与验收样例',
-      affects: { scope: '增加 <script>范围</script>', schedule: '工期顺延两天 & 完成联调', acceptance: '验收包含 "边界" 与特殊输入', extra: { note: '原有扩展字段也保留', count: 0 }, flag: false },
-      no_written_evidence: true, no_evidence_reason: '经业务会议讨论形成调整，暂无独立书面原件',
-    });
-    assert.strictEqual(created.status, 201, created.text);
-    const vid = created.body.version.id;
-    assert.strictEqual((await post(`/sysbuild/package-versions/${vid}/submit`)).status, 200);
-    const sheet = await get(`/sysbuild/package-versions/${vid}/confirmation-sheet`);
-    assert.strictEqual(sheet.status, 200, sheet.text);
-    const impact = section(sheet.text, 'sec-change-impact');
-    for (const text of ['变更影响说明', '对范围的影响', '增加 &lt;script&gt;范围&lt;/script&gt;', '对排期的影响', '工期顺延两天 &amp; 完成联调', '对验收的影响', '验收包含 &quot;边界&quot; 与特殊输入']) assert.ok(impact.includes(text), '变更影响缺少 ' + text);
-    assert.ok(!impact.includes('<script>'), '影响内容必须转义');
-    assert.ok(impact.includes('原有扩展字段也保留') && impact.includes('&quot;count&quot;: 0') && impact.includes('false'), '自由结构影响字段不能丢失');
-    const task = (await H.tasksOf(vid))[0];
-    const opened = await get(`/sysbuild/confirm-tasks/${task.task_id || task.id}`);
-    assert.strictEqual(opened.status, 200, opened.text);
-    assert.deepStrictEqual(opened.body.object.change.affects, { scope: '增加 <script>范围</script>', schedule: '工期顺延两天 & 完成联调', acceptance: '验收包含 "边界" 与特殊输入', extra: { note: '原有扩展字段也保留', count: 0 }, flag: false });
-  });
-
   test(`${P}立项依据确认单——选入立项节点材料冻结版与声明同时展示`, async () => {
     const pid = await H.newProject(); await H.seedParty(pid, '立项需求部门', U.own, U.del);
     const nodes = await sqlAll('SELECT * FROM sysbuild_nodes WHERE project_id=?', [pid]);
@@ -94,14 +72,17 @@ function defineTraceL3Cases(T) {
     const chosen = await material(initiation, 'initiation-basis', '立项依据', '提交时选入的立项依据第一版');
     const foreign = await material(other, 'other-proof', '开发节点材料', '不应归到立项依据的其他节点正文');
     const pk = await H.mkPackage(pid, 'initiation'); const vid = await H.mkVersion(pk);
-    const saved = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '项目立项确认正文', material_version_ids: [chosen.vid, foreign.vid], no_written_basis_reason: '部分决策来自口头会议，尚未形成全部书面原件' } });
+    const saved = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '项目立项确认正文', material_version_ids: [chosen.vid, foreign.vid] } });
     assert.strictEqual(saved.status, 200, saved.text);
     assert.strictEqual((await post(`/sysbuild/package-versions/${vid}/submit`)).status, 200);
     const later = await material(initiation, 'initiation-basis', '立项依据', '后来的材料版本不能替换已提交版本');
     const response = await get(`/sysbuild/package-versions/${vid}/confirmation-sheet`);
     assert.strictEqual(response.status, 200, response.text);
+    // #212 C2（D4，清单 4.4 ⑥）：小节序号手推——快照、立项依据、冻结附件、引用材料版本全文（本场景选入两份材料）、必需确认人，附录不编号（#212 C7：「引用条目」小节随需求条目流程删除，必需确认人前移一位，M-SHEET）
+    const heads = (response.text.match(/<h2>[^<]*<\/h2>/g) || []).map((x) => x.slice(4, -5));
+    assert.deepStrictEqual(heads, ['一、包内容快照', '二、立项依据', '三、冻结附件清单（本包版本）', '四、引用材料版本全文', '五、必需确认人', '附录：修订历史'], '立项包小节序号连续（无节点计划节、无历史补录节）');
     const basis = section(response.text, 'sec-initiation-basis');
-    for (const text of ['立项依据', '无书面依据', '部分决策来自口头会议，尚未形成全部书面原件', '提交时选入的立项依据第一版', `data-material-version-id="${chosen.vid}"`, `data-attachment-id="${chosen.aid}"`]) assert.ok(basis.includes(text), '立项依据缺少 ' + text);
+    for (const text of ['立项依据', '提交时选入的立项依据第一版', `data-material-version-id="${chosen.vid}"`, `data-attachment-id="${chosen.aid}"`]) assert.ok(basis.includes(text), '立项依据缺少 ' + text);
     assert.ok(!basis.includes('开发节点材料'), '仅立项节点材料进入依据分区');
     assert.ok(!basis.includes(`data-material-version-id="${later.vid}"`), '不得读取材料最新版');
     assert.ok(!basis.includes(`data-attachment-id="${later.aid}"`), '不得读取后续附件');
@@ -125,12 +106,13 @@ function defineTraceL3Cases(T) {
     }
     await sameAsSubmit('项目还没有需求部门参与方，无法确定必需确认人');
     await H.seedParty(pid, '原因核对需求部门', U.own, null);
-    await sameAsSubmit('请选入立项节点下带附件的立项依据，或填写无书面依据原因（10–500字）');
+    await sameAsSubmit('请选入「立项依据」中带可用附件的一版，或在立项依据卡片填写无书面依据原因（10–500字）');
     const own = await api(U.own, 'GET', `/sysbuild/package-versions/${vid}`);
     assert.strictEqual(own.status, 200, own.text);
     assert.strictEqual(own.body.actions.submit, false);
     assert.strictEqual(own.body.submit_block, null, '没有发起权限的账号不给原因');
-    const saved = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '原因核对立项内容', no_written_basis_reason: '立项来源于线下会议，目前没有书面原件' } });
+    await H.declareInitiationBasis(vid);
+    const saved = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '原因核对立项内容' } });
     assert.strictEqual(saved.status, 200, saved.text);
     const ready = await get(`/sysbuild/package-versions/${vid}`);
     assert.strictEqual(ready.body.actions.submit, true);
@@ -144,7 +126,9 @@ function defineTraceL3Cases(T) {
   test(`${P}立项依据声明单独展示——无材料旧版说明且声明转义`, async () => {
     const pid = await H.newProject(); await H.seedParty(pid, '口头立项需求部门', U.own, U.del);
     const pk = await H.mkPackage(pid, 'initiation'); const vid = await H.mkVersion(pk);
-    const r = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '口头立项确认内容', no_written_basis_reason: '口头会议 <img src=x> 已批准本次项目建设' } });
+    const node = await sqlGet("SELECT id FROM sysbuild_nodes WHERE project_id = ? AND template_key = 'p_initiation'", [pid]);
+    assert.strictEqual((await post(`/sysbuild/nodes/${node.id}/materials/initiation-basis/not-applicable`, { reason: '口头会议 <img src=x> 已批准本次项目建设' })).status, 201);
+    const r = await patch(`/sysbuild/package-versions/${vid}`, { snapshot_json: { text: '口头立项确认内容' } });
     assert.strictEqual(r.status, 200, r.text); assert.strictEqual((await post(`/sysbuild/package-versions/${vid}/submit`)).status, 200);
     const response = await get(`/sysbuild/package-versions/${vid}/confirmation-sheet`); assert.strictEqual(response.status, 200, response.text);
     const basis = section(response.text, 'sec-initiation-basis');
@@ -155,14 +139,11 @@ function defineTraceL3Cases(T) {
 const mu = (id, expect, file, from, to) => ({ id: `L3 ${id}`, expect: [`${P}${expect}`], edits: [{ file, from, to }] });
 const TRACE_L3_MUTATIONS = [
   mu('开始事实失败误报缺计划', '开始门读取失败', 'report-core.js', "if (facts.unreadable || facts.is_dev === null) return 'unknown';", "if (facts.unreadable || facts.is_dev === null) return 'no_plan';"),
-  mu('确认单漏变更影响', '变更确认单影响', 'confirmation-sheet.js', "${m.change ? section('sec-change-impact', '变更影响说明', renderChangeImpact(m.change.affects)) : ''}", "${''}"),
-  mu('确认单影响不读取', '变更确认单影响', 'confirmation-sheet.js', 'affects: aff.affects === undefined ? {} : aff.affects, entries,', 'affects: {}, entries,'),
-  mu('确认单影响丢扩展字段', '变更确认单影响', 'confirmation-sheet.js', 'Object.entries(values).map(([key, value]) =>', "Object.entries(values).filter(([key]) => ['scope', 'schedule', 'acceptance'].includes(key)).map(([key, value]) =>"),
   mu('确认单漏立项依据', '立项依据确认单', 'confirmation-sheet.js', "${m.pkg.type === 'initiation' ? section('sec-initiation-basis', '立项依据', renderInitiationBasis(m)) : ''}", "${''}"),
   mu('确认单立项误收其他节点', '立项依据确认单', 'confirmation-sheet.js', 'm.materials.filter((material) => ids.includes(material.node_id))', 'm.materials'),
   mu('确认单立项遗漏声明', '立项依据声明单独展示', 'confirmation-sheet.js', 'const reason = m.snapshot.no_written_basis_reason;', 'const reason = null;'),
   // 55 号 D1 修复：读接口拒绝原因与提交端点同一判定。
-  mu('提交原因不给出', '提交拒绝原因同源', 'packages.js', 'return v && v.status !== 403 ? { code: v.code, message: v.message } : null;', 'return null;'),
+  {"id":"L3 提交原因不给出","expect":["L3 留痕：提交拒绝原因同源"],"edits":[{"file":"packages.js","from":"return v && v.status !== 403 ? {","to":"return false ? {"}]},
   mu('提交原因不用版本事实', '提交拒绝原因同源', 'packages.js', "rules.checkOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, facts));", "rules.checkOp('package_version_submit', access, access.project, versionTarget(ver, pkg, batchStatus, {}));"),
   mu('提交原因对无权限也给出', '提交拒绝原因同源', 'packages.js', 'return v && v.status !== 403 ?', 'return v ?'),
   mu('提交原因不限草稿', '提交拒绝原因同源', 'packages.js', "    if (ver.status !== 'draft') return null;\n    const v = rules.checkOp('package_version_submit'", "    const v = rules.checkOp('package_version_submit'"),

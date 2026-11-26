@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const VERSION = 6;
+const VERSION = 9;
 const LEDGER = 'sysbuild_schema_migrations';
 const KNOWN = Object.freeze([
     { version: 1, commit: '204bb3e6', digest: 'f38f94bc8bb9c6b82105b5b2fe87b64580c4a1c22df9bc287b8fe53ee681b598' },
@@ -12,8 +12,15 @@ const KNOWN = Object.freeze([
     { version: 4, commit: '66831372', digest: '1ab09f7baf3da294d4e6d859015579037987fde747b1c85db37e36bedab37731' },
     { version: 5, commit: '1c590228', digest: 'ee74d8f6bfd8bd494738b117c149ce2b810a6f3b729f3bf87d9982e348f8cd6a' },
     { version: 6, commit: '8bbc6e78', digest: 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7' },
+    // Pin the schema blob rather than attempting to name the commit introducing
+    // this registration from inside that same commit.
+    { version: 7, commit: 'sysbuild-v7', schemaBlobSha1: '81a3d8e4bb35efbae45300495587628602db6be8', digest: '7555d514878c6927f184bd4c1f602f3c4c42a9ec1a677bcbde8988998854e2ba' },
+    { version: 8, commit: 'sysbuild-v8', schemaBlobSha1: '333824024e6f4f85b484d4ca420bca71ed3bfd37', digest: 'c1476cedae71fbc20188afb705bed4d5412fc4b903897a86b3190c9720d09acd' },
+    { version: 9, commit: 'sysbuild-v9', schemaBlobSha1: '068a026de2b589c65aece4241465a5b4334d64ef', digest: '91f6f61bf27fcac6734939a1d28912306b7dcf35f8981d525d5a34121f4c5fcf' },
 ]);
-const { LEDGER_SQL } = require(path.resolve(__dirname, '../../wbs-server/routes/sysbuild/migration-schema.js'));
+const { LEDGER_SQL, LEDGER_SQL_V1, LEDGER_SQL_V2, LEDGER_SQL_V3 } = require(path.resolve(__dirname, '../../wbs-server/routes/sysbuild/migration-schema.js'));
+const LEDGER_DEFINITIONS = Object.freeze([null, LEDGER_SQL_V1, LEDGER_SQL_V2, LEDGER_SQL_V3, LEDGER_SQL]);
+const LEDGER_DEFINITION_BY_SCHEMA = Object.freeze([null, 1, 1, 1, 1, 1, 1, 2, 3, 4]);
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function plainPath(value, directory) {
     if (typeof value !== 'string' || !value || !path.isAbsolute(value)) throw failure('EXPLICIT_ABSOLUTE_PATH_REQUIRED', '须显式指定绝对路径');
@@ -73,7 +80,12 @@ function createMigrator({ sqlite3, schemaObjects, normalizeSql, materialReader }
         if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok') throw failure('INTEGRITY_FAILED', 'SQLite 完整性检查未通过');
         const rows = await all(db, "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'");
         const ledger = rows.find((r) => r.name === LEDGER);
-        if (ledger && (ledger.type !== 'table' || normalizeSql(ledger.sql) !== normalizeSql(LEDGER_SQL))) throw failure('LEDGER_SCHEMA_MISMATCH', '版本账本自身的结构不符');
+        let ledgerDefinition = null;
+        if (ledger) {
+            const sql = normalizeSql(ledger.sql);
+            if (ledger.type === 'table') ledgerDefinition = LEDGER_DEFINITIONS.findIndex((definition) => definition !== null && sql === normalizeSql(definition));
+            if (ledgerDefinition === null || ledgerDefinition < 1) throw failure('LEDGER_SCHEMA_MISMATCH', '版本账本自身的结构不符');
+        }
         const owned = rows.filter((r) => r.name !== LEDGER && (r.tbl_name.startsWith('sysbuild_') || /\bsysbuild_[a-z0-9_]+\b/i.test(r.sql)));
         const digest = hash(owned);
         const known = owned.length ? KNOWN.find((r) => r.digest === digest) : { version: 0 };
@@ -82,9 +94,14 @@ function createMigrator({ sqlite3, schemaObjects, normalizeSql, materialReader }
         for (const name of tables) counts[name] = (await all(db, 'SELECT COUNT(*) AS n FROM ' + identifier(name)))[0].n;
         const blocked = [];
         if (!known) blocked.push('UNKNOWN_SCHEMA');
+        if (ledger && known && known.version > 0 && ledgerDefinition !== LEDGER_DEFINITION_BY_SCHEMA[known.version]) {
+            blocked.push('LEDGER_DEFINITION_VERSION_MISMATCH');
+        }
         const totalRows = Object.values(counts).reduce((sum, n) => sum + n, 0);
         if (known && known.version > 0 && known.version < VERSION && totalRows > 0) blocked.push('NONEMPTY_LEGACY_REQUIRES_MAPPING');
         const records = ledger ? await all(db, 'SELECT id, from_version, to_version, contract_sha256, backup_sha256, applied_at FROM sysbuild_schema_migrations ORDER BY id') : [];
+        const sequence = ledger ? (await all(db, 'SELECT seq FROM sqlite_sequence WHERE name = ?', [LEDGER]))[0] : null;
+        const ledgerSequence = sequence ? sequence.seq : null;
         let previous;
         for (const record of records) {
             const target = KNOWN.find((r) => r.version === record.to_version);
@@ -92,11 +109,13 @@ function createMigrator({ sqlite3, schemaObjects, normalizeSql, materialReader }
             previous = record;
         }
         if (records.length && (!known || previous.to_version !== known.version)) blocked.push('LEDGER_VERSION_MISMATCH');
+        if (ledger && owned.length && records.length === 0) blocked.push('LEDGER_CHAIN_EMPTY');
+        if (records.length && (!Number.isSafeInteger(ledgerSequence) || ledgerSequence < previous.id)) blocked.push('LEDGER_SEQUENCE_MISMATCH');
         if (!owned.length && ledger) blocked.push('LEDGER_WITHOUT_BUSINESS_SCHEMA');
         const compatibility = known && known.version === VERSION && !blocked.length ? await compatibilityOf(db) : { checkedVersions: 0, issues: [] };
         if (compatibility.issues.length) blocked.push('C8_SNAPSHOT_COMPATIBILITY');
         const action = blocked.length ? 'blocked' : known.version === VERSION ? records.length ? 'none' : 'register_current' : known.version === 0 ? 'initialize' : 'rebuild_empty_legacy';
-        return { sourceVersion: known ? known.version : null, targetVersion: VERSION, digest, action, blocked, counts, totalRows, objects: owned.length, tables, ledger: records, compatibility };
+        return { sourceVersion: known ? known.version : null, targetVersion: VERSION, digest, action, blocked, counts, totalRows, objects: owned.length, tables, ledgerDefinition, ledgerSequence, ledger: records, compatibility };
     }
     async function inspect({ dbPath }) {
         const file = plainPath(dbPath, false); noJournal(file);
@@ -126,23 +145,37 @@ function createMigrator({ sqlite3, schemaObjects, normalizeSql, materialReader }
             const backupDb = await open(backupPath, false);
             try {
                 const copied = await inspectOn(backupDb);
-                if (copied.blocked.length || copied.digest !== before.digest || JSON.stringify(copied.counts) !== JSON.stringify(before.counts)) throw failure('BACKUP_VALIDATION_MISMATCH', '备份结构、数量或兼容检查与来源不符，本次不迁移');
+                if (copied.blocked.length || JSON.stringify(copied) !== JSON.stringify(before)) throw failure('BACKUP_VALIDATION_MISMATCH', '备份结构、账本、数量或兼容检查与来源不符，本次不迁移');
             } finally { await close(backupDb); }
             const backupSha = crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex');
             backup = { path: backupPath, sha256: backupSha, verified: true };
             await run(db, 'BEGIN EXCLUSIVE'); transaction = true; outcome = 'in_transaction';
             const locked = await inspectOn(db);
             if (await dataVersion(db) !== version || JSON.stringify(locked) !== JSON.stringify(before)) throw failure('SOURCE_CHANGED_AFTER_BACKUP', '备份期间来源发生变化，本次不迁移');
+            if (locked.ledgerDefinition !== null && locked.ledgerDefinition !== LEDGER_DEFINITION_BY_SCHEMA[VERSION]) {
+                await run(db, 'DROP TABLE sysbuild_schema_migrations');
+                await run(db, LEDGER_SQL);
+                for (const record of locked.ledger) {
+                    await run(db, 'INSERT INTO sysbuild_schema_migrations (id, from_version, to_version, contract_sha256, backup_sha256, applied_at) VALUES (?, ?, ?, ?, ?, ?)',
+                        [record.id, record.from_version, record.to_version, record.contract_sha256, record.backup_sha256, record.applied_at]);
+                }
+                await run(db, 'UPDATE sqlite_sequence SET seq = ? WHERE name = ?', [locked.ledgerSequence, LEDGER]);
+            }
             if (before.action === 'rebuild_empty_legacy') {
                 if (locked.totalRows !== 0) throw failure('NONEMPTY_LEGACY', '旧结构已有业务记录，不允许空库重建');
                 for (const name of before.tables) await run(db, 'DROP TABLE ' + identifier(name));
             }
             if (before.action === 'initialize' || before.action === 'rebuild_empty_legacy') for (const object of schemaObjects) await run(db, object.sql);
             await run(db, LEDGER_SQL);
-            const recordedVersion = before.ledger.length ? before.ledger[before.ledger.length - 1].to_version : 0;
+            const recordedVersion = locked.ledger.length ? locked.ledger[locked.ledger.length - 1].to_version : 0;
             await run(db, 'INSERT INTO sysbuild_schema_migrations (from_version, to_version, contract_sha256, backup_sha256) VALUES (?, ?, ?, ?)', [recordedVersion, VERSION, KNOWN[VERSION - 1].digest, backupSha]);
             const after = await inspectOn(db);
-            if (after.action !== 'none' || after.digest !== KNOWN[VERSION - 1].digest) throw failure('POST_MIGRATION_CONTRACT_FAILED', '迁移后的结构与版本账本核对失败');
+            if (after.action !== 'none' || after.digest !== KNOWN[VERSION - 1].digest
+                || after.ledger.length !== locked.ledger.length + 1
+                || after.ledgerSequence !== (locked.ledgerSequence ?? 0) + 1
+                || JSON.stringify(after.ledger.slice(0, -1)) !== JSON.stringify(locked.ledger)) {
+                throw failure('POST_MIGRATION_CONTRACT_FAILED', '迁移后的结构与版本账本核对失败');
+            }
             await run(db, 'COMMIT'); transaction = false; applied = true; outcome = 'committed';
             const receipt = { applied: true, at: new Date().toISOString(), sourceVersion: before.sourceVersion, targetVersion: VERSION, contractSha256: after.digest, backup, businessCountsBefore: before.counts, businessCountsAfter: after.counts, compatibility: after.compatibility };
             try { fs.writeFileSync(path.join(dir, 'receipt.json'), JSON.stringify(receipt, null, 2), { flag: 'wx' }); }

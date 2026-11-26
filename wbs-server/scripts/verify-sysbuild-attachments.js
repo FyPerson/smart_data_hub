@@ -24,6 +24,7 @@ const sqlite3 = require('sqlite3');
 const { Readable } = require('stream');
 const { spawn } = require('child_process');
 const { listenOnSafePort } = require('./lib/listen-safe-port');
+const rec = require('./lib/sysbuild-mut-record'); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@CASE / @@MUT 行
 
 const DEFAULT_DIR = path.join(__dirname, '..', 'routes', 'sysbuild');
 const argDirIdx = process.argv.indexOf('--module-dir');
@@ -223,21 +224,28 @@ async function makeFixture() {
       try { removeTree(root); } catch (e) { console.log(`  [清理] 临时目录未删除: ${root} — ${e.message}`); }
     },
   };
+  // #212 C2：记录读面（GET /sysbuild/attachments/:aid）要关联 users 取遮蔽人 / 删除人 / 上传人显示名；本夹具此前没有读过记录接口，所以没建 users 表。
+  //   只建被测代码用到的列，种子 = 上面的 U 用户（显示名 = display_name，用于遮蔽人姓名的精确断言）。
+  await fx.run('CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT)', []);
+  for (const u of Object.values(U)) await fx.run('INSERT INTO users (id, username, display_name, role, status) VALUES (?, ?, ?, ?, ?)', [u.id, `u${u.id}`, u.display_name, u.role, 'active']);
   // 种子：项目与成员。
   const proj = async (status, pm) => (await fx.run("INSERT INTO sysbuild_projects (system_name, build_type, pm_user_id, status, created_by) VALUES ('t', 'inhouse', ?, ?, 1)", [pm, status])).lastID;
-  const member = (pid, uid, opts) => fx.run(
-    'INSERT INTO sysbuild_members (project_id, user_id, joined_at, removed_at, removed_reason, added_by) VALUES (?, ?, ?, ?, ?, 1)',
-    [pid, uid, (opts && opts.pending) ? null : '2026-10-01 10:00:00', (opts && opts.removed) ? '2026-10-02 10:00:00' : null, (opts && opts.removed) ? '离项' : null]
-  );
+  const member = (pid, uid, opts = {}) => {
+    if (Object.hasOwn(opts, 'pending')) throw new Error('v8 成员夹具不能使用 pending 选项');
+    return fx.run(
+      'INSERT INTO sysbuild_members (project_id, user_id, joined_at, removed_at, removed_reason, added_by) VALUES (?, ?, ?, ?, ?, 1)',
+      [pid, uid, '2026-10-01 10:00:00', opts.removed ? '2026-10-02 10:00:00' : null, opts.removed ? '离项' : null]
+    );
+  };
   fx.P1 = await proj('active', U.PM.id);
   await member(fx.P1, U.M1.id); await member(fx.P1, U.M2.id); await member(fx.P1, U.RO.id);
-  await member(fx.P1, U.REMOVED.id, { removed: true }); await member(fx.P1, U.PENDING.id, { pending: true });
+  await member(fx.P1, U.REMOVED.id, { removed: true });
   fx.P2 = await proj('active', U.PM.id); await member(fx.P2, U.M1.id);
   fx.PP = await proj('paused', U.PM.id); await member(fx.PP, U.M1.id);
   fx.PT = await proj('terminated', U.PM.id); await member(fx.PT, U.M1.id);
   fx.PC = await proj('closed', U.PM.id); await member(fx.PC, U.M1.id);
   fx.PF = await proj('active', U.PM.id); // 用于「被拒绝的暂存」：从未有人成功上传，上传目录不应被创建
-  await member(fx.PF, U.RO.id); await member(fx.PF, U.REMOVED.id, { removed: true }); await member(fx.PF, U.PENDING.id, { pending: true });
+  await member(fx.PF, U.RO.id); await member(fx.PF, U.REMOVED.id, { removed: true });
   fx.PRO = await proj('active', U.PM_RO.id);
   fx.PX = await proj('active', U.PM.id); await member(fx.PX, U.M3.id); // M2 用：暂存途中把 M3 标记为已移出
   fx.PD = await proj('active', U.PM.id); await member(fx.PD, U.M1.id); // L1 用：上传目录位置被一个普通文件占住
@@ -631,6 +639,30 @@ test('Q8 遮蔽后下载 / 预览的文件名头不含原名（含 RFC 5987 编�
   // 权限口径不变：遮蔽后成员 / PM 仍是 403。
   expectErr(await download(fx, U.M1, a.id), 403, 'SYSBUILD_ATTACHMENT_MASKED', '遮蔽后成员下载');
   expectErr(await preview(fx, U.PM, a.id), 403, 'SYSBUILD_ATTACHMENT_MASKED', '遮蔽后 PM 预览');
+  // #212 C2（清单 4.4 ⑤ 第 2 处，N7 / N8）：记录读面——同一个遮蔽附件，三个角色先断言状态再读内容；遮蔽原因 / 遮蔽人 / 姓名 / 时间按夹具与手写读库精确核（期望不取自被测代码）
+  const mrow = await attRow(fx, a.id); // 手写读库：遮蔽时间的期望值
+  const nameOf = async (id) => (await fx.get('SELECT COALESCE(display_name, username) AS n FROM users WHERE id = ?', [id])).n;
+  const readRec = async (user) => { // call 返回 { status, headers, buf, body }（没有 .text）
+    const r = await call(fx, user, 'GET', `/sysbuild/attachments/${a.id}`);
+    const text = r.buf.toString('utf8');
+    assert.strictEqual(r.status, 200, `记录接口 ${user.id}：${text}`); // 先断言状态
+    assert.ok(!text.includes(Q8_NAME) && !text.includes(Q8_DIGITS), `记录接口 ${user.id} 的响应不得含原名或其数字片段：${text}`); // 三个角色的整个响应都核「原名不返回」
+    return r.body.attachment;
+  };
+  const expectMeta = ['含身份证号', U.PM.id, await nameOf(U.PM.id), mrow.masked_at]; // 遮蔽原因、遮蔽人、遮蔽人姓名、遮蔽时间：夹具值（:621 的原因、遮蔽人 = U.PM）与独立读库值
+  const metaOf = (v) => [v.mask_reason, v.masked_by, v.masked_by_name, v.masked_at];
+  const ra = await readRec(U.ADMIN);
+  assert.deepStrictEqual([ra.name, ra.masked], [null, true], '管理员：原名不返回、遮蔽状态');
+  assert.deepStrictEqual(metaOf(ra), expectMeta, '管理员读到的遮蔽原因 / 遮蔽人 / 姓名 / 时间');
+  assert.deepStrictEqual([ra.actions.download, ra.actions.preview], [true, true]); // admin 可读
+  const rp = await readRec(U.PM);
+  assert.deepStrictEqual([rp.name, rp.masked], [null, true], 'PM：原名不返回、遮蔽状态');
+  assert.deepStrictEqual(metaOf(rp), expectMeta, 'PM 读到的遮蔽原因 / 遮蔽人 / 姓名 / 时间（与管理员同值）');
+  assert.deepStrictEqual([rp.actions.download, rp.actions.preview], [false, false]); // PM：不可读
+  const rm = await readRec(U.M1);
+  assert.deepStrictEqual([rm.name, rm.masked], [null, true], '普通成员：原名不返回、遮蔽状态');
+  assert.deepStrictEqual(metaOf(rm), expectMeta, '普通成员读到的遮蔽原因 / 遮蔽人 / 姓名 / 时间（与管理员同值）');
+  assert.deepStrictEqual([rm.actions.download, rm.actions.preview], [false, false]); // 普通成员：不可读（与 :633 / :503 的 403 同源）
   // 扩展名规范为小写：.PNG 上传，遮蔽后头里是 .png。
   const up = await stageOk(fx, U.M1, fx.P1, PNG_1X1, '大写扩展名 110101199001011234.PNG');
   assert.strictEqual((await mask(fx, U.PM, up.id, '含身份证号')).status, 200);
@@ -837,20 +869,33 @@ test('冻结助手：只冻结已绑定且未删除的；清单 sha256 与附件
   assert.strictEqual(e.code, 'SYSBUILD_INTERNAL');
 });
 
-test('C4b 预筛 D1 凭据附件不可普通软删除（不变量 9，同模式全扫 P59）：绑定为 confirmation / history_import / schedule_record 的附件软删除 409 且未删、可遮蔽；绑定为 entry 等非凭据类型的仍可软删除', async (fx) => {
+test('C4b 预筛 D1 凭据附件不可普通软删除（不变量 9，同模式全扫 P59）：绑定为 schedule_record 的附件软删除 409 且未删、可遮蔽；绑定为 entry 等非凭据类型的仍可软删除', async (fx) => {
   const bind = (ids, ownerType, ownerId) => fx.db.withWriteTxn((q) => fx.helpers.bindStagedAttachments(q, { projectId: fx.P1, userId: U.M1.id, attachmentIds: ids, ownerType, ownerId }));
-  for (const [ot, oid] of [['confirmation', 801], ['history_import', 802], ['schedule_record', 803], ['event', 805]]) { // C4b Q-S2：历史补录窗口开启 / 关闭 / 重开的凭据以 event 绑定
+  for (const [ot, oid] of [['schedule_record', 803]]) { // #212 C2：history_import / event 两类随历史补录退出（golive_event 由 trace-l2「L2 留痕：上线撤销附件」承接）
     const a = await stageOk(fx, U.M1, fx.P1, Buffer.from(`d1-${ot}`), `d1-${ot}.txt`);
     await bind([a.id], ot, oid);
+    // #212 C2（清单 4.5 表 B；codex 102 M2）：记录读面 attachments.js 的 evidence_bound 与 actions.delete，对每个保留的凭据类型各核一次（承接 N5 / N6）；
+    //   必须在遮蔽之前读——遮蔽后读到的 actions.delete 为假可能只是「已遮蔽」，证明不了未遮蔽凭据的删除入口已禁用
+    const rec = await call(fx, U.PM, 'GET', `/sysbuild/attachments/${a.id}`);
+    assert.strictEqual(rec.status, 200, `${ot} 记录接口：${rec.buf.toString('utf8')}`); // 本文件的 call 返回 { status, headers, buf, body }，没有 .text
+    assert.strictEqual(rec.body.attachment.evidence_bound, true, `${ot} 凭据（未遮蔽）：evidence_bound 应为真`);
+    assert.strictEqual(rec.body.attachment.actions.delete, false, `${ot} 凭据（未遮蔽）：actions.delete 应为假`);
     const r = await del(fx, U.PM, a.id);
     expectErr(r, 409, 'SYSBUILD_STATE', `${ot} 凭据不可软删除`);
     assert.strictEqual(r.body.message, '附件已作为确认 / 改期凭据，不能删除；如需隐藏请由项目经理遮蔽', `${ot} 提示（小修批 F1：凭据另用「确认 / 改期凭据」文案，冻结那句不变）`);
     assert.strictEqual((await fx.get('SELECT deleted_at FROM sysbuild_attachments WHERE id = ?', [a.id])).deleted_at, null, `${ot} 被拒的删除不改附件`);
     assert.strictEqual((await eventsOf(fx, a.id, 'attachment_deleted')).length, 0, `${ot} 被拒的删除不写事件`);
     assert.strictEqual((await mask(fx, U.PM, a.id, `${ot} 凭据遮蔽`)).status, 200, `${ot} 凭据仍可受控遮蔽`);
+    // #212 C3（C2 遗留 ③）：遮蔽之后再读一次记录接口——凭据被受控遮蔽后仍是凭据、仍不可删
+    const recM = await call(fx, U.PM, 'GET', `/sysbuild/attachments/${a.id}`);
+    assert.strictEqual(recM.status, 200, `${ot} 遮蔽后记录接口：${recM.buf.toString('utf8')}`);
+    assert.deepStrictEqual([recM.body.attachment.masked, recM.body.attachment.evidence_bound, recM.body.attachment.actions.delete], [true, true, false], `${ot} 凭据遮蔽后：仍是凭据、仍不可删`);
   }
   const plain = await stageOk(fx, U.M1, fx.P1, Buffer.from('d1-entry'), 'd1-entry.txt');
   await bind([plain.id], 'entry', 804);
+  const recPlain = await call(fx, U.PM, 'GET', `/sysbuild/attachments/${plain.id}`); // 对照：绑定为 entry 的非凭据附件，在软删除之前读一次
+  assert.strictEqual(recPlain.status, 200, recPlain.buf.toString('utf8'));
+  assert.deepStrictEqual([recPlain.body.attachment.evidence_bound, recPlain.body.attachment.actions.delete], [false, true], '非凭据：evidence_bound 为假、actions.delete 为真');
   assert.strictEqual((await del(fx, U.PM, plain.id)).status, 200, '绑定为 entry 的非凭据附件仍可软删除');
 });
 
@@ -859,20 +904,20 @@ test('C3b 冻结取集 = 绑定 ∪ 引用：引用来的附件进入冻结清�
   const viaRef = await stageOk(fx, U.M1, fx.P1, Buffer.from('via-ref'), 'c3b-ref.txt');
   const refDeleted = await stageOk(fx, U.M1, fx.P1, Buffer.from('ref-deleted'), 'c3b-refdel.txt');
   const other = await stageOk(fx, U.M1, fx.P1, Buffer.from('other-owner'), 'c3b-other.txt');
-  await fx.db.withWriteTxn((q) => fx.helpers.bindStagedAttachments(q, { projectId: fx.P1, userId: U.M1.id, attachmentIds: [own.id, viaRef.id, refDeleted.id, other.id], ownerType: 'item_version', ownerId: 711 }));
-  const addRef = (aid, ownerId) => fx.run("INSERT INTO sysbuild_attachment_refs (project_id, attachment_id, owner_type, owner_id, ref_by) VALUES (?, ?, 'item_version', ?, ?)", [fx.P1, aid, ownerId, U.M1.id]);
+  await fx.db.withWriteTxn((q) => fx.helpers.bindStagedAttachments(q, { projectId: fx.P1, userId: U.M1.id, attachmentIds: [own.id, viaRef.id, refDeleted.id, other.id], ownerType: 'package_version', ownerId: 711 }));
+  const addRef = (aid, ownerId) => fx.run("INSERT INTO sysbuild_attachment_refs (project_id, attachment_id, owner_type, owner_id, ref_by) VALUES (?, ?, 'package_version', ?, ?)", [fx.P1, aid, ownerId, U.M1.id]);
   await addRef(viaRef.id, 712);
   await addRef(refDeleted.id, 712);
   await addRef(own.id, 712);
   await addRef(other.id, 713);
-  // 同号但不同类型的所属对象（material_version 712）的引用不得串入 item_version 712 的取集
+  // 同号但不同类型的所属对象（material_version 712）的引用不得串入 package_version 712 的取集
   await fx.run("INSERT INTO sysbuild_attachment_refs (project_id, attachment_id, owner_type, owner_id, ref_by) VALUES (?, ?, 'material_version', 712, ?)", [fx.P1, other.id, U.M1.id]);
   assert.strictEqual((await del(fx, U.PM, refDeleted.id)).status, 200, '被引用但未冻结的附件可以软删除');
-  const freeze = (ownerId, versionId) => fx.db.withWriteTxn((q) => fx.helpers.freezeAttachmentSet(q, { objectType: 'item_version', objectVersionId: versionId, ownerType: 'item_version', ownerId, operatorId: U.PM.id, operatorName: 'pm', projectId: fx.P1 }));
+  const freeze = (ownerId, versionId) => fx.db.withWriteTxn((q) => fx.helpers.freezeAttachmentSet(q, { objectType: 'package_version', objectVersionId: versionId, ownerType: 'package_version', ownerId, operatorId: U.PM.id, operatorName: 'pm', projectId: fx.P1 }));
   const list712 = await freeze(712, 9712);
   assert.deepStrictEqual(list712.map((x) => x.attachment_id), [own.id, viaRef.id], '712 只有引用：own（绑定在 711，引用到 712）与 viaRef；已删除的引用不进');
   assert.deepStrictEqual(list712.map((x) => x.sha256), [own.sha256, viaRef.sha256]);
-  const rows = await fx.all("SELECT attachment_id FROM sysbuild_frozen_attachments WHERE object_type = 'item_version' AND object_version_id = 9712 ORDER BY attachment_id");
+  const rows = await fx.all("SELECT attachment_id FROM sysbuild_frozen_attachments WHERE object_type = 'package_version' AND object_version_id = 9712 ORDER BY attachment_id");
   assert.deepStrictEqual(rows.map((r) => r.attachment_id), [own.id, viaRef.id], '冻结清单落库');
   // 711 是绑定来源：own / viaRef / other 在 711 名下（refDeleted 已软删除不进）；引用到 712 / 713 的行不影响 711 的取集，也不重复
   const list711 = await freeze(711, 9711);
@@ -1491,6 +1536,7 @@ async function runAll() {
       failed += 1;
       fx.failed = true;
       console.log(`  ✗ ${c.name}\n      ${e && e.message}`);
+      if (rec.enabled()) console.log(rec.caseLine(c.name, e));
     } finally {
       if (c.fresh && fx !== shared) await fx.dispose();
     }
@@ -1513,12 +1559,17 @@ const MUTATIONS = [
   { id: '预检不拦非成员（multer 落盘）', file: 'attachments.js', from: "rules.assertCan(access, rules.canStageAttachment, { writeKind: 'attachment' }); // 预检", to: 'void access; // 预检' },
   { id: '只读账号可暂存', file: 'rules.js', from: 'return !!(!access.isReadonly && (access.isAdmin || access.isMember));', to: 'return !!(access.isAdmin || access.isMember);' },
   { id: '冻结附件可软删除', file: 'attachments.js', from: 'if (await isAttachmentFrozen(q, aid)) throw', to: 'if (false) throw' },
-  // C4b 预筛 D1：凭据附件（代录确认 / 历史导入 / 改期证据）不可普通软删除——三类各一条（各自从 IN 清单里去掉一类），再加整句去掉
-  { id: 'C4b D1 代录确认凭据（confirmation）可软删除', file: 'attachments.js', from: "owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1\",\n        [aid]", to: "owner_type IN ('history_import', 'schedule_record', 'event') LIMIT 1\",\n        [aid]" },
-  { id: 'C4b D1 历史导入凭据（history_import）可软删除', file: 'attachments.js', from: "owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1\",\n        [aid]", to: "owner_type IN ('confirmation', 'schedule_record', 'event') LIMIT 1\",\n        [aid]" },
-  { id: 'C4b D1 改期证据（schedule_record）可软删除', file: 'attachments.js', from: "owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1\",\n        [aid]", to: "owner_type IN ('confirmation', 'history_import', 'event') LIMIT 1\",\n        [aid]" },
-  { id: 'C4b Q-S2 窗口凭据（event）可软删除', file: 'attachments.js', from: "owner_type IN ('confirmation', 'history_import', 'schedule_record', 'event') LIMIT 1\",\n        [aid]", to: "owner_type IN ('confirmation', 'history_import', 'schedule_record') LIMIT 1\",\n        [aid]" },
-  { id: 'C4b D1 凭据附件整句不拦', file: 'attachments.js', from: 'if (evidenceBound) throw', to: 'if (false) throw' },
+  // C4b 预筛 D1：凭据附件（代录确认 / 改期证据）不可普通软删除——两类各一条（各自从 IN 清单里去掉一类），再加整句去掉
+  //   #212 C2：history_import / event 两条（M2468 / M2470）随历史补录退出；M2467 / M2469 的 from / to 改挂为 C2 后 :611 现行整句
+  { id: 'C4b D1 改期证据（schedule_record）可软删除', file: 'attachments.js', from: "owner_type IN ('schedule_record', 'golive_event', 'opinion_assessment') LIMIT 1\",\n        [aid]", to: "owner_type IN ('golive_event', 'opinion_assessment') LIMIT 1\",\n        [aid]" },
+  { id: 'C4b D1 凭据附件整句不拦', file: 'attachments.js', from: 'if (evidenceBound) {', to: 'if (false) {' },
+  // #212 C2 新增（N5 / N6，清单 4.5）：记录读面 :535 的单行清单各去一类，判红点是 :841 循环里新增的 evidence_bound 断言（不改 :611，所以不会命中 409 断言）
+  { id: '记录读面：evidence_bound 清单漏 schedule_record', file: 'attachments.js', from: "owner_type IN ('schedule_record', 'golive_event', 'opinion_assessment') LIMIT 1\", [aid]);", to: "owner_type IN ('golive_event', 'opinion_assessment') LIMIT 1\", [aid]);" },
+  // #212 C3 新增（R4，清单 4.5）：遮蔽后记录读面读不到凭据绑定（evidence 取空）→ 遮蔽后 evidence_bound 变假、actions.delete 变真；判红点是循环里遮蔽之后的 [masked, evidence_bound, actions.delete] 三元组断言
+  { id: '遮蔽读面：遮蔽后记录接口 evidence_bound 取空', file: 'attachments.js', from: 'const evidence = await q.get(', to: 'const evidence = att.masked_at ? null : await q.get(' },
+  // #212 C2 新增（N7 / N8，清单 4.4 ⑤）：遮蔽读面 :540 readable 判定；N7 管理员读不到，N8 PM、普通成员也读得到
+  { id: '遮蔽读面：记录接口管理员读不到遮蔽附件', file: 'attachments.js', from: 'const readable = !att.deleted_at && (!att.masked_at || access.isAdmin);', to: 'const readable = !att.deleted_at && (!att.masked_at);' },
+  { id: '遮蔽读面：记录接口 PM 与普通成员也读得到遮蔽附件', file: 'attachments.js', from: 'const readable = !att.deleted_at && (!att.masked_at || access.isAdmin);', to: 'const readable = !att.deleted_at && (!att.masked_at || true);' },
   { id: '遮蔽不限 PM', file: 'rules.js', from: 'function canMaskAttachment(access) {\n  return !!(access.isPm && !access.isReadonly);', to: 'function canMaskAttachment(access) {\n  return !!((access.isPm || access.isMember) && !access.isReadonly);' },
   { id: '软删除不限 PM', file: 'rules.js', from: 'function canSoftDeleteAttachment(access) {\n  return !!(access.isPm && !access.isReadonly);', to: 'function canSoftDeleteAttachment(access) {\n  return !!((access.isPm || access.isMember) && !access.isReadonly);' },
   { id: '预览缺 nosniff', file: 'attachments.js', from: "    res.setHeader('X-Content-Type-Options', 'nosniff');\n    res.setHeader('Content-Security-Policy', \"default-src 'none'\");", to: "    res.setHeader('Content-Security-Policy', \"default-src 'none'\");" },
@@ -1551,11 +1602,14 @@ const MUTATIONS = [
   { id: '非成员读不拦（可见性）', file: 'rules.js', from: 'if (!canViewProject(access)) throw NOT_FOUND();', to: 'if (false) throw NOT_FOUND();' },  // C2a 预筛 L3：assertVisible 改调 canViewProject，锚点随之更换
   { id: '只读账号不能查看', file: 'rules.js', from: 'return !!(access.isAdmin || access.isMember || access.isReadonly);', to: 'return !!(access.isAdmin || access.isMember);' },
   { id: '已移出成员仍算成员', file: 'rules.js', from: 'AND joined_at IS NOT NULL AND removed_at IS NULL LIMIT 1', to: 'AND joined_at IS NOT NULL LIMIT 1' },
-  { id: '未加入成员算成员', file: 'rules.js', from: 'AND joined_at IS NOT NULL AND removed_at IS NULL LIMIT 1', to: 'AND removed_at IS NULL LIMIT 1' },
   { id: 'PM 不视为成员', file: 'rules.js', from: 'let isMember = isPm;', to: 'let isMember = false;' },
   { id: '项目状态限制只允许 active', file: 'rules.js', from: "attachment: Object.freeze({ active: true, paused: true, terminated: true, closed: true }),", to: "attachment: Object.freeze({ active: true, paused: false, terminated: false, closed: false })," },  // C2a：projectAllowsWrite 改查 PROJECT_ACTION_TABLE，锚点随之换成 attachment 行
   // ── 预筛修订新增 ──
-  { id: '冻结不查同项目', file: 'attachments.js', from: 'if (r.project_id !== projectId) throw', to: 'if (false) throw' },
+  // 纵深校验加入后同一条校验有两处副本（readAttachmentSet 的 for 单行、freezeAttachmentRows 的 for 块），变异要两处一起去掉
+  { id: '冻结不查同项目', file: 'attachments.js', edits: [
+    { from: 'for (const r of rows) if (r.project_id !== projectId) throw', to: 'for (const r of rows) if (false) throw' },
+    { from: 'for (const r of rows) {\n      if (r.project_id !== projectId) throw', to: 'for (const r of rows) {\n      if (false) throw' },
+  ] },
   { id: '白名单去掉压缩包', file: 'attachments.js', from: "const EXTRA_EXTS = ['.zip', '.rar', '.7z'];", to: 'const EXTRA_EXTS = [];' },
   { id: '遮蔽放行 admin', file: 'rules.js', from: 'function canMaskAttachment(access) {\n  return !!(access.isPm && !access.isReadonly);', to: 'function canMaskAttachment(access) {\n  return !!((access.isPm || access.isAdmin) && !access.isReadonly);' },
   { id: '软删除放行 admin', file: 'rules.js', from: 'function canSoftDeleteAttachment(access) {\n  return !!(access.isPm && !access.isReadonly);', to: 'function canSoftDeleteAttachment(access) {\n  return !!((access.isPm || access.isAdmin) && !access.isReadonly);' },
@@ -1572,7 +1626,12 @@ const MUTATIONS = [
   { id: '下载缺 no-store（L5）', file: 'attachments.js', from: "    res.setHeader('Cache-Control', 'private, no-store');\n    // 显式以存储的", to: '    // 显式以存储的' },
   { id: '预览缺 no-store（L5）', file: 'attachments.js', from: "    res.setHeader('Cache-Control', 'private, no-store');\n    res.setHeader('Content-Length', String(size));", to: "    res.setHeader('Content-Length', String(size));" },
   { id: '绑定把非数组当空（L7）', file: 'attachments.js', from: "if (attachmentIds !== undefined && attachmentIds !== null && !Array.isArray(attachmentIds)) throw invalid(", to: 'if (false) throw invalid(' },
-  { id: '冻结不校验 ownerId（L7）', file: 'attachments.js', from: "if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');", to: '' },
+  // 纵深校验：readAttachmentSet / freezeAttachmentSet / freezeAttachmentRows 三处各有一份，三处都去掉
+  { id: '冻结不校验 ownerId（L7）', file: 'attachments.js', edits: [
+    { from: "\n  if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');\n  const rows = await q.all(", to: '\n  const rows = await q.all(' },
+    { from: "\n    if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    return freezeAttachmentRows(", to: "\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    return freezeAttachmentRows(" },
+    { from: "\n    if (!Number.isInteger(ownerId) || ownerId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的所属对象编号不合法');\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    const frozen = [];", to: "\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    const frozen = [];" },
+  ] },
   // ── codex 11 号修订新增 ──
   { id: '独占创建改回覆盖写（M-1）', file: 'attachments.js', from: "fs.openSync(path.join(dir, name), 'wx')", to: "fs.openSync(path.join(dir, name), 'w')" },
   { id: 'EEXIST 不重试（M-1）', file: 'attachments.js', from: "if (!e || e.code !== 'EEXIST') return finish(e);", to: 'return finish(e);' },
@@ -1595,7 +1654,11 @@ const MUTATIONS = [
     { from: '      res.json({ attachment });\n    } catch (err) {', to: '    } catch (err) {' },
     { from: '      return sendError(res, failure);\n    }\n    return undefined;\n  }', to: '      return sendError(res, failure);\n    }\n    res.json({ attachment });\n    return undefined;\n  }' },
   ] },
-  { id: '冻结不校验 objectVersionId（L7）', file: 'attachments.js', from: "if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');", to: '' },
+  // 纵深校验：freezeAttachmentSet / freezeAttachmentRows 两处各有一份，两处都去掉
+  { id: '冻结不校验 objectVersionId（L7）', file: 'attachments.js', edits: [
+    { from: "\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    return freezeAttachmentRows(", to: '\n    return freezeAttachmentRows(' },
+    { from: "\n    if (!Number.isInteger(objectVersionId) || objectVersionId <= 0) throw makeError(500, 'SYSBUILD_INTERNAL', '内部错误：冻结的对象版本编号不合法');\n    const frozen = [];", to: '\n    const frozen = [];' },
+  ] },
   // ── Q8 原文件名（2026-10-29）──
   { id: '暂存事件恢复 original_name（Q8）', file: 'attachments.js', from: 'payload: { size, sha256, is_image: isImage },', to: 'payload: { original_name: file.originalname, size, sha256, is_image: isImage },' },
   { id: '删除事件恢复 original_name（Q8）', file: 'attachments.js', edits: [
@@ -1640,7 +1703,7 @@ function runChild(args) {
       if (signal || m === null) return resolve({ kind: 'abnormal', detail: signal || (errOut.split('\n').filter(Boolean).slice(-3).join(' | ') || out.split('\n').filter(Boolean).slice(-2).join(' | ') || '无汇总行') });
       const passedN = Number(m[1]);
       const totalN = Number(m[2]);
-      if (code === 1 && passedN < totalN) return resolve({ kind: 'red', detail: `${passedN}/${totalN}` });
+      if (code === 1 && passedN < totalN) return resolve({ kind: 'red', detail: `${passedN}/${totalN}`, caseDetails: rec.parseCaseLines(out) });
       if (code === 0 && passedN === totalN) return resolve({ kind: 'green', detail: `${passedN}/${totalN}` });
       return resolve({ kind: 'abnormal', detail: `退出码 ${code} 与汇总 ${passedN}/${totalN} 不一致` });
     });
@@ -1706,7 +1769,7 @@ async function selfTestIn(root) {
       }
       return out;
     });
-    if (bad) { console.log(`  ✗ [${mu.id}] ${bad}`); weak += 1; } else prepared.push({ mu, dir });
+    if (bad) { console.log(`  ✗ [${mu.id}] ${bad}`); weak += 1; if (rec.enabled()) console.log(rec.mutLine('attachments', mu.id, rec.VERDICT.ANCHOR, [], bad)); } else prepared.push({ mu, dir });
   });
   const results = new Array(prepared.length);
   let next = 0;
@@ -1723,12 +1786,15 @@ async function selfTestIn(root) {
     const label = res.kind === 'red' ? `判红（${res.detail}）` : res.kind === 'green' ? '未判红（断言无判别力）' : `异常（${res.detail}），不计为检出`;
     console.log(`  ${res.kind === 'red' ? '✓' : '✗'} [${p.mu.id}] ${label}`);
     if (res.kind !== 'red') weak += 1;
+    if (rec.enabled()) console.log(rec.mutLine('attachments', p.mu.id, res.kind === 'red' ? rec.VERDICT.RED : (res.kind === 'green' ? rec.VERDICT.WEAK : rec.VERDICT.ABNORMAL), res.kind === 'red' ? (res.caseDetails || []) : (res.kind === 'abnormal' ? [{ case: null, errorClass: null, message: res.detail }] : []), null));
   });
   console.log(`\n变异自检：${MUTATIONS.length - weak}/${MUTATIONS.length} 判红`);
   return weak;
 }
 
-(async () => {
+// 只读导出（#212 C1b，供 scripts/sysbuild-step1/mutation-check.js 读取）：变异登记与用例名清单；下面的入口只在直接运行本脚本时执行。
+module.exports = { MUTATIONS, CASE_NAMES: cases.map((c) => c.name) };
+if (require.main === module) (async () => {
   if (SELF_TEST) {
     const weak = await selfTest();
     process.exitCode = weak === 0 ? 0 : 1;

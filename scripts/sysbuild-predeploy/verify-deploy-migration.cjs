@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const rec = require(path.join(__dirname, '../../wbs-server/scripts/lib/sysbuild-mut-record.js')); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@MUT 行
 const flags = process.argv.slice(2); const settings = {};
 for (let i = 0; i < flags.length; i += 1) {
     const key = flags[i];
@@ -16,14 +17,15 @@ if (!settings['--script'] || !path.isAbsolute(settings['--script'])) throw new E
 const scriptFile = settings['--script']; const source = fs.readFileSync(scriptFile, 'utf8');
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'sysbuild-deploy-guard-'));
 const reportPath = 'E:\\Task_Pool_deploy_tmp\\sysbuild_migration_unit.json';
-const digest = 'b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7';
-const payload = (extra) => ({ fromVersion: 1, toVersion: 6, applied: true, outcome: 'committed', compatibilityIssues: 0, contractSha256: digest, report: reportPath, reportSha256: 'b'.repeat(64), backup: { verified: true, path: 'E:\\Task_Pool_deploy_tmp\\sysbuild-migrate-unit\\before.sqlite', sha256: 'a'.repeat(64) }, ...extra });
+const digest = '91f6f61bf27fcac6734939a1d28912306b7dcf35f8981d525d5a34121f4c5fcf';
+const payload = (extra) => ({ fromVersion: 1, toVersion: 9, applied: true, outcome: 'committed', compatibilityIssues: 0, contractSha256: digest, report: reportPath, reportSha256: 'b'.repeat(64), backup: { verified: true, path: 'E:\\Task_Pool_deploy_tmp\\sysbuild-migrate-unit\\before.sqlite', sha256: 'a'.repeat(64) }, ...extra });
 const proc = (data, tag, extra) => ({ ExitCode: tag === 'SYSBUILD_MIGRATION_FAIL' || tag === 'SYSBUILD_MIGRATION_UNKNOWN' ? 1 : 0, Stdout: (tag || 'SYSBUILD_MIGRATION_OK') + ' ' + JSON.stringify(data) + '\n', Stderr: '', StartError: null, TimedOut: false, ...extra });
 const protocolCases = [
     ['source-zero', payload({ fromVersion: 0 }), null, null, 'OK', 0],
     ['source-one', payload(), null, null, 'OK', 1],
-    ['current-register', payload({ fromVersion: 6 }), null, null, 'OK', 6],
-    ['current-noop', payload({ fromVersion: 6, applied: false, outcome: 'noop', backup: null }), null, null, 'OK', 6],
+    ['current-register', payload({ fromVersion: 9 }), null, null, 'OK', 9],
+    ['current-noop', payload({ fromVersion: 9, applied: false, outcome: 'noop', backup: null }), null, null, 'OK', 9],
+    ['legacy-cannot-noop', payload({ fromVersion: 6, applied: false, outcome: 'noop', backup: null }), null, null, 'UNKNOWN', 6],
     ['known-fail', payload({ applied: false, outcome: 'rolled_back' }), 'SYSBUILD_MIGRATION_FAIL', null, 'FAIL', 1],
     ['committed-report-fail', payload(), 'SYSBUILD_MIGRATION_FAIL', null, 'FAIL', 1],
     ['uncertain', payload({ applied: null, outcome: 'unknown' }), 'SYSBUILD_MIGRATION_UNKNOWN', null, 'UNKNOWN', 1],
@@ -33,7 +35,7 @@ const protocolCases = [
     ['array-json', null, null, { Stdout: 'SYSBUILD_MIGRATION_OK []\n' }, 'UNKNOWN', 1],
     ['ok-exit-one', payload(), null, { ExitCode: 1 }, 'UNKNOWN', 1],
     ['wrong-source', payload({ fromVersion: 2 }), null, null, 'UNKNOWN', 1],
-    ['wrong-target', payload({ toVersion: 7 }), null, null, 'UNKNOWN', 1],
+    ['wrong-target', payload({ toVersion: 10 }), null, null, 'UNKNOWN', 1],
     ['wrong-report', payload({ report: reportPath + '.old' }), null, null, 'UNKNOWN', 1],
     ['wrong-contract', payload({ contractSha256: '0'.repeat(64) }), null, null, 'UNKNOWN', 1],
     ['bad-snapshot', payload({ compatibilityIssues: 1 }), null, null, 'UNKNOWN', 1],
@@ -56,7 +58,8 @@ const moduleListingPattern = String.raw`\A100(?:644|755) blob [0-9a-f]{40}\twbs-
 const mutations = [
     { id: 'success-nonzero-exit', from: 'if (-not (Test-Ok $Res)) { return $unknown }', to: 'if ($false) { return $unknown }' },
     { id: 'wrong-source-scope', from: '$j.fromVersion -ne $ExpectedFromVersion -or ', to: '' },
-    { id: 'wrong-target-scope', from: '$j.toVersion -ne 6 -or ', to: '' },
+    { id: 'wrong-target-scope', from: '$j.toVersion -ne 9 -or ', to: '' },
+    { id: 'c8-noop-still-uses-v6', from: "$j.outcome -ne 'noop' -or $ExpectedFromVersion -ne 9", to: "$j.outcome -ne 'noop' -or $ExpectedFromVersion -ne 6" },
     { id: 'compatibility-not-zero', from: '-or $j.compatibilityIssues -ne 0)', to: ')' },
     { id: 'backup-unverified', from: '-or -not $j.backup.verified -or ', to: '-or ' },
     { id: 'failure-continues-start', from: "if ($migrationOutcome.Outcome -ne 'OK') {", to: 'if ($false) {' },
@@ -103,8 +106,8 @@ function executeCandidate(file, label) {
     const getFlow = (name) => data.flows.find((row) => row.name === name);
     if (getFlow('off').tape.length !== 0 || getFlow('off').exitCode !== null) failures.push('flow:off');
     for (const name of ['ok','real_ok','real_noop']) {
-        const from=name==='real_noop'?6:0;
-        const expected='COMMAND cd /d "E:\\fixture repo" && node scripts\\sysbuild-predeploy\\deploy-prestart.cjs --db "E:\\fixture db\\module.sqlite" --backup-dir "E:\\fixture tmp" --from-version '+from+' --to-version 6 --report "E:\\fixture tmp\\sysbuild_migration_unit.json" --maintenance-confirmed';
+        const from=name==='real_noop'?9:0;
+        const expected='COMMAND cd /d "E:\\fixture repo" && node scripts\\sysbuild-predeploy\\deploy-prestart.cjs --db "E:\\fixture db\\module.sqlite" --backup-dir "E:\\fixture tmp" --from-version '+from+' --to-version 9 --report "E:\\fixture tmp\\sysbuild_migration_unit.json" --maintenance-confirmed';
         if (getFlow(name).exitCode !== null || !getFlow(name).tape.includes(expected) || !getFlow(name).tape.includes('STAGE code_updated')) failures.push('flow:'+name);
     }
     for (const name of ['sysbuild_migration_fail', 'sysbuild_migration_unknown','real_fail','real_unknown','real_missing','real_committed_failure']) if (getFlow(name).exitCode !== 1 || !getFlow(name).tape.includes('MANUAL_RECOVERY') || getFlow(name).tape.includes('STAGE code_updated')) failures.push('flow:' + name);
@@ -118,7 +121,7 @@ function executeCandidate(file, label) {
     if (!data.probe.includes('Get-CimInstance') || !data.probe.includes('deploy-prestart[.]cjs') || !data.probe.includes('SYSBUILD_MIGRATION_PROCESS_SCAN_OK count=') || !data.probe.includes('-ErrorAction Stop')) failures.push('recovery:process-probe');
     const guards = [
         ['off', [], 0, false], ['zero', ['-SysbuildMigrationFromVersion', '0'], 0, true], ['six', ['-SysbuildMigrationFromVersion', '6'], 0, true],
-        ['out-of-range', ['-SysbuildMigrationFromVersion', '7'], 2], ['fraction', ['-SysbuildMigrationFromVersion', '1.5'], 2], ['spaces', ['-SysbuildMigrationFromVersion', ' 1'], 2],
+        ['seven', ['-SysbuildMigrationFromVersion', '7'], 0, true], ['eight', ['-SysbuildMigrationFromVersion', '8'], 0, true], ['nine', ['-SysbuildMigrationFromVersion', '9'], 0, true], ['out-of-range', ['-SysbuildMigrationFromVersion', '10'], 2], ['fraction', ['-SysbuildMigrationFromVersion', '1.5'], 2], ['spaces', ['-SysbuildMigrationFromVersion', ' 1'], 2],
         ['simulation-without-scope', ['-DryRun', '-DryRunFailAt', 'sysbuild_migration_fail'], 2],
     ];
     for (const [name, args, status, requested] of guards) {
@@ -136,10 +139,12 @@ else if (settings['--self-test']) {
     const results = [];
     for (const [index, mutation] of mutations.entries()) {
         const count = source.split(mutation.from).length - 1;
-        if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); continue; }
+        if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); if (rec.enabled()) console.log(rec.mutLine('deploy', mutation.id, rec.VERDICT.ANCHOR, [], 'anchor count ' + count)); continue; }
         const file = path.join(out, 'candidate-' + index + '.ps1'); fs.writeFileSync(file, source.replace(mutation.from, () => mutation.to));
         const result = executeCandidate(file, 'mutation-' + index); const red = mutation.expect ? result.failures.includes(mutation.expect) : result.failures.length > 0;
         results.push({ id: mutation.id, red, failures: result.failures, directory: result.directory }); console.log((red ? '变异判红 ' : '变异未检出 ') + mutation.id);
+        // C1c 机器基线：deploy 的失败是 PowerShell 夹具产出的标签（flow:real_fail 之类），不是异常；label / case / message 都填标签原文
+        if (rec.enabled()) console.log(rec.mutLine('deploy', mutation.id, red ? rec.VERDICT.RED : rec.VERDICT.WEAK, result.failures.map((x) => ({ case: x, errorClass: 'GuardFail', message: x, site: null, label: x })), red ? null : (mutation.expect ? '期望标签 ' + mutation.expect + ' 未出现' : '没有任何失败标签')));
     }
     const red = results.filter((r) => r.red).length; fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ at: new Date().toISOString(), sourceSha256: crypto.createHash('sha256').update(source).digest('hex'), baseline, red, total: results.length, results }, null, 2));
     console.log('部署迁移变异 ' + red + '/' + results.length + ' 判红；证据 ' + out); process.exitCode = red === results.length ? 0 : 1;

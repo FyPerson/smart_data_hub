@@ -28,6 +28,7 @@ const mutations = [
     { id: '客户端把写请求发给只读服务器', file: 'server-client.js', from: "if(READONLY&&!['GET','HEAD','OPTIONS'].includes(method))throw", to: "if(false&&READONLY&&!['GET','HEAD','OPTIONS'].includes(method))throw", expect: '只读页面展示' },
 ];
 async function run({ childEnv, appDir }) {
+    const rec = require(path.join(__dirname, '../../wbs-server/scripts/lib/sysbuild-mut-record.js')); // C1c：机器基线输出，只在 SYSBUILD_MUT_RECORD=1 时多打 @@MUT 行
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'sysbuild-3002-ro-mut-'));
     const test = path.join(__dirname, 'verify-readonly.cjs'); const root = path.resolve(__dirname, '../..');
     function execute(name, args) {
@@ -46,15 +47,16 @@ async function run({ childEnv, appDir }) {
         for (const file of ['cli.cjs', 'archive-core.cjs', 'archive-fs.cjs']) fs.copyFileSync(path.join(__dirname, file), path.join(candidate, file), fs.constants.COPYFILE_EXCL);
         const source = fs.readFileSync(path.join(candidate, mutation.file), 'utf8').replace(/\r\n/g, '\n');
         const count = source.split(mutation.from).length - 1;
-        if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); continue; }
+        if (count !== 1) { results.push({ id: mutation.id, red: false, error: 'anchor count ' + count }); console.log('锚点失败 ' + mutation.id); if (rec.enabled()) console.log(rec.mutLine('readonly', mutation.id, rec.VERDICT.ANCHOR, [], 'anchor count ' + count)); continue; }
         fs.writeFileSync(path.join(candidate, mutation.file), source.replace(mutation.from, () => mutation.to));
         const result = execute('mutation-' + index, ['--app-dir', candidate]);
         const failed = result.summary ? result.summary.results.filter((r) => !r.passed).map((r) => r.name) : [];
         const red = result.status === 1 && !result.signal && !result.error && result.summary && result.summary.total === baseline.summary.total && failed.some((name) => name.startsWith(mutation.expect));
         results.push({ id: mutation.id, red: !!red, status: result.status, failed, evidence: result.evidence, error: result.error }); console.log((red ? '变异判红 ' : '变异未检出 ') + mutation.id);
+        if (rec.enabled()) console.log(rec.mutLine('readonly', mutation.id, red ? rec.VERDICT.RED : (result.error || result.signal || !result.summary ? rec.VERDICT.ABNORMAL : rec.VERDICT.WEAK), rec.failuresOfSummary(result.summary), red ? null : (result.error || result.signal || (!result.summary ? '没有结果文件' : null))));
     }
     const red = results.filter((r) => r.red).length;
     fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ at: new Date().toISOString(), scope: 'C9 draft, private service and data only', baseline: baseline.evidence, red, total: results.length, results }, null, 2));
     console.log('只读变异 ' + red + '/' + results.length + ' 判红；证据 ' + out); return red === results.length ? 0 : 1;
 }
-module.exports = { run };
+module.exports = { run, mutations }; // mutations 为 #212 C1b 加的只读导出（供 wbs-server/scripts/sysbuild-step1/mutation-check.js 读取）

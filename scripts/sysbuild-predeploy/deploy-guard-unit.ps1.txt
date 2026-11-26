@@ -75,9 +75,9 @@ $flowResults = @()
 foreach ($mode in @('off', 'ok', 'sysbuild_migration_fail', 'sysbuild_migration_unknown', 'real_ok', 'real_fail', 'real_unknown', 'real_missing', 'real_committed_failure', 'real_noop')) {
     $script:Tape = @(); $script:UnitExit = $null; $script:SysbuildMigrationRequested = $mode -ne 'off'; $script:Id = 'unit'; $script:NewCommit = 'a' * 40
     $RemoteRepo = 'E:\fixture repo'; $RemoteDb = 'E:\fixture db\module.sqlite'; $RemoteTmpDir = 'E:\fixture tmp'; $RemoteSqlite3 = 'E:\fixture repo\wbs-server\node_modules\sqlite3'
-    $SysbuildMigrationFromVersion = $(if ($mode -eq 'real_noop') { '6' } else { '0' }); $DryRunFailAt = $(if ($mode -like 'sysbuild_*') { $mode } else { '' })
+    $SysbuildMigrationFromVersion = $(if ($mode -eq 'real_noop') { '9' } else { '0' }); $DryRunFailAt = $(if ($mode -like 'sysbuild_*') { $mode } else { '' })
     $script:FlowReal = $mode.StartsWith('real_')
-    $realData = @{ fromVersion=[int]$SysbuildMigrationFromVersion; toVersion=6; applied=$true; outcome='committed'; contractSha256='b354be11ba53a480dbbf73a587ad351dbc3b3e37506550e46c019ae0610f47e7'; compatibilityIssues=0; report="$RemoteTmpDir\sysbuild_migration_unit.json"; reportSha256=('b'*64); backup=@{ verified=$true; path="$RemoteTmpDir\before.sqlite"; sha256=('a'*64) } }
+    $realData = @{ fromVersion=[int]$SysbuildMigrationFromVersion; toVersion=9; applied=$true; outcome='committed'; contractSha256='91f6f61bf27fcac6734939a1d28912306b7dcf35f8981d525d5a34121f4c5fcf'; compatibilityIssues=0; report="$RemoteTmpDir\sysbuild_migration_unit.json"; reportSha256=('b'*64); backup=@{ verified=$true; path="$RemoteTmpDir\before.sqlite"; sha256=('a'*64) } }
     $realTag = 'SYSBUILD_MIGRATION_OK'; $realExit = 0
     if ($mode -eq 'real_fail') { $realData.applied=$false; $realData.outcome='rolled_back'; $realTag='SYSBUILD_MIGRATION_FAIL'; $realExit=1 }
     if ($mode -eq 'real_committed_failure') { $realTag='SYSBUILD_MIGRATION_FAIL'; $realExit=1 }

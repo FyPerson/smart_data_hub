@@ -12,6 +12,7 @@
 //   端点里不另写「暂停时不能收口」之类的特例：暂停拒绝收口只来自状态表的 close 类别。
 // 写端点全部在 withWriteTxn 内完成「加载 → 校验 → 写 → 写事件」；状态转移用条件 UPDATE（WHERE 带改前状态），影响行数 0 → 409。
 'use strict';
+const stageCards = require('./stage-cards');
 const confirmCore = require('./confirm-core');
 const express = require('express');
 const rules = require('./rules');
@@ -19,17 +20,21 @@ const { makeError } = require('./db');
 const { writeEvent } = require('./events');
 const { G_STAGES } = require('./templates');
 const { effectiveOverallVersionId } = require('./packages');
-const entriesCore = require('./entries-core'); // C5 S-S1b：收口前置读登记事实（entries-core 只依赖 rules / db / events / confirm-core，不依赖本文件，不成环）
+const entriesCore = require('./entries-core'); // C6：结项阶段的收口前置事实（批次上线判据等，closingFactsOf；办理类登记已不再进收口前置）（entries-core 只依赖 rules / db / events / confirm-core，不依赖本文件，不成环）
 const goliveCore = require('./golive-core'); // C6a：批次视图的上线信息与 actions、项目上线进度（golive-core 不依赖本文件，不成环）
 const notifySchedule = require('./notify-schedule'); // C6b：改期知会的生成（只依赖 events / confirm-core / notify-core，不成环）
+const completion = require('./node-completion');
+const { pendingClosingWork, pendingWorkMessage } = require('./work-core');
 const reports = require('./report-core');
 const { goliveEventView } = require('./golive');
 
 const NAME_MAX = 60;
 const REASON_MAX = 500;
+const START_NOTE_MAX = 2000;
 const EVIDENCE_REASON_MIN = 10;
-// 草稿期计划（形成基线之前）原因可选；库内 plan_change 的 CHECK 要求原因非空，所以没填时写这句固定文案。
+// 初次和草稿期排期的原因可选；库内 plan_change 的 CHECK 要求原因非空。
 const DRAFT_PLAN_REASON = '草稿期计划';
+const FIRST_PLAN_REASON = '范围生效后首次排期';
 
 function operatorNameOf(user) {
   return (user && (user.display_name || user.username)) || ('user#' + (user && user.id));
@@ -121,65 +126,45 @@ function deriveSchedule(node, recs, today) {
   };
 }
 
-// ── 收口前置检查（读接口与收口端点共用这一个函数）──────────────────────────────────────────
-// 输入 = 本项目全部节点的精简视图 [{ id, batch_id, template_key, status, current_plan }]（调用方先取数 + deriveSchedule）。
-// 返回阻塞项数组 [{ code, message, node_ids }]；空数组 = 前置满足。
-//   C3a 只有两条（方案 v1.2 §4.4）：
-//     ① 收口「批次需求确认」（b_req）：本批全部未取消节点都须有当前计划（起止都有）；
-//     ② 收口「总体范围与批次规划」（p_overall）：全部未取消的项目层节点都须有当前计划。
-//   C4a 修订批加「内容包已生效」（方案 §3.1 / §3.2 / §4.4；C4 增项），code = PACKAGE_NOT_EFFECTIVE，node_ids = [本节点]，排在 PLAN_MISSING 之后：
-//     ③ 收口「立项与授权」（p_initiation）：项目立项包须有生效版本；
-//     ④ 收口「总体范围与批次规划」（p_overall）：总体规划包须有生效版本；
-//     ⑤ 收口「需求确认」（批次层 b_req）：第一期单批由总体规划包（合并形态）承载批次需求（P19），以总体规划包已有生效版本为前置；
-//        C5 / 第二期交接：开放多批次后，批次层需求确认应改看**本批**的批次需求包（batch_req）是否生效，而不是项目级的总体规划包（P41 同一条交接）；
-//     ⑥ 收口「用户验收测试」（b_uat）：本批批次验收包须有生效版本。批次验收包的提交在 C6 才开放，所以 C6 之前该节点（外包类）收口恒被阻塞——这是有意的收紧，
-//        不是缺陷（自研没有 b_uat 节点，采购类的验收并入 b_training，本批不覆盖，C6 另定）。
-//   facts = 本项目已生效内容包的事实（loadPlanData 取数）：{ initiation: bool, overall: bool, batchAccept: { [批次编号]: true } }；缺失按「都未生效」处理（fail-closed）。
-//   C5 再加：「本节点办理类过程登记均有结论」（方案 §4.1、§4.5）。
-function closeBlockers(node, allNodes, facts) {
+function projectCompletion(status, closing, today) {
+  const date = closing?.current_plan?.end ?? null;
+  const active = status === 'active';
+  const days = active && date ? daysBetween(today, date) : null;
+  const tone = days === null ? null : days <= 3 ? 'danger' : days <= 14 ? 'warning' : null;
+  const delay = active && closing?.diff_days > 0 ? closing.diff_days : null;
+  return { date, days_remaining: days, tone, delay_days: delay, as_of: today };
+}
+
+// 项目层结项的业务前置由计划视图和结项端点共用。
+function closeBlockers(node, facts) {
+  if (node.template_key !== 'p_closing' || node.batch_id !== null) return [];
   const f = facts || {};
   const out = [];
-  let scope = null;
-  let message = '';
-  if (node.template_key === 'b_req') {
-    scope = allNodes.filter((n) => n.batch_id === node.batch_id && n.status !== 'cancelled');
-    message = '本批全部未取消的节点都须先有计划起止日期，才能收口需求确认';
-  } else if (node.template_key === 'p_overall') {
-    scope = allNodes.filter((n) => n.batch_id === null && n.status !== 'cancelled');
-    message = '全部未取消的项目层节点都须先有计划起止日期，才能收口总体范围与批次规划';
+  const closingCards = f.closingCards || [];
+  if (!(f.closing && typeof f.closing.closingEffectiveAt === 'string') && !closingCards.some((card) => card.key === 'closing')) {
+    out.push({ code: 'PACKAGE_NOT_EFFECTIVE', message: '结项包还没有生效版本，不能结项', node_ids: [node.id] });
   }
-  if (scope !== null) {
-    const missing = scope.filter((n) => !n.current_plan).map((n) => n.id);
-    if (missing.length > 0) out.push({ code: 'PLAN_MISSING', message, node_ids: missing });
-  }
-  // 注意 b_req 一行（⑤）：第一期单批，项目级总体规划包承载批次需求；开放多批次后必须改看本批的批次需求包（见上面 ⑤ 的交接说明），不能沿用 f.overall。
-  let pkgMessage = null;
-  if (node.template_key === 'p_initiation' && f.initiation !== true) pkgMessage = '项目立项包还没有生效版本，不能收口立项与授权';
-  else if (node.template_key === 'p_overall' && f.overall !== true) pkgMessage = '总体规划包还没有生效版本，不能收口总体范围与批次规划';
-  else if (node.template_key === 'b_req' && f.overall !== true) pkgMessage = '总体规划包（第一期单批由它承载本批需求）还没有生效版本，不能收口需求确认';
-  else if (node.template_key === 'b_uat' && !(f.batchAccept && f.batchAccept[node.batch_id] === true)) pkgMessage = '本批批次验收包还没有生效版本，不能收口用户验收测试';
-  else if (node.template_key === 'p_closing' && !(f.closing && typeof f.closing.closingEffectiveAt === 'string')) pkgMessage = '结项包还没有生效版本，不能收口整体验收结项'; // C6a
-  if (pkgMessage !== null) out.push({ code: 'PACKAGE_NOT_EFFECTIVE', message: pkgMessage, node_ids: [node.id] });
   // C6a 整体验收结项（p_closing）的收口前置（方案 §2.3 :443、§4.3 v1.5；facts.closing = entries-core.closingFactsOf，与结项包提交前置同一个函数）：
-  //   ② 每个有效批次（非已转出 / 被替代）都已正式上线（batchLiveState，P106 口径），已转出批次须有已生效的变更包（第一期不可达，照写）；
+  //   ② 每个有效批次（非已转出 / 被替代）都已正式上线（batchLiveState，P106 口径）；
   //   ③ 结项包的生效时刻晚于每个批次最后一条上线事件（撤销后再上线，结项包须重新确认，P141）；
-  //   ①（结项包已生效）在上面的 PACKAGE_NOT_EFFECTIVE，④（项目整体的未结过程登记）在下面的 ENTRY_UNRESOLVED。事实没取到（不是对象）fail-closed 报 CLOSING_FACTS_MISSING。
+  //   ①（结项包已生效）在上面的 PACKAGE_NOT_EFFECTIVE。事实没取到（不是对象）fail-closed 报 CLOSING_FACTS_MISSING。
   if (node.template_key === 'p_closing') {
     const cl = f.closing;
-    if (!cl || typeof cl !== 'object' || !Array.isArray(cl.notLive) || !Array.isArray(cl.transferNoChange) || !Array.isArray(cl.goliveNewer)
+    if (!cl || typeof cl !== 'object' || !Array.isArray(cl.notLive) || !Array.isArray(cl.goliveNewer)
       || typeof cl.closingStale !== 'boolean' || !Array.isArray(cl.packagePending)) {
       out.push({ code: 'CLOSING_FACTS_MISSING', message: '无法确定批次上线情况，请刷新后重试', node_ids: [node.id] });
     } else {
       const names = (arr) => arr.map((b) => b.name).join('、');
-      // P168：结项包确认时引用的总体规划已被正式变更换版，须在现行规划上重新确认结项包；P164：项目里有待确认的内容包版本时先处理完（任何类型）。
+      // P168：结项包确认时引用的总体规划已换版，须在现行规划上重新确认结项包；P164：项目里有待确认的内容包版本时先处理完（任何类型）。
       if (cl.closingStale === true && typeof cl.closingEffectiveAt === 'string') {
-        out.push({ code: 'CLOSING_STALE', message: '结项包确认时引用的总体规划已被变更替换，须基于现行总体规划重新提交结项包并确认', node_ids: [node.id] });
+        out.push({ code: 'CLOSING_STALE', message: '结项包引用的版本不是现行范围版本，须基于现行范围版本重新提交结项包并确认', node_ids: [node.id] });
       }
       if (cl.packagePending.length > 0) {
-        out.push({ code: 'PACKAGE_PENDING', message: `项目里还有待确认的内容包（${cl.packagePending.map((t) => rules.PACKAGE_TYPE_LABELS[t] || t).join('、')}），须先处理完再整体验收结项`, node_ids: [node.id] });
+        out.push({ code: 'PACKAGE_PENDING', message: `项目里还有待确认的内容包（${cl.packagePending.map((t) => rules.PACKAGE_TYPE_LABELS[t] || t).join('、')}），须先处理完再结项`, node_ids: [node.id] });
       }
-      if (cl.notLive.length > 0) out.push({ code: 'BATCH_NOT_LIVE', message: `以下批次还没有正式上线，不能整体验收结项：${names(cl.notLive)}`, node_ids: [node.id], batch_ids: cl.notLive.map((b) => b.id) });
-      if (cl.transferNoChange.length > 0) out.push({ code: 'TRANSFER_CHANGE_MISSING', message: `以下已转出的批次没有已生效的变更包：${names(cl.transferNoChange)}`, node_ids: [node.id], batch_ids: cl.transferNoChange.map((b) => b.id) });
+      const missingLiveCards = new Set(closingCards.filter((card) => card.key === 'golive').map((card) => card.batch_id));
+      const unlistedBatches = cl.notLive.filter((batch) => !missingLiveCards.has(batch.id));
+      if (unlistedBatches.length > 0) out.push({ code: 'BATCH_NOT_LIVE', message: `以下批次还没有正式上线，不能结项：${names(unlistedBatches)}`, node_ids: [node.id], batch_ids: unlistedBatches.map((b) => b.id) });
       if (cl.goliveNewer.length > 0) {
         out.push({
           code: 'CLOSING_BEFORE_GOLIVE', message: `结项包的生效时刻不晚于以下批次最后一条上线事件，须重新确认结项包：${names(cl.goliveNewer)}`, node_ids: [node.id], batch_ids: cl.goliveNewer.map((b) => b.id),
@@ -187,43 +172,34 @@ function closeBlockers(node, allNodes, facts) {
       }
     }
   }
-  // C5 S-S1b（方案 §4.1、§4.5）：本节点下「过程登记里办理类（意见与反馈、问题与处理）、未作废、没有有效结论」的登记（含拆出的处理项；已拆分容器按子项判；有未解决异议都算未结）阻塞收口；
-  //   知悉类不阻塞。项目整体（node_id 为空）的过程登记阻塞「整体验收结项」（p_closing）——该节点的收口随 C6 开放，这里先写好。
-  //   取数由 loadPlanData 做（entries-core.unresolvedProcessEntriesOf，「已结」口径只有 entries-core.entryResolved 一份）。fail-closed：facts 没带登记事实（不是数组）→ 报 ENTRY_FACTS_MISSING，
-  //   不静默当作「没有未结登记」。
-  if (!Array.isArray(f.entryUnresolved)) {
-    out.push({ code: 'ENTRY_FACTS_MISSING', message: '无法确定本节点的过程登记是否都有结论，请刷新后重试', node_ids: [node.id] });
-  } else {
-    const mine = f.entryUnresolved.filter((e) => e.node_id === node.id || (node.template_key === 'p_closing' && e.node_id === null));
-    if (mine.length > 0) {
-      out.push({ code: 'ENTRY_UNRESOLVED', message: `本节点还有 ${mine.length} 条过程登记（意见与反馈、问题与处理）没有有效结论，须先办理完`, node_ids: [node.id], entry_ids: mine.map((e) => e.id) });
-    }
+  if (closingCards.length) {
+    const batchIds = [...new Set(closingCards.map((card) => card.batch_id).filter((id) => id !== null))];
+    out.push({
+      code: 'REQUIRED_CARDS_INCOMPLETE',
+      message: '以下必做事项尚未完成，不能结项：' + stageCards.missingCardNames(closingCards),
+      node_ids: [...new Set(closingCards.map((card) => card.node_id))],
+      ...(batchIds.length ? { batch_ids: batchIds } : {}),
+    });
+  }
+  if (f.pendingWork?.length) {
+    out.push({ code: 'PENDING_PROJECT_WORK', message: pendingWorkMessage(f.pendingWork), pending_work: f.pendingWork });
   }
   return out;
 }
 
-// 收口前置里「内容包已生效」那几条（上面 closeBlockers 的 pkgMessage 分支）所依赖的包：{ type, batchId, label }，不依赖内容包的节点返回 null。
-//   C4b Q-S2 H4（P68 ⑥）：历史导入收口时除了「现在已生效」（closeBlockers），还要核对收口原日期不早于该包的生效日（history.js loadNodeFact 单独接收原日期）。
-//   这张表与 closeBlockers 的 pkgMessage 分支必须一一对应——history 套件有对拍用例，逐模板键证明两件事：① 有 PACKAGE_NOT_EFFECTIVE 的键集合 = 这里非 null 的键集合；
-//   ② 对这里每个非 null 的键，只让表里写的那个包生效时 closeBlockers 不报、去掉它或只让别的包生效时报（批次验收包另核按批次）。对拍不会替你改表：改 closeBlockers 的包前置时必须同改本表。
-//   C5 改 b_req 前置为「本批批次需求包」（上面 ⑤ 的交接）时，须同改本表。
-function closePackageRequirement(node) {
-  if (node.template_key === 'p_initiation') return { type: 'initiation', batchId: null, label: '项目立项包' };
-  if (node.template_key === 'p_overall') return { type: 'overall', batchId: null, label: '总体规划包' };
-  if (node.template_key === 'b_req') return { type: 'overall', batchId: null, label: '总体规划包' }; // 第一期单批：总体规划包承载批次需求（P19，同 closeBlockers ⑤）
-  if (node.template_key === 'b_uat') return { type: 'batch_accept', batchId: node.batch_id, label: '批次验收包' };
-  if (node.template_key === 'p_closing') return { type: 'closing', batchId: null, label: '结项包' }; // C6a：整体验收结项 ← 结项包（同 closeBlockers 的 p_closing 分支）
-  return null;
+// 读写共用。基线只由总体规划确认生效形成；范围生效后可以录入尚无计划的阶段，再次修改须写明原因。
+function planWriteMode(records, hasEffectiveOverall) {
+  const editing = records.some((r) => r.kind === 'baseline') ||
+    (hasEffectiveOverall && records.some((r) => r.kind === 'plan_change'));
+  return editing ? 'reschedule' : 'draft';
 }
 
-// 计划写入的两种方式（读接口节点视图的 plan_write_mode 与 POST schedule 的分支共用这一个函数，读写同源）。codex 19 号 H-1 / P43 撤销了 C3a 预筛 D8 / C4a 交接 ① 的
-//   「总体规划生效后首次计划即基线」：基线只能来自被确认的计划，生效后才写的日期从未进入任何版本的确认对象，不能直接引用已生效版本形成基线。现在：
-//   'draft'      = 项目还没有生效的总体规划版本（草稿期计划）：原因可选、不要证据，写 plan_change；
-//   'reschedule' = 项目已有生效的总体规划版本（节点有没有基线都一样）：改期式写入——原因必填、证据必填（附件或无书面证据声明）、同一套校验与 node_rescheduled 事件，
-//                  写 plan_change；**无基线的节点不写 baseline**，它的基线在下一次总体规划版本生效时（confirm-core.formBaselines）由当时的当前计划形成。
-//   节点是否已有基线另由节点视图的 has_baseline 给出（页面区分「改的是基线」还是「尚无基线的新计划」）。
-function planWriteMode(hasBaseline, hasEffectiveOverall) {
-  return hasBaseline || hasEffectiveOverall ? 'reschedule' : 'draft';
+function canRecordEarlyStart(node, hasEffectiveOverall) {
+  return node.batch_id !== null && !hasEffectiveOverall;
+}
+
+function rangeUnconfirmedStarted(node, records, hasEffectiveOverall) {
+  return canRecordEarlyStart(node, hasEffectiveOverall) && records.some((record) => record.kind === 'actual_start');
 }
 
 function createPlanRoutes(ctx) {
@@ -284,7 +260,7 @@ function createPlanRoutes(ctx) {
 
   // ── 读库小助手 ──────────────────────────────────────────────────────────────────────────
   const NODE_COLS = 'id, project_id, batch_id, template_key, name, g_stage, sort_order, is_golive_milestone, status, opened_at, closed_at';
-  const REC_COLS = 'id, node_id, kind, planned_start, planned_end, actual_date, corrects_kind, reason, source_party_id, dev_key_entry_id, package_version_id, no_written_evidence, no_evidence_reason, created_by, created_at';
+  const REC_COLS = 'id, node_id, kind, planned_start, planned_end, actual_date, corrects_kind, reason, source_party_id, package_version_id, no_written_evidence, no_evidence_reason, created_by, created_at';
   async function loadNodeRow(q, nid) {
     return q.get(`SELECT ${NODE_COLS} FROM sysbuild_nodes WHERE id = ?`, [nid]);
   }
@@ -340,28 +316,20 @@ function createPlanRoutes(ctx) {
     );
     const activeAssignees = {};
     for (const r of active) activeAssignees[r.id] = true;
-    // C4a 修订批：已生效内容包的事实（收口前置 PACKAGE_NOT_EFFECTIVE 用）与总体规划是否待确认（P34 排期冻结用）。
-    const effRows = await q.all(
-      `SELECT p.type AS type, p.batch_id AS batch_id FROM sysbuild_package_versions v JOIN sysbuild_packages p ON p.id = v.package_id
-        WHERE p.project_id = ? AND v.status = 'effective'`,
-      [projectId]
-    );
-    //   「有无生效的总体规划」读 packages.js effectiveOverallVersionId——与 POST schedule 写端点（planWriteMode）、现行版本解析同一个来源（修订批二 LOW-3），
-    //   读写两端不会各自算出不同的答案；立项包 / 批次验收包的事实仍取自上面这条查询。
-    const facts = { initiation: false, overall: (await effectiveOverallVersionId(q, projectId)) !== null, batchAccept: {} };
-    for (const r of effRows) {
-      if (r.type === 'initiation') facts.initiation = true;
-      else if (r.type === 'batch_accept' && r.batch_id !== null) facts.batchAccept[r.batch_id] = true;
-    }
-    // C5 S-S1b：过程登记里未结的办理类登记（收口前置 ENTRY_UNRESOLVED）与各节点「收口后未结异议」条数（节点视图 post_close_objections_open）
-    facts.entryUnresolved = await entriesCore.unresolvedProcessEntriesOf(q, projectId);
+    const facts = { overall: (await effectiveOverallVersionId(q, projectId)) !== null };
     // C6a：整体验收结项的收口前置事实（结项包生效时刻、批次上线情况；与结项包提交前置同一个函数 entries-core.closingFactsOf）
     facts.closing = await entriesCore.closingFactsOf(q, projectId);
-    const postCloseObjections = await entriesCore.postCloseObjectionsOf(q, projectId);
-    return { batches, nodes, recsByNode, activeAssignees, facts, postCloseObjections, overallPending: await overallPendingOf(q, projectId) };
+    const closing = nodes.find((node) => node.template_key === 'p_closing' && node.batch_id === null && node.status === 'in_progress');
+    if (closing) {
+      const project = await q.get('SELECT id, build_type FROM sysbuild_projects WHERE id = ?', [projectId]);
+      facts.closingCards = stageCards.missingCards(await stageCards.loadProjectCards(q, project), true);
+      facts.pendingWork = await pendingClosingWork(q, projectId);
+      facts.completionCandidates = await completion.completionCandidates(q, projectId, { excludeId: closing.id });
+    }
+    return { batches, nodes, recsByNode, activeAssignees, facts, overallPending: await overallPendingOf(q, projectId) };
   }
   // 本项目的总体规划包有待确认的版本？（P34：待确认期间排期随包冻结，节点排期 / 取消节点被拒；读接口 actions 与写端点都取这一个事实。）
-  //   C6a：与上线前置 PLAN_PENDING、上线事件历史导入共用 golive-core.planPendingOf（同一个查询，不另写）。
+  //   C6a：与上线前置 PLAN_PENDING 共用 golive-core.planPendingOf（同一个查询，不另写）。
   async function overallPendingOf(q, projectId) {
     return goliveCore.planPendingOf(q, projectId);
   }
@@ -393,12 +361,6 @@ function createPlanRoutes(ctx) {
   function buildPlanView(access, data, todayStr) {
     const batchById = {};
     for (const b of data.batches) batchById[b.id] = b;
-    const derived = {};
-    const brief = data.nodes.map((n) => {
-      const d = deriveSchedule(n, data.recsByNode[n.id] || [], todayStr);
-      derived[n.id] = d;
-      return { id: n.id, batch_id: n.batch_id, template_key: n.template_key, status: n.status, current_plan: d.current_plan };
-    });
     const project = access.project;
     const batches = data.batches.map((b) => {
       const t = batchTarget(b);
@@ -426,28 +388,31 @@ function createPlanRoutes(ctx) {
       const batch = n.batch_id === null ? null : (batchById[n.batch_id] || null);
       const actions = {};
       for (const [flag, op, corrects] of NODE_ACTION_OPS) actions[flag] = rules.opAllowed(op, access, project, nodeTarget(n, batch, recs, corrects, data.overallPending, data.devStartReady[n.id]));
+      if (n.template_key === 'p_closing' && n.batch_id === null && (data.facts.closingCards?.length || data.facts.pendingWork?.length)) actions.close = false;
       return Object.assign({
         id: n.id, batch_id: n.batch_id, template_key: n.template_key, name: n.name, g_stage: n.g_stage, sort_order: n.sort_order,
         is_golive_milestone: n.is_golive_milestone === 1, status: n.status, opened_at: n.opened_at, closed_at: n.closed_at,
-      }, derived[n.id], {
-        close_blockers: n.status === 'in_progress' ? closeBlockers(n, brief, data.facts) : [],
-        // C5 S-S1b（D34）：节点收口后的异议补充登记里还没有结论的条数（节点卡片「收口后有未结异议 N 条」；C6 上线交接读它）
-        post_close_objections_open: hasKey(data.postCloseObjections, n.id) ? data.postCloseObjections[n.id] : 0,
-        // 计划写入方式（预筛 M2；修订批三 H-1 改为 draft / reschedule 两态）：与 POST schedule 的分支共用 planWriteMode；has_baseline 让页面区分
-        //   「改期的是基线」与「总体规划生效后新增、尚无基线的计划」（后者同样要原因与证据，但不写基线）。
+      }, deriveSchedule(n, recs, todayStr), {
+        close_blockers: n.status === 'in_progress' ? closeBlockers(n, data.facts) : [],
+        ...(n.template_key === 'p_closing' && n.batch_id === null ? { completion_candidates: data.facts.completionCandidates || [] } : {}),
         has_baseline: recs.some((r) => r.kind === 'baseline'),
-        plan_write_mode: planWriteMode(recs.some((r) => r.kind === 'baseline'), data.facts.overall),
+        plan_write_mode: planWriteMode(recs, data.facts.overall),
+        allow_start_note: actions.start === true && canRecordEarlyStart(n, data.facts.overall),
+        range_unconfirmed_started: rangeUnconfirmedStarted(n, recs, data.facts.overall),
         report: data.reports[n.id],
         dev_start_ready: data.devStartReady[n.id],
         actions,
       });
     });
     return {
-      project: Object.assign({ id: project.id, build_type: access.buildType, status: project.status }, data.goliveProgress ? { golive_progress: data.goliveProgress } : {}),
+      project: Object.assign({
+        id: project.id, build_type: access.buildType, status: project.status,
+        estimated_completion: projectCompletion(project.status, nodes.find((node) => node.batch_id === null && node.template_key === 'p_closing'), todayStr),
+      }, data.goliveProgress ? { golive_progress: data.goliveProgress } : {}),
       batches, nodes,
     };
   }
-  // withGolive = true（GET /plan）：另取各批次的上线信息（最后一条上线事件、是否已正式上线）、actions.golive / revoke_golive 与项目上线进度（C6a）；节点写端点的响应只要节点，不取（交接集合现算较重）。
+  // withGolive = true（GET /plan）：另取各批次的上线信息（最后一条上线事件、是否已正式上线）、actions.golive / revoke_golive 与项目上线进度（C6a）；节点写端点的响应只要节点，不取（上线前置现算较重）。
   async function planViewFor(q, projectId, user, withGolive) {
     const access = await rules.loadProjectAccess(q, projectId, user, accessOpts());
     rules.assertVisible(access);
@@ -465,17 +430,21 @@ function createPlanRoutes(ctx) {
     if (withGolive === true) {
       data.golive = {};
       for (const b of data.batches) {
-        // 只有进行中的批次需要现算上线前置（其余批次 actions.golive 恒由批次状态判假）；与 golive 端点 / 交接读接口同一个 goliveCore.handoverViewOf
+        // 只有进行中的批次需要现算上线前置（其余批次 actions.golive 恒由批次状态判假）；与 golive 端点 / 上线前置读接口同一个 goliveCore.goliveBlockersOf
         data.golive[b.id] = {
           info: await goliveCore.goliveInfoOf(q, b.id),
-          blockers: b.status === 'active' ? (await goliveCore.handoverViewOf(q, b)).blockers : [],
+          blockers: b.status === 'active' ? await goliveCore.goliveBlockersOf(q, b) : [],
         };
         data.golive[b.id].info.last_event = await goliveEventView(q, data.golive[b.id].info.last_event);
       }
       data.closingPending = await goliveCore.closingPendingOf(q, projectId);
       data.goliveProgress = await goliveCore.goliveProgressOf(q, projectId);
     }
-    return buildPlanView(access, data, todayStr);
+    const view = buildPlanView(access, data, todayStr);
+    if (withGolive === true) {
+      view.display_stage_ids = displayStages(view.nodes, view.batches.map((batch) => batch.id)).map((node) => node.id);
+    }
+    return view;
   }
   async function nodeResponse(q, projectId, nid, user) {
     const view = await planViewFor(q, projectId, user, false);
@@ -504,7 +473,7 @@ function createPlanRoutes(ctx) {
         const actor = await q.get('SELECT COALESCE(display_name, username) AS name FROM users WHERE id = ?', [r.created_by]);
         records.push({
           id: r.id, kind: r.kind, planned_start: r.planned_start, planned_end: r.planned_end, actual_date: r.actual_date, corrects_kind: r.corrects_kind,
-          reason: r.reason, source_party_id: r.source_party_id, dev_key_entry_id: r.dev_key_entry_id, package_version_id: r.package_version_id,
+          reason: r.reason, source_party_id: r.source_party_id, package_version_id: r.package_version_id,
           no_written_evidence: r.no_written_evidence === 1, no_evidence_reason: r.no_evidence_reason,
           is_draft_plan: r.kind === 'plan_change' && (!baseline || r.id < baseline.id),
           attachment_ids: binds.map((b) => b.attachment_id), created_by: r.created_by, created_at: r.created_at,
@@ -559,11 +528,21 @@ function createPlanRoutes(ctx) {
   // ── POST /sysbuild/nodes/:nid/start：开始 ───────────────────────────────────────────────────
   router.post('/sysbuild/nodes/:nid/start', parseJsonBody, handle(async (req, res) => {
     const nid = readIdParam(req.params.nid, 'nid', '节点编号');
-    onlyKeys(bodyOf(req), []);
+    const body = bodyOf(req);
+    onlyKeys(body, ['start_note', 'attachment_ids']);
+    const note = readText(body.start_note, 'start_note', '开工说明', START_NOTE_MAX, false);
+    const submittedIds = body.attachment_ids ?? [];
+    if (!Array.isArray(submittedIds) || submittedIds.length > 20) throw invalid('附件编号须为至多 20 项的列表', 'attachment_ids');
+    const attachmentIds = submittedIds.map((value) => readIdParam(value, 'attachment_ids', '附件编号'));
+    if (new Set(attachmentIds).size !== attachmentIds.length) throw invalid('附件编号重复', 'attachment_ids');
+    if (!note && attachmentIds.length) throw invalid('附沟通记录时请填写开工说明', 'start_note');
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
       const { node, batch, recs, access } = await loadNodeCtx(q, nid, user);
       rules.assertOp('node_start', access, access.project, nodeTarget(node, batch, recs, null, undefined, await reports.devStartReadyOf(q, node, today)));
+      if (note && !canRecordEarlyStart(node, (await effectiveOverallVersionId(q, node.project_id)) !== null)) {
+        throw Object.assign(stateError('当前阶段不需要记录范围确认前的开工说明'), { field: 'start_note' });
+      }
       const r = await q.run(
         "UPDATE sysbuild_nodes SET status = 'in_progress', opened_at = datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE id = ? AND status = 'not_started'",
         [nid]
@@ -572,6 +551,22 @@ function createPlanRoutes(ctx) {
       const day = today();
       await q.run("INSERT INTO sysbuild_node_schedule_records (node_id, kind, actual_date, created_by) VALUES (?, 'actual_start', ?, ?)", [nid, day, Number(user.id)]);
       await emit(q, user, node.project_id, 'node', nid, 'node_started', { actual_date: day });
+      if (note) {
+        const uid = Number(user.id);
+        const snapshot = entriesCore.operatorSnapshotOf(await rules.completeIdentity(q, access, user));
+        const eid = await entriesCore.insertEntryRow(q, {
+          projectId: node.project_id, nodeId: nid, type: 'note', sourcePartyId: null, operatorUserId: uid,
+          snapshotJson: JSON.stringify(snapshot), period: 'process', days: null, businessDate: day,
+          title: '范围确认前开工说明', body: note, noEvidence: 0, form: null,
+        });
+        const bound = attachmentIds.length
+          ? await attachmentHelpers.bindStagedAttachments(q, { projectId: node.project_id, userId: uid, attachmentIds, ownerType: 'entry', ownerId: eid, operatorName: operatorNameOf(user) })
+          : [];
+        await emit(q, user, node.project_id, 'entry', eid, 'entry_created', {
+          type: 'note', purpose: 'general', node_id: nid, period: 'process', days_after_close: null,
+          source_party_id: null, attachment_ids: bound, no_written_evidence: false, operator_identity: snapshot,
+        });
+      }
       return nodeResponse(q, node.project_id, nid, user);
     });
     res.json(out);
@@ -580,17 +575,23 @@ function createPlanRoutes(ctx) {
   // ── POST /sysbuild/nodes/:nid/close：收口 ───────────────────────────────────────────────────
   router.post('/sysbuild/nodes/:nid/close', parseJsonBody, handle(async (req, res) => {
     const nid = readIdParam(req.params.nid, 'nid', '节点编号');
-    onlyKeys(bodyOf(req), []);
+    const body = bodyOf(req);
+    onlyKeys(body, ['complete_node_ids']);
+    const completionIds = completion.readCompletionIds(body.complete_node_ids);
     const user = req.user;
     const out = await db.withWriteTxn(async (q) => {
       const { node, batch, recs, access } = await loadNodeCtx(q, nid, user);
       rules.assertOp('node_close', access, access.project, nodeTarget(node, batch, recs, null));
       // 业务规则：收口前置检查（与读接口 close_blockers 同一个函数）。
-      const data = await loadPlanData(q, node.project_id);
       const day = today();
-      const brief = data.nodes.map((n) => ({ id: n.id, batch_id: n.batch_id, template_key: n.template_key, status: n.status, current_plan: deriveSchedule(n, data.recsByNode[n.id] || [], day).current_plan }));
-      const blockers = closeBlockers(node, brief, data.facts);
+      const closing = node.template_key === 'p_closing' && node.batch_id === null;
+      const blockers = closing ? closeBlockers(node, (await loadPlanData(q, node.project_id)).facts) : [];
       if (blockers.length > 0) throw Object.assign(makeError(409, 'SYSBUILD_CLOSE_BLOCKED', '收口前置条件未满足'), { blockers });
+      if (!closing && completionIds.length) throw completion.ineligibleSelection();
+      const completedNodeIds = await completion.completeSelected(q, {
+        projectId: node.project_id, excludeId: nid, ids: completionIds, day,
+        operatorId: Number(user.id), operatorName: operatorNameOf(user), via: 'closing',
+      });
       // codex 17 号 M-1：自动记的实际结束不得早于该节点最后一条实际开始（含更正）——在条件 UPDATE 之前核对。更正端点已拒绝未来日期，
       //   正常路径下不会触发；防御「今天」的取值来源变化（时钟回拨、todayProvider 换源）。
       const lastStart = lastActual(recs, 'actual_start');
@@ -604,17 +605,17 @@ function createPlanRoutes(ctx) {
       await emit(q, user, node.project_id, 'node', nid, 'node_closed', { actual_date: day });
       // C6a：整体验收结项节点（p_closing）收口 = 整体结项，同一事务里项目 进行中 → 已结项（条件更新）并写项目状态事件（与 projects.js 状态端点的 project_status_changed 同形 { from, to, reason }）；
       //   项目层「结项日」（P95）取最后一条把项目状态改为已结项的事件时刻（entries-core.projectEndedOn）。前置（结项包已生效、批次都已正式上线等）已在上面的 closeBlockers 核过。
-      if (node.template_key === 'p_closing' && node.batch_id === null) {
+      if (closing) {
         const pr = await q.run("UPDATE sysbuild_projects SET status = 'closed', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'active'", [node.project_id]);
         if (pr.changes === 0) throw stateError('项目状态已变化，请刷新后重试');
         await emit(q, user, node.project_id, 'project', node.project_id, 'project_status_changed', { from: 'active', to: 'closed', reason: '整体验收结项节点收口' });
       }
-      return nodeResponse(q, node.project_id, nid, user);
+      return Object.assign(await nodeResponse(q, node.project_id, nid, user), { completed_node_ids: completedNodeIds });
     });
     res.json(out);
   }));
 
-  // ── POST /sysbuild/nodes/:nid/reopen：重开（N-D1：同一层排在它之后、已收口的节点一并退回进行中）────────────
+  // ── POST /sysbuild/nodes/:nid/reopen：只重开指定节点 ───────────────────────────────────
   router.post('/sysbuild/nodes/:nid/reopen', parseJsonBody, handle(async (req, res) => {
     const nid = readIdParam(req.params.nid, 'nid', '节点编号');
     onlyKeys(bodyOf(req), ['reason']);
@@ -623,29 +624,14 @@ function createPlanRoutes(ctx) {
     const out = await db.withWriteTxn(async (q) => {
       const { node, batch, recs, access } = await loadNodeCtx(q, nid, user);
       rules.assertOp('node_reopen', access, access.project, nodeTarget(node, batch, recs, null));
-      // 同一层 = 同一 batch_id（项目层 batch_id 为空，用 IS 比较）；只取 sort_order 更大且已收口的节点。
-      const later = await q.all(
-        "SELECT id, is_golive_milestone FROM sysbuild_nodes WHERE project_id = ? AND batch_id IS ? AND sort_order > ? AND status = 'closed' ORDER BY sort_order, id",
-        [node.project_id, node.batch_id, node.sort_order]
-      );
-      // 预筛 D2：级联范围里有已收口的正式上线里程碑 → 整个重开不发生（里程碑状态由上线事件 / 撤销上线决定，不能被级联退回；C6 撤销上线时再定）。
-      if (later.some((l) => l.is_golive_milestone === 1)) throw stateError('下游含已收口的正式上线里程碑，须先撤销上线');
       const r = await q.run(
         "UPDATE sysbuild_nodes SET status = 'in_progress', closed_at = NULL, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'closed'",
         [nid]
       );
       if (r.changes === 0) throw stateError('节点状态已变化，请刷新后重试');
       await emit(q, user, node.project_id, 'node', nid, 'node_reopened', { reason });
-      for (const l of later) {
-        const rc = await q.run(
-          "UPDATE sysbuild_nodes SET status = 'in_progress', closed_at = NULL, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'closed'",
-          [l.id]
-        );
-        if (rc.changes === 0) throw stateError('节点状态已变化，请刷新后重试');
-        await emit(q, user, node.project_id, 'node', l.id, 'node_cascade_reopened', { cause_node_id: nid, reason });
-      }
       const resp = await nodeResponse(q, node.project_id, nid, user);
-      resp.cascaded_node_ids = later.map((l) => l.id);
+      resp.cascaded_node_ids = [];
       return resp;
     });
     res.json(out);
@@ -753,19 +739,18 @@ function createPlanRoutes(ctx) {
   }));
 
   // ── POST /sysbuild/nodes/:nid/schedule：计划（草稿期 / 改期）与实际日期更正 ───────────────────────
-  // kind='plan'：项目还没有生效的总体规划版本 = 草稿期计划（追加 plan_change，原因可选；只收 planned_start / planned_end / reason）；
-  //   已有生效的总体规划版本 = 改期式写入（原因必填、来源参与方可空、开发方来源 409、方向类证据必填；追加 plan_change）——节点已有 baseline 与否一样（planWriteMode，
-  //   读接口节点视图的 plan_write_mode / has_baseline 同源）。baseline 只由总体规划包生效时形成（C4a，confirm-core.formBaselines）；本端点任何分支都不写 baseline
-  //   （codex 19 号 H-1 / P43：生效后才写的日期从未被确认，不能直接成为基线；无基线的节点下一次总体规划版本生效时由当时的当前计划形成基线）。
+  // kind='plan'：按 planWriteMode 处理首排和改期。改期须写原因，推迟项目层结项的计划结束还须证据。
   //   总体规划**待确认**期间（P34）本项目节点一律不能设计划 / 改期（rules.js schedule_plan 的 overallPending）：总体排期基线是确认对象，排期随提交冻结。
   // kind='actual_correct'：corrects（actual_start / actual_end）+ actual_date + reason。
   router.post('/sysbuild/nodes/:nid/schedule', parseJsonBody, handle(async (req, res) => {
     const nid = readIdParam(req.params.nid, 'nid', '节点编号');
     const body = bodyOf(req);
+    // R2（C6）：开发方来源的改期不再引用关键事项，dev_key_entry_id 键出现即 400（不看值，含 null），先于 kind 与其他字段的校验。
+    if (hasKey(body, 'dev_key_entry_id')) throw invalid('不支持的字段 dev_key_entry_id', 'dev_key_entry_id');
     const kind = body.kind;
     if (kind !== 'plan' && kind !== 'actual_correct') throw invalid('kind 必须是 plan 或 actual_correct', 'kind');
     // 严格键白名单（预筛 L8）：多余的键 400，不静默忽略。
-    if (kind === 'plan') onlyKeys(body, ['kind', 'planned_start', 'planned_end', 'reason', 'source_party_id', 'dev_key_entry_id', 'attachment_ids', 'no_written_evidence', 'no_evidence_reason']);
+    if (kind === 'plan') onlyKeys(body, ['kind', 'planned_start', 'planned_end', 'reason', 'source_party_id', 'attachment_ids', 'no_written_evidence', 'no_evidence_reason']);
     else onlyKeys(body, ['kind', 'corrects', 'actual_date', 'reason']);
     const user = req.user;
     const uid = Number(user.id);
@@ -802,9 +787,6 @@ function createPlanRoutes(ctx) {
     const reason = readText(body.reason, 'reason', '原因', REASON_MAX, false);
     let sourcePartyId = null;
     if (body.source_party_id !== undefined && body.source_party_id !== null) sourcePartyId = readIdParam(body.source_party_id, 'source_party_id', '提出方');
-    // C5 S-S1c：开发方提出的改期引用开发方负责人已认可的关键事项登记（dev_key_entry_id，写入改期记录）；非开发方来源不许带
-    let devKeyEntryId = null;
-    if (body.dev_key_entry_id !== undefined && body.dev_key_entry_id !== null) devKeyEntryId = readIdParam(body.dev_key_entry_id, 'dev_key_entry_id', '关键事项登记');
     let attachmentIds = [];
     if (body.attachment_ids !== undefined && body.attachment_ids !== null) {
       if (!Array.isArray(body.attachment_ids)) throw invalid('附件编号列表格式不对', 'attachment_ids');
@@ -817,63 +799,54 @@ function createPlanRoutes(ctx) {
     const out = await db.withWriteTxn(async (q) => {
       const { node, batch, recs, access, overallPending } = await loadNodeCtx(q, nid, user);
       rules.assertOp('schedule_plan', access, access.project, nodeTarget(node, batch, recs, null, overallPending));
-      const hasBaseline = recs.some((r) => r.kind === 'baseline');
       const cur = deriveSchedule(node, recs, today()).current_plan;
       const same = !!cur && cur.start === plannedStart && cur.end === plannedEnd;
-      const mode = planWriteMode(hasBaseline, (await effectiveOverallVersionId(q, node.project_id)) !== null);
+      const hasEffectiveOverall = (await effectiveOverallVersionId(q, node.project_id)) !== null;
+      const mode = planWriteMode(recs, hasEffectiveOverall);
       if (mode === 'draft') {
-        // 草稿期（项目还没有生效的总体规划版本）：只收计划与原因；带了改期专用的字段就 400，不静默丢弃。
-        if (sourcePartyId !== null || devKeyEntryId !== null || attachmentIds.length > 0 || body.no_written_evidence !== undefined || noEvidenceReason !== null) {
-          throw invalid('形成基线之前的计划修改不需要提出方、证据附件或无书面证据说明', 'body');
+        // 草稿期或首排只收计划与原因；改期字段返回 400。
+        if (sourcePartyId !== null || attachmentIds.length > 0 || body.no_written_evidence !== undefined || noEvidenceReason !== null) {
+          const message = hasEffectiveOverall
+            ? '首次排期只填写计划日期和可选原因'
+            : '形成基线之前的计划修改不需要提出方、证据附件或无书面证据说明';
+          throw invalid(message, 'body');
         }
         if (same) throw invalid('新计划与当前计划相同，无需修改', 'planned_start');
+        const loggedReason = reason ?? (hasEffectiveOverall ? FIRST_PLAN_REASON : DRAFT_PLAN_REASON);
         const ins = await q.run(
           "INSERT INTO sysbuild_node_schedule_records (node_id, kind, planned_start, planned_end, reason, created_by) VALUES (?, 'plan_change', ?, ?, ?, ?)",
-          [nid, plannedStart, plannedEnd, reason === null ? DRAFT_PLAN_REASON : reason, uid]
+          [nid, plannedStart, plannedEnd, loggedReason, uid]
         );
-        // 预筛 D6：事件里的原因与库内记录一致（没填写固定文案），并标 draft: true。
         await emit(q, user, node.project_id, 'node', nid, 'node_plan_set', {
-          record_id: ins.lastID, before: cur, after: { start: plannedStart, end: plannedEnd }, reason: reason === null ? DRAFT_PLAN_REASON : reason, draft: true,
+          record_id: ins.lastID, before: cur, after: { start: plannedStart, end: plannedEnd }, reason: loggedReason, draft: !hasEffectiveOverall,
         });
         return Object.assign(await nodeResponse(q, node.project_id, nid, user), { record_id: ins.lastID });
       }
-      // 改期式写入（mode === 'reschedule'）：节点已有基线的改期，或总体规划生效后尚无基线的节点写计划（含之后新增的自定义节点；H-1 / P43，不写 baseline）——同一套校验与事件。
+      // 统一核对改期原因及所附证据。
       if (reason === null) throw invalid('改期必须填写原因', 'reason');
       if (sourcePartyId !== null) {
         const party = await q.get('SELECT id, side FROM sysbuild_parties WHERE id = ? AND project_id = ?', [sourcePartyId, node.project_id]);
         if (!party) throw invalid('提出方不是本项目的参与方', 'source_party_id');
-        if (party.side === 'dev') {
-          if (devKeyEntryId === null) throw stateError('开发方提出的改期须引用开发方负责人已认可的关键事项（dev_key_entry_id）');
-          // 引用的登记：本项目（不存在 / 别的项目 400，不借此探测）、来源方就是本次提出方（开发方）、已认可且未作废（否则 409，文案说明原因）
-          const ke = await q.get(`SELECT ${entriesCore.ENTRY_COLS} FROM sysbuild_entries WHERE id = ? AND project_id = ?`, [devKeyEntryId, node.project_id]);
-          if (!ke) throw invalid('引用的关键事项登记不存在或不属于本项目', 'dev_key_entry_id');
-          if (ke.source_party_id !== sourcePartyId) throw stateError('引用的关键事项必须是本次提出方（开发方）的登记');
-          const ap = await entriesCore.devApprovalUsable(q, ke);
-          if (!ap.ok) throw stateError(`引用的关键事项未认可：${ap.reason}`);
-        } else if (devKeyEntryId !== null) {
-          throw invalid('只有开发方提出的改期需要引用关键事项', 'dev_key_entry_id');
-        }
-      } else if (devKeyEntryId !== null) {
-        throw invalid('只有开发方提出的改期需要引用关键事项', 'dev_key_entry_id');
       }
       if (same) throw invalid('新计划与当前计划相同', 'planned_start');
       if (noEvidence && attachmentIds.length > 0) throw invalid('已附证据附件，不应再声明无书面证据', 'no_written_evidence');
       if (!noEvidence && noEvidenceReason !== null) throw invalid('未声明无书面证据时不应填写无书面证据原因', 'no_evidence_reason');
-      if (!noEvidence && attachmentIds.length === 0) {
+      const evidenceRequired = node.batch_id === null && node.template_key === 'p_closing' && cur && plannedEnd > cur.end;
+      if (evidenceRequired && !noEvidence && attachmentIds.length === 0) {
         throw makeError(400, 'SYSBUILD_EVIDENCE_REQUIRED', '改期须上传证据附件，或声明无书面证据并写明原因（至少 10 个字）');
       }
       if (noEvidence && (noEvidenceReason === null || Array.from(noEvidenceReason).length < EVIDENCE_REASON_MIN)) {
         throw invalid(`无书面证据原因至少 ${EVIDENCE_REASON_MIN} 个字`, 'no_evidence_reason');
       }
       const ins = await q.run(
-        "INSERT INTO sysbuild_node_schedule_records (node_id, kind, planned_start, planned_end, reason, source_party_id, dev_key_entry_id, no_written_evidence, no_evidence_reason, created_by) VALUES (?, 'plan_change', ?, ?, ?, ?, ?, ?, ?, ?)",
-        [nid, plannedStart, plannedEnd, reason, sourcePartyId, devKeyEntryId, noEvidence ? 1 : 0, noEvidence ? noEvidenceReason : null, uid]
+        "INSERT INTO sysbuild_node_schedule_records (node_id, kind, planned_start, planned_end, reason, source_party_id, no_written_evidence, no_evidence_reason, created_by) VALUES (?, 'plan_change', ?, ?, ?, ?, ?, ?, ?)",
+        [nid, plannedStart, plannedEnd, reason, sourcePartyId, noEvidence ? 1 : 0, noEvidence ? noEvidenceReason : null, uid]
       );
       const bound = attachmentIds.length > 0
         ? await attachmentHelpers.bindStagedAttachments(q, { projectId: node.project_id, userId: uid, attachmentIds, ownerType: 'schedule_record', ownerId: ins.lastID, operatorName: operatorNameOf(user) })
         : [];
       await emit(q, user, node.project_id, 'node', nid, 'node_rescheduled', {
-        record_id: ins.lastID, before: cur, after: { start: plannedStart, end: plannedEnd }, reason, source_party_id: sourcePartyId, dev_key_entry_id: devKeyEntryId,
+        record_id: ins.lastID, before: cur, after: { start: plannedStart, end: plannedEnd }, reason, source_party_id: sourcePartyId,
         no_written_evidence: noEvidence, no_evidence_reason: noEvidence ? noEvidenceReason : null, attachment_ids: bound,
       });
       // C6b（§4.4 知会）：正式上线里程碑的计划结束日期推后 → 同一事务给每个需求部门现任负责人生成改期知会与发送意图（提前 / 同日 / 非里程碑不生成）；草稿期分支不走到这里
@@ -883,8 +856,21 @@ function createPlanRoutes(ctx) {
     return res.status(201).json(out);
   }));
 
-  // loadPlanData：历史事实导入的 node_closed（history.js，C4b Q-S2）按收口端点同一份取数 + closeBlockers 核对前置（P57），不复制。
-  return { router, loadPlanData };
+  return { router };
 }
 
-module.exports = { createPlanRoutes, closeBlockers, closePackageRequirement, deriveSchedule };
+// 批次顺序由调用方按 seq、id 提供。每组沿用原有阶段顺序，结项单独放在最后。
+function displayStages(nodes, batchIds) {
+  const project = [];
+  const closing = [];
+  const batches = Object.fromEntries(batchIds.map((id) => [id, []]));
+  for (const node of nodes) {
+    if (node.status === 'cancelled') continue;
+    if (node.batch_id !== null) batches[node.batch_id]?.push(node);
+    else if (node.template_key === 'p_closing') closing.push(node);
+    else project.push(node);
+  }
+  return [...project, ...batchIds.flatMap((id) => batches[id]), ...closing];
+}
+
+module.exports = { createPlanRoutes, closeBlockers, deriveSchedule, projectCompletion, rangeUnconfirmedStarted, displayStages };
