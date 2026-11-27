@@ -234,7 +234,7 @@ const STAGE8_MUTATIONS = [
     mu('确认误给决策选项', 'C8 通知修订', 'confirm.js', 'allowed_decisions: Object.keys(DECISIONS),', "allowed_decisions: ['confirm'],"),
     mu('确认遗漏导出能力', 'C8 通知修订', 'confirm.js', "body.actions.export_sheet = c.obj.kind === 'package_version' && rules.canExportConfirmationSheet(c.access, c.obj.ver);", 'body.actions.export_sheet = false;'),
     mu('确认单漏材料正文', 'C8 材料引用', 'confirmation-sheet.js', "${m.materials.length ? section('sec-materials', '引用材料版本全文', m.materials.map(renderMaterial)) : ''}", ''),
-    mu('登记来源选项遗漏PM本人', 'C8 登记与条目元数据', 'entries.js', "[{ id: null, label: 'PM 本人登记' }, ...", '[...'),
+    mu('登记来源选项遗漏PM本人', 'C8 登记与条目元数据', 'entries.js', "[{ id: null, label: identity.isPm === true ? 'PM 本人登记' : '管理员本人登记' }, ...", '[...'),
     // #212 C6：详情路由的 identity 取数随知会异议删除（entries.js 现写 `const { access } = await loadProjectCtx(…)`），from / to 随之改写；expect 改挂到 frontend 套件的知会详情可见性用例（原 C8 用例里的非成员 404 读取随 :238–246 删；该用例拒绝循环里 U.ro / U.m1 / U.x1 / U.out 的 404 来自详情路由自带的接收人 / PM / admin 校验，不是项目可见性守卫，判红靠用例末尾「已移出项目的接收人读详情 404」一格：接收人校验的 SQL 不看 removed_at，只有项目可见性会拦）
     mu('知会详情绕过项目可见性', 'C7 S-1 改期知会详情可见性', 'entries.js', 'const { access } = await loadProjectCtx(q, notice.project_id, req.user);', 'const access = await rules.loadProjectAccess(q, notice.project_id, req.user, accessOpts());'),
     mu('材料维护类别误作身份类', 'rules：OP_KIND 与状态表', 'rules.js', "material_version_create: 'maintain',", "material_version_create: 'membership',"),

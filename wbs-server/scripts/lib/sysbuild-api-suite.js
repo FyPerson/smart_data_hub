@@ -123,6 +123,13 @@ async function makeInstanceHarness(fx) { // 调用方已 await fx.ready()（fx =
     const seeded = await sql.run("INSERT INTO users (username, password, display_name, role, status) VALUES (?, 'fixture-only', ?, 'user', 'active')", [name, name]);
     plain.push({ id: seeded.lastID, role: 'user' });
   }
+  // 平台管理员 = 编号 1（rules.SUPER_ADMIN_USER_IDS，与 fx.ADMIN_ID 同号）。既有用例里的「admin」要的是普通 admin 角色账号（非 PM 即被拒），
+  //   所以在实例库（一次性隔离副本）里另建一个名单外的 admin 给 world.adminId；编号 1 只在平台管理员用例里以 world.superId 出现。
+  if (fx.ADMIN_ID !== 1) throw new Error(`夹具的管理员编号应为 1（平台管理员名单），实际 ${fx.ADMIN_ID}`);
+  const superRow = await sql.get("SELECT id FROM users WHERE id = 1 AND role = 'admin' AND status = 'active'", []);
+  if (!superRow) throw new Error('实例库里编号 1 不是 active 的 admin：无法验证平台管理员');
+  const plainAdminName = `sysbuild-fixture-${process.pid}-${Date.now()}-admin`;
+  const plainAdmin = await sql.run("INSERT INTO users (username, password, display_name, role, status) VALUES (?, 'fixture-only', ?, 'admin', 'active')", [plainAdminName, plainAdminName]);
   const tokens = {};
   // C6b：写请求提交后，发送意图在事务外异步发送并回写（状态 / 事件）；轮询到「最近 20 秒内创建的 pending 意图」清零再把响应交给用例（信号 = 意图状态，不用固定 sleep；
   //   用例自己造的旧 pending 夹具行创建时刻早于窗口，不会拖慢后续请求）。上限 3 秒，超时不报错（发送侧遇忙 / 异常的意图留在 pending，等补发）。
@@ -154,7 +161,7 @@ async function makeInstanceHarness(fx) { // 调用方已 await fx.ready()（fx =
     mode: '真实实例',
     notifyKit: null, // C6b：实例模式没有进程内替身；通知用例改读平台钉钉替身日志（dataDir 下 external-calls.jsonl）
     dataDir: () => { try { return require('./test-env').env().dataDir; } catch (_) { return null; } },
-    world: { adminId: fx.ADMIN_ID, roId: roRows[0].id, plain: plain.map((r) => r.id) },
+    world: { adminId: plainAdmin.lastID, superId: 1, roId: roRows[0].id, plain: plain.map((r) => r.id) },
     call,
     sql,
     // 把某个用户的平台角色临时改掉（用例结束前改回）；令牌按改后的角色重新签。
@@ -200,7 +207,8 @@ async function makeInprocHarness() {
   await sql.run('CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, role TEXT, status TEXT, phone TEXT, dingtalk_user_id TEXT)', []); // C6b：通知读收件人的 phone / dingtalk_user_id
   // C6b：夹具用户默认都有钉钉号（通知发送走替身，默认成功）；用例要走「无钉钉号 / 按手机号反查」分支时自己改 users 行
   const seedUser = (id, role) => sql.run('INSERT INTO users (id, username, display_name, role, status, dingtalk_user_id) VALUES (?, ?, ?, ?, ?, ?)', [id, `u${id}`, `用户${id}`, role, 'active', `ding-u${id}`]);
-  await seedUser(1, 'admin');
+  await seedUser(1, 'admin'); // 平台管理员（名单里的编号 1）：只在平台管理员用例里以 world.superId 出现
+  await seedUser(2, 'admin'); // 普通 admin 角色账号：既有用例里的「admin」都用它（world.adminId）
   for (const id of READONLY_IDS) await seedUser(id, 'user');
   const plain = [];
   for (let i = 101; i <= 114; i += 1) { await seedUser(i, 'user'); plain.push(i); }
@@ -214,6 +222,9 @@ async function makeInprocHarness() {
     req.user = JSON.parse(Buffer.from(h, 'base64').toString('utf8')); // 显示名含中文，请求头里用 base64 传
     return next();
   });
+  // 平台管理员标记：与 index.js 用同一个中间件工厂和同一份名单，都取自被测副本（名单与标记的变异才测得到）。
+  const rulesMod = require(path.join(MODULE_DIR, 'rules.js'));
+  app.use(rulesMod.createSuperAdminMarker(rulesMod.SUPER_ADMIN_USER_IDS));
   app.use('/api', routes.router);
   const attachmentModule = createAttachmentRoutes({
     db, logger, UPLOAD_DIR: root, normalizeAttachmentExt: (n) => path.extname(String(n)).toLowerCase(), safeDeleteFileSync: () => {},
@@ -291,7 +302,12 @@ async function makeInprocHarness() {
     notifyKit: { notifier, ding, db: rawDb, readonlyIds: READONLY_IDS, setSettle: (v) => { settleSends = v === true; }, modulePath: () => path.join(MODULE_DIR, 'notify.js') }, // C6b：发送侧、钉钉 / 配置替身、模块 db（beforeCommit 钩子构造事务回滚）
     get fixedToday() { return currentToday; },
     setToday(d) { currentToday = d; },
-    world: { adminId: 1, roId: READONLY_IDS[0], plain },
+    world: { adminId: 2, superId: 1, roId: READONLY_IDS[0], plain },
+    // 只读名单是各路由共用的同一个数组（rules 每次读取时现建集合）：用例可临时把某个账号加进去，用完必须移除。
+    readonlyKit: {
+      add(id) { READONLY_IDS.push(id); },
+      remove(id) { const at = READONLY_IDS.lastIndexOf(id); if (at >= 2) READONLY_IDS.splice(at, 1); },
+    },
     call,
     sql,
     async setRole(uid, role) { await sql.run('UPDATE users SET role = ? WHERE id = ?', [role, uid]); userInfo[uid].role = role; },
@@ -321,7 +337,7 @@ const U = {}; // 角色 → 用户编号，开跑前由 world 分配
 function assignUsers() {
   const p = W.plain;
   Object.assign(U, {
-    admin: W.adminId, ro: W.roId,
+    admin: W.adminId, superAdmin: W.superId, ro: W.roId, // admin = 名单外的普通 admin 角色账号；superAdmin = 平台管理员
     pm: p[0], m1: p[1], m2: p[2], out: p[3], cand: p[4], cand2: p[5], own: p[6], del: p[7], x1: p[8], x2: p[9], x3: p[10], inactive: p[10], fixtureLeader: p[11], fixtureRepresentative: p[12], // inactive 只在单条用例里短暂置为停用再恢复，与 x3 不会同时使用
   });
 }
@@ -1224,6 +1240,12 @@ require('./sysbuild-api-suite-dashboard').defineDashboardCases({
   test, U, api, sqlRun, sqlGet, addParty, addMember, addAppointment, addDelegation, expectErr,
   getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
 });
+require('./sysbuild-api-suite-superadmin').defineSuperAdminCases({
+  test, U, api, upload: (uid, tail, formData) => H.call(uid, 'POST', tail, { formData }),
+  sqlGet, sqlAll, sqlRun, expectErr, addParty, addMember, addAppointment, addDelegation,
+  getModuleDir: () => MODULE_DIR, confirm: confirmHelpers,
+  getReadonlyKit: () => (H && H.readonlyKit) || null, skip: SKIP, // 只读名单只有进程内夹具能临时改；真实实例模式下该用例跳过
+});
 }
 
 // ── 运行 ─────────────────────────────────────────────────────────────────────────────
@@ -1260,7 +1282,7 @@ const MUTATIONS = [
   { id: '只读否决被去掉（建项）', expect: ['建项：只读账号', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'return !!(!platform.isReadonly && platform.roleCanWrite);', to: 'return !!platform.roleCanWrite;' }] },
   { id: '建项不查平台角色（viewer 可建项，D1）', expect: ['建项 D1', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'return !!(!platform.isReadonly && platform.roleCanWrite);', to: 'return !platform.isReadonly;' }] },
   { id: '候选 PM 不查平台角色（viewer 可被指定为 PM，D1）', expect: ['建项 D1'], edits: [{ file: 'projects.js', from: 'if (!plat.roleCanWrite) throw invalid(', to: 'if (false) throw invalid(' }] },
-  { id: '只读否决被去掉（PM 改基本信息）', expect: ['改基本信息：别的键', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'return !!(identity.isPm && !identity.isReadonly);', to: 'return !!identity.isPm;' }] },
+  { id: '只读否决被去掉（PM 改基本信息）', expect: ['改基本信息：别的键', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'function canEditProjectBasics(identity) {\n  return canActAsPm(identity);', to: 'function canEditProjectBasics(identity) {\n  return !!(identity.isPm || identity.isSuper === true);' }] },
   { id: '只读否决被去掉（admin 改状态）', expect: ['rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'function canChangeProjectStatus(identity) {\n  return !!(identity.isAdmin && !identity.isReadonly);', to: 'function canChangeProjectStatus(identity) {\n  return !!identity.isAdmin;' }] },
   { id: 'scope=all 不查角色', expect: ['列表：'], edits: [{ file: 'projects.js', from: "if (scope === 'all' && !rules.canListAll(platform)) throw", to: "if (false) throw" }] },
   { id: '状态查表：已终止放行 basics', expect: ['改基本信息：别的键', 'rules：项目状态 × 动作表', 'actions 与执行一致'], edits: [{ file: 'rules.js', from: 'basics: Object.freeze({ active: true, paused: true, terminated: false, closed: false }),', to: 'basics: Object.freeze({ active: true, paused: true, terminated: true, closed: false }),' }] },
@@ -1290,7 +1312,7 @@ const MUTATIONS = [
   { id: '状态转移表：已终止允许直接暂停', expect: ['状态：四种合法', 'rules：项目状态 × 动作表'], edits: [{ file: 'rules.js', from: "terminated: Object.freeze(['active']),", to: "terminated: Object.freeze(['active', 'paused'])," }] },
   { id: '状态更新不记 reason（事件 payload 缺原因）', expect: ['状态：四种合法'], edits: [{ file: 'projects.js', from: 'payload: { from, to, reason }', to: 'payload: { from, to }' }] },
   { id: '改基本信息事件 payload 含未改动的列', expect: ['改基本信息：PM 成功'], edits: [{ file: 'projects.js', from: 'if (cur[f] !== next[f]) {', to: 'if (true) {' }] },
-  { id: '改基本信息允许非 PM 成员', expect: ['改基本信息：PM 成功', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'return !!(identity.isPm && !identity.isReadonly);', to: 'return !!((identity.isPm || identity.isMember) && !identity.isReadonly);' }] },
+  { id: '改基本信息允许非 PM 成员', expect: ['改基本信息：PM 成功', 'rules：项目级判定函数'], edits: [{ file: 'rules.js', from: 'function canEditProjectBasics(identity) {\n  return canActAsPm(identity);', to: 'function canEditProjectBasics(identity) {\n  return canActAsPm(identity) || !!(identity.isMember && !identity.isReadonly);' }] },
   { id: 'PATCH 接受 status 等非基本信息键', expect: ['改基本信息：别的键'], edits: [{ file: 'projects.js', from: 'if (!BASIC_FIELDS.includes(k)) throw invalid(', to: 'if (false) throw invalid(' }] },
   { id: '改基本信息不更新 updated_at（X3）', expect: ['改基本信息：PM 成功'], edits: [{ file: 'projects.js', from: "initiated_on = ?, updated_at = datetime('now','localtime') WHERE id = ?", to: 'initiated_on = ? WHERE id = ?' }] },
   { id: '候选 PM 不查只读账号', expect: ['建项：admin 代建', '更换 PM：新 PM 是只读账号'], edits: [{ file: 'projects.js', from: 'if (plat.isReadonly) throw invalid(', to: 'if (false) throw invalid(' }] },
@@ -1327,6 +1349,7 @@ const MUTATIONS = [
   ...require('./sysbuild-api-suite-step4').step4Mutations,
   ...require('./sysbuild-api-suite-work').workMutations,
   ...require('./sysbuild-api-suite-dashboard').dashboardMutations,
+  ...require('./sysbuild-api-suite-superadmin').SUPER_ADMIN_MUTATIONS,
 ];
 
 // 变异 id 全局唯一（codex 20 号 M-1）：阶段补检改按 id 名单选择（--mutation-ids），id 必须能唯一定位一条变异。加载时校验，有重复就列出重复的 id 并让进程以退出码 1 结束

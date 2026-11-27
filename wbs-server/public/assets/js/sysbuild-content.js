@@ -62,6 +62,8 @@
                 }
                 if (card.actions.upload) {
                     if (basis && cardKey) content.push(materialForm(detail, data, material, c, card, true));
+                    // 立项依据的上传表单在卡片详情页里；阶段页的卡片上给一个直达入口，和其它材料卡片的「上传材料」对齐。
+                    if (basis && !cardKey) content.push(A.link(material?.versions.length ? '再传一版立项依据' : '上传立项依据', { project: detail.project.id, tab: 'plan', node: node.id, card: card.key }));
                     if (!basis) content.push(A.button(material?.versions.length ? '再传一版' : '上传材料', () => materialForm(detail, data, material, c, card)));
                 }
                 if (card.actions.mark_not_applicable) content.push(A.command(basis ? '填写无书面依据原因' : '标为不适用', (cc) => markMaterialCard(card, cc), '', c));

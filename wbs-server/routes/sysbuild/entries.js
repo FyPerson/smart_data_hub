@@ -288,10 +288,10 @@ function createEntryRoutes(ctx) {
       if (input.nodeId !== null && node === null) throw invalid('节点不存在或不属于本项目', 'node_id');
       if (node !== null && node.status === 'cancelled') throw stateError('该节点已取消，不能再关联新登记');
       if (input.businessDate !== null && input.businessDate > todayStr) throw invalid(`业务日期不能晚于今天（${todayStr}）`, 'business_date');
-      // 来源方：PM 可代登并填真实来源方（不填 = PM 本人登记，来源方为空）；非 PM 填了 400；成员本人取其成员行的参与方（可空 = 信息技术部内部成员）；admin 非成员来源方为空。
+      // 来源方：PM（含平台管理员）可代登并填真实来源方（不填 = 本人登记，来源方为空）；其他人填了 400；成员本人取其成员行的参与方（可空 = 信息技术部内部成员）；admin 非成员来源方为空。
       let sourcePartyId = null;
       if (input.sourcePartyId !== null) {
-        if (identity.isPm !== true) throw invalid('只有项目经理代登时可以填写来源方', 'source_party_id');
+        if (!rules.canActAsPm(identity)) throw invalid('只有项目经理代登时可以填写来源方', 'source_party_id');
         const party = await q.get('SELECT id FROM sysbuild_parties WHERE id = ? AND project_id = ?', [input.sourcePartyId, pid]);
         if (!party) throw invalid('来源方不是本项目的参与方', 'source_party_id');
         sourcePartyId = party.id;
@@ -340,7 +340,7 @@ function createEntryRoutes(ctx) {
       }
       const devPartyId = await entries.devPartyIdOf(q, pid);
       const devAllowed = rules.opAllowed('entry_create_dev', identity, access.project, { devPartyId });
-      const sources = identity.isPm === true ? [{ id: null, label: 'PM 本人登记' }, ...(await q.all('SELECT id, name FROM sysbuild_parties WHERE project_id = ? ORDER BY sort_order, id', [pid])).map((p) => ({ id: p.id, label: '代登：' + p.name }))] : null;
+      const sources = identity.isPm === true || rules.canActAsPm(identity) ? [{ id: null, label: identity.isPm === true ? 'PM 本人登记' : '管理员本人登记' }, ...(await q.all('SELECT id, name FROM sysbuild_parties WHERE project_id = ? ORDER BY sort_order, id', [pid])).map((p) => ({ id: p.id, label: '代登：' + p.name }))] : null;
       return {
         project_id: pid, entries: list,
         registration: { types: REGISTERABLE_TYPES, purposes: rules.ENTRY_PURPOSES_FINAL, source_choices: sources, forms: forms.availableForms({ generalAllowed: rules.opAllowed('entry_create_process', identity, access.project, {}) || rules.opAllowed('entry_create_supplement', identity, access.project, {}), devAllowed, isPm: rules.canActAsPm(identity) }) },

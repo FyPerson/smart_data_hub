@@ -104,7 +104,8 @@ async function myWork(q, user, accessOptions) {
   for (const project of projects) {
     const access = await rules.loadProjectAccess(q, project.id, user, accessOptions);
     if (!rules.canViewProject(access)) continue;
-    const identity = { ...access, userId: uid };
+    // 「等我处理」只按本人身份算：平台管理员的代办权限不算他的待办（isSuper 置假），否则他作为普通成员的项目里会冒出 PM 的事项。
+    const identity = { ...access, isSuper: false, userId: uid };
     const open = await q.all(
       "SELECT id, title, status, updated_at FROM sysbuild_opinions WHERE project_id = ? AND status IN ('triage','assessment','disposition','cut_approval') ORDER BY id DESC",
       [project.id]

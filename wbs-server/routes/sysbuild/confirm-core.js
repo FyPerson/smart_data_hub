@@ -198,6 +198,20 @@ async function confirmAvailabilityBlock(q, rev, user, accessOpts, cache, o) {
   if (!info.canDecide) return '项目当前状态不允许作出这项确认';
   return qualificationLoss(q, rev, o);
 }
+// 这条平台确认是不是平台管理员代办的：操作人不是该修订的必需确认人本人（rules.confirm_decide 只放行本人与平台管理员）。
+//   确认页与归档确认单都读这一个函数，据此在操作人后标「管理员代办」。卡片确认、取不到必需确认人账号的记录一律不算代办。
+async function confirmedByProxy(q, confirmationId) {
+  const row = await q.get(
+    `SELECT c.method AS method, c.actor_user_id AS actor_user_id, m.user_id AS required_user_id
+       FROM sysbuild_confirmations c
+       JOIN sysbuild_confirm_task_revisions r ON r.id = c.task_revision_id
+       LEFT JOIN sysbuild_members m ON m.id = r.required_member_id
+      WHERE c.id = ?`,
+    [confirmationId]
+  );
+  if (!row || row.method !== 'platform' || row.actor_user_id === null || row.required_user_id === null) return false;
+  return Number(row.actor_user_id) !== Number(row.required_user_id);
+}
 
 // ── P36 同一人不能在同一参与方同时以负责人和代表人身份确认 ────────────────────────────────────────────
 // 已确认的修订保持有效（确认记录绑定当时的修订与版本，不变量 5）；但改发时若解析出的新人已在本版本、同一参与方的另一类任务上确认过，改发 409。
@@ -424,7 +438,7 @@ module.exports = {
   settleRevision, localDateString, validDate,
   attachmentView,
   frozenSetOf, frozenKey, frozenSetOfTask, frozenKeyOfTask, INVALIDATED_ON_TERMINATE_PURPOSES, RETAINED_ON_TERMINATE_PURPOSES, assertTerminatePurposeClassification,
-  CONFIRMER_ELIGIBLE_SQL, eligibleMember, currentOwner, currentDelegate, currentDemandLeaderUser, resolvePackageConfirmers, confirmersMissing, directAssignmentRole, qualificationLoss, confirmAvailabilityBlock, confirmedOnOtherRoleBySameUser,
+  CONFIRMER_ELIGIBLE_SQL, eligibleMember, currentOwner, currentDelegate, currentDemandLeaderUser, resolvePackageConfirmers, confirmersMissing, directAssignmentRole, qualificationLoss, confirmAvailabilityBlock, confirmedByProxy, confirmedOnOtherRoleBySameUser,
   createTaskWithRevision, latestRevision, closePendingRevision, invalidatePendingRevisionsOfProject,
   submittedNodePlans, advancePlanningBatches,
   allPackageTasksConfirmed, formBaselines, takeEffectIfComplete,

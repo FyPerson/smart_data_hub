@@ -2,6 +2,7 @@
 const assert = require('assert');
 const path = require('path');
 const BASIS = 'L3 确认页立项依据与冻结版本';
+const PROXY = '平台管理员不接管走完立项并代办确认';
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 function defineCases(T) {
     const { people, api, project, assignParty, visit, env, suffix, out, token, target, declareViaCard, savePackageDraft } = T;
@@ -76,10 +77,35 @@ function defineCases(T) {
             await page.frameLocator('iframe').locator('#sec-initiation-basis').waitFor();
             assert.ok((await page.frameLocator('iframe').locator('#sec-initiation-basis').textContent()).includes(basisReason));
         }],
+        // 页面身份是平台管理员（编号 1，不是本项目 PM 也不是成员）：在界面上填立项依据声明、建草稿、发起确认，再代办需求方领导的确认。
+        [PROXY, async (page) => {
+            const pid = await project('平台管理员代办_' + suffix); await participant(pid, people.owner, 'demand');
+            const ini = await initiation(page, pid, false);
+            await visit(page, '#task=' + ini.task);
+            await target('super-admin-proxy-panel', async () => {
+                await page.getByRole('heading', { name: '管理员代办确认', exact: true }).waitFor();
+                assert.strictEqual(await page.getByRole('heading', { name: '本人作出决定', exact: true }).count(), 0, '代办时不显示本人决定面板');
+                assert.ok((await page.locator('.sbui-confirmation').textContent()).includes('并标为「管理员代办」'), '代办面板写明记录方式');
+            });
+            await page.locator('[name="decision"]').selectOption('confirm');
+            await page.locator('[name="acknowledged"]').check();
+            await page.getByRole('button', { name: '提交代办的决定', exact: true }).click();
+            await target('super-admin-proxy-recorded', async () => {
+                await page.getByText('已确认', { exact: true }).first().waitFor();
+                assert.strictEqual(await page.getByRole('cell', { name: '平台管理员代办', exact: true }).count(), 1, '确认记录的方式标平台管理员代办');
+                assert.strictEqual(await page.getByRole('cell', { name: '平台本人确认', exact: true }).count(), 0);
+                assert.strictEqual(await page.getByRole('cell', { name: people.superAdmin.display_name, exact: true }).count(), 1, '确认人一栏是平台管理员');
+            });
+            const recorded = await api(people.pm, 'GET', '/confirm-tasks/' + ini.task);
+            assert.deepStrictEqual(recorded.confirmations.map((row) => [row.actor_user_id, row.by_admin_proxy]), [[people.superAdmin.id, true]]);
+            assert.strictEqual(recorded.object.version.status, 'effective');
+        }, 'superAdmin'],
     ];
 }
 const MUTATIONS = [
     { id: 'l3-confirm-basis-filter', from: 'const materials = (o.materials || []).filter((m) => initiationNodeIds.includes(m.node_id));', to: 'const materials = [];', expect: BASIS, expectFailure: '[l3-basis-frozen]' },
     { id: 'l3-confirm-basis-declaration', from: "if (reason) body.push(A.panel('无书面依据', [prose(reason)]));", to: 'if (false) body.push(A.panel("无书面依据", [prose(reason)]));', expect: BASIS, expectFailure: '[l3-basis-declaration]' },
+    { id: 'super-admin-proxy-shown-as-self', from: "if (data.actions.decide === true && data.actions.decide_mode === 'admin') host.appendChild", to: 'if (false) host.appendChild', expect: PROXY, expectFailure: '[super-admin-proxy-panel]' },
+    { id: 'super-admin-proxy-method-as-self', from: "cf.by_admin_proxy === true ? '平台管理员代办' : label(methods, cf.method)", to: 'label(methods, cf.method)', expect: PROXY, expectFailure: '[super-admin-proxy-recorded]' },
 ].map((mutation) => ({ ...mutation, file: 'sysbuild-confirm.js' }));
 module.exports = { defineCases, MUTATIONS };

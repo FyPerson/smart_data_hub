@@ -2373,7 +2373,7 @@ const NOTIFY_MUTATIONS = [
   nm('就绪扫描可重复触发', [T_SCAN], 'notify.js', '    readyScanned = true;\n', ''),
   nm('PM 补发不写事件', [T_RESEND], 'notify.js', "eventType: 'send_intents_resent'", "eventType: 'send_intent_attempted'"),
   nm('事件类型 send_intent_attempted 未登记', [T_SEND], 'events.js', "'send_intent_attempted', 'send_intents_resent',", "'send_intents_resent',"),
-  nm('非 PM 的项目详情也带发送失败条数', [T_RESEND], 'projects.js', 'if (identity.isPm === true) detail.notify =', 'if (true) detail.notify ='),
+  nm('非 PM 的项目详情也带发送失败条数', [T_RESEND], 'projects.js', 'if (identity.isPm === true || rules.canActAsPm(identity)) detail.notify =', 'if (true) detail.notify ='),
   // ── 待办 ──
   nm('待办 handle 被不认可的修订改发 / 出新结论后仍列', [T_TODO], 'notify.js', 'if (!(await declinedStillOpen(q, d))) continue;', ''),
   nm('待办 send_failed 读成已发', [T_TODO], 'notify-core.js', 'const intentFailedWhere = "(i.status = \'failed\' OR', 'const intentFailedWhere = "(i.status = \'sent\' OR'),
@@ -2437,7 +2437,7 @@ const NOTIFY_MUTATIONS = [
   nm('R1 L5 非负责人的改期知会标题被改', [T_FIX], 'notify.js', "[PURPOSES.SCHEDULE_NOTICE]: '改期知会',", "[PURPOSES.SCHEDULE_NOTICE]: '知会',"),
   // ── L6 / L7 / L8 / L9 ──
   nm('R1 L6 决策人就是 PM 也写不认可通知', [T_NOPM], 'notify-core.js', 'if (o.actorUserId !== undefined && Number(p.pm_user_id) === Number(o.actorUserId)) return null;', ''),
-  nm('R1 L6 调用方不传决策人', [T_NOPM], 'confirm.js', 'refId: c.latest.id, actorUserId: c.requiredUserId });', 'refId: c.latest.id });'),
+  nm('R1 L6 调用方不传决策人', [T_NOPM], 'confirm.js', 'refId: c.latest.id, actorUserId: Number(user.id) });', 'refId: c.latest.id });'),
   nm('R1 L7 改期知会对负责人仍用确认类固定文案', [T_SCHED, T_FIX], 'notify.js', 'if (data.ownerRecipient && data.intent.purpose === PURPOSES.SCHEDULE_NOTICE) {', 'if (false) {'),
   nm('R1 L7 改期知会链接文字仍是「打开确认」', [T_SCHED, T_FIX], 'notify.js', "const NOTICE_LINK_LABEL = '打开查看';", "const NOTICE_LINK_LABEL = '打开确认';"),
   // ── K5 主会话裁定 ──

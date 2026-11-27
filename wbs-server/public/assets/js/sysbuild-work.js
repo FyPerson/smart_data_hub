@@ -83,14 +83,19 @@
         form.addEventListener('change', refreshOptions);
         refreshOptions();
     }
+    // 开发意见的三种登记方式：开发负责人本人、PM 代录（须附截图）、平台管理员代办（不要求截图，记录上标管理员代办）。
+    function assessLabel(opinion) {
+        const mode = opinion.actions.assess_mode;
+        return mode === 'proxy' ? '代录开发意见与工时' : mode === 'admin' ? '管理员代办开发意见与工时' : '填写开发意见与工时';
+    }
     function assess(detail, opinion, c) {
         const proxy = opinion.actions.assess_mode === 'proxy';
-        enableDecimal(A.dialog(proxy ? '代录开发意见与工时' : '填写开发意见与工时', [
+        enableDecimal(A.dialog(assessLabel(opinion), [
             textField('text', '开发意见', 4000, true), hours,
             { ...evidence, label: proxy ? '开发方意见截图' : '附件', required: proxy },
         ], async (v, cc) => {
             const attachment_ids = await A.stageFiles(detail.project.id, v.files, cc);
-            await A.request(actionPath(opinion.id), { method: 'POST', body: { action: 'assess', text: v.text, estimated_hours: Number(v.estimated_hours), attachment_ids } }, cc);
+            await A.request(actionPath(opinion.id), { method: 'POST', body: { action: 'assess', text: v.text, estimated_hours: Number(v.estimated_hours), attachment_ids, expected_mode: opinion.actions.assess_mode } }, cc);
             await A.render();
         }, '提交开发意见', A.reserveDialog(c)));
     }
@@ -104,13 +109,18 @@
         }, '保存去向', A.reserveDialog(c));
     }
     function decideCut(opinion, row, c) {
-        A.dialog('需求方负责人本人表态', [
+        const proxy = row.decide_mode === 'admin';
+        // 代办：表单写明代的是哪位负责人，并把他的授权编号带回，提交时服务端核对负责人没有换人。
+        const form = A.dialog(proxy ? '管理员代办需求方负责人表态' : '需求方负责人本人表态', [
             { name: 'decision', label: row.party_name, required: true, options: [['', '请选择'], ['agree', '同意本期移出范围'], ['object', '不同意，维持原范围']] },
             textField('text', '说明', 500),
         ], async (v, cc) => {
-            await A.request(actionPath(opinion.id), { method: 'POST', body: { action: 'cut_decide', party_id: row.party_id, ...v } }, cc);
+            const body = { action: 'cut_decide', party_id: row.party_id, ...v };
+            if (proxy) body.expected_delegation_id = row.proxy_for.delegation_id;
+            await A.request(actionPath(opinion.id), { method: 'POST', body }, cc);
             await A.render();
-        }, '提交本人表态', A.reserveDialog(c));
+        }, proxy ? '提交代办表态' : '提交本人表态', A.reserveDialog(c));
+        if (proxy) form.prepend(A.hint('代 ' + (row.proxy_for.name || '该部门现任负责人') + ' 表态。记录的操作人是你，并标为「管理员代办」。'));
     }
     function withdrawCut(opinion, c) {
         A.dialog('撤回同意请求，维持原范围', [textField('text', '撤回原因', 500, true)], async (v, cc) => {
@@ -130,20 +140,20 @@
         ], A.row(A.link('返回意见', back))));
         const actions = A.row();
         if (o.actions.triage === true) actions.appendChild(A.command('PM 初判', (cc) => triage(o, cc), 'primary', c));
-        if (o.actions.assess === true) actions.appendChild(A.command(o.actions.assess_mode === 'proxy' ? '代录开发意见与工时' : '填写开发意见与工时', (cc) => assess(detail, o, cc), 'primary', c));
+        if (o.actions.assess === true) actions.appendChild(A.command(assessLabel(o), (cc) => assess(detail, o, cc), 'primary', c));
         if (o.actions.dispose === true) actions.appendChild(A.command('PM 定去向', (cc) => dispose(o, cc), 'primary', c));
         if (o.actions.cut_withdraw === true) actions.appendChild(A.command('撤回同意请求', (cc) => withdrawCut(o, cc), '', c));
         if (actions.childElementCount) host.appendChild(actions);
         if (o.triage_text) host.appendChild(A.panel('PM 初判', [prose(o.triage_text), o.skip_reason ? A.hint('跳过评估：' + o.skip_reason) : null]));
         if (o.assessment_source) host.appendChild(A.panel('开发意见与工时', [
-            A.facts([['记录来源', o.assessment_source === 'proxy' ? (o.assessed_for_user_id ? 'PM 代录' : 'PM 代录，开发负责人待指定') : '开发负责人本人'], ['工时', o.assessment_hours + ' 小时']]),
+            A.facts([['记录来源', o.assessment_by_admin === true ? '管理员代办' : o.assessment_source === 'proxy' ? (o.assessed_for_user_id ? 'PM 代录' : 'PM 代录，开发负责人待指定') : '开发负责人本人'], ['工时', o.assessment_hours + ' 小时']]),
             prose(o.assessment_text), A.attachmentList(o.assessment_attachments, c),
         ]));
         if (o.approvals?.length) host.appendChild(A.panel('需求部门表态', [A.table(['需求部门', '表态', '说明', '操作'], o.approvals.map((row) => [
             row.party_name,
-            row.status === 'agree' ? '已同意' : row.status === 'object' ? '不同意' : o.status === 'concluded' ? '未答复，已结束' : '待同意',
+            (row.status === 'agree' ? '已同意' : row.status === 'object' ? '不同意' : o.status === 'concluded' ? '未答复，已结束' : '待同意') + (row.by_admin_proxy === true ? '（管理员代办）' : ''),
             row.decision_text || '—',
-            row.can_decide === true ? A.command('本人表态', (cc) => decideCut(o, row, cc), 'primary', c) : null,
+            row.can_decide === true ? A.command(row.decide_mode === 'admin' ? '管理员代办表态' : '本人表态', (cc) => decideCut(o, row, cc), 'primary', c) : null,
         ]))]));
         if (o.outcome) host.appendChild(A.panel('结论 · ' + outcomes[o.outcome], [prose(o.outcome_text),
             o.task ? A.link('查看已生成任务', taskHref(pid, o.task.node_id, o.task.id)) : null]));

@@ -164,7 +164,7 @@ function confirmationDetail(c) {
     html`<li>时间：${fmtTime(c.created_at)}</li>`,
   ];
   if (c.method === 'platform' || c.method === 'card') {
-    lines.push(html`<li>操作人：${c.actor_name || '—'}</li>`);
+    lines.push(html`<li>操作人：${c.actor_name || '—'}${c.by_admin_proxy === true ? '（管理员代办）' : ''}</li>`);
     if (c.method === 'platform') lines.push(html`<li>勾选声明：${c.checkbox_text}</li>`);
   }
   if (c.decision !== 'confirm') lines.push(html`<li>原因：${c.reason}</li>`);
@@ -376,6 +376,7 @@ function createConfirmationSheetRoutes(ctx) {
     );
     if (!c) return null;
     c.actor_name = await userNameOf(q, c.actor_user_id);
+    c.by_admin_proxy = await core.confirmedByProxy(q, c.id); // 平台管理员代办：操作人后标「管理员代办」（与确认页同一个判定）
     return c;
   }
   function parseSnapshot(text) {

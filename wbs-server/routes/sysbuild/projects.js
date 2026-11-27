@@ -163,6 +163,7 @@ function createProjectRoutes(ctx) {
     return {
       roles,
       is_admin: identity.isAdmin,
+      is_super_admin: identity.isSuper === true, // 平台管理员（rules.js「平台管理员」段）：页面据此写「我是谁」，按钮仍只看 actions
       is_readonly: identity.isReadonly,
       is_pm: identity.isPm,
       is_member: identity.isMember,
@@ -416,8 +417,8 @@ function createProjectRoutes(ctx) {
       // 预筛 LOW-5：部分上线进度（已正式上线 n / 有效批次 m，转出单列）与 GET /plan 的 project.golive_progress 同一个函数
       const golive_progress = await goliveCore.goliveProgressOf(q, pid);
       const detail = { project: Object.assign(viewOf(row), { golive_progress }), parties: partyItems, members, appointments: objs.appointments, delegations: objs.delegations, me: identityCard(identity), actions: rules.actionsFor(identity, row) };
-      // C6b（§9.2）：PM 的项目视图显示「通知发送失败 N 条」，供点补发（POST …/send-intents/resend）；只给本人是 PM 的详情，其他人不带这个字段
-      if (identity.isPm === true) detail.notify = { send_failed: await notifyCore.failedIntentCount(q, pid) };
+      // C6b（§9.2）：PM 的项目视图显示「通知发送失败 N 条」，供点补发（POST …/send-intents/resend）；给 PM 本人（含只读的 PM，与改动前相同）和平台管理员，其他人不带这个字段；能不能补发仍由补发端点按 canActAsPm 判
+      if (identity.isPm === true || rules.canActAsPm(identity)) detail.notify = { send_failed: await notifyCore.failedIntentCount(q, pid) };
       return detail;
   }
   router.get('/sysbuild/projects/:id', handle(async (req, res) => {

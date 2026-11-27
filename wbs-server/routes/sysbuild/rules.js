@@ -32,8 +32,30 @@ function hasControlChar(s) {
   return typeof s === 'string' && CONTROL_CHAR_RE.test(s);
 }
 
+// ── 平台管理员（2026-11-27 用户定：便于补录，对项目管理开放全部权限）──────────────────────────────
+// 只认名单里的账号编号，且平台角色须为 admin；其余 admin 角色账号在本模块的权限不变（生产启用的 admin 角色账号有 12 个，只有编号 1 是平台管理员）。
+//   能做的事：在任何项目里做 PM 的全部动作（不必先接管），并代办「须由对方本人做」的动作（内容包确认、砍需求表态）。
+//   不变的限制：只读账号一票否决；项目状态 × 动作表；各动作的对象状态前置（state）。
+// 标记登记在模块私有的 WeakSet 里，键是请求上的 user 对象本身：令牌载荷带不进来；核对别人资格时按 id / role 临时拼出的 user 对象
+//   （候选 PM、通知收件人）不在集合里，所以不会被当成平台管理员。只有 createSuperAdminMarker 返回的中间件能登记。
+const SUPER_ADMIN_USER_IDS = Object.freeze([1]);
+const SUPER_ADMIN_USERS = new WeakSet();
+function createSuperAdminMarker(ids) {
+  if (!Array.isArray(ids) || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw new Error('rules.createSuperAdminMarker: 名单须为正整数数组');
+  const allowed = new Set(ids);
+  return function markSuperAdmin(req, res, next) {
+    const user = req.user;
+    if (user !== null && typeof user === 'object' && user.role === 'admin' && Number.isSafeInteger(user.id) && allowed.has(user.id)) SUPER_ADMIN_USERS.add(user);
+    next();
+  };
+}
+function isSuperAdminUser(user) {
+  return user !== null && typeof user === 'object' && SUPER_ADMIN_USERS.has(user);
+}
+
 // ── 读库：项目 + 调用者在该项目中的身份 ─────────────────────────────────────────────────
-// 返回 { project, isAdmin, isPm, isMember, isReadonly }；项目不存在时 project 为 null，其余全 false。
+// 返回 { project, isAdmin, isSuper, isPm, isMember, isReadonly }；项目不存在时 project 为 null，其余全 false。
+//   isSuper：平台管理员（见上）。isPm 仍只表示「本人就是本项目 PM」这一事实，待办归属、通知收件人、身份快照都读 isPm，不读 isSuper。
 //   isMember：sysbuild_members 里有「已加入、未移出」的行；PM 视为成员（PM 不一定有成员行）。
 //   readonlyIds：只读账号 id 集合（数组或 Set，调用方从平台配置取）；只读账号对写入有否决权（§5.1）。
 //   必须显式传入：缺失或类型不对抛 500 SYSBUILD_INTERNAL，不回落为空集合（回落会让只读账号静默拥有写权限）。
@@ -45,8 +67,13 @@ async function loadProjectAccess(q, projectId, user, opts) {
   const readonlyIds = new Set(Array.from(ro).map(Number));
   const uid = Number(user && user.id);
   const project = await q.get('SELECT id, pm_user_id, status, build_type FROM sysbuild_projects WHERE id = ?', [projectId]);
-  if (!project) return { project: null, isAdmin: false, isPm: false, isMember: false, isReadonly: false };
+  if (!project) return { project: null, isAdmin: false, isSuper: false, isPm: false, isMember: false, isReadonly: false };
   const isAdmin = !!user && user.role === 'admin';
+  // 平台管理员：请求对象带标记，且库里此刻仍是启用的 admin。令牌里的角色是签发时的快照（平台鉴权每次只回库查账号状态），
+  //   这层权限大，所以对带标记的对象再按库里的角色与状态核一次：编号 1 被降级或停用后，旧令牌立刻失去这层权限（codex 294 号）。
+  const marked = isAdmin && isSuperAdminUser(user);
+  const live = marked ? await q.get('SELECT role, status FROM users WHERE id = ?', [uid]) : null;
+  const isSuper = marked && !!live && live.role === 'admin' && live.status === 'active';
   const isReadonly = readonlyIds.has(uid);
   const isPm = Number(project.pm_user_id) === uid;
   let isMember = isPm;
@@ -57,7 +84,7 @@ async function loadProjectAccess(q, projectId, user, opts) {
     );
     isMember = !!row;
   }
-  return { project, isAdmin, isPm, isMember, isReadonly };
+  return { project, isAdmin, isSuper, isPm, isMember, isReadonly };
 }
 
 // ── 动作判定（纯函数；本段四个附件判定是 C1c 的；C2a 的项目级判定在下面「C2a」段，M-S2 在同处追加成员与授权类）────────
@@ -72,14 +99,14 @@ function canViewAttachments(access) {
 function canStageAttachment(access) {
   return !!(!access.isReadonly && (access.isAdmin || access.isMember));
 }
-// §10.3 受控遮蔽由 PM 执行；只读账号即使是 PM 也不行。
+// §10.3 受控遮蔽由 PM 执行（平台管理员同样可做）；只读账号即使是 PM 也不行。
 function canMaskAttachment(access) {
-  return !!(access.isPm && !access.isReadonly);
+  return canActAsPm(access);
 }
 // 方案未写软删除的执行人。主会话按「只收窄不放宽」暂定与遮蔽相同（PM 且不是只读账号），
 //   已记入锚点待追认；追认结果改这一处即可。
 function canSoftDeleteAttachment(access) {
-  return !!(access.isPm && !access.isReadonly);
+  return canActAsPm(access);
 }
 
 // C4c R-S1 需求确认单导出（方案 §5.2「导出需求确认单」行：全部身份为「是」；§2.2 不变量 9：导出读提交时冻结的快照与附件清单）：
@@ -245,9 +272,9 @@ function canListAll(platform) {
 function canCreateProject(platform) {
   return !!(!platform.isReadonly && platform.roleCanWrite);
 }
-// 改基本信息：PM 本人（admin 经「接管」成为 PM 后才可）。
+// 改基本信息：PM 本人或平台管理员（其余 admin 经「接管」成为 PM 后才可）。
 function canEditProjectBasics(identity) {
-  return !!(identity.isPm && !identity.isReadonly);
+  return canActAsPm(identity);
 }
 // 暂停 / 恢复 / 终止 / 重开：admin。
 function canChangeProjectStatus(identity) {
@@ -272,9 +299,15 @@ function pmClash(identity) {
 function ownsParty(identity, partyId) {
   return Array.isArray(identity.ownerOfParties) && identity.ownerOfParties.includes(Number(partyId));
 }
+// 做 PM 的动作：PM 本人，或平台管理员（不必先接管）。只读账号一票否决。
 function canActAsPm(identity) {
   if (identity.isReadonly) return false;
-  return !!identity.isPm;
+  return !!(identity.isPm || identity.isSuper === true);
+}
+// 代办「须由对方本人做」的动作（内容包确认、砍需求表态）：只有平台管理员；只读账号一票否决。
+//   记录如实写操作人是平台管理员（不冒充本人），页面与确认单据此标「管理员代办」。
+function canProxyAsSuperAdmin(identity) {
+  return !!(identity.isSuper === true && !identity.isReadonly);
 }
 const noStateLimit = () => null;
 const PROXY_FACT_UNKNOWN_MESSAGE = '无法确定代录的前置事实，请刷新后重试';
@@ -329,10 +362,10 @@ const entryNotVoided = (t) => {
 function canRegisterEntry(identity) {
   return !!(!identity.isReadonly && (identity.isAdmin || identity.isMember));
 }
-// 更正 / 作废：登记人本人或 PM；只读账号一票否决。t.isRegistrant = 操作人就是登记的 operator_user_id。
+// 更正 / 作废：登记人本人或 PM（含平台管理员）；只读账号一票否决。t.isRegistrant = 操作人就是登记的 operator_user_id。
 function canCorrectOrVoidEntry(identity, project, t) {
   if (identity.isReadonly) return false;
-  return !!(identity.isPm || t.isRegistrant === true);
+  return !!(canActAsPm(identity) || t.isRegistrant === true);
 }
 const OBJECT_OPS = Object.freeze({
   party_add: Object.freeze({
@@ -538,8 +571,9 @@ const OBJECT_OPS = Object.freeze({
   // 作出确认：只认「本人是当前修订的必需确认人」。**不**带只读否决——方案 §5.1：只读账号「也只能查看和作出本人的确认类动作」（确认、有异议…）；
   //   领导只读账号正是部门负责人这类必需确认人。派单 P27 写「项目只读账号 403」与方案 §5.1 冲突，按方案（P31：主会话 11-01 裁定保持现状，
   //   即 confirm_decide 不带只读否决；P27 该句被更正）。
+  //   平台管理员可代办（2026-11-27）：代办分支带只读否决；对象状态前置（修订待确认、对象版本待确认、必需确认人资格仍在）与本人确认相同。
   confirm_decide: Object.freeze({
-    can: (identity, project, t) => t.isRequired === true,
+    can: (identity, project, t) => t.isRequired === true || canProxyAsSuperAdmin(identity),
     state: (t) => {
       if (t.revisionIdGiven !== undefined && t.revisionIdGiven !== t.currentRevisionId) return { code: 'SYSBUILD_TASK_SUPERSEDED', message: '该确认任务已被改发或替代，请刷新后重试' };
       if (t.objectVersionIdGiven !== undefined && t.objectVersionIdGiven !== t.objectVersionId) return { code: 'SYSBUILD_VERSION_CHANGED', message: '确认的对象版本与任务不符，请刷新后重试' };
@@ -560,7 +594,7 @@ const OBJECT_OPS = Object.freeze({
     state: (t) => t.opinionStatus === 'triage' ? null : '这条意见已完成初判，请刷新后查看',
   }),
   opinion_assess: Object.freeze({
-    can: (identity, project, t) => !identity.isReadonly && (identity.isPm || t.isDevResponsible === true),
+    can: (identity, project, t) => canActAsPm(identity) || (!identity.isReadonly && t.isDevResponsible === true),
     state: (t) => t.opinionStatus === 'assessment' ? null : '这条意见当前无需开发评估，请刷新后查看',
   }),
   opinion_dispose: Object.freeze({
@@ -568,9 +602,14 @@ const OBJECT_OPS = Object.freeze({
     state: (t) => t.opinionStatus === 'disposition' ? null : '这条意见当前不在待定去向，请刷新后查看',
   }),
   opinion_cut_decide: Object.freeze({
-    // 本人与原确认相同，拥有本部门当前授权的只读账号也可亲自表态。
-    can: (identity, project, t) => t.isCutResponsible === true,
-    state: (t) => t.opinionStatus === 'cut_approval' && t.cutStatus === 'pending' ? null : '当前已无可提交的本人表态，请刷新后查看',
+    // 本人与原确认相同，拥有本部门当前授权的只读账号也可亲自表态。平台管理员可代办（带只读否决）。
+    //   代办时该部门须有现任负责人（t.hasCutResponsible === true；表态记录要写依据的授权编号），没有或事实没取到一律拒绝。
+    can: (identity, project, t) => t.isCutResponsible === true || canProxyAsSuperAdmin(identity),
+    state: (t) => {
+      if (!(t.opinionStatus === 'cut_approval' && t.cutStatus === 'pending')) return '当前已无可提交的本人表态，请刷新后查看';
+      if (t.isCutResponsible !== true && t.hasCutResponsible !== true) return '该需求部门当前没有负责人，请先指定人员后再代办表态';
+      return null;
+    },
   }),
   opinion_cut_withdraw: Object.freeze({
     can: canActAsPm,
@@ -578,7 +617,7 @@ const OBJECT_OPS = Object.freeze({
   }),
   work_task_create: Object.freeze({ can: canActAsPm, state: noStateLimit }),
   work_task_result: Object.freeze({
-    can: (identity, project, t) => !identity.isReadonly && (identity.isPm || (identity.isMember && identity.userId === t.assigneeUserId)),
+    can: (identity, project, t) => canActAsPm(identity) || (!identity.isReadonly && identity.isMember && identity.userId === t.assigneeUserId),
     state: (t) => t.taskStatus === 'pending' ? null : '这条任务已有结果，请刷新后查看',
   }),
   // 办理动作 target（entries-core.entryTarget 构造，读接口逐对象 actions 与写端点同一份）：
@@ -599,7 +638,7 @@ const OBJECT_OPS = Object.freeze({
   entry_create_dev: Object.freeze({
     can: (identity, project, t) => {
       if (identity.isReadonly) return false;
-      if (identity.isPm) return true;
+      if (canActAsPm(identity)) return true;
       if (t.devPartyId === null || t.devPartyId === undefined) return false;
       const dp = Number(t.devPartyId);
       return ownsParty(identity, dp) || (Array.isArray(identity.delegateOfParties) && identity.delegateOfParties.includes(dp));
@@ -765,6 +804,7 @@ module.exports = {
   PROJECT_ACTION_TABLE, STATUS_TRANSITIONS, projectAllowsWrite, actionsFor,
   SUBMITTABLE_PACKAGE_TYPES, EXCLUSIVE_PENDING_PACKAGE_TYPES, EXCLUSIVE_PENDING_SQL_LIST, PACKAGE_TYPE_LABELS,
   PACKAGE_TYPES_FINAL, ENTRY_PURPOSES_FINAL,
-  canActAsPm, ownsParty, OBJECT_OPS, OP_KIND, checkOp, opAllowed, assertOp,
+  canActAsPm, canProxyAsSuperAdmin, SUPER_ADMIN_USER_IDS, createSuperAdminMarker,
+  ownsParty, OBJECT_OPS, OP_KIND, checkOp, opAllowed, assertOp,
   assertVisible, assertCan,
 };

@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { createSysbuildDb } = require('./db');
 const schema = require('./schema');
+const rules = require('./rules');
 const { createAttachmentRoutes } = require('./attachments');
 const { createProjectRoutes } = require('./projects');
 const { createMembershipRoutes } = require('./membership');
@@ -80,7 +81,8 @@ module.exports = (deps) => {
     }
     return next();
   }
-  router.use('/sysbuild', authenticateToken, requireSysbuildReady);
+  // 平台管理员标记（rules.js「平台管理员」段）：紧跟鉴权，本模块全部端点都先经过这里；名单在 rules.SUPER_ADMIN_USER_IDS。
+  router.use('/sysbuild', authenticateToken, requireSysbuildReady, rules.createSuperAdminMarker(rules.SUPER_ADMIN_USER_IDS));
 
   // 附件端点（C1c）：路径都以 /sysbuild/ 开头，已在上一行前置鉴权与就绪闸门。
   const attachments = createAttachmentRoutes({

@@ -131,11 +131,13 @@
     }
     async function openNewProject(capabilities, c) {
         const lease = A.reserveDialog(c);
-        const defs = basicFields().filter((field) => field.name !== 'goal');
-        defs.splice(2, 0, { name: 'build_type', label: '建设方式', required: true, options: [['', '请选择建设方式'], ...Object.entries(buildLabels)], hint: '保存后不可更改，将按此方式带出默认批次与节点。' });
+        // 建档弹窗按 12 列排：第一行 系统名称 / 期次 / 建设方式，第二行 OA 单号 / 立项日期 / PM。
+        const spans = { system_name: 5, phase_name: 3, oa_number: 4, initiated_on: 4 };
+        const defs = basicFields().filter((field) => field.name !== 'goal').map((field) => ({ ...field, span: spans[field.name] }));
+        defs.splice(2, 0, { name: 'build_type', label: '建设方式', required: true, span: 4, options: [['', '请选择建设方式'], ...Object.entries(buildLabels)], hint: '保存后不可更改，将按此方式带出默认批次与节点。' });
         const users = await A.request('/users/active', { platform: true }, lease);
         if (capabilities.actions.create_pm_required === true) {
-            defs.push({ name: 'pm_user_id', label: '项目负责人（PM）', required: true, options: [['', '请选择 PM'], ...users.map((u) => [u.id, u.display_name || u.username])], hint: '管理员代建须指定 PM。代建不会让管理员自动成为项目成员。' });
+            defs.push({ name: 'pm_user_id', label: '项目负责人（PM）', required: true, span: 4, options: [['', '请选择 PM'], ...users.map((u) => [u.id, u.display_name || u.username])], hint: '管理员代建须指定 PM。代建不会让管理员自动成为项目成员。' });
         }
         defs.push(...A.initialPeopleFields(A.personOptions(users)));
         A.assertCurrent(lease);
@@ -143,9 +145,10 @@
             const body = { system_name: v.system_name, phase_name: optional(v.phase_name), build_type: v.build_type, oa_number: optional(v.oa_number), initiated_on: optional(v.initiated_on) };
             if (v.pm_user_id) body.pm_user_id = A.id(v.pm_user_id);
             body.demand_parties = v.demand_parties;
-            if ((v.dev_name || '').trim() || v.dev_leader_user_id || v.dev_representative_user_id) {
-                body.dev_party = { name: v.dev_name, leader_user_id: v.dev_leader_user_id ? A.id(v.dev_leader_user_id) : null };
-                if (v.dev_representative_user_id) body.dev_party.representative_user_id = A.id(v.dev_representative_user_id);
+            const dev = v.dev_party;
+            if ((dev.name || '').trim() || dev.leader_user_id || dev.representative_user_id) {
+                body.dev_party = { name: dev.name, leader_user_id: dev.leader_user_id ? A.id(dev.leader_user_id) : null };
+                if (dev.representative_user_id) body.dev_party.representative_user_id = A.id(dev.representative_user_id);
             }
             const result = await A.request('/projects', { method: 'POST', body }, cc);
             A.navigate({ project: result.project.id, tab: 'plan', stage: 'initiation' });
@@ -153,12 +156,13 @@
         A.$('sbuiDialog').classList.add('sbui-create-dialog');
         A.guardDialogUnsaved(f, lease);
         f.prepend(A.hint('指定的人员保存后立即加入。立项材料和确认在项目内办理。'));
+        f.querySelector('[name="system_name"]').focus();
     }
     function identityCard(detail) {
         const me = detail.me;
         const lines = [];
         if (me.is_readonly) lines.push('你使用领导只读账号。可以查看档案，并按本人当前资格完成本人的确认；登记、维护等写入由服务端拒绝。');
-        if (me.is_admin) lines.push(me.is_readonly ? '你拥有管理员的项目查看范围，当前账号的只读限制仍然生效。' : me.is_pm ? '你是平台管理员，并担任本项目 PM。' : '你是平台管理员。可查看全部项目、暂停或重开项目。管理人员或履行 PM 职责前请先接管。');
+        if (me.is_admin) lines.push(me.is_readonly ? '你拥有管理员的项目查看范围，当前账号的只读限制仍然生效。' : me.is_pm ? '你是平台管理员，并担任本项目 PM。' + (me.is_super_admin === true ? '也可代办须由对方本人做的确认与表态；代办会记为「管理员代办」。' : '') : me.is_super_admin === true ? '你是平台管理员。可查看全部项目、暂停或重开项目，不必接管就能做 PM 的全部操作，也可代办须由对方本人做的确认与表态；代办会记为「管理员代办」。' : '你是平台管理员。可查看全部项目、暂停或重开项目。管理人员或履行 PM 职责前请先接管。');
         if (me.is_pm) lines.push(me.is_readonly ? '你在本项目登记为 PM，当前账号只读，登记与维护限制仍然生效。' : '你是本项目 PM。负责整理推进事实、维护材料与计划、办理登记、发起确认和核对收口；不能代替他人自动同意。');
         for (const partyId of me.owner_of_parties || []) {
             const p = detail.parties.find((x) => x.id === partyId);
@@ -433,6 +437,7 @@
         ]));
         host.appendChild(A.panel('在建项目和上线分界', [
             A.hint('在建项目照常建档，用阶段的「更正实际日期」补记真实日期。已有的书面凭据随材料上传。'),
+            A.hint('补录时，指定的平台管理员账号（admin，其他管理员角色账号不在内）可以直接做 PM 的操作，并代办对方的确认与表态。代办的记录写明操作人是管理员，并标为「管理员代办」。'),
             A.hint('正式上线后，新功能和问题走系统迭代受理渠道，项目可保留单号与链接。迭代单按系统迭代的权限查看。'),
         ]));
         return host;

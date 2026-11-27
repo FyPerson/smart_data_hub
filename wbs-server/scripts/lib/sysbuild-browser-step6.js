@@ -64,7 +64,13 @@ function homeAndDrawerCases({ people, api, project, pageFor, visit, env, sql, su
             await basis.waitFor();
             assert.strictEqual(await basis.locator('[type="file"]').count(), 0, '立项依据表单仅在抽屉');
         });
-        await basis.getByRole('link', { name: '查看卡片', exact: true }).click();
+        // 阶段页的立项依据卡片上有直达上传表单的入口（指向卡片抽屉，与「查看卡片」同一处）。
+        await target('step6-basis-upload-entry', async () => {
+            const entry = basis.getByRole('link', { name: '上传立项依据', exact: true });
+            assert.strictEqual(await entry.count(), 1, '立项依据卡片缺少上传入口');
+            assert.strictEqual(await entry.getAttribute('href'), await basis.getByRole('link', { name: '查看卡片', exact: true }).getAttribute('href'));
+        });
+        await basis.getByRole('link', { name: '上传立项依据', exact: true }).click(); // 从上传入口进抽屉（「查看卡片」由其它场景的 openStageCard 点击）
         await drawer.getByRole('heading', { name: '立项依据', exact: true }).waitFor();
         await target('step6-drawer-tab-cycle', async () => {
             const first = drawer.getByRole('button', { name: '关闭抽屉', exact: true });
@@ -507,6 +513,7 @@ const MUTATIONS = [
     { id: 'step6-ignore-default-todo', file: 'sysbuild-page.js', from: "if (!params.toString() && data.default_view === 'todo')", to: 'if (false)', expect: HOME, expectFailure: '[step6-default-view]' },
     { id: 'step6-return-home-redirects-again', file: 'sysbuild-ui.js', from: "link('项目列表', { scope: 'mine' })", to: "link('项目列表', {})", expect: HOME, expectFailure: '[step6-explicit-home]' },
     { id: 'step6-basis-inline', file: 'sysbuild-content.js', from: 'if (basis && cardKey) content.push(materialForm', to: 'if (basis) content.push(materialForm', expect: DRAWER, expectFailure: '[step6-basis-drawer-only]' },
+    { id: 'step6-basis-upload-entry-missing', file: 'sysbuild-content.js', from: 'if (basis && !cardKey) content.push(A.link(', to: 'if (false) content.push(A.link(', expect: DRAWER, expectFailure: '[step6-basis-upload-entry]' },
     { id: 'step6-drawer-allows-back-during-upload', file: 'sysbuild-ui.js', from: 'if (drawerBusy() && location.hash !== acceptedHash && location.hash !== programmaticHash)', to: 'if (false)', expect: DRAWER, expectFailure: '[step6-drawer-kept]' },
     { id: 'step6-drawer-background-action-enabled', file: 'sysbuild-page.js', from: 'host.inert = true;', to: 'host.inert = false;', expect: DRAWER, expectFailure: '[step6-drawer-focus]' },
     { id: 'step6-drawer-does-not-cycle-tab', file: 'sysbuild-ui.js', from: "if (event.key !== 'Tab') return;", to: "return;", expect: DRAWER, expectFailure: '[step6-drawer-tab-cycle]' },

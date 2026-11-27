@@ -91,6 +91,9 @@ async function run(options) {
     await sql(env.dbPath, "INSERT OR IGNORE INTO users (id, username, password, display_name, role, status) VALUES (6, ?, 'test-only', 'sbui_readonly', 'viewer', 'active')", ['sbui_ro_' + suffix]);
     await sql(env.dbPath, "UPDATE users SET status = 'active', role = 'viewer', display_name = 'sbui_readonly' WHERE id = 6", []);
     people.readonly = (await sql(env.dbPath, 'SELECT id, username, display_name, role FROM users WHERE id = 6'))[0];
+    // 平台管理员按账号编号认（routes/sysbuild/rules.js 的名单：编号 1），上面新建的 people.admin 是名单外的普通 admin 角色账号。
+    people.superAdmin = (await sql(env.dbPath, "SELECT id, username, display_name, role FROM users WHERE id = 1 AND role = 'admin' AND status = 'active'"))[0];
+    assert.ok(people.superAdmin, '实例库里编号 1 应是 active 的 admin（平台管理员）');
     const tokens = new Map();
     async function token(person) {
         if (!tokens.has(person.id)) tokens.set(person.id, await fx.signAs(person.id));

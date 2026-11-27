@@ -33,8 +33,17 @@ function opinionTarget(context, opinion, approval) {
     opinionStatus: opinion?.status,
     isDevResponsible: context.developer?.userId === context.identity.userId,
     isCutResponsible: approval?.responsible?.userId === context.identity.userId,
+    hasCutResponsible: !!approval?.responsible, // 平台管理员代办表态的前置：该部门有现任负责人
     cutStatus: approval?.row?.status,
   };
+}
+// 开发评估的登记方式：平台管理员代办（不要求截图，2026-11-27 用户定）、PM 代录（须带截图）、开发负责人本人。
+//   平台管理员先判：他兼任本项目 PM（比如接管之后）时仍按管理员代办，不因为成了 PM 反而要补截图（codex 290 号 HIGH）；
+//   他本人就是现任开发负责人时算本人评估。其余人的判定与原来相同：PM 与参与方身份互斥，是 PM 即代录，否则只可能是开发负责人本人。
+function assessModeOf(identity, target) {
+  if (rules.canProxyAsSuperAdmin(identity) && !target.isDevResponsible) return 'admin';
+  if (identity.isPm) return 'proxy';
+  return 'dev';
 }
 
 function opinionActions(context, opinion) {
@@ -44,7 +53,7 @@ function opinionActions(context, opinion) {
   return {
     triage: rules.opAllowed('opinion_triage', identity, identity.project, target),
     assess,
-    assess_mode: assess ? (identity.isPm ? 'proxy' : 'dev') : null,
+    assess_mode: assess ? assessModeOf(identity, target) : null,
     dispose: rules.opAllowed('opinion_dispose', identity, identity.project, target),
     cut_withdraw: rules.opAllowed('opinion_cut_withdraw', identity, identity.project, target),
   };
@@ -91,10 +100,31 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
     for (const row of approvals) {
       const responsible = opinion.status === 'cut_approval' ? await work.responsibleUser(q, opinion.project_id, row.party_id) : null;
       row.can_decide = rules.opAllowed('opinion_cut_decide', context.identity, context.identity.project, opinionTarget(context, opinion, { row, responsible }));
+      row.decide_mode = row.can_decide ? (responsible?.userId === context.identity.userId ? 'self' : 'admin') : null; // admin = 平台管理员代办
+      row.by_admin_proxy = await cutDecidedByProxy(q, row);
+      // 代办表单要写明代的是谁，并把这位负责人的授权编号带回来由写端复核（期间换了负责人就拒绝，codex 290 / 292 号）。只在可代办时给。
+      row.proxy_for = row.decide_mode === 'admin'
+        ? { delegation_id: responsible.delegationId, name: (await q.get('SELECT COALESCE(display_name, username) AS name FROM users WHERE id = ?', [responsible.userId]))?.name ?? null }
+        : null;
+    }
+    // 开发意见是不是平台管理员代办的：库里与 PM 代录同记为 proxy，区别只在评估事件里（by_super_admin）。
+    let assessmentByAdmin = false;
+    if (opinion.assessment_source === 'proxy') {
+      const event = await q.get(
+        "SELECT payload_json FROM sysbuild_events WHERE project_id = ? AND object_type = 'opinion' AND object_id = ? AND event_type = 'opinion_assessed' ORDER BY id DESC LIMIT 1",
+        [opinion.project_id, opinion.id]
+      );
+      try { assessmentByAdmin = !!event && JSON.parse(event.payload_json)?.by_super_admin === true; } catch (_) { assessmentByAdmin = false; }
     }
     const task = opinion.outcome === 'now'
       ? await q.get('SELECT id, node_id FROM sysbuild_tasks WHERE project_id = ? AND source_opinion_id = ?', [opinion.project_id, opinion.id]) : null;
-    return { ...opinion, attachments, assessment_attachments: assessmentAttachments, approvals, task: task || null, actions: opinionActions(context, opinion) };
+    return { ...opinion, assessment_by_admin: assessmentByAdmin, attachments, assessment_attachments: assessmentAttachments, approvals, task: task || null, actions: opinionActions(context, opinion) };
+  }
+  // 这条砍需求表态是不是平台管理员代办的：表态人不是所依据授权的那位负责人。
+  async function cutDecidedByProxy(q, row) {
+    if (row.decided_by === null || row.decided_by === undefined || row.delegation_id === null || row.delegation_id === undefined) return false;
+    const holder = await q.get('SELECT m.user_id AS user_id FROM sysbuild_delegations d JOIN sysbuild_members m ON m.id = d.member_id WHERE d.id = ?', [row.delegation_id]);
+    return !!holder && holder.user_id !== null && Number(holder.user_id) !== Number(row.decided_by);
   }
   async function bind(q, user, projectId, ownerType, ownerId, attachmentIds) {
     if (!attachmentIds.length) return [];
@@ -216,8 +246,11 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
     };
   }
   function readAssessment(body) {
-    work.onlyFields(body, ['action', 'text', 'estimated_hours', 'attachment_ids']);
-    return { text: readText(body.text, 'text', '开发意见', BODY_MAX), hours: hoursOf(body.estimated_hours), attachmentIds: work.readAttachmentIds(body.attachment_ids) };
+    work.onlyFields(body, ['action', 'text', 'estimated_hours', 'attachment_ids', 'expected_mode']);
+    // expected_mode（可选）：打开表单时页面显示的登记方式（本人 dev / PM 代录 proxy / 管理员代办 admin）。带了就由写端核对此刻仍是这种方式。
+    const expectedMode = has(body, 'expected_mode') && body.expected_mode !== null ? body.expected_mode : null;
+    if (expectedMode !== null && !['dev', 'proxy', 'admin'].includes(expectedMode)) throw invalid('评估的登记方式不合法', 'expected_mode');
+    return { text: readText(body.text, 'text', '开发意见', BODY_MAX), hours: hoursOf(body.estimated_hours), attachmentIds: work.readAttachmentIds(body.attachment_ids), expectedMode };
   }
 
   async function triage(q, user, context, opinion, input) {
@@ -267,10 +300,13 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
 
   async function assess(q, user, context, opinion, input) {
     const { identity, developer } = context;
-    // 项目经理与参与方身份互斥。负责人本人可评估，项目经理代录时保留截图。
-    const source = identity.isPm ? 'proxy' : 'dev';
+    // 项目经理与参与方身份互斥。负责人本人可评估，项目经理代录时保留截图；平台管理员代办不要求截图，库里同记为代录（proxy），事件里另记 by_super_admin。
+    const mode = assessModeOf(identity, opinionTarget(context, opinion));
+    // 打开表单之后登记方式变了（比如本人不再是开发负责人，此刻只能算管理员代办）：不按新方式悄悄收下，要求重新打开（codex 296 号）。
+    if (input.expectedMode !== null && input.expectedMode !== mode) throw invalidState('评估的登记方式已变化，请重新打开后核对');
+    const source = mode === 'dev' ? 'dev' : 'proxy';
     const bound = await bind(q, user, opinion.project_id, 'opinion_assessment', opinion.id, input.attachmentIds);
-    if (source === 'proxy') await verifyScreenshot(q, bound);
+    if (mode === 'proxy') await verifyScreenshot(q, bound);
     const updated = await q.run(
       `UPDATE sysbuild_opinions SET status = ?, assessment_text = ?, assessment_hours = ?, assessment_source = ?,
          assessed_by = ?, assessed_at = datetime('now','localtime'), assessed_for_user_id = ?, assessed_for_delegation_id = ?,
@@ -281,8 +317,10 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
     await work.emit(q, user, opinion.project_id, 'opinion', opinion.id, 'opinion_assessed', {
       text: input.text, estimated_hours: input.hours, source, developer_user_id: developer?.userId ?? null,
       developer_delegation_id: developer?.delegationId ?? null, attachment_ids: bound,
+      ...(mode === 'admin' ? { by_super_admin: true } : {}),
     });
-    if (source === 'dev') await workNotify.afterDeveloperAssessment(q, opinion, context.identity.project);
+    // 开发负责人本人评估、或平台管理员代办之后，都告知 PM 去定去向；评估的人自己就是 PM 时不必告知自己（PM 代录、平台管理员兼任 PM）。
+    if (!identity.isPm) await workNotify.afterDeveloperAssessment(q, opinion, context.identity.project);
   }
 
   const cutRowsOf = (q, opinion) => q.all('SELECT * FROM sysbuild_cut_approvals WHERE project_id = ? AND opinion_id = ? ORDER BY party_id', [opinion.project_id, opinion.id]);
@@ -293,9 +331,11 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
     return { outcome: body.outcome, text: readText(body.text, 'text', '去向说明', BODY_MAX) };
   }
   function readCutDecision(body) {
-    work.onlyFields(body, ['action', 'party_id', 'decision', 'text']);
+    work.onlyFields(body, ['action', 'party_id', 'decision', 'text', 'expected_delegation_id']);
     if (body.decision !== 'agree' && body.decision !== 'object') throw invalid('请选择是否同意砍需求', 'decision');
-    return { partyId: readId(body.party_id, 'party_id', '需求部门'), decision: body.decision, text: optionalReason(body, 'text', '表态说明') };
+    // expected_delegation_id：平台管理员代办时必带（打开表单时看到的那位负责人的授权编号）；负责人本人表态不带。
+    const expected = has(body, 'expected_delegation_id') && body.expected_delegation_id !== null ? readId(body.expected_delegation_id, 'expected_delegation_id', '代办对象') : null;
+    return { partyId: readId(body.party_id, 'party_id', '需求部门'), decision: body.decision, text: optionalReason(body, 'text', '表态说明'), expectedDelegationId: expected };
   }
   function readCutWithdrawal(body) {
     work.onlyFields(body, ['action', 'text']);
@@ -334,22 +374,40 @@ function createWorkRoutes({ db, logger, readonlyIds, writeRoles, attachmentHelpe
     await conclude(q, user, opinion, input.outcome, input.text, adjustment);
   }
   async function cutDecision(q, user, context, opinion, input, approval) {
+    // 平台管理员代办：必须带回打开表单时看到的授权编号，且与此刻的现任负责人一致；期间换了负责人就拒绝，不把表态记到他没看见的人名下。
+    //   反过来，带着代办对象提交、而此刻本人已是这个部门的负责人（打开代办表单之后被任命）：表单写的是「代某人表态」，不按本人表态收下，同样拒绝。
+    if (approval.responsible.userId !== context.identity.userId) {
+      if (input.expectedDelegationId === null) throw invalid('代办表态须带代办对象', 'expected_delegation_id');
+      if (input.expectedDelegationId !== approval.responsible.delegationId) throw invalidState('该需求部门的负责人已变更，请重新打开后核对代办对象');
+    } else if (input.expectedDelegationId !== null) {
+      throw invalidState('该需求部门的负责人已变更，请重新打开后核对代办对象');
+    }
     const updated = await q.run(
       `UPDATE sysbuild_cut_approvals SET status = ?, decided_by = ?, delegation_id = ?, decision_text = ?, decided_at = datetime('now','localtime')
         WHERE id = ? AND status = 'pending'`,
       [input.decision, context.identity.userId, approval.responsible.delegationId, input.text, approval.row.id]
     );
     if (updated.changes !== 1) throw invalidState('该部门已作出表态，请刷新后查看');
-    await work.emit(q, user, opinion.project_id, 'opinion', opinion.id, 'opinion_cut_decided', { party_id: input.partyId, decision: input.decision, text: input.text });
+    // 平台管理员代办：decided_by 如实记管理员，事件里另记代的是哪位负责人。
+    const proxied = approval.responsible.userId !== context.identity.userId;
+    await work.emit(q, user, opinion.project_id, 'opinion', opinion.id, 'opinion_cut_decided', {
+      party_id: input.partyId, decision: input.decision, text: input.text,
+      ...(proxied ? { by_super_admin: true, on_behalf_of_user_id: approval.responsible.userId } : {}),
+    });
+    // 结论文案不把代办写成负责人本人作出的（codex 290 号 HIGH）：代办不同意、或全部同意里含代办时，文案里写明。
     if (input.decision === 'object') {
-      await conclude(q, user, opinion, 'scope_kept', input.text || '需求方负责人不同意，维持原范围', null);
+      // 代办的不同意，结论里始终带代办标识：没写说明用默认句，写了说明就把说明接在标识后面。
+      const proxyText = '管理员代办表态：不同意，' + (input.text ? '说明：' + input.text : '维持原范围');
+      await conclude(q, user, opinion, 'scope_kept', proxied ? proxyText : (input.text || '需求方负责人不同意，维持原范围'), null);
       return;
     }
     const approvals = await cutRowsOf(q, opinion);
     if (approvals.length === 0 || !approvals.every((row) => row.status === 'agree')) return;
     const current = await effectiveOverallVersionId(q, opinion.project_id);
     if (current === null || current !== opinion.cut_scope_version_id) throw invalidState('生效范围已变化，请项目经理撤回此事项');
-    await conclude(q, user, opinion, 'cut_agreed', '原范围各需求部门负责人均同意本期移出', current);
+    let anyProxy = false;
+    for (const row of approvals) anyProxy = (await cutDecidedByProxy(q, row)) || anyProxy;
+    await conclude(q, user, opinion, 'cut_agreed', anyProxy ? '原范围各需求部门均已同意本期移出，其中含管理员代办的表态' : '原范围各需求部门负责人均同意本期移出', current);
   }
   async function cutWithdrawal(q, user, context, opinion, input) {
     await work.emit(q, user, opinion.project_id, 'opinion', opinion.id, 'opinion_cut_withdrawn', { text: input.text });

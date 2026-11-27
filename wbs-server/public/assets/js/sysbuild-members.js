@@ -33,57 +33,64 @@
         leader_user_id: nullableId(values.leader_user_id), representative_user_id: nullableId(values.representative_user_id),
     });
 
+    // 建档弹窗里的一行参与方：名称、领导、负责人并排。列标题只在首行显示，其余行的标题留给读屏。
+    function partyRow(options, names, captions, required) {
+        const row = A.el('div', 'sbui-party-row');
+        row.setAttribute('role', 'group');
+        const name = A.el('input');
+        name.name = names[0]; name.required = required; name.maxLength = 50;
+        const leader = A.el('select');
+        leader.name = names[1]; leader.required = required;
+        const representative = A.el('select');
+        representative.name = names[2]; representative.required = required;
+        for (const select of [leader, representative]) {
+            for (const [value, caption] of options) {
+                const option = A.el('option', '', caption);
+                option.value = String(value);
+                select.appendChild(option);
+            }
+        }
+        const cell = (caption, control) => A.append(A.el('label'), [A.el('span', 'sbui-label', caption), control]);
+        A.append(row, [cell(captions[0], name), cell(captions[1], leader), cell(captions[2], representative)]);
+        return { row, name, leader, representative };
+    }
     function initialDemandField(options) {
         return {
             name: 'demand_parties',
             required: true,
             label: '需求部门',
             render(c) {
-                const group = A.el('fieldset', 'sbui-full');
+                const group = A.el('fieldset', 'sbui-full sbui-party-group');
                 group.name = 'demand_parties';
-                const rows = A.el('div');
+                const rows = A.el('div', 'sbui-party-rows');
                 const fields = [];
                 const update = () => {
-                    fields.forEach(({ row, title, remove }, index) => {
-                        title.textContent = '需求部门 ' + (index + 1);
+                    fields.forEach(({ row, remove }, index) => {
+                        row.setAttribute('aria-label', '需求部门 ' + (index + 1));
+                        remove.setAttribute('aria-label', '移除需求部门 ' + (index + 1));
                         remove.hidden = fields.length === 1;
                         row.dataset.index = String(index);
                     });
                 };
                 const add = () => {
                     A.assertCurrent(c);
-                    const row = A.el('fieldset');
-                    const title = A.el('legend', '', '');
-                    const name = A.el('input');
-                    name.name = 'demand_name'; name.required = true; name.maxLength = 50;
-                    const leader = A.el('select');
-                    leader.name = 'demand_leader_user_id'; leader.required = true;
-                    const representative = A.el('select');
-                    representative.name = 'demand_representative_user_id'; representative.required = true;
-                    for (const select of [leader, representative]) {
-                        for (const [value, caption] of options) {
-                            const option = A.el('option', '', caption);
-                            option.value = String(value);
-                            select.appendChild(option);
-                        }
-                    }
-                    const input = (label, control) => A.append(A.el('label'), [A.el('span', 'sbui-label', label), control]);
-                    const remove = A.button('移除这组需求部门', () => {
+                    const item = partyRow(options, ['demand_name', 'demand_leader_user_id', 'demand_representative_user_id'], ['部门名称', '需求方领导', '需求方负责人'], true);
+                    item.remove = A.button('移除', () => {
                         A.assertCurrent(c);
-                        const index = fields.findIndex((item) => item.row === row);
+                        const index = fields.indexOf(item);
                         if (index < 0 || fields.length === 1) return;
                         fields.splice(index, 1);
-                        row.remove();
+                        item.row.remove();
                         update();
+                        fields[Math.min(index, fields.length - 1)].name.focus();
                     });
-                    A.append(row, [title, A.append(A.el('div', 'sbui-form-grid'), [
-                        input('部门名称', name), input('需求方领导', leader), input('需求方负责人', representative),
-                    ]), remove]);
-                    rows.appendChild(row);
-                    fields.push({ row, title, remove, name, leader, representative });
+                    item.row.appendChild(item.remove);
+                    rows.appendChild(item.row);
+                    fields.push(item);
                     update();
+                    if (fields.length > 1) item.name.focus();
                 };
-                A.append(group, [A.el('legend', 'sbui-label', '需求部门（必填）'), rows, A.button('再添加一个需求部门', add)]);
+                A.append(group, [A.el('legend', '', '需求部门（必填）'), rows, A.button('再添加一个需求部门', add)]);
                 add();
                 return { label: group, control: group, def: this, readValue: () => fields.map(({ name, leader, representative }) => ({
                     name: name.value, leader_user_id: nullableId(leader.value), representative_user_id: nullableId(representative.value),
@@ -91,13 +98,23 @@
             },
         };
     }
+    function initialDevField(options) {
+        return {
+            name: 'dev_party',
+            label: '开发方',
+            render() {
+                const group = A.el('fieldset', 'sbui-full sbui-party-group');
+                group.name = 'dev_party';
+                const item = partyRow(options, ['dev_name', 'dev_leader_user_id', 'dev_representative_user_id'], ['开发方名称', '开发方领导', '开发负责人'], false);
+                A.append(group, [A.el('legend', '', '开发方'), A.hint('开发方可以稍后填写。填写时请选开发方领导。'), A.append(A.el('div', 'sbui-party-rows'), [item.row])]);
+                return { label: group, control: group, def: this, readValue: () => ({
+                    name: item.name.value, leader_user_id: item.leader.value, representative_user_id: item.representative.value,
+                }) };
+            },
+        };
+    }
     function initialPeopleFields(options) {
-        return [
-            initialDemandField(options),
-            { name: 'dev_name', label: '开发方名称', max: 50, hint: '开发方可以稍后填写。填写时请选开发方领导。' },
-            { name: 'dev_leader_user_id', label: '开发方领导', options },
-            { name: 'dev_representative_user_id', label: '开发负责人', options },
-        ];
+        return [initialDemandField(options), initialDevField(options)];
     }
     async function addParty(detail, side, c) {
         const lease = A.reserveDialog(c);

@@ -562,7 +562,7 @@ const workMutations = [
     { file: 'work-core.js', from: 'await confirmations.currentDelegate(q, partyId, options)', to: 'await confirmations.currentOwner(q, partyId, options)' },
   ] },
   { id: 'B5.1 代填不需要真实截图', expect: [PROXY], edits: [
-    { file: 'work.js', from: "if (source === 'proxy') await verifyScreenshot(q, bound);", to: '' },
+    { file: 'work.js', from: "if (mode === 'proxy') await verifyScreenshot(q, bound);", to: '' },
   ] },
   { id: 'B5.2 本期做不建任务', expect: [DISPOSE], edits: [
     { file: 'work.js', from: 'await createTask(q, user, pid, nodeId, { title: opinion.title, assigneeId: assignee?.id ?? context.identity.project.pm_user_id, plannedOn: null, opinionId: opinion.id });', to: '' },
@@ -571,7 +571,7 @@ const workMutations = [
     { file: 'work.js', from: "if (approvals.length === 0 || !approvals.every((row) => row.status === 'agree')) return;", to: 'if (false) return;' },
   ] },
   { id: 'B5.2 领导或 PM 可代砍需求表态', expect: [CUT], edits: [
-    { file: 'rules.js', from: 'can: (identity, project, t) => t.isCutResponsible === true,', to: 'can: (identity, project, t) => identity.isPm || t.isCutResponsible === true,' },
+    { file: 'rules.js', from: 'can: (identity, project, t) => t.isCutResponsible === true || canProxyAsSuperAdmin(identity),', to: 'can: (identity, project, t) => identity.isPm || t.isCutResponsible === true || canProxyAsSuperAdmin(identity),' },
   ] },
   { id: 'B5.2 结项提交绕过待办', expect: [CLOSE], edits: [
     { file: 'rules.js', from: "if (t.packageType === 'closing' && t.pendingWork) return t.pendingWork;", to: '' },
@@ -580,7 +580,7 @@ const workMutations = [
     { file: 'plan.js', from: 'if (f.pendingWork?.length) {', to: 'if (false) {' },
   ] },
   { id: 'B5.3 开发评估结束不知悉PM', expect: [NOTICES], edits: [
-    { file: 'work.js', from: "if (source === 'dev') await workNotify.afterDeveloperAssessment", to: "if (false) await workNotify.afterDeveloperAssessment" },
+    { file: 'work.js', from: "if (!identity.isPm) await workNotify.afterDeveloperAssessment", to: "if (false) await workNotify.afterDeveloperAssessment" },
   ] },
   { id: 'B5.3 开发评估待办误发给可代录PM', expect: [NOTICES], edits: [
     { file: 'work-notify.js', from: "if (item.status === 'assessment' && developer?.userId !== uid) continue;", to: '' },

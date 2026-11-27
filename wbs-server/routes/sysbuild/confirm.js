@@ -349,7 +349,9 @@ function createConfirmRoutes(ctx) {
     if (expectedRevision !== null && expectedRevision !== undefined && expectedRevision !== c.latest.id) throw makeError(409, 'SYSBUILD_TASK_SUPERSEDED', '任务修订已变化，请明确重新打开当前任务');
     const frozen = await core.frozenSetOfTask(q, c.task); // 任务自己的冻结清单（confirm-core.frozenKeyOfTask）
     const target = await decideTarget(q, c, user, null);
-    const shouldRecord = target.isRequired && c.latest.status === 'pending';
+    // 平台管理员代办确认同样要先有本人（管理员）的浏览记录（确认记录的 view_id 是库内约束），user_id 如实记管理员。
+    //   必需确认人本人：修订待确认即写（原规则不变）。平台管理员：此刻确实可以代办（confirm_decide 整条判定通过）才写，随手打开不能代办的任务不留浏览记录。
+    const shouldRecord = target.isRequired ? c.latest.status === 'pending' : rules.opAllowed('confirm_decide', c.access, c.access.project, target);
     let viewId = null;
     if (record && shouldRecord) {
       const ins = await q.run(
@@ -380,6 +382,7 @@ function createConfirmRoutes(ctx) {
     for (const cf of confs) {
       const actor = cf.actor_user_id === null ? null : await q.get('SELECT COALESCE(display_name, username) AS name FROM users WHERE id = ?', [cf.actor_user_id]);
       cf.actor_name = actor ? actor.name : null;
+      cf.by_admin_proxy = await core.confirmedByProxy(q, cf.id); // 平台管理员代办的确认：操作人不是该修订的必需确认人
     }
     const projectInfo = await q.get('SELECT id, system_name FROM sysbuild_projects WHERE id = ?', [c.task.project_id]);
     const current = revs.find((revision) => revision.id === c.latest.id);
@@ -399,10 +402,12 @@ function createConfirmRoutes(ctx) {
       view_id: viewId,
       actions: {
         decide: rules.opAllowed('confirm_decide', c.access, c.access.project, target),
+        decide_mode: null, // 下面按 decide 补：self = 必需确认人本人，admin = 平台管理员代办
         reissue: rules.opAllowed('confirm_reissue', c.access, c.access.project, reissueTarget(c, await resolveReissue(q, c))),
       },
     };
     body.actions.export_sheet = c.obj.kind === 'package_version' && rules.canExportConfirmationSheet(c.access, c.obj.ver);
+    if (body.actions.decide === true) body.actions.decide_mode = target.isRequired ? 'self' : 'admin';
     return { body, shouldRecord };
   }
   // 纯读定位：rev 是通知修订号，不是task id；不调用可能写浏览记录的任务详情。
@@ -466,9 +471,12 @@ function createConfirmRoutes(ctx) {
         "INSERT INTO sysbuild_confirmations (task_revision_id, object_type, object_version_id, actor_user_id, method, decision, checkbox_text, reason, view_id) VALUES (?, ?, ?, ?, 'platform', ?, ?, ?, ?)",
         [c.latest.id, c.task.object_type, c.task.object_version_id, uid, decision, body.checkbox_text, reason, view.id] // 保存实际提交的文案（上面已校验与该决策的固定文案逐字相等）
       );
+      // 操作人不是必需确认人本人 = 平台管理员代办（rules.confirm_decide 只放行这两种人）：确认记录的 actor_user_id 如实记管理员，事件里另记代的是谁。
+      const proxied = c.requiredUserId !== uid;
       await emit(q, user, c.task.project_id, 'confirm_task', tid, 'confirmation_recorded', {
         confirmation_id: ins.lastID, revision_id: c.latest.id, object_type: c.task.object_type, object_version_id: c.task.object_version_id,
         decision, method: 'platform', view_id: view.id, reason,
+        ...(proxied ? { by_super_admin: true, on_behalf_of_user_id: c.requiredUserId } : {}),
       });
       const result = { decision, revision: { id: c.latest.id, status: toStatus }, confirmation_id: ins.lastID };
       await applyDecisionEffects(q, user, c, decision, reason, ins.lastID, result);
@@ -481,7 +489,7 @@ function createConfirmRoutes(ctx) {
   async function applyDecisionEffects(q, user, c, decision, reason, confirmationId, result) {
     // C6b（§9.2）：确认人在平台上作出有异议 / 不认可 → 项目 PM 收到发送意图。
     if (decision !== 'confirm') {
-      await notifyCore.enqueuePmIntent(q, { projectId: c.task.project_id, purpose: notifyCore.PURPOSES.DECISION_OBJECTED, refType: notifyCore.REF_TYPES.REVISION, refId: c.latest.id, actorUserId: c.requiredUserId }); // L6：作出决策的人（必需确认人）本人就是 PM 时不写
+      await notifyCore.enqueuePmIntent(q, { projectId: c.task.project_id, purpose: notifyCore.PURPOSES.DECISION_OBJECTED, refType: notifyCore.REF_TYPES.REVISION, refId: c.latest.id, actorUserId: Number(user.id) }); // L6：作出决策的人本人就是 PM 时不写；取实际操作人（必需确认人本人，或代办的平台管理员），不取被代办的人（codex 290 号）
     }
     if (c.task.object_type === 'package_version') {
       if (decision === 'confirm') {

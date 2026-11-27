@@ -192,7 +192,7 @@
             if (def.hint) control.appendChild(hint(def.hint));
             return { label: control, control, def, readValue: () => inputs.filter((input) => input.checked).map((input) => input.value) };
         }
-        const label = el('label', def.full ? 'sbui-full' : '');
+        const label = el('label', def.full ? 'sbui-full' : def.span ? 'sbui-span-' + def.span : '');
         const control = el(def.options ? 'select' : def.type === 'textarea' ? 'textarea' : 'input');
         if (!def.options && def.type !== 'textarea') control.type = def.type || 'text';
         control.name = def.name;

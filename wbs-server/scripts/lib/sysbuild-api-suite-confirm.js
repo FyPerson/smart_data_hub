@@ -855,7 +855,7 @@ function defineConfirmCases(T) {
     assert.deepStrictEqual(b.frozen_attachments, expectedFrozen.map((attachment) => ({ ...attachment, masked: false, name: attachment.attachment_id === s.att ? '确认证据.txt' : '配对确认材料.txt', size: 3, mime_type: 'text/plain', is_image: false, missing: false, masked_at: null, masked_by: null, masked_by_name: null, mask_reason: null, deleted: false, deleted_at: null, deleted_by: null, deleted_by_name: null })));
     assert.deepStrictEqual(b.checkbox_texts, CHECKBOXES, 'M-3：任务详情返回三种决策各自的固定文案');
     assert.ok(!hasOwn(b, 'checkbox_text'), '不再返回共用的单条文案');
-    assert.deepStrictEqual(b.actions, { decide: true, reissue: false, export_sheet: true }); // C8：导出仍按只读范围开放。
+    assert.deepStrictEqual(b.actions, { decide: true, decide_mode: 'self', reissue: false, export_sheet: true }); // C8：导出仍按只读范围开放。
     // 再打开一次再写一条
     assert.strictEqual((await openTask(U.own, tid)).status, 200);
     assert.strictEqual((await viewsOf(U.own)).length, 2);
@@ -864,7 +864,7 @@ function defineConfirmCases(T) {
       const r = await openTask(uid, tid);
       assert.strictEqual(r.status, 200, `${label}: ${r.text}`);
       assert.strictEqual(r.body.view_id, null, `${label} 打开不写浏览记录`);
-      assert.deepStrictEqual(r.body.actions, { decide: false, reissue: reissueFlag, export_sheet: true }, `${label} 的 actions`); // 读范围不因写动作不同而收窄。
+      assert.deepStrictEqual(r.body.actions, { decide: false, decide_mode: null, reissue: reissueFlag, export_sheet: true }, `${label} 的 actions`); // 读范围不因写动作不同而收窄。
       assert.strictEqual((await viewsOf(uid)).length, 0, `${label} 名下没有浏览记录`);
     }
     // 乙部负责人打开自己的任务：只写他自己的一条
@@ -880,7 +880,7 @@ function defineConfirmCases(T) {
     const after = await openTask(U.own, tid);
     assert.strictEqual(after.body.view_id, null);
     assert.strictEqual((await viewsOf(U.own)).length, nViews, '已确认的修订再打开不写浏览记录');
-    assert.deepStrictEqual(after.body.actions, { decide: false, reissue: false, export_sheet: true });
+    assert.deepStrictEqual(after.body.actions, { decide: false, decide_mode: null, reissue: false, export_sheet: true });
     assert.strictEqual(after.body.confirmations.length, 1);
     // 附件遮蔽后不返回原名（Q8）
     await sqlRun("UPDATE sysbuild_attachments SET masked_at = '2026-10-30 10:00:00', masked_by = ?, mask_reason = '含敏感信息' WHERE id = ?", [U.pm, s.att]);
@@ -945,9 +945,10 @@ function defineConfirmCases(T) {
     // 再读一致：任务详情的确认记录与修订
     const again = await openTask(U.pm, t.bOwner.task_id);
     assert.deepStrictEqual(again.body.confirmations.map((c) => [c.revision_id, c.decision, c.method, c.actor_user_id, c.reason]), [[t.bOwner.rev_id, 'object', 'platform', U.x1, '内容有出入，需要说明']]);
-    assert.deepStrictEqual([again.body.revision.status, again.body.actions], ['objected', { decide: false, reissue: true, export_sheet: true }]);
+    assert.deepStrictEqual([again.body.revision.status, again.body.actions], ['objected', { decide: false, decide_mode: null, reissue: true, export_sheet: true }]);
     const rec = again.body.confirmations[0];
-    assert.deepStrictEqual(Object.keys(rec).sort(), ['actor_name', 'actor_user_id', 'created_at', 'decision', 'id', 'method', 'reason', 'revision_id'], '确认记录键集合全等（七个代录相关键随 C3 消失，W1 7）');
+    assert.deepStrictEqual(Object.keys(rec).sort(), ['actor_name', 'actor_user_id', 'by_admin_proxy', 'created_at', 'decision', 'id', 'method', 'reason', 'revision_id'], '确认记录键集合全等（七个代录相关键随 C3 消失，W1 7；by_admin_proxy 是平台管理员代办标识，2026-11-27 加）');
+    assert.strictEqual(rec.by_admin_proxy, false, '必需确认人本人的决定不标代办');
     assert.ok(again.body.revisions.some((r) => r.id === t.bOwner.rev_id), 'revisions[] 非空且含已知修订编号（codex 118 L：空数组时下面的 every 恒真）');
     assert.ok(!('proxy_only' in again.body.revision) && again.body.revisions.every((r) => !('proxy_only' in r)), 'revision / revisions[] 不再带 proxy_only（W1 5 / 6）');
   });
@@ -2132,9 +2133,9 @@ function defineConfirmCases(T) {
     const [t] = await tasksOf(d.pv);
     const tid = t.task_id;
     const confirmerFlags = (await openTask(U.del, tid)).body.actions;
-    assert.deepStrictEqual(confirmerFlags, { decide: true, reissue: false, export_sheet: true });
+    assert.deepStrictEqual(confirmerFlags, { decide: true, decide_mode: 'self', reissue: false, export_sheet: true });
     const pmFlags = (await openTask(U.pm, tid)).body.actions;
-    assert.deepStrictEqual(pmFlags, { decide: false, reissue: true, export_sheet: true });
+    assert.deepStrictEqual(pmFlags, { decide: false, decide_mode: null, reissue: true, export_sheet: true });
     const o = await openTask(U.del, tid);
     assert.ok((await reissue(U.del, tid, '本人改发')).status >= 400, '必需确认人 reissue 标志为假');
     assert.ok((await decideRaw(U.pm, tid, decideBodyOf(o.body, 'confirm'))).status >= 400, 'PM decide 标志为假');
@@ -2142,7 +2143,7 @@ function defineConfirmCases(T) {
     assert.ok(dec.status >= 200 && dec.status < 300, `decide 标志为真，执行应成功: ${dec.text}`);
     // 已确认：decide 假 / reissue 假（当前修订已确认）
     const after = (await openTask(U.del, tid)).body.actions;
-    assert.deepStrictEqual(after, { decide: false, reissue: false, export_sheet: true });
+    assert.deepStrictEqual(after, { decide: false, decide_mode: null, reissue: false, export_sheet: true });
     assert.ok((await decideRaw(U.del, tid, decideBodyOf(o.body, 'confirm'))).status >= 400, '已确认 decide 标志为假');
     assert.ok((await reissue(U.pm, tid, '已确认再改发')).status >= 400, '已确认 reissue 标志为假');
     // 待确认版本 withdraw 真 → 执行成功后标志全假
@@ -2159,7 +2160,7 @@ function defineConfirmCases(T) {
     // 已终止项目：所有标志为假，执行 409
     assert.strictEqual((await setStatus(s.pid, 'terminated')).status, 200);
     const tf = (await openTask(U.pm, s.T.aOwner.task_id)).body.actions;
-    assert.deepStrictEqual(tf, { decide: false, reissue: false, export_sheet: true });
+    assert.deepStrictEqual(tf, { decide: false, decide_mode: null, reissue: false, export_sheet: true });
     const vf = await flagsOfVersion(U.pm, s.pv);
     assert.deepStrictEqual([vf.submit, vf.withdraw], [false, false]);
     assert.ok((await withdraw(U.pm, s.pv, '终止后撤回')).status >= 400);
@@ -2261,12 +2262,12 @@ const CONFIRM_MUTATIONS = [
   // ── 浏览 ──
   // #212 C2 新增（N3，清单 4.4 ⑤）：遮蔽人姓名取空——只在新增的 masked_by_name 断言判红（未遮蔽的对照里该字段本来就是 null）
   { id: '遮蔽读面：确认任务附件视图遮蔽人姓名取空', expect: ['C4a 浏览：'], edits: [{ file: 'confirm-core.js', from: 'COALESCE(mu.display_name, mu.username) AS masked_by_name', to: 'NULL AS masked_by_name' }] },
-  { id: 'C4a 浏览：非必需确认人打开也写浏览记录', expect: ['C4a 浏览：'], edits: [{ file: 'confirm.js', from: 'const shouldRecord = target.isRequired && c.latest.status === \'pending\';', to: "const shouldRecord = c.latest.status === 'pending';" }] },
+  { id: 'C4a 浏览：非必需确认人打开也写浏览记录', expect: ['C4a 浏览：'], edits: [{ file: 'confirm.js', from: "const shouldRecord = target.isRequired ? c.latest.status === 'pending' : rules.opAllowed('confirm_decide', c.access, c.access.project, target);", to: "const shouldRecord = c.latest.status === 'pending';" }] },
   { id: 'C4a 浏览：必需确认人打开不写浏览记录', expect: ['C4a 浏览：', 'C4a 决策：成功路径'], edits: [{ file: 'confirm.js', from: 'if (record && shouldRecord) {', to: 'if (false) {' }] },
   { id: 'C4a 浏览：浏览记录里的冻结清单写成空', expect: ['C4a 浏览：', 'C4a 决策：409 各分支'], edits: [{ file: 'confirm.js', from: '[Number(user.id), c.task.object_type, c.task.object_version_id, JSON.stringify(frozen)]', to: "[Number(user.id), c.task.object_type, c.task.object_version_id, '[]']" }] },
   { id: 'C4a 浏览：任务读接口不查项目可见性', expect: ['C4a 浏览：'], edits: [{ file: 'confirm.js', from: "rules.assertVisible(access);\n    const latest = await core.latestRevision(q, tid);", to: 'const latest = await core.latestRevision(q, tid);' }] },
   // ── 决策 ──
-  { id: 'C4a 决策：任何人都能决策', expect: ['C4a 决策：403 / 404', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: 'can: (identity, project, t) => t.isRequired === true,', to: 'can: () => true,' }] },
+  { id: 'C4a 决策：任何人都能决策', expect: ['C4a 决策：403 / 404', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: 'can: (identity, project, t) => t.isRequired === true || canProxyAsSuperAdmin(identity),', to: 'can: () => true,' }] },
   { id: 'C4a 决策：当前修订取第一条而不是最新一条', expect: ['C4a 改发：负责人更换后改发'], edits: [{ file: 'confirm-core.js', from: 'FROM sysbuild_confirm_task_revisions WHERE task_id = ? ORDER BY rev_no DESC LIMIT 1', to: 'FROM sysbuild_confirm_task_revisions WHERE task_id = ? ORDER BY rev_no ASC LIMIT 1' }] },
   { id: 'C4a 决策：修订编号不核对', expect: ['C4a 决策：409 各分支', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: 'if (t.revisionIdGiven !== undefined && t.revisionIdGiven !== t.currentRevisionId)', to: 'if (false)' }] },
   { id: 'C4a 决策：对象版本编号不核对', expect: ['C4a 决策：409 各分支', 'C4a rules：新动作'], edits: [{ file: 'rules.js', from: 'if (t.objectVersionIdGiven !== undefined && t.objectVersionIdGiven !== t.objectVersionId)', to: 'if (false)' }] },

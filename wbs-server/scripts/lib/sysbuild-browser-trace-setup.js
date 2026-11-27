@@ -65,7 +65,7 @@ function defineCases(T) {
             await dialog.locator('[name="build_type"]').selectOption('inhouse');
             await fillDemand(page, '立项测试需求部门');
             const box = await dialog.boundingBox();
-            assert.ok(Math.abs(box.width - 560) < 2 && Math.abs(box.x - (1440 - box.width) / 2) < 2, '[l3-modal-layout] 建档弹窗宽560且居中');
+            assert.ok(Math.abs(box.width - 760) < 2 && Math.abs(box.x - (1440 - box.width) / 2) < 2, '[l3-modal-layout] 建档弹窗宽760且居中');
             await page.evaluate(() => window.scrollTo(0, 0));
             await page.screenshot({ path: path.join(out, 'l3-create-modal.png') });
             await dialog.getByRole('button', { name: '保存', exact: true }).click();
@@ -289,6 +289,7 @@ function defineCases(T) {
                 ],
                 '在建项目和上线分界': [
                     '在建项目照常建档，用阶段的「更正实际日期」补记真实日期。已有的书面凭据随材料上传。',
+                    '补录时，指定的平台管理员账号（admin，其他管理员角色账号不在内）可以直接做 PM 的操作，并代办对方的确认与表态。代办的记录写明操作人是管理员，并标为「管理员代办」。',
                     '正式上线后，新功能和问题走系统迭代受理渠道，项目可保留单号与链接。迭代单按系统迭代的权限查看。',
                 ],
             };

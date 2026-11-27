@@ -151,7 +151,9 @@ body:has(#sysbuildApp) {
 .sbui-todo-item strong { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 12px; }
 .sbui-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff; color: #334155; box-shadow: 0 20px 60px rgba(15,23,42,.15); }
 .sbui-dialog::backdrop { background: rgba(15,23,42,.4); }
-.sbui-dialog .sbui-form-grid { display: grid; grid-template-columns: minmax(0,1fr); }
+.sbui-dialog .sbui-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px 16px; }
+.sbui-dialog .sbui-form-grid > :is(.sbui-full, fieldset, :only-child), .sbui-dialog .sbui-form-grid > label:has(textarea, input[type="file"], input[type="checkbox"]) { grid-column: 1 / -1; }
+.sbui-form-grid label > .sbui-hint { margin: 4px 0 0; }
 .sbui-dialog input:not([type="checkbox"]), .sbui-dialog select, .sbui-dialog textarea { width: 100%; min-height: 36px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 12px; font: inherit; }
 .sbui-dialog button:focus-visible, .sbui-dialog input:focus-visible, .sbui-dialog textarea:focus-visible, .sbui-dialog select:focus-visible { outline: 2px solid #b45309; outline-offset: 2px; }
 .sbui-dialog .sbui-btn { color: #334155; background: #ffffff; border-color: #cbd5e1; }
@@ -175,9 +177,29 @@ body:has(#sysbuildApp) {
 .sbui-confirmation { max-width: 1120px; margin: 0 auto; }
 .sbui-confirmation .sbui-longtext { font-size: 16px; line-height: 1.9; }
 .sbui-confirmation > .sbui-panel:first-child { border-top: 3px solid var(--sbui-accent); }
-.sbui-dialog { width: min(760px, calc(100vw - 32px)); overflow: auto; }
-.sbui-dialog.sbui-create-dialog { width: min(560px, calc(100vw - 32px)); margin: auto; }
+.sbui-dialog { width: min(760px, calc(100vw - 32px)); margin: auto; overflow: auto; }
+.sbui-create-dialog form > .sbui-hint { margin-bottom: 14px; }
+@media (min-width: 769px) {
+    .sbui-create-dialog .sbui-form-grid { grid-template-columns: repeat(12, minmax(0,1fr)); }
+    .sbui-create-dialog .sbui-form-grid > .sbui-span-3 { grid-column: span 3; }
+    .sbui-create-dialog .sbui-form-grid > .sbui-span-4 { grid-column: span 4; }
+    .sbui-create-dialog .sbui-form-grid > .sbui-span-5 { grid-column: span 5; }
+}
+.sbui-party-group { min-width: 0; margin: 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--sbui-line); }
+.sbui-party-group > legend { float: left; padding: 0; margin: 0 12px 10px 0; color: var(--sbui-ink); font-size: 14px; font-weight: 600; line-height: 1.6; }
+.sbui-party-group > .sbui-hint { margin: 0 0 10px; line-height: 22.4px; }
+.sbui-party-rows { clear: both; display: grid; gap: 8px; }
+.sbui-party-row { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) 56px; gap: 12px; align-items: end; }
+.sbui-party-row + .sbui-party-row .sbui-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.sbui-party-row > .sbui-btn { min-height: 36px; padding-inline: 0; }
+.sbui-party-group > .sbui-btn { margin-top: 10px; border-style: dashed; }
 .sbui-create-dialog > div > .sbui-panel-head { position: sticky; top: 0; z-index: 2; background: var(--sbui-paper); }
 .sbui-create-dialog .sbui-form-actions { position: sticky; bottom: -20px; margin: 20px -20px -20px; padding: 16px 20px; border-top: 1px solid var(--sbui-line); background: var(--sbui-paper); z-index: 1; }
 @media (max-width: 1200px) { .sbui-app { padding: 24px; } .sbui-facts { grid-template-columns: repeat(2, minmax(0,1fr)); } }
 @media (max-width: 768px) { .sbui-app { padding: 16px; } .sbui-form-grid, .sbui-facts, .sbui-todo { grid-template-columns: minmax(0,1fr); } .sbui-heading, .sbui-panel-head { align-items: stretch; } .sbui-table { min-width: 560px; } }
+@media (max-width: 768px) {
+    .sbui-dialog .sbui-form-grid { grid-template-columns: minmax(0,1fr); }
+    .sbui-party-row { grid-template-columns: minmax(0,1fr); gap: 8px; padding: 10px 12px; border: 1px solid var(--sbui-line); border-radius: 6px; }
+    .sbui-party-row + .sbui-party-row .sbui-label { position: static; width: auto; height: auto; overflow: visible; clip-path: none; white-space: normal; }
+    .sbui-party-row > .sbui-btn { justify-self: start; padding-inline: 14px; }
+}

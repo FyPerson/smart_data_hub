@@ -662,7 +662,7 @@ function createNotifyRoutes(ctx) {
     if (typeof b !== 'object' || Array.isArray(b)) throw invalid('请求体必须是 JSON 对象', 'body');
     return b;
   }
-  // 项目可见（非成员 404）→ 本人是 PM 且非只读账号（否则 403；admin 要接管成为 PM 后才行）。补发 / 列表不核项目状态：补发不改业务，四种项目状态都可。
+  // 项目可见（非成员 404）→ 本人是 PM 或平台管理员、且非只读账号（否则 403；其余 admin 要接管成为 PM 后才行）。补发 / 列表不核项目状态：补发不改业务，四种项目状态都可。
   async function loadPmAccess(q, pid, user) {
     const access = await rules.loadProjectAccess(q, pid, user, accessOpts());
     rules.assertVisible(access);
