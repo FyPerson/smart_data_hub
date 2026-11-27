@@ -32,8 +32,8 @@ const users = [null, { id:1, username:'fixture-admin', display_name:'测试管�
 //   q.get/all/run/assertWrite 四个入口才会调用 probeSql。保证范围只到这里为止：路由文件（或其
 //   require 的本地助手模块）若自行引入数据库驱动、绕开这四个入口直接执行 SQL，根本不会产生
 //   rec，这条谓词也就无从判定——那部分由 R10 结构规则挡住（G3A-b M5 起白名单式全等比较，覆盖
-//   inspection-sheets.js / inspections.js / inspection-collect.js / inspection-photo-files.js
-//   四个文件），不是本谓词或运行时探针本身的职责，不存在"任何写法都绕不过"这种无限定的保证。
+//   inspection-sheets.js / inspections.js / inspection-collect.js / inspection-photo-files.js /
+//   inspection-period.js 五个文件），不是本谓词或运行时探针本身的职责，不存在"任何写法都绕不过"这种无限定的保证。
 function isProbeViolation(rec) { return rec.writeRequest === true && rec.inWriteTxn !== true; }
 // M2（G2A2b 必修）：逐路由接通断言用的 method+path → 路由key 归一化——sheets/photos/collect 三个
 //   接口测试文件共用同一份实现，不各自维护一份容易长歪的归一化逻辑。只认
@@ -174,4 +174,6 @@ async function createFixture(options = {}) {
     }
   }};
 }
-module.exports = {createFixture, isProbeViolation, normalizeInspectionRouteKey, ensureDeviceInspectionsTable};
+// users: the in-process synthetic account table authenticateToken reads on every request (a copy per request); exported so a browser check can change one
+// account's platform role under its unchanged token (#200 C2 fix 3: admin -> non-admin on the same token). Restore it in a finally block.
+module.exports = {createFixture, isProbeViolation, normalizeInspectionRouteKey, ensureDeviceInspectionsTable, users};

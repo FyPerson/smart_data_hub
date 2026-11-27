@@ -8,7 +8,11 @@ async function main(){
  try{
   const racks=[];for(let i=1;i<=2;i++)racks.push(await api('POST','/racks',{room:'详情测试',name:'机柜'+i,u_total:24},1,201));
   for(let i=1;i<=2;i++)await api('POST','',{category:'server',name:'服务器'+i,u_height:1,placement:{kind:'rack',rack_id:racks[0].id,u_start:i}},1,201);
+  // C0b：新单（v2）机房项只有「漏水与地面」「卫生与杂物」，没有温湿度。主流程这张单要覆盖「旧单（v1）详情仍显示温湿度两张卡」，
+  // 所以建单后用夹具直写库补插 v1 的温度、湿度两行（label 照 v1 原文）并把主表模板版本改回 v1，再重新 GET 取全部检查项。
+  const addLegacyRoomNumbers=async sheetId=>{for(const [key,label] of [['temperature','温度（℃，参考 18–27）'],['humidity','湿度（%，参考 40–60）']])await f.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind) VALUES(?,?,?,?,?,?,?)',[sheetId,'room',0,'机房环境',key,label,'number']);await f.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?",[sheetId]);};
   let s=await api('POST','/inspections/sheets',{room_name:'详情测试'},2,201);
+  await addLegacyRoomNumbers(s.id);s=await api('GET','/inspections/sheets/'+s.id,undefined,2);
   const bad=s.items.find(it=>it.section==='rack'&&it.target_id===racks[1].id);
   s=await api('PUT','/inspections/sheets/'+s.id,{expected_version:s.version,remark:'检查完成',items:s.items.map(it=>({id:it.id,result:it.value_kind==='check'?(it.id===bad.id?'bad':'ok'):null,number_value:it.value_kind==='number'?(it.item_key==='temperature'?30:45):null,note:it.id===bad.id?'柜门锁待维修':null}))});
   for(const r of racks)await upload(s,'rack_front',r.id);await upload(s,'item',bad.id);
@@ -20,9 +24,12 @@ async function main(){
   browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:1000}});await ctx.addInitScript(()=>localStorage.setItem('token','fixture-1'));const page=await ctx.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   const open=async()=>{await page.goto(f.base+'/IT_Ledger.html#inspections');await page.locator('[data-insp-view="'+s.id+'"]').click();await page.locator('#itlSheetMetrics').waitFor();};
   await open();
-  equal('DD五项指标全等',await page.locator('[data-metric-value]').allTextContents(),['18 / 18','1','3 / 3','30 ℃','45 %']);
+  equal('DD旧单五项指标全等(含温湿度两张卡)',await page.locator('[data-metric-value]').allTextContents(),['14 / 14','1','3 / 3','30 ℃','45 %']);
+  // C0b 修复批 1（LOW-1）：指标条列数按卡片数，旧单五卡铺满一行（左缘贴容器左缘、右缘贴容器右缘 ±2px，各卡等宽 ±1px）。
+  const metricsGeometry=pg=>pg.locator('#itlSheetMetrics').evaluate(el=>{const c=el.getBoundingClientRect(),cards=[...el.children].map(x=>x.getBoundingClientRect());return {n:cards.length,left:Math.abs(cards[0].left-c.left)<=2,right:Math.abs(cards[cards.length-1].right-c.right)<=2,equalWidth:Math.max(...cards.map(r=>r.width))-Math.min(...cards.map(r=>r.width))<=1};});
+  equal('DD旧单五卡等宽且铺满容器宽度(1440)',await metricsGeometry(page),{n:5,left:true,right:true,equalWidth:true});
   equal('DD参考范围超出弱提示',await page.locator('#itlSheetMetrics>div').nth(3).locator('small').innerText(),'参考 18–27 · 超出参考范围');
-  equal('DD机房正常标签全等',await page.locator('[data-normal-section="room"] .itl-normal-tag').allTextContents(),['空调运行','UPS 与供电','消防设施','门禁与门锁','漏水与地面','卫生与杂物']);
+  equal('DD机房正常标签全等',await page.locator('[data-normal-section="room"] .itl-normal-tag').allTextContents(),['漏水与地面','卫生与杂物']);
   equal('DD机柜合并与逐项标签全等',await page.locator('[data-normal-section="rack"] .itl-normal-tag').allTextContents(),['机柜1 四项正常','机柜2 · 运行指示灯','机柜2 · 线缆与标签','机柜2 · PDU 与电源']);
   equal('DD设备正常标签逐台全等',await page.locator('[data-normal-section="device"] .itl-normal-tag').allTextContents(),['服务器1','服务器2']);
   equal('DD正常项默认展开',await page.locator('.itl-normal-tag').evaluateAll(nodes=>nodes.every(el=>el.getBoundingClientRect().height>0)),true);
@@ -47,14 +54,24 @@ async function main(){
   // A real owner losing write permission can read an incomplete draft: fallback tags remain visible.
   await f.run("INSERT INTO users(id,username,display_name,role) VALUES(2,'fixture-write','测试维护员','user')");
   const draft=await api('POST','/inspections/sheets',{room_name:'详情测试'},2,201);
+  // C0b：另一个机房（1 柜无设备）的旧单（v1）草稿，补插温湿度两行，覆盖「旧单未填读数指标兜底为 —」。
+  await api('POST','/racks',{room:'详情旧单草稿',name:'旧单柜',u_total:24},1,201);
+  const legacyDraft=await api('POST','/inspections/sheets',{room_name:'详情旧单草稿'},2,201);
+  await addLegacyRoomNumbers(legacyDraft.id);
   await f.run("UPDATE it_asset_acl SET level='read' WHERE user_id=2");
-  const ro=await browser.newContext();await ro.addInitScript(()=>localStorage.setItem('token','fixture-2'));const p=await ro.newPage();await p.goto(f.base+'/IT_Ledger.html#inspections');await p.locator('[data-insp-view="'+draft.id+'"]').click();await p.locator('#itlSheetMetrics').waitFor();
-  equal('DD未填读数指标兜底',await p.locator('[data-metric-value]').allTextContents(),['0 / 18','0','0 / 2','—','—']);
+  const ro=await browser.newContext({viewport:{width:1440,height:1000}});await ro.addInitScript(()=>localStorage.setItem('token','fixture-2'));const p=await ro.newPage();await p.goto(f.base+'/IT_Ledger.html#inspections');await p.locator('[data-insp-view="'+draft.id+'"]').click();await p.locator('#itlSheetMetrics').waitFor();
+  // C0b：新单详情不显示温湿度卡——指标条只有「检查项 / 异常 / 照片位置」三张（原为五张，后两张是温湿度的「—」兜底）。
+  equal('DD新单未填指标只有三张卡且不含温湿度',await p.locator('[data-metric-value]').allTextContents(),['0 / 12','0','0 / 2']);
+  equal('DD新单三卡等宽且铺满容器宽度(1440)',await metricsGeometry(p),{n:3,left:true,right:true,equalWidth:true});
+  equal('DD新单详情不显示温湿度卡',await p.locator('#itlSheetMetrics').innerText().then(t=>t.includes('机房温度')||t.includes('机房湿度')),false);
   equal('DD未填标签完整展示',await p.locator('.itl-normal-tag').allTextContents(),[
-   '温度（℃，参考 18–27） · 未填','湿度（%，参考 40–60） · 未填','空调运行 · 未填','UPS 与供电 · 未填','消防设施 · 未填','门禁与门锁 · 未填','漏水与地面 · 未填','卫生与杂物 · 未填',
+   '漏水与地面 · 未填','卫生与杂物 · 未填',
    '机柜1 · 柜门锁闭 · 未填','机柜1 · 运行指示灯 · 未填','机柜1 · 线缆与标签 · 未填','机柜1 · PDU 与电源 · 未填','机柜2 · 柜门锁闭 · 未填','机柜2 · 运行指示灯 · 未填','机柜2 · 线缆与标签 · 未填','机柜2 · PDU 与电源 · 未填','服务器1 · 未填','服务器2 · 未填']);
   equal('DD无异常标题立即可见',await p.locator('#itlSheetResults>header .itl-sheet-clear').innerText(),'本次无异常项');
   equal('DD只读草稿没有编辑控件',await p.locator('#itlFormActionbar,input:not([disabled]),textarea:not([disabled])').count(),0);
+  // 旧单草稿：温湿度两张卡仍在，未填读数兜底为「—」。
+  await p.evaluate(id=>window.ITLedger.openInspectionSheet(id),legacyDraft.id);await p.waitForFunction(()=>document.querySelectorAll('[data-metric-value]').length===5);
+  equal('DD旧单未填读数指标兜底',await p.locator('[data-metric-value]').allTextContents(),['0 / 8','0','0 / 1','—','—']);
   await ro.close();console.log('REDESIGN_DETAIL_BROWSER PASS='+pass+' FAIL=0');
  }finally{if(browser)await browser.close();await f.close();}
 }

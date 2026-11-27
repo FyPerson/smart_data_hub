@@ -13,7 +13,7 @@
 // assertWrite）：本文件的 G2A2 探针零违规断言保证范围只到"经 withRead / withWrite 注入的
 // q.get/all/run/assertWrite 四个入口执行的 SQL"为止；路由（或其 require 的本地助手模块）自行
 // 打开数据库连接不在探针可见范围内，由 R10 结构规则挡住（G3A-b M5 起覆盖 inspection-sheets.js /
-// inspections.js / inspection-collect.js / inspection-photo-files.js 四个文件），不是"任何写法
+// inspections.js / inspection-collect.js / inspection-photo-files.js / inspection-period.js 五个文件），不是"任何写法
 // 都绕不过"。
 const assert = require('assert/strict');
 const crypto = require('crypto');

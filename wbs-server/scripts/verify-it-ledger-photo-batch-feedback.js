@@ -19,6 +19,13 @@ async function main() {
   };
   const files = n => Array.from({ length: n }, (_, i) => ({ name: '批次-' + i + '.png', mimeType: 'image/png', buffer: PNG }));
   const completeItems = sheet => sheet.items.map(it => ({ id: it.id, result: it.value_kind === 'number' ? null : 'ok', number_value: it.value_kind === 'number' ? (it.item_key === 'temperature' ? 23 : 48) : null, note: null }));
+  // C0b：v2 新单机房项只有 water / cleanliness，没有数值项；H 组要的「改一个读数触发自动保存」靠夹具直写库补插 v1 旧单的温度、湿度两行覆盖。
+  async function addLegacyRoomNumbers(sheetId) {
+    for (const [key, label] of [['temperature', '温度（℃，参考 18–27）'], ['humidity', '湿度（%，参考 40–60）']]) {
+      await f.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind) VALUES(?,?,?,?,?,?,?)', [sheetId, 'room', 0, '机房环境', key, label, 'number']);
+    }
+    await f.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?", [sheetId]);
+  }
   let roomSeq = 0;
   async function newRoom() {
     const room = '批次机房' + (++roomSeq);
@@ -331,14 +338,14 @@ async function main() {
     {
       const { room, rack } = await newRoom();
       const draft = await api('POST', '/inspections/sheets', { room_name: room }, 201);
-      const aircon = draft.items.find(it => it.item_key === 'aircon');
+      const water = draft.items.find(it => it.item_key === 'water'); // C0b：原借用 aircon（空调运行）改 water（漏水与地面）
       const { context, page, errors } = await openPage();
       await page.route(url => new URL(url).pathname === '/api/it-assets/inspections/sheets/' + draft.id, route => route.request().method() === 'PUT' ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ message: '测试注入失败' }) }) : route.continue());
       let photoPosts = 0;
       page.on('request', r => { if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/photos')) photoPosts++; });
       await page.locator('[data-insp-continue="' + draft.id + '"]').click();
       await page.locator('#itlSheetExpandAll').click();
-      await page.locator('[data-seg-ok="' + aircon.id + '"]').click();
+      await page.locator('[data-seg-ok="' + water.id + '"]').click();
       const key = settledKey(draft.id, rack.id), before = await settledCount(page, key);
       await slotOf(page, rack.id).locator('input[type=file]').setInputFiles(files(3));
       await waitSettled(page, key, before);
@@ -377,7 +384,9 @@ async function main() {
     // ===== H（L2）：焦点停在登记目录按钮上时，自动保存结束后的进度刷新不能把焦点丢到 body =====
     {
       const { room } = await newRoom();
-      const draft = await api('POST', '/inspections/sheets', { room_name: room }, 201);
+      const draft0 = await api('POST', '/inspections/sheets', { room_name: room }, 201);
+      await addLegacyRoomNumbers(draft0.id);
+      const draft = await api('GET', '/inspections/sheets/' + draft0.id);
       const temperature = draft.items.find(it => it.item_key === 'temperature');
       const { context, page, errors } = await openPage();
       await page.locator('[data-insp-continue="' + draft.id + '"]').click();

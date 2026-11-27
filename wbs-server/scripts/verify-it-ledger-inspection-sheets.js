@@ -25,11 +25,11 @@ function check(name, ok, detail) { if (!ok && detail !== undefined) console.erro
 // 无限定表述），不在这里（L5：本句订正措辞，删去容易被读成"运行时探针无限定保证"的省略写法）。
 //
 // G3A（41S/41T 审查订正保证边界）→ G3A-b（M6：探针入口扩到 assertWrite；M5：R10 扫描扩到四个
-// 文件）：运行时探针的保证范围**只到经 withRead / withWrite 注入的 q.get/all/run/assertWrite
+// 文件，#200 C0 起为五个：另加 inspection-period.js）：运行时探针的保证范围**只到经 withRead / withWrite 注入的 q.get/all/run/assertWrite
 // 四个入口执行的 SQL 为止**——路由文件（或其 require 的本地助手模块）若自行引入数据库驱动
 // （sqlite3/better-sqlite3 等，不在各自文件的 require 白名单内）绕开这四个入口直接执行 SQL，
 // 探针看不到，不在这套运行时保证的覆盖范围内；这部分改由 R10 结构规则挡住（禁止巡检相关路由
-// 文件及其本地助手模块 inspection-photo-files.js 引入白名单外的驱动/助手、工厂参数解构键集合
+// 文件及其本地助手模块 inspection-photo-files.js / inspection-period.js 引入白名单外的驱动/助手、工厂参数解构键集合
 // 与预期全等、不得出现 RestElement/非 Identifier 键），不是"任何写法都绕不过"。
 //
 // runSheetRouteGuard(src, options?) 是纯函数：只做 acorn 解析与规则判定，不 check()、不读文件。
@@ -64,7 +64,7 @@ function check(name, ok, detail) { if (!ok && detail !== undefined) console.erro
 //   R10（G3A 新增，41S/41T H1 部分成立后的结构规则；G3A-b M5 改白名单全等 + 扫描扩到
 //      inspection-photo-files.js；G3A-c 41RT M5 覆盖动态入口）——巡检相关路由文件
 //      （inspection-sheets.js、inspections.js、inspection-collect.js）及其 require 的本地助手
-//      模块（inspection-photo-files.js）：①require() 的参数必须是单一字符串字面量且在各文件
+//      模块（inspection-photo-files.js；#200 C0 起加 inspection-period.js）：①require() 的参数必须是单一字符串字面量且在各文件
 //      固定白名单内（全等比较，不是只挡 sqlite3/better-sqlite3 的黑名单，动态 require 或白名单
 //      外的任何依赖都判违规）；②不得使用动态 import()（ImportExpression）；③不得使用
 //      module.require(...)（MemberExpression 形式的调用）；④require 标识符不得被当值引用
@@ -74,7 +74,7 @@ function check(name, ok, detail) { if (!ok && detail !== undefined) console.erro
 //      不得出现 RestElement 或非 Identifier 键（否则会绕开①⑤的全等比较本身）——防止路由文件
 //      （或其本地助手模块）绕开 withRead/withWrite/assertWrite 引入独立的数据库访问路径，这部分
 //      探针本身看不见。**保证边界**：R10 挡的是"直接 require / 动态 import / module.require /
-//      经上述四个本地模块间接"这些常规入口；eval()/new Function()/process.binding() 等更隐蔽的
+//      经上述五个文件（三个路由文件加两个本地助手模块）间接"这些常规入口；eval()/new Function()/process.binding() 等更隐蔽的
 //      代码执行/原生绑定入口，是这条纯语法树结构规则的已知限制，不追补（真要挡这些需要更重的静态
 //      分析甚至运行时沙箱）。
 //
@@ -103,14 +103,16 @@ const SHEET_EXPECTED_DEPS = ['withRead', 'withWrite', 'requireLedgerWrite', 'han
 // 变异 inspection-sheets.js 自己的源码）。
 const INSPECTIONS_EXPECTED_DEPS = ['withRead', 'handleErr', 'collect', 'sheetVisibility', 'stripFinance'];
 const INSPECTION_COLLECT_EXPECTED_DEPS = ['collector', 'recordManagement'];
-// G3A-b（M5 必修）：四个文件各自的 require() 白名单——全等比较（不是"至少包含"），逐字对应各
+// G3A-b（M5 必修）：五个文件各自的 require() 白名单——全等比较（不是"至少包含"），逐字对应各
 // 文件顶部真实 require 语句（2026-09-24 实测扫描结果，新增/减少依赖须同步更新这里）。
-// inspection-photo-files.js 是 inspection-sheets.js require 的本地助手模块，没有工厂函数（导出
-// 一组普通函数，不走依赖注入），下面 factoryFnName 传 null，只跑 require 检查这一半。
-const SHEET_REQUIRE_WHITELIST = ['express', 'crypto', 'fs', './inspection-photo-files'];
+// inspection-photo-files.js 与 inspection-period.js（#200 C0 起）是 inspection-sheets.js require 的两个
+// 本地助手模块，没有工厂函数（导出一组普通函数，不走依赖注入），下面 factoryFnName 传 null，只跑
+// require 检查这一半。
+const SHEET_REQUIRE_WHITELIST = ['express', 'crypto', 'fs', './inspection-photo-files', './inspection-period'];   // #200 C0：纯函数周期判据模块（无 DB、无 IO）
 const INSPECTIONS_REQUIRE_WHITELIST = ['express'];
 const INSPECTION_COLLECT_REQUIRE_WHITELIST = [];
 const INSPECTION_PHOTO_FILES_REQUIRE_WHITELIST = ['fs', 'path', 'crypto', 'multer'];
+const INSPECTION_PERIOD_REQUIRE_WHITELIST = [];   // #200 C0：纯函数模块，不 require 任何东西
 
 // G3A（R10 新增）：walk 提升到模块作用域——供 runSheetRouteGuard 与新增的 runDbAccessGuard（R10，
 // 巡检相关三个路由文件共用同一份"禁引入数据库驱动/工厂依赖键集合全等"判定）共用同一份 AST 遍历
@@ -128,9 +130,9 @@ function walk(node, visit, parents) {
   }
 }
 
-// G3A（R10 新增）→ G3A-b（M5 必修，改白名单全等比较 + 扫描扩到 inspection-photo-files.js）：
+// G3A（R10 新增）→ G3A-b（M5 必修，改白名单全等比较 + 扫描扩到 inspection-photo-files.js；#200 C0 起再加 inspection-period.js）：
 // 巡检相关路由文件（inspection-sheets.js/inspections.js/inspection-collect.js）及其 require 的
-// 本地助手模块（inspection-photo-files.js）共用的结构规则——
+// 两个本地助手模块（inspection-photo-files.js、inspection-period.js）共用的结构规则——
 //   ① require() 的参数必须是单一字符串字面量，且该字符串必须在 requireWhitelist 内（全等比较，
 //      不是"只挡 sqlite3/better-sqlite3 黑名单"——新增任何依赖都要求先同步这里的白名单，动态
 //      require（变量/表达式）一律判违规，不管值是什么）。
@@ -138,13 +140,14 @@ function walk(node, visit, parents) {
 //      RestElement（`{...rest}`）或非 Identifier 键（如计算属性 `{[x]: y}`）——旧实现只统计
 //      Property+Identifier 的键，RestElement/计算键会被直接跳过、既不算 extra 也不算 missing，
 //      是全等比较的一个逃逸口；解构键集合本身仍须与 expectedDeps 全等。factoryFnName 传
-//      null/undefined 时跳过这一整段（inspection-photo-files.js 导出一组普通函数，没有工厂/
-//      依赖注入，只需要检查①）。
+//      null/undefined 时跳过这一整段（inspection-photo-files.js / inspection-period.js 导出一组普通函数，
+//      没有工厂/依赖注入，只需要检查①）。
 // 纯函数，接收已解析好的 acorn AST（调用方自己 parse，PARSE 失败由调用方处理，与
 // runSheetRouteGuard 的既有约定一致）。返回 violations 数组，每条 { rule: 'R10', detail }。
-function runDbAccessGuard(ast, src, factoryFnName, expectedDeps, requireWhitelist) {
+function runDbAccessGuard(ast, src, factoryFnName, expectedDeps, requireWhitelist, fileName) {
   const violations = [];
-  const fileLabel = factoryFnName || '(inspection-photo-files.js)';
+  // 违规标签：有工厂函数时用工厂名；没有工厂函数的本地助手模块由调用方传入被扫的文件名（不写死某一个文件）。
+  const fileLabel = factoryFnName || fileName || '(未命名文件)';
   function violate(detail) { violations.push({ rule: 'R10', detail: { file: fileLabel, ...detail } }); }
   const whitelist = new Set(requireWhitelist || []);
   const badRequires = [];
@@ -167,8 +170,8 @@ function runDbAccessGuard(ast, src, factoryFnName, expectedDeps, requireWhitelis
   // 白名单本身可以比真实 require 语句更宽（挂着从未被实际 require() 过的模块名）而不会被判
   // 违规，导致上面 106-108 行注释宣称的"全等比较"名不副实。这里反向核对白名单每一项是否都被
   // 实际 require() 过，多出来的一律判违规，使其成为真正的全等比较（依赖被删掉之后，如果忘记
-  // 同步收窄白名单，这里会立刻报违规提醒）。四份白名单（2026-09-25 实测扫描结果）已逐字对应
-  // 各文件真实 require 语句，本次收紧不需要再改任何白名单常量。
+  // 同步收窄白名单，这里会立刻报违规提醒）。当时四份白名单（2026-09-25 实测扫描结果；#200 C0 起
+  // 共五份，另加 inspection-period.js 的 []）已逐字对应各文件真实 require 语句，本次收紧不需要再改任何白名单常量。
   const unusedWhitelist = (requireWhitelist || []).filter((w) => !requiredLiterals.has(w));
   if (unusedWhitelist.length) {
     violate({ reason: 'require白名单存在从未被实际require()过的多余项(与真实依赖不全等)', unusedWhitelist });
@@ -208,8 +211,8 @@ function runDbAccessGuard(ast, src, factoryFnName, expectedDeps, requireWhitelis
   if (requireAsValueRefs.length) {
     violate({ reason: 'require 标识符被当值引用(赋值/传递)而非直接调用,可能被换个名字后再调用绕开检查', count: requireAsValueRefs.length, positions: requireAsValueRefs.map((n) => n.start) });
   }
-  // 保证边界（41RT M5）：R10 挡的是"直接 require / 动态 import / module.require / 经上述四个
-  // 本地模块间接"这些常规入口；eval()/new Function()/process.binding() 等更隐蔽的代码执行/
+  // 保证边界（41RT M5）：R10 挡的是"直接 require / 动态 import / module.require / 经上述五个
+  // 文件（三个路由文件加两个本地助手模块）间接"这些常规入口；eval()/new Function()/process.binding() 等更隐蔽的代码执行/
   // 原生绑定入口，是这条纯语法树结构规则的已知限制（列为限制，不追补——真要挡这些需要更重的
   // 静态分析甚至运行时沙箱，不是"扫 AST 找几种调用形状"能覆盖的范畴）。
   if (!factoryFnName) return violations;
@@ -621,10 +624,13 @@ function runSheetRouteGuard(src, options) {
   return { violations, routes: routeKeys.slice().sort() };
 }
 
-async function verifyRedesignOverview() {
-  const f = await createFixture({ cleanup: true });
-  const equal = (name, actual, expected) => { assert.deepEqual(actual, expected, name); check(name, true); };
-  const emptyRoom = room => ({ room, this_month_done: false, last_submitted_at: null, last_submitted_by_name: null, last_filled: null, last_total: null, last_abnormal: null, days_since_last: null, draft: null });
+// 概览用例的固定「现在」：2026-11-16（周一）00:15 本地。经 testHooks.overviewNowMs 注入，与真实运行日无关。
+const OV_WEEK_NOW_MS = new Date(2026, 10, 16, 0, 15).getTime();
+// 月档用例的固定「现在」：2026-11-19（周四）10:00 本地。
+const OV_MONTH_NOW_MS = new Date(2026, 10, 19, 10, 0).getTime();
+
+// 概览用例共用助手（周档与月档两个夹具共用）：请求封装、建机柜、建草稿、提交一张单。
+function overviewHelpers(f) {
   const request = async (method, url, body, uid = 2, status = 200) => {
     const res = await f.api(method, url, body, uid);
     assert.equal(res.status, status, JSON.stringify(res.body));
@@ -641,24 +647,43 @@ async function verifyRedesignOverview() {
     assert.equal(photo.status, 201);
     return request('POST', '/inspections/sheets/' + s.id + '/submit', { expected_version: filled.version });
   }
+  return { request, rack, draft, submitted };
+}
+
+async function verifyRedesignOverview() {
+  // 概览接口的周期来自环境变量 IT_INSPECTION_CYCLE（工厂装配时读取一次）。这里钉成「未设置」= 默认 week，
+  // 不受运行者 shell 里残留变量影响；周期判据本身的各档断言在 verify-it-ledger-inspection-period.js。
+  const savedCycle = process.env.IT_INSPECTION_CYCLE;
+  delete process.env.IT_INSPECTION_CYCLE;
+  // 固定「现在」（#200 C0 修复批 2）：经测试专用注入点 testHooks.overviewNowMs 把概览接口的「现在」钉在 2026-11-16（周一）00:15 本地，
+  // 用例与真实运行日无关，周一 / 上周日的边界每次都在，不再用 dow 推算。注入点只在 enableTestHooks:true 时生效。
+  const f = await createFixture({ cleanup: true, enableTestHooks: true, inspectionSheetTestHooks: { overviewNowMs: () => OV_WEEK_NOW_MS } });
+  const equal = (name, actual, expected) => { assert.deepEqual(actual, expected, name); check(name, true); };
+  const emptyRoom = room => ({ room, period_done: false, last_submitted_at: null, last_submitted_by_name: null, last_filled: null, last_total: null, last_abnormal: null, days_since_last: null, draft: null });
+  const { request, rack, draft, submitted } = overviewHelpers(f);
   try {
-    const start = (await f.all("SELECT date('now','localtime') AS day"))[0].day;
-    const [year, month, day] = start.split('-').map(Number);
-    const monthStart = new Date(year, month - 1, 1, 0, 30).toISOString();
-    const previousEnd = new Date(year, month - 1, 0, 23, 30).toISOString();
-    const today = new Date(year, month - 1, day, 0, 30).toISOString();
+    // 固定周一（2026-11-16）的周期：2026-11-16 至 2026-11-22。夹具钉在周边界：
+    //   OV-B = 同一周一 00:15 本地（UTC 下落在上周日 16:15，漏写 localtime 会被判到上周）→ 本周已巡检，days_since=0；
+    //   OV-C = 前一天周日 23:30 本地（差 45 分钟就进本周）→ 上周，days_since=1，也让「滚动 7 天冒充自然周」必然判错；
+    //   OV-F = 同一周一 00:10 本地 → 本周，days_since=0。
+    // 时区前提：「漏写 localtime」类变异只在运行机器本地时区早于 UTC 超过 15 分钟（本夹具时刻的 UTC 日期与本地日期不同）时才与正确实现有差异（本机 UTC+8）；
+    // 机器时区是 UTC 或更晚时本夹具管不住它（变异驱动 c1 按夹具时刻的 UTC 日期判断，不满足则跳过该变异并进 report）。
+    const period = { cycle: 'week', start: '2026-11-16', end: '2026-11-22' };
+    const weekStart = new Date(2026, 10, 16, 0, 15).toISOString();
+    const lastWeek = new Date(2026, 10, 15, 23, 30).toISOString();
+    const today = new Date(2026, 10, 16, 0, 10).toISOString();
     const overview = uid => request('GET', '/inspections/sheets/overview', undefined, uid);
     equal('OV无权限403', (await f.api('GET', '/inspections/sheets/overview', undefined, 4)).status, 403);
-    equal('OV空库响应全等', await overview(1), {month:start.slice(0,7),rooms:[]});
+    equal('OV空库响应全等', await overview(1), {period,rooms:[]});
     await rack('OV-A未巡检');
-    equal('OV懒建前机房全等', await overview(3), {month:start.slice(0,7),rooms:[emptyRoom('OV-A未巡检')]});
+    equal('OV懒建前机房全等', await overview(3), {period,rooms:[emptyRoom('OV-A未巡检')]});
     equal('OV只读不建巡检表', await f.all("SELECT name FROM sqlite_master WHERE name='it_inspection_sheets'"), []);
-    for (const name of ['OV-B本月','OV-C上月','OV-D删除','OV-E草稿','OV-F历史']) await rack(name);
-    const current = await submitted('OV-B本月');
-    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?', [monthStart,current.id]);
-    const previous = await submitted('OV-C上月');
+    for (const name of ['OV-B本周','OV-C上周','OV-D删除','OV-E草稿','OV-F历史']) await rack(name);
+    const current = await submitted('OV-B本周');
+    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?', [weekStart,current.id]);
+    const previous = await submitted('OV-C上周');
     await request('POST','/inspections/sheets/archive',{items:[{id:previous.id,expected_version:previous.version}]},1);
-    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?',[previousEnd,previous.id]);
+    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?',[lastWeek,previous.id]);
     const removed = await submitted('OV-D删除');
     await request('DELETE','/inspections/sheets/'+removed.id,{expected_version:removed.version,reason:'OV删除'});
     // Historical room survives after its empty rack is moved, a production-reachable union case.
@@ -666,20 +691,19 @@ async function verifyRedesignOverview() {
     await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?',[today,historical.id]);
     await request('PUT','/racks/'+historical.scope.racks[0].id,{room:'OV-A未巡检'},1);
     const owner = await draft('OV-E草稿');
-    const badItem = owner.items.find(it => it.item_key === 'aircon');
+    const badItem = owner.items.find(it => it.item_key === 'water'); // C0b：v2 机房项只有 water / cleanliness，原借用 aircon 改 water
     await request('PUT','/inspections/sheets/'+owner.id,{expected_version:owner.version,items:[{id:badItem.id,result:'bad',number_value:null,note:'测试异常'}]});
-    const second = await draft('OV-B本月');
-    const fullDraft = s => ({id:s.id,created_by_name:'测试维护员',created_at:s.created_at,filled:s.id === owner.id ? 1 : 0,total:12,visibility:'full',abnormal:s.id === owner.id ? 1 : 0});
+    const second = await draft('OV-B本周');
+    const fullDraft = s => ({id:s.id,created_by_name:'测试维护员',created_at:s.created_at,filled:s.id === owner.id ? 1 : 0,total:6,visibility:'full',abnormal:s.id === owner.id ? 1 : 0});
     const ownerResult = await overview(2);
     const readerResult = await overview(3);
     const adminResult = await overview(1);
-    const end = (await f.all("SELECT date('now','localtime') AS day"))[0].day;
-    equal('OV运行期间跨日，请重跑', end, start);
-    equal('OV机房集合和排序全等', ownerResult.rooms.map(r => r.room), ['OV-A未巡检','OV-B本月','OV-C上月','OV-D删除','OV-E草稿','OV-F历史']);
+    // 「运行期间跨日，请重跑」守卫已删：概览的「现在」由注入点固定，本组不再依赖真实日期。
+    equal('OV机房集合和排序全等', ownerResult.rooms.map(r => r.room), ['OV-A未巡检','OV-B本周','OV-C上周','OV-D删除','OV-E草稿','OV-F历史']);
     equal('OV从未巡检字段全等', ownerResult.rooms[0], emptyRoom('OV-A未巡检'));
-    const lastFields = (room, at, days, done) => ({...emptyRoom(room),this_month_done:done,last_submitted_at:at,last_submitted_by_name:'测试维护员',last_filled:12,last_total:12,last_abnormal:0,days_since_last:days});
-    equal('OV月份边界上月归档不计本月', ownerResult.rooms[2], lastFields('OV-C上月',previousEnd,day,false));
-    equal('OV本月月初与草稿共存字段全等', ownerResult.rooms[1], {...lastFields('OV-B本月',monthStart,day-1,true),draft:fullDraft(second)});
+    const lastFields = (room, at, days, done) => ({...emptyRoom(room),period_done:done,last_submitted_at:at,last_submitted_by_name:'测试维护员',last_filled:6,last_total:6,last_abnormal:0,days_since_last:days});
+    equal('OV周期边界上周归档不计本周', ownerResult.rooms[2], lastFields('OV-C上周',lastWeek,1,false));
+    equal('OV本周与草稿共存字段全等', ownerResult.rooms[1], {...lastFields('OV-B本周',weekStart,0,true),draft:fullDraft(second)});
     equal('OV已删除单不计入', ownerResult.rooms[3], emptyRoom('OV-D删除'));
     equal('OV本人草稿full含abnormal', ownerResult.rooms[4], {...emptyRoom('OV-E草稿'),draft:fullDraft(owner)});
     const summaryDraft = {...fullDraft(owner),visibility:'summary'}; delete summaryDraft.abnormal;
@@ -687,11 +711,11 @@ async function verifyRedesignOverview() {
     equal('OV管理员草稿full全等', adminResult.rooms[4], ownerResult.rooms[4]);
     equal('OV历史机房今日天数为零', ownerResult.rooms[5], lastFields('OV-F历史',today,0,true));
     // Newest submitted time wins even when its id is lower than a later-created backdated sheet.
-    const later = await submitted('OV-C上月');
-    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?',[new Date(year,month-2,1,0,30).toISOString(),later.id]);
+    const later = await submitted('OV-C上周');
+    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?',[new Date(2026,10,2,0,30).toISOString(),later.id]);
     equal('OV最近单按提交时间取归档单', (await overview(2)).rooms[2], ownerResult.rooms[2]);
     await request('DELETE','/inspections/sheets/'+second.id,{expected_version:second.version});
-    const proxy = await draft('OV-B本月');
+    const proxy = await draft('OV-B本周');
     const proxyFilled = await request('PUT','/inspections/sheets/'+proxy.id,{expected_version:proxy.version,items:proxy.items.map(it=>({id:it.id,result:it.value_kind==='check'?'ok':null,number_value:it.value_kind==='number'?(it.item_key==='temperature'?22:45):null,note:null}))},1);
     const fd = new FormData(); fd.append('slot','rack_front'); fd.append('target_id',String(proxy.scope.racks[0].id)); fd.append('file',new Blob([Buffer.from([255,216,255,224,0,0,255,217])],{type:'image/jpeg'}),'proxy.jpg');
     assert.equal((await fetch(f.base+'/api/it-assets/inspections/sheets/'+proxy.id+'/photos',{method:'POST',headers:{Authorization:'Bearer fixture-1'},body:fd})).status,201);
@@ -703,11 +727,46 @@ async function verifyRedesignOverview() {
     const missing = await request('GET','/inspections/sheets/'+owner.id,undefined,1);
     equal('OV日志用户不存在保留日志且姓名null', missing.log.map(l => ({actor_id:l.actor_id,actor_name:l.actor_name,action:l.action})), [{actor_id:2,actor_name:null,action:'create'}]);
     console.log('OVERVIEW_SAMPLE='+JSON.stringify(ownerResult));
-  } finally { await f.close(); }
+  } finally {
+    // 先恢复环境变量再 close（与月档用例一致）：close 失败或抛错时也不把环境变量状态漏给后面的用例。
+    if (savedCycle === undefined) delete process.env.IT_INSPECTION_CYCLE; else process.env.IT_INSPECTION_CYCLE = savedCycle;
+    await f.close();
+  }
+}
+
+// #200 C0 修复批 1（L2）→ 批 2（MED-2）：周期来自环境变量、工厂装配时读取一次；设成 month 再建一次夹具（进程内临时库），
+// 「现在」固定在 2026-11-19（周四）10:00 本地，与真实运行日无关（所以没有跨月守卫）。除 period 全等外，带两个机房的记录：
+//   MC-A = 已归档、提交于 2026-11-02 10:00（本月、不在本周）→ period_done 为真（若误用周周期会是假）；
+//   MC-B = 已提交、提交于 2026-10-31 23:30（上月末）→ period_done 为假。结束恢复环境变量。
+async function verifyOverviewMonthCycle() {
+  const saved = process.env.IT_INSPECTION_CYCLE;
+  process.env.IT_INSPECTION_CYCLE = 'month';
+  let f;
+  try {
+    f = await createFixture({ cleanup: true, enableTestHooks: true, inspectionSheetTestHooks: { overviewNowMs: () => OV_MONTH_NOW_MS } });
+    const { request, rack, submitted } = overviewHelpers(f);
+    await rack('MC-A本月上旬'); await rack('MC-B上月末');
+    const a = await submitted('MC-A本月上旬');
+    await request('POST', '/inspections/sheets/archive', { items: [{ id: a.id, expected_version: a.version }] }, 1);
+    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?', [new Date(2026, 10, 2, 10, 0).toISOString(), a.id]);
+    const b = await submitted('MC-B上月末');
+    await f.run('UPDATE it_inspection_sheets SET submitted_at=? WHERE id=?', [new Date(2026, 9, 31, 23, 30).toISOString(), b.id]);
+    const body = await request('GET', '/inspections/sheets/overview', undefined, 1);
+    assert.deepEqual(body.period, { cycle: 'month', start: '2026-11-01', end: '2026-11-30' }, 'OV月周期响应period全等');
+    check('OV月周期响应period全等', true);
+    assert.deepEqual(body.rooms.map(r => ({ room: r.room, period_done: r.period_done, days: r.days_since_last })),
+      [{ room: 'MC-A本月上旬', period_done: true, days: 17 }, { room: 'MC-B上月末', period_done: false, days: 19 }], 'OV月周期本月归档计入上月末不计');
+    check('OV月周期本月归档计入上月末不计', true);
+  } finally {
+    // 先恢复环境变量再 close：close 失败或抛错时也不把 month 漏给后面的用例。
+    if (saved === undefined) delete process.env.IT_INSPECTION_CYCLE; else process.env.IT_INSPECTION_CYCLE = saved;
+    if (f) await f.close();
+  }
 }
 
 async function main() {
   await verifyRedesignOverview();
+  await verifyOverviewMonthCycle();
   // G2A2（长任务 E 段2）：运行时锁外读库探针——全套接口测试共用这一个收集器，sqlProbe 只记录不
   // 抛错，套件末尾统一断言（见文件尾"G2A2 运行时探针"节）。enableTestHooks:true 只解锁测试专用
   // seam（含本探针与 _internals 的行为改写型 setter），不改变任何既有断言依赖的生产行为。
@@ -745,7 +804,48 @@ async function main() {
   }
   const f = await createFixture({ enableTestHooks: true, sqlProbe: (rec) => sqlProbeRecords.push(rec) });
   console.log('ISOLATED_ARTIFACTS=' + f.dir);
+  {
+    // #200 C0 修复批 3（LOW-3）：本夹具没有 overviewNowMs 钩子，概览取「现在」走生产回退分支 Date.now()。断言返回的周期包含本地今天，
+    // 证明这条回退没被改坏（OV 组全部用注入的固定时刻，覆盖不到它）。本地今天用测试内独立算法从 new Date() 取，请求前后各取一次，
+    // 不一致即跨日，判红并提示重跑。
+    const pad2 = n => String(n).padStart(2, '0');
+    const localToday = () => { const t = new Date(); return t.getFullYear() + '-' + pad2(t.getMonth() + 1) + '-' + pad2(t.getDate()); };
+    const before = localToday();
+    const res = await f.api('GET', '/inspections/sheets/overview', undefined, 1);
+    const after = localToday();
+    check('OV回退分支运行期间跨日，请重跑', before === after, { before, after });
+    check('OV回退分支返回200', res.status === 200, res.body);
+    check('OV回退分支周期包含本地今天', res.body.period.start <= before && before <= res.body.period.end, { period: res.body.period, today: before });
+  }
   const NUMBER_DEFAULT = { temperature: 22, humidity: 45 };
+  // C0b：v2 新单机房项只有 water / cleanliness 两个勾选项，没有数值项。要覆盖「v1 旧单里的温湿度行」（范围校验、完整性判定）
+  // 就用夹具直写库，往一张已建草稿里补插 v1 的温度、湿度两行（label 照 v1 原文），并把主表模板版本改回 v1，等同一张旧单。
+  const V1_ROOM_NUMBER_ROWS = [['temperature', '温度（℃，参考 18–27）'], ['humidity', '湿度（%，参考 40–60）']];
+  async function addLegacyRoomNumbers(fx, sheetId) {
+    for (const [key, label] of V1_ROOM_NUMBER_ROWS) {
+      await fx.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind) VALUES(?,?,?,?,?,?,?)', [sheetId, 'room', 0, '机房环境', key, label, 'number']);
+    }
+    await fx.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?", [sheetId]);
+  }
+  // C0b 修复批 1（LOW-3）：addLegacyRoomNumbers 做出来的是「v2 机房项 + 尾部温湿度」混合单，id 顺序与项数不同于真实 v1。
+  // rebuildAsV1 把一张草稿按真实 v1 原貌重建：删光该单全部 items，机房 8 项按 v1 顺序（label 取 2c8b46f8 的 ROOM_ITEMS 原文），
+  // 再按 buildItemRows 的顺序插机柜项与设备项（取自单据冻结的 scope_json），主表 template_version 改回 'v1'。
+  const V1_ROOM_ROWS = [
+    ['temperature', '温度（℃，参考 18–27）', 'number'], ['humidity', '湿度（%，参考 40–60）', 'number'],
+    ['aircon', '空调运行', 'check'], ['ups', 'UPS 与供电', 'check'], ['fire', '消防设施', 'check'],
+    ['access', '门禁与门锁', 'check'], ['water', '漏水与地面', 'check'], ['cleanliness', '卫生与杂物', 'check'],
+  ];
+  const V1_RACK_ROWS = [['door', '柜门锁闭'], ['lights', '运行指示灯'], ['cabling', '线缆与标签'], ['pdu', 'PDU 与电源']];
+  async function rebuildAsV1(fx, sheetId) {
+    const sheet = (await fx.all('SELECT scope_json FROM it_inspection_sheets WHERE id=?', [sheetId]))[0];
+    const scope = JSON.parse(sheet.scope_json);
+    const ins = (section, targetId, targetLabel, key, label, kind) => fx.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind) VALUES(?,?,?,?,?,?,?)', [sheetId, section, targetId, targetLabel, key, label, kind]);
+    await fx.run('DELETE FROM it_inspection_sheet_items WHERE sheet_id=?', [sheetId]);
+    for (const [k, l, kind] of V1_ROOM_ROWS) await ins('room', 0, '机房环境', k, l, kind);
+    for (const rack of scope.racks) for (const [k, l] of V1_RACK_ROWS) await ins('rack', rack.id, rack.name, k, l, 'check');
+    for (const dev of scope.devices) await ins('device', dev.id, dev.name, 'front_panel', '前面板与告警灯', 'check');
+    await fx.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?", [sheetId]);
+  }
   async function makeRoom(roomName, rackCount = 1, devicesPerRack = 1) {
     const racks = [];
     for (let i = 0; i < rackCount; i++) {
@@ -873,7 +973,15 @@ async function main() {
     check('单图唯一索引不再存在', uniqueLeft === 0, uniqueLeft);
 
     const itemCount = (await f.all('SELECT COUNT(*) n FROM it_inspection_sheet_items WHERE sheet_id=?', [sheetIdMain]))[0].n;
-    check('建单生成 8(room)+4(rack)+1(device) = 13 行检查项', itemCount === 13, itemCount);
+    check('建单生成 2(room)+4(rack)+1(device) = 7 行检查项', itemCount === 7, itemCount);
+    // C0b 新增：v2 模板的机房项集合恰为 [cleanliness, water]，且没有任何数值项；主表 template_version='v2'
+    const v2Room = await f.all("SELECT item_key, value_kind FROM it_inspection_sheet_items WHERE sheet_id=? AND section='room'", [sheetIdMain]);
+    check('C0b新单机房项item_key集合恰为[cleanliness,water]', JSON.stringify(v2Room.map((x) => x.item_key).sort()) === JSON.stringify(['cleanliness', 'water']) && v2Room.every((x) => x.value_kind === 'check'), v2Room);
+    // 修复批 1（LOW-4）：整张单（机房 / 机柜 / 设备三段）都没有 number 行，不只看机房段。
+    const v2NumberRows = await f.all("SELECT section, item_key FROM it_inspection_sheet_items WHERE sheet_id=? AND value_kind='number'", [sheetIdMain]);
+    check('C0b新单整张单无number行', v2NumberRows.length === 0, v2NumberRows);
+    const v2Tpl = (await f.all('SELECT template_version FROM it_inspection_sheets WHERE id=?', [sheetIdMain]))[0];
+    check("C0b新单主表template_version='v2'", v2Tpl && v2Tpl.template_version === 'v2', v2Tpl);
 
     // ============================================================
     // 3) 表级 CHECK 反例（直接 f.run 写 SQL）+ 正向对照（M5：去掉违规点即成功插入）
@@ -1030,7 +1138,7 @@ async function main() {
     // 6) 完整性：未填提交400、异常项无说明400、全部填完可提交、submitted_by/at 与日志
     // ============================================================
     const incomplete = await f.api('POST', '/inspections/sheets/' + sheetIdMain + '/submit', { expected_version: 1 }, 2);
-    check('未填写完整提交400 SHEET_INCOMPLETE', incomplete.status === 400 && incomplete.body.code === 'SHEET_INCOMPLETE' && Array.isArray(incomplete.body.detail.unfilled_item_ids) && incomplete.body.detail.unfilled_item_ids.length === 13, incomplete.body);
+    check('未填写完整提交400 SHEET_INCOMPLETE', incomplete.status === 400 && incomplete.body.code === 'SHEET_INCOMPLETE' && Array.isArray(incomplete.body.detail.unfilled_item_ids) && incomplete.body.detail.unfilled_item_ids.length === 7, incomplete.body);
 
     const detail1 = await getSheet(sheetIdMain, 2);
     const fill1 = detail1.body.items.map((it) => (it.value_kind === 'number'
@@ -1304,6 +1412,7 @@ async function main() {
     const wrongItemPut = await f.api('PUT', '/inspections/sheets/' + mDraft.id, { expected_version: 1, items: [{ id: foreignItemId, result: 'ok', number_value: null, note: null }] }, 2);
     check('他单item id 400 LEDGER_BAD_REQUEST', wrongItemPut.status === 400 && wrongItemPut.body.code === 'LEDGER_BAD_REQUEST', wrongItemPut.body);
 
+    await addLegacyRoomNumbers(f, mDraft.id); // C0b：新单没有温度项，越界校验靠旧单（v1）里补插的温湿度行覆盖
     const detailForRange = await getSheet(mDraft.id, 2);
     const tempItem = detailForRange.body.items.find((it) => it.item_key === 'temperature');
     const rangeBad = await f.api('PUT', '/inspections/sheets/' + mDraft.id, { expected_version: 1, items: [{ id: tempItem.id, result: null, number_value: 9999, note: null }] }, 2);
@@ -1354,8 +1463,8 @@ async function main() {
     }
 
     // ============================================================
-    // R10（G3A 新增）→ G3A-b（M5：扫描扩到 inspection-photo-files.js，require 检查改白名单全等）：
-    // inspections.js / inspection-collect.js / inspection-photo-files.js 各自的真实源码也跑一次
+    // R10（G3A 新增）→ G3A-b（M5：扫描扩到 inspection-photo-files.js，require 检查改白名单全等；#200 C0 起再扩到 inspection-period.js）：
+    // inspections.js / inspection-collect.js / inspection-photo-files.js / inspection-period.js 各自的真实源码也跑一次
     // runDbAccessGuard——与 inspection-sheets.js 共用同一份判定逻辑，验证它们当前确实没有引入
     // 白名单外的依赖、工厂依赖键集合与预期一致（41S 部分成立结论"路由文件当前拿不到裸连接"的静态
     // 复核，见 41S 原话档案 recommendations 第2条）。不接入负向用例矩阵（那套矩阵只变异
@@ -1419,12 +1528,12 @@ async function main() {
       const collectViolations = runDbAccessGuard(collectAst, collectSrc, 'createInspectionCollect', INSPECTION_COLLECT_EXPECTED_DEPS, INSPECTION_COLLECT_REQUIRE_WHITELIST);
       check('R10静态守卫(inspection-collect.js真实源码) violations.length===0', collectViolations.length === 0, collectViolations);
 
-      // G3A-b（M5 必修）：inspection-photo-files.js 是 inspection-sheets.js 唯一 require 的本地
-      // 助手模块，此前不在 R10 扫描范围内——没有工厂函数（factoryFnName 传 null，只跑 require
+      // G3A-b（M5 必修）：inspection-photo-files.js 是 inspection-sheets.js require 的本地
+      // 助手模块（#200 C0 起另有 inspection-period.js，见下），此前不在 R10 扫描范围内——没有工厂函数（factoryFnName 传 null，只跑 require
       // 白名单检查）。
       const photoFilesSrc = fs.readFileSync(path.join(__dirname, '../routes/it-ledger/inspection-photo-files.js'), 'utf8');
       const photoFilesAst = acorn.parse(photoFilesSrc, { ecmaVersion: 2022, sourceType: 'script' });
-      const photoFilesViolations = runDbAccessGuard(photoFilesAst, photoFilesSrc, null, null, INSPECTION_PHOTO_FILES_REQUIRE_WHITELIST);
+      const photoFilesViolations = runDbAccessGuard(photoFilesAst, photoFilesSrc, null, null, INSPECTION_PHOTO_FILES_REQUIRE_WHITELIST, 'inspection-photo-files.js');
       check('R10静态守卫(inspection-photo-files.js真实源码) violations.length===0', photoFilesViolations.length === 0, photoFilesViolations);
 
       // G3A-b（M5 负向用例）：在 inspection-photo-files.js 源码的字符串副本上加驱动 require，
@@ -1432,8 +1541,21 @@ async function main() {
       const photoFilesMutated = photoFilesSrc.replace("const multer = require('multer');", "const multer = require('multer');\nconst sqlite3 = require('sqlite3');");
       if (photoFilesMutated === photoFilesSrc) throw new Error('M5负向用例: inspection-photo-files.js needle未命中');
       const photoFilesMutatedAst = acorn.parse(photoFilesMutated, { ecmaVersion: 2022, sourceType: 'script' });
-      const photoFilesMutatedViolations = runDbAccessGuard(photoFilesMutatedAst, photoFilesMutated, null, null, INSPECTION_PHOTO_FILES_REQUIRE_WHITELIST);
+      const photoFilesMutatedViolations = runDbAccessGuard(photoFilesMutatedAst, photoFilesMutated, null, null, INSPECTION_PHOTO_FILES_REQUIRE_WHITELIST, 'inspection-photo-files.js');
       check("M5负向用例: inspection-photo-files.js加require('sqlite3')命中R10", photoFilesMutatedViolations.some((v) => v.rule === 'R10'), photoFilesMutatedViolations);
+
+      // #200 C0 修复批 1（M2）：inspection-period.js 是 inspection-sheets.js require 的第二个本地助手模块
+      // （纯日期运算，无 DB、无 IO）。真实源码零 require（白名单 []，全等比较），再加一条负向用例：
+      // 在源码字符串副本上追加驱动 require，R10 必须拦下。
+      const periodSrc = fs.readFileSync(path.join(__dirname, '../routes/it-ledger/inspection-period.js'), 'utf8');
+      const periodAst = acorn.parse(periodSrc, { ecmaVersion: 2022, sourceType: 'script' });
+      const periodViolations = runDbAccessGuard(periodAst, periodSrc, null, null, INSPECTION_PERIOD_REQUIRE_WHITELIST, 'inspection-period.js');
+      check('R10静态守卫(inspection-period.js真实源码) violations.length===0', periodViolations.length === 0, periodViolations);
+      const periodMutated = periodSrc.replace(/\r?\n$/, '') + "\nconst sqlite3 = require('sqlite3');\n";
+      if (periodMutated === periodSrc) throw new Error('M2负向用例: inspection-period.js 副本未变');
+      const periodMutatedAst = acorn.parse(periodMutated, { ecmaVersion: 2022, sourceType: 'script' });
+      const periodMutatedViolations = runDbAccessGuard(periodMutatedAst, periodMutated, null, null, INSPECTION_PERIOD_REQUIRE_WHITELIST, 'inspection-period.js');
+      check("M2负向用例: inspection-period.js加require('sqlite3')命中R10且违规标签是它自己", periodMutatedViolations.some((v) => v.rule === 'R10' && v.detail.file === 'inspection-period.js'), periodMutatedViolations);
     }
 
     // ============================================================
@@ -2004,9 +2126,9 @@ async function main() {
       for (const uid of [3, 5]) {
         const label = uid === 3 ? '只读' : '其他写权限者';
         const vSub = await f.api('GET', '/inspections/sheets/' + m4submitted.id, undefined, uid);
-        check(`M4${label}查看submitted详情200完整字段`, vSub.status === 200 && Array.isArray(vSub.body.items) && vSub.body.items.length === 13 && Array.isArray(vSub.body.log), vSub.body);
+        check(`M4${label}查看submitted详情200完整字段`, vSub.status === 200 && Array.isArray(vSub.body.items) && vSub.body.items.length === 7 && Array.isArray(vSub.body.log), vSub.body);
         const vArch = await f.api('GET', '/inspections/sheets/' + m4archivedPre.id, undefined, uid);
-        check(`M4${label}查看archived详情200完整字段`, vArch.status === 200 && Array.isArray(vArch.body.items) && vArch.body.items.length === 13 && Array.isArray(vArch.body.log), vArch.body);
+        check(`M4${label}查看archived详情200完整字段`, vArch.status === 200 && Array.isArray(vArch.body.items) && vArch.body.items.length === 7 && Array.isArray(vArch.body.log), vArch.body);
       }
     }
 
@@ -2140,7 +2262,7 @@ async function main() {
       const h3create = await createSheet(5, 'H3-Uid5Create');
       check('H3其他写权限者(uid5)建单201且created_by=5(重读响应体)', h3create.status === 201 && h3create.body.created_by === 5, h3create.body);
       const h3ItemCount = (await f.all('SELECT COUNT(*) n FROM it_inspection_sheet_items WHERE sheet_id=?', [h3create.body.id]))[0].n;
-      check('H3其他写权限者建单检查项行数为13(重读)', h3ItemCount === 13, h3ItemCount);
+      check('H3其他写权限者建单检查项行数为7(重读)', h3ItemCount === 7, h3ItemCount);
       const h3LogRows = await f.all("SELECT * FROM it_inspection_sheet_log WHERE sheet_id=? AND action='create'", [h3create.body.id]);
       check('H3其他写权限者建单create日志actor_id=5(重读)', h3LogRows.length === 1 && h3LogRows[0].actor_id === 5, h3LogRows);
     }
@@ -2164,17 +2286,18 @@ async function main() {
         const h4aDetail = await freshH4.api('GET', '/inspections/sheets/' + h4a.body.id, undefined, 2);
         const h4aFill = fillPayloadAllOk(h4aDetail.body.items).map((it) => {
           const orig = h4aDetail.body.items.find((x) => x.id === it.id);
-          return (orig.item_key === 'aircon' || orig.item_key === 'ups') ? { ...it, result: 'bad', note: 'H4两处异常' } : it;
+          // C0b：原 aircon / ups 两处异常改 water / cleanliness
+          return (orig.item_key === 'water' || orig.item_key === 'cleanliness') ? { ...it, result: 'bad', note: 'H4两处异常' } : it;
         });
         const h4aPut = await freshH4.api('PUT', '/inspections/sheets/' + h4a.body.id, { expected_version: h4a.body.version, items: h4aFill }, 2);
         check('H4两异常项单保存200', h4aPut.status === 200, h4aPut.body);
         await uploadAllRackFrontPhotos(freshH4, h4a.body.id, h4a.body.scope, 2);
-        const h4aAircon = h4aDetail.body.items.find((it) => it.item_key === 'aircon');
-        const h4aUps = h4aDetail.body.items.find((it) => it.item_key === 'ups');
-        const h4aAirconUpload = await uploadPhoto(freshH4, h4a.body.id, 'item', h4aAircon.id, 2);
-        check('C2d T2-补 H4 aircon照片201', h4aAirconUpload.status === 201, h4aAirconUpload.body);
-        const h4aUpsUpload = await uploadPhoto(freshH4, h4a.body.id, 'item', h4aUps.id, 2);
-        check('C2d T2-补 H4 ups照片201', h4aUpsUpload.status === 201, h4aUpsUpload.body);
+        const h4aWater = h4aDetail.body.items.find((it) => it.item_key === 'water');
+        const h4aClean = h4aDetail.body.items.find((it) => it.item_key === 'cleanliness');
+        const h4aWaterUpload = await uploadPhoto(freshH4, h4a.body.id, 'item', h4aWater.id, 2);
+        check('C2d T2-补 H4 water照片201', h4aWaterUpload.status === 201, h4aWaterUpload.body);
+        const h4aCleanUpload = await uploadPhoto(freshH4, h4a.body.id, 'item', h4aClean.id, 2);
+        check('C2d T2-补 H4 cleanliness照片201', h4aCleanUpload.status === 201, h4aCleanUpload.body);
         const h4aSubmit = await freshH4.api('POST', '/inspections/sheets/' + h4a.body.id + '/submit', { expected_version: h4aPut.body.version }, 2);
         check('H4两异常项单提交200', h4aSubmit.status === 200, h4aSubmit.body);
 
@@ -2229,7 +2352,7 @@ async function main() {
       const h5a2Door = h5a2Detail.body.items.find((it) => it.item_key === 'door');
       const h5a2FillNormal = fillPayloadAllOk(h5a2Detail.body.items).map((it) => (it.id === h5a2Door.id ? { ...it, result: 'bad', note: '正常说明占位' } : it));
       const h5a2Put = await f.api('PUT', '/inspections/sheets/' + h5a2.id, { expected_version: h5a2.version, items: h5a2FillNormal }, 2);
-      check('H5a2先用正常说明填完12+1项(为后续直接写库替换做准备)200', h5a2Put.status === 200, h5a2Put.body);
+      check('H5a2先用正常说明填完全部项(为后续直接写库替换做准备)200', h5a2Put.status === 200, h5a2Put.body);
       await f.run("UPDATE it_inspection_sheet_items SET note='   ' WHERE id=?", [h5a2Door.id]);
       const h5a2Detail2 = await getSheet(h5a2.id, 2);
       check('H5a2直接写库的纯空格说明detail.progress仍判missing_note(sheetProgress自身trim()防御独立生效，不依赖validateItemPatch)', h5a2Detail2.body.progress.missing.missingNoteItemIds.includes(h5a2Door.id), h5a2Detail2.body.progress.missing);
@@ -2237,16 +2360,17 @@ async function main() {
       check('H5a2直接写库的纯空格说明提交400 SHEET_INCOMPLETE(sheetProgress自身trim()防御独立生效)', h5a2Submit.status === 400 && h5a2Submit.body.code === 'SHEET_INCOMPLETE' && h5a2Submit.body.detail.missing_note_item_ids.includes(h5a2Door.id), h5a2Submit.body);
 
       const h5b = await buildDraftSheet('H5-OutOfRangeTemp', 2);
+      await addLegacyRoomNumbers(f, h5b.id); // C0b：新单没有温度项，这条是 v1 旧单兼容覆盖（旧单里的温湿度行仍按范围判完整）
       const h5bDetail = await getSheet(h5b.id, 2);
       const h5bTemp = h5bDetail.body.items.find((it) => it.item_key === 'temperature');
-      // 先把其余12项正常填完（正常PUT，受范围校验），只对温度项之后用直接SQL写入越界值（绕开PUT的
+      // 先把其余项正常填完（正常PUT，受范围校验），只对温度项之后用直接SQL写入越界值（绕开PUT的
       // validateItemAgainstTarget），这样"越界数值不算已填"才是唯一变量，不与"其余项本来就没填"混淆。
       const h5bFillNormal = fillPayloadAllOk(h5bDetail.body.items);
       const h5bPutNormal = await f.api('PUT', '/inspections/sheets/' + h5b.id, { expected_version: h5b.version, items: h5bFillNormal }, 2);
-      check('H5越界温度用例-先正常填完12+1项200', h5bPutNormal.status === 200, h5bPutNormal.body);
+      check('H5越界温度用例-先正常填完全部项(含旧单温湿度行)200', h5bPutNormal.status === 200, h5bPutNormal.body);
       await f.run('UPDATE it_inspection_sheet_items SET number_value=999 WHERE id=?', [h5bTemp.id]);
       const h5bDetail2 = await getSheet(h5b.id, 2);
-      check('H5越界温度详情progress.filled不计入该项(其余12项都已正常填完)', h5bDetail2.body.progress.filled === h5bDetail2.body.progress.total - 1, h5bDetail2.body.progress);
+      check('H5越界温度详情progress.filled不计入该项(其余项都已正常填完)', h5bDetail2.body.progress.filled === h5bDetail2.body.progress.total - 1, h5bDetail2.body.progress);
       check('H5越界温度详情unfilled清单恰为该项', JSON.stringify(h5bDetail2.body.progress.missing.unfilledItemIds) === JSON.stringify([h5bTemp.id]), h5bDetail2.body.progress.missing);
       const h5bSubmit = await f.api('POST', '/inspections/sheets/' + h5b.id + '/submit', { expected_version: h5bPutNormal.body.version }, 2);
       check('H5越界温度提交400 SHEET_INCOMPLETE且清单含该项', h5bSubmit.status === 400 && h5bSubmit.body.code === 'SHEET_INCOMPLETE' && h5bSubmit.body.detail.unfilled_item_ids.includes(h5bTemp.id), h5bSubmit.body);
@@ -2394,13 +2518,12 @@ async function main() {
 
     // ============================================================
     // M-模板全等：含机柜+设备的建单结果，按 section/target_id 核对完整 item_key/item_label/value_kind
-    // 与模板v1全等——不是只靠总数和少数 item_key 间接校验（codex 35T MEDIUM）
+    // 与模板v2全等（C0b 起机房项精简）——不是只靠总数和少数 item_key 间接校验（codex 35T MEDIUM）
     // ============================================================
     {
+      // C0b：模板 v2 机房项只有两个勾选项（v1 的温湿度 / 空调 / UPS / 消防 / 门禁已去掉）
       const TPL_ROOM = [
-        ['temperature', '温度（℃，参考 18–27）', 'number'], ['humidity', '湿度（%，参考 40–60）', 'number'],
-        ['aircon', '空调运行', 'check'], ['ups', 'UPS 与供电', 'check'], ['fire', '消防设施', 'check'],
-        ['access', '门禁与门锁', 'check'], ['water', '漏水与地面', 'check'], ['cleanliness', '卫生与杂物', 'check'],
+        ['water', '漏水与地面', 'check'], ['cleanliness', '卫生与杂物', 'check'],
       ];
       const TPL_RACK = [['door', '柜门锁闭', 'check'], ['lights', '运行指示灯', 'check'], ['cabling', '线缆与标签', 'check'], ['pdu', 'PDU 与电源', 'check']];
       const TPL_DEVICE = [['front_panel', '前面板与告警灯', 'check']];
@@ -2414,7 +2537,66 @@ async function main() {
       for (const dev of tplCreated.body.scope.devices) for (const [k, l, v] of TPL_DEVICE) expected.push({ section: 'device', target_id: dev.id, item_key: k, item_label: l, value_kind: v });
       const normalize = (arr) => arr.map((it) => ({ section: it.section, target_id: it.target_id, item_key: it.item_key, item_label: it.item_label, value_kind: it.value_kind }))
         .sort((a, b) => (a.section + a.target_id + a.item_key).localeCompare(b.section + b.target_id + b.item_key));
-      check('M模板全等(8+4*2+1*2=18行)按section/target_id/item_key/item_label/value_kind全等模板v1', JSON.stringify(normalize(tplCreated.body.items)) === JSON.stringify(normalize(expected)), { got: normalize(tplCreated.body.items), expected: normalize(expected) });
+      check('M模板全等(2+4*2+1*2=12行)按section/target_id/item_key/item_label/value_kind全等模板v2', JSON.stringify(normalize(tplCreated.body.items)) === JSON.stringify(normalize(expected)), { got: normalize(tplCreated.body.items), expected: normalize(expected) });
+      const tplMain = (await f.all('SELECT template_version FROM it_inspection_sheets WHERE id=?', [tplCreated.body.id]))[0];
+      check("M模板全等-主表template_version='v2'", tplMain && tplMain.template_version === 'v2', tplMain);
+    }
+
+    // ============================================================
+    // C0b 修复批 1（LOW-3 / codex 62 L-1）：按真实 v1 原貌重建的旧单（温湿度在最前，另有 aircon/ups/fire/access 四个已移出模板的勾选项）。
+    // addLegacyRoomNumbers 做的是「v2 + 尾部温湿度」混合单，id 顺序与项数跟真实 v1 不同；这里用 rebuildAsV1 补依赖 id 顺序的输出。
+    // ============================================================
+    {
+      const v1KeyOf = (it) => it.item_key;
+      await makeRoom('V1-Rebuild', 1, 1);
+      const v1Created = await createSheet(2, 'V1-Rebuild');
+      check('V1重建建单201', v1Created.status === 201, v1Created.body);
+      const v1Id = v1Created.body.id;
+      await rebuildAsV1(f, v1Id);
+      const v1Detail = await getSheet(v1Id, 2);
+      const v1Items = v1Detail.body.items;
+      check('V1重建详情机房项顺序/label/kind与真实v1全等', JSON.stringify(v1Items.filter((it) => it.section === 'room').map((it) => [it.item_key, it.item_label, it.value_kind])) === JSON.stringify(V1_ROOM_ROWS), v1Items);
+      check('V1重建详情共13项且机柜/设备项顺序为door,lights,cabling,pdu,front_panel', v1Items.length === 13 && v1Items.slice(8).map(v1KeyOf).join(',') === 'door,lights,cabling,pdu,front_panel', v1Items.map(v1KeyOf));
+      const v1TempId = v1Items.find((it) => it.item_key === 'temperature').id;
+      const v1HumId = v1Items.find((it) => it.item_key === 'humidity').id;
+      const v1Incomplete = await f.api('POST', '/inspections/sheets/' + v1Id + '/submit', { expected_version: v1Detail.body.version }, 2);
+      // 详情 GET 的 progress.missing.unfilledItemIds 来自 ORDER BY id 的读取，顺序即 v1 项顺序、以温度湿度开头。
+      check('V1重建详情progress.missing.unfilledItemIds全部13项按v1顺序、以温度湿度开头', JSON.stringify(v1Detail.body.progress.missing.unfilledItemIds) === JSON.stringify(v1Items.map((it) => it.id))
+        && v1Detail.body.progress.missing.unfilledItemIds[0] === v1TempId && v1Detail.body.progress.missing.unfilledItemIds[1] === v1HumId, v1Detail.body.progress.missing);
+      // 提交 400 返回的 unfilled_item_ids 来自 submit 路径里没有 ORDER BY 的 SELECT（走 uq_it_inspection_sheet_items 索引，实测按 section/target_id/item_key 排，
+      // v1 / v2 同样，非本批引入），所以这里只断言集合全等（排序后），不断言顺序；顺序问题见回报「拿不准」。
+      check('V1重建未填提交400 SHEET_INCOMPLETE且unfilled_item_ids集合为全部13项', v1Incomplete.status === 400 && v1Incomplete.body.code === 'SHEET_INCOMPLETE'
+        && JSON.stringify([...v1Incomplete.body.detail.unfilled_item_ids].sort((a, b) => a - b)) === JSON.stringify(v1Items.map((it) => it.id).sort((a, b) => a - b)), v1Incomplete.body);
+      const v1Put = await f.api('PUT', '/inspections/sheets/' + v1Id, { expected_version: v1Detail.body.version, items: fillPayloadAllOk(v1Items) }, 2);
+      check('V1重建填满（温湿度合法值、勾选项全ok）保存200', v1Put.status === 200, v1Put.body);
+      await uploadAllRackFrontPhotos(f, v1Id, v1Created.body.scope, 2);
+      const v1Submit = await f.api('POST', '/inspections/sheets/' + v1Id + '/submit', { expected_version: v1Put.body.version }, 2);
+      check('V1重建填满且机柜照片齐后提交200 submitted', v1Submit.status === 200 && v1Submit.body.status === 'submitted', v1Submit.body);
+
+      // codex 62 L-1：旧勾选项（aircon，已移出模板）标异常 → 说明 / 照片要求 → 已提交后改说明留 edit 日志
+      await makeRoom('V1-RebuildBad', 1, 1);
+      const bCreated = await createSheet(2, 'V1-RebuildBad');
+      const bId = bCreated.body.id;
+      await rebuildAsV1(f, bId);
+      const bDetail = await getSheet(bId, 2);
+      const aircon = bDetail.body.items.find((it) => it.item_key === 'aircon');
+      const bFill = fillPayloadAllOk(bDetail.body.items).map((it) => (it.id === aircon.id ? { ...it, result: 'bad', note: '空调故障待修' } : it));
+      const bPut = await f.api('PUT', '/inspections/sheets/' + bId, { expected_version: bDetail.body.version, items: bFill }, 2);
+      check('V1旧项异常 aircon标异常带说明保存200', bPut.status === 200, bPut.body);
+      await uploadAllRackFrontPhotos(f, bId, bCreated.body.scope, 2);
+      const bMid = await getSheet(bId, 2);
+      check('V1旧项异常 完整性清单含aircon项照片位置（且只缺这一处）', JSON.stringify(bMid.body.progress.missing.missingPhotoPositions) === JSON.stringify([{ slot: 'item', target_id: aircon.id }]), bMid.body.progress.missing);
+      const bNoPhoto = await f.api('POST', '/inspections/sheets/' + bId + '/submit', { expected_version: bPut.body.version }, 2);
+      check('V1旧项异常 缺aircon照片提交400 SHEET_INCOMPLETE且缺照片位置为该项', bNoPhoto.status === 400 && bNoPhoto.body.code === 'SHEET_INCOMPLETE' && JSON.stringify(bNoPhoto.body.detail.missing_photo_positions) === JSON.stringify([{ slot: 'item', target_id: aircon.id }]), bNoPhoto.body);
+      const bPhoto = await uploadPhoto(f, bId, 'item', aircon.id, 2);
+      check('V1旧项异常 上传aircon项照片201', bPhoto.status === 201, bPhoto.body);
+      const bSubmit = await f.api('POST', '/inspections/sheets/' + bId + '/submit', { expected_version: bPut.body.version }, 2);
+      check('V1旧项异常 补照片后提交200', bSubmit.status === 200 && bSubmit.body.status === 'submitted', bSubmit.body);
+      const bEdit = await f.api('PUT', '/inspections/sheets/' + bId, { expected_version: bSubmit.body.version, items: [{ id: aircon.id, result: 'bad', number_value: null, note: '空调故障已报修' }] }, 2);
+      check('V1旧项异常 已提交后改异常说明200且version+1', bEdit.status === 200 && bEdit.body.version === bSubmit.body.version + 1 && bEdit.body.unchanged === false, bEdit.body);
+      const bEditLog = bEdit.body.log.filter((l) => l.action === 'edit');
+      const bExpectedDiff = [{ kind: 'item', item_id: aircon.id, label: aircon.target_label + ' · ' + aircon.item_label, field: 'note', before: '空调故障待修', after: '空调故障已报修' }];
+      check('V1旧项异常 edit日志恰1行且diff记录说明修改', bEditLog.length === 1 && JSON.stringify(bEditLog[0].diff) === JSON.stringify(bExpectedDiff), { got: bEditLog, expected: bExpectedDiff });
     }
 
     // ============================================================

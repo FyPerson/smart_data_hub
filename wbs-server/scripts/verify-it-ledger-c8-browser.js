@@ -15,7 +15,7 @@ async function main(){
     await p.goto(f.base+'/IT_Ledger.html#racks');await p.locator('.itl-rack-summary').first().waitFor();
     check('真实机柜阵列两柜',await p.locator('.itl-rack-summary').count()===2);
     check('总览刻度1/5/10/顶端12',JSON.stringify(await p.locator('.itl-rack-summary').first().locator('.itl-rack-scale span').allTextContents())===JSON.stringify(['1','12','5','10']));
-    check('设备方案B浅色中性底与类型侧条',await p.locator('.itl-rack-device').evaluate(el=>getComputedStyle(el).backgroundColor==='rgb(213, 223, 205)'&&getComputedStyle(el).borderLeftColor==='rgb(176, 122, 76)'));
+    check('设备方案B浅色中性底与类型侧条',await p.locator('.itl-rack-device').evaluate(el=>getComputedStyle(el).backgroundColor==='rgb(228, 239, 242)'&&getComputedStyle(el).borderLeftColor==='rgb(176, 122, 76)'));
     await p.locator('.itl-rack-title[data-open-rack="'+a.id+'"]').click();await p.locator('#itlRackOverlay').waitFor({state:'visible'});
     await p.locator('[data-select-rack-asset="'+host.id+'"]').click();await p.locator('[data-rack-command="move"]').click();
     await p.locator('[data-u="4"].itl-can-place').waitFor();

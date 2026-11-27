@@ -1,4 +1,5 @@
 'use strict';
+// 主题文件已改名为 it-ledger-theme.css（#200 C1a）；本文件名保留原名。
 const assert = require('assert/strict'), fs = require('fs'), path = require('path');
 const { chromium } = require('playwright');
 const { createFixture } = require('./it-ledger-browser-fixture');
@@ -25,7 +26,7 @@ async function main() {
       await page.locator('[data-tab="' + tab + '"][aria-current=page]').waitFor();
       await page.waitForFunction(() => !document.querySelector('#itlContent').hasAttribute('aria-busy') && !document.querySelector('#itlContent').textContent.includes('正在读取'));
       const styles = await page.evaluate(() => ({ selected: getComputedStyle(document.querySelector('[data-tab][aria-current]')).backgroundColor, width:document.documentElement.scrollWidth, header:document.querySelector('#itlViewTitle').textContent }));
-      check(tab + ' 方案 B 选中态及桌面布局', styles.selected === 'rgb(223, 237, 226)' && styles.width === 1440);
+      check(tab + ' 方案 B 选中态及桌面布局', styles.selected === 'rgb(225, 231, 236)' && styles.width === 1440);
       await page.screenshot({ path:path.join(artifacts, tab + '.png') });
       for (const width of [768,390]) {
         await page.setViewportSize({width,height:900});
@@ -36,10 +37,10 @@ async function main() {
     }
     await page.goto(f.base + '/IT_Ledger.html#all'); await page.locator('#itlTable').waitFor();
     await page.locator('[data-detail="' + host.id + '"]').click(); await page.locator('#itlDrawer.open').waitFor();
-    check('详情抽屉使用暖白底', await page.locator('#itlDrawerBody').evaluate(el => getComputedStyle(el).backgroundColor) === 'rgb(255, 254, 251)');
+    check('详情抽屉使用白纸底', await page.locator('#itlDrawerBody').evaluate(el => getComputedStyle(el).backgroundColor) === 'rgb(255, 255, 255)');
     await page.screenshot({path:path.join(artifacts,'asset-detail.png')}); await page.locator('#itlDrawerClose').click();
     await page.locator('#itlRegister').click(); await page.locator('#itlModal.open').waitFor();
-    check('登记弹窗方案 B 主操作', await page.locator('#itlSubmit').evaluate(el => getComputedStyle(el).backgroundColor) === 'rgb(46, 120, 97)');
+    check('登记弹窗方案 B 主操作', await page.locator('#itlSubmit').evaluate(el => getComputedStyle(el).backgroundColor) === 'rgb(29, 31, 32)');
     await page.screenshot({path:path.join(artifacts,'asset-register.png')}); await page.locator('#itlModalCancel').click();
     await page.goto(f.base + '/IT_Ledger.html#inspections'); await page.locator('[data-insp-continue="' + sheet.id + '"]').click();
     await page.locator('#itlSheetRoute').waitFor();
@@ -57,7 +58,16 @@ async function main() {
     check('全部展开六段', await page.locator('[data-workflow-section][open]').count()===6);
     await page.locator('[data-workflow-section=rack] > summary').click();
     await page.locator('#itlSheetRoute [data-workflow-go=room]').click();
-    const num = sheet.items.find(it=>it.item_key==='temperature'); await page.locator('[data-num-id="'+num.id+'"]').fill('23.5');
+    // C0b：新单机房段没有温度输入框，原先填温度 23.5 触发自动保存，改为点机房项「漏水与地面」的「正常」触发同一次自动保存。
+    // 修复批 1（codex 62 L-2）：上一次自动保存的「草稿已保存」文案可能还在，只等文案会在第二次保存返回前就结束；
+    // 点击前先注册对本单 PUT 响应的等待（请求体里 water 项 id 且 result=ok 才算），响应成功后再断言机柜段仍收起。
+    const roomCheck = sheet.items.find(it=>it.item_key==='water');
+    const roomSaved = page.waitForResponse(r=>{
+      if(r.request().method()!=='PUT'||!r.url().endsWith('/inspections/sheets/'+sheet.id))return false;
+      try{return (r.request().postDataJSON().items||[]).some(it=>it.id===roomCheck.id&&it.result==='ok');}catch(_e){return false;}
+    },{timeout:10000});
+    await page.locator('[data-seg-ok="'+roomCheck.id+'"]').click();
+    check('机房项自动保存响应200', (await roomSaved).status()===200);
     await page.waitForFunction(()=>document.querySelector('#itlFormSavedAt').textContent.includes('草稿已保存'));
     check('自动保存不会展开用户收起的机柜段', !(await page.locator('[data-workflow-section=rack]').evaluate(el=>el.open)));
     await page.evaluate(()=>window.scrollTo(0,0));

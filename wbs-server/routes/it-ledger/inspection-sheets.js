@@ -21,12 +21,15 @@
 //   （覆盖"未入库文件立即删除"这一步的实现）与 C2d T-H2 新增的 testHooks.queueUnlink（覆盖
 //   processCleanupQueue 里真正的 unlink 调用），用于制造"unlink 本身也失败"这个纯文件系统层面在
 //   Windows 上难以可靠触发的场景——不影响生产路径的真实删除逻辑（testHooks 为 undefined 时两个
-//   钩子都落回真实实现）。
+//   钩子都落回真实实现）。#200 C0 起另认 testHooks.overviewNowMs（返回毫秒时间戳，覆盖概览接口「现在」的
+//   取值，见 overviewNowMs()），用于把周 / 月边界用例固定在某个时刻、与真实运行日无关；同样每次调用时才读，
+//   不存在时落回 Date.now()。
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const fsp = fs.promises;
 const photoFiles = require('./inspection-photo-files');
+const inspectionPeriod = require('./inspection-period');
 
 // G2A2 Commit2（主会话裁定）→ G3A（41T H2 收窄）：runCleanupDetached(limit) 由 index.js 注入——
 //   仅测试模式让固定的清理函数（index.js 内绑定的 processCleanupQueue 引用）显式退出当前写请求的
@@ -37,6 +40,9 @@ const photoFiles = require('./inspection-photo-files');
 //   内或本文件其它位置。
 module.exports = function createInspectionSheets({ withRead, withWrite, requireLedgerWrite, handleErr, recordManagement, storageDir, testHooks, collect, stripFinance, runCleanupDetached }) {
   const router = express.Router();
+  // 巡检周期（#200 C0）：装配时读一次环境变量 IT_INSPECTION_CYCLE，改周期 = 改 .env 并重启；启动日志打印一行实际生效值。
+  const cycleConfig = inspectionPeriod.readCycleFromEnv();
+  console.log(inspectionPeriod.cycleLogLine(cycleConfig));
   const error = (status, code, message, detail) => Object.assign(new Error(message), { status, code, ...(detail !== undefined ? { detail } : {}) });
   const bad = (message) => error(400, 'LEDGER_BAD_REQUEST', message);
   const notFound = (message = '巡检单不存在或无权查看') => error(404, 'SHEET_NOT_FOUND', message);
@@ -193,16 +199,13 @@ module.exports = function createInspectionSheets({ withRead, withWrite, requireL
   }
 
   // ============================================================
-  // 二、检查项模板 v1（方案 §3）
+  // 二、检查项模板 v2（方案 §3；v2 起机房项精简）
   // ============================================================
-  const TEMPLATE_VERSION = 'v1';
+  // 2026-11-20 用户定：机房均为托管机房，不记温湿度；空调 / UPS / 消防 / 门禁由 IDC 负责
+  // （柜门与柜内供电由机柜项覆盖）。v2 机房项只留「漏水与地面」「卫生与杂物」。
+  // 以后有自有机房再加区分。已按 v1 建的旧单照常可用（其温湿度行靠 NUMBER_RANGE_BY_KEY 校验）。
+  const TEMPLATE_VERSION = 'v2';
   const ROOM_ITEMS = [
-    { key: 'temperature', label: '温度（℃，参考 18–27）', kind: 'number', min: -20, max: 60 },
-    { key: 'humidity', label: '湿度（%，参考 40–60）', kind: 'number', min: 0, max: 100 },
-    { key: 'aircon', label: '空调运行', kind: 'check' },
-    { key: 'ups', label: 'UPS 与供电', kind: 'check' },
-    { key: 'fire', label: '消防设施', kind: 'check' },
-    { key: 'access', label: '门禁与门锁', kind: 'check' },
     { key: 'water', label: '漏水与地面', kind: 'check' },
     { key: 'cleanliness', label: '卫生与杂物', kind: 'check' },
   ];
@@ -213,7 +216,9 @@ module.exports = function createInspectionSheets({ withRead, withWrite, requireL
     { key: 'pdu', label: 'PDU 与电源', kind: 'check' },
   ];
   const DEVICE_ITEMS = [{ key: 'front_panel', label: '前面板与告警灯', kind: 'check' }];
-  const NUMBER_RANGE_BY_KEY = Object.fromEntries(ROOM_ITEMS.filter((x) => x.kind === 'number').map((x) => [x.key, [x.min, x.max]]));
+  // 只用于 v1 模板建的旧巡检单里的温湿度行（v2 新单不再有数值项）；sheetProgress 与
+  // validateItemAgainstTarget 对旧单的行为不变。不再从 ROOM_ITEMS 派生。
+  const NUMBER_RANGE_BY_KEY = { temperature: [-20, 60], humidity: [0, 100] };
   // Additive, transactional migration. Existing read-only requests can still read pre-migration rows.
   async function ensureManualObservationColumn(q) {
     const columns = await q.all('PRAGMA table_info(it_inspection_sheet_items)');
@@ -589,6 +594,14 @@ module.exports = function createInspectionSheets({ withRead, withWrite, requireL
     return fn(fullPath);
   }
 
+  // #200 C0：概览「现在」的取值点——每次调用时才读 testHooks.overviewNowMs（同 removeFile()/queueUnlink() 的写法，不在
+  //   工厂构造时绑死），测试注入一个固定时刻，让「周一 00:15 本地」（周档）、「月中某日 10:00 本地」（月档）这类用例与真实运行日无关；
+  //   testHooks 不存在或没设 overviewNowMs 时落回 Date.now()，生产路径恒为 undefined，行为不变。
+  function overviewNowMs() {
+    const fn = (testHooks && typeof testHooks.overviewNowMs === 'function') ? testHooks.overviewNowMs : null;
+    return fn ? fn() : Date.now();
+  }
+
   // 清理队列重试（§2.6 规则三/四）：独立顶层函数，同理不出现在任何路由处理器体的 AST 子树内。
   //   分两阶段：① withRead 读出至多 limit 条待清理行 ② 锁外逐个 unlink（M3：删除前复核归属，仍被
   //   it_inspection_sheet_photos 引用的行不删文件） ③ 一个新的 withWrite 把成功的删行、失败的
@@ -680,10 +693,13 @@ module.exports = function createInspectionSheets({ withRead, withWrite, requireL
     try {
       const result = await withRead(async (q) => {
         await canRead(q, req.user);
-        const { month } = await q.get("SELECT strftime('%Y-%m','now','localtime') AS month");
+        // 「今天」= 服务器本地日期，由注入点 overviewNowMs()（生产 = Date.now()）换算；period 与下面的 days_since 共用这一个 today。
+        const { today } = await q.get("SELECT date(?,'unixepoch','localtime') AS today", [Math.floor(overviewNowMs() / 1000)]);
+        const period = inspectionPeriod.periodOf(today, cycleConfig.cycle);
         const rackRooms = await q.all('SELECT DISTINCT room FROM it_racks');
         const sheets = (await exists(q)) ? await q.all(
-          "SELECT *, strftime('%Y-%m',submitted_at,'localtime')=strftime('%Y-%m','now','localtime') AS month_done, CAST(julianday(date('now','localtime'))-julianday(date(submitted_at,'localtime')) AS INTEGER) AS days_since FROM it_inspection_sheets WHERE deleted_at IS NULL ORDER BY submitted_at DESC,id DESC"
+          "SELECT *, date(submitted_at,'localtime') AS submitted_day, CAST(julianday(?)-julianday(date(submitted_at,'localtime')) AS INTEGER) AS days_since FROM it_inspection_sheets WHERE deleted_at IS NULL ORDER BY submitted_at DESC,id DESC",
+          [today]   // 与上面算 period 的 today 同源，跨零点时 days_since 与周期不会各取一次今天
         ) : [];
         const names = new Set(rackRooms.map(r => r.room).filter(Boolean));
         sheets.forEach(s => names.add(s.room_name));
@@ -703,13 +719,13 @@ module.exports = function createInspectionSheets({ withRead, withWrite, requireL
             draft = { id: row.id, created_by_name: row.created_by_name, created_at: row.created_at, filled: row.filled, total: row.total, visibility: row.visibility };
             if (row.visibility === 'full') draft.abnormal = row.abnormal;
           }
-          rooms.push({ room, this_month_done: completed.some(s => s.month_done === 1),
+          rooms.push({ room, period_done: completed.some(s => inspectionPeriod.inPeriod(s.submitted_day, period)),
             last_submitted_at: last ? last.submitted_at : null,
             last_submitted_by_name: last ? await displayName(q, last.submitted_by) : null,
             last_filled: lastRow ? lastRow.filled : null, last_total: lastRow ? lastRow.total : null,
             last_abnormal: lastRow ? lastRow.abnormal : null, days_since_last: last ? last.days_since : null, draft });
         }
-        return { month, rooms };
+        return { period, rooms };
       });
       res.json(result);
     } catch (e) { handleErr(res, e); }

@@ -7,7 +7,7 @@ const api=async(method,url,body,status=200,user=2)=>{const r=await f.api(method,
 async function upload(sheet,slot,target,user=2){const data=new FormData();data.append('slot',slot);data.append('target_id',String(target));data.append('file',new Blob([PNG],{type:'image/png'}),'现场.png');const r=await fetch(f.base+'/api/it-assets/inspections/sheets/'+sheet+'/photos',{method:'POST',headers:{Authorization:'Bearer fixture-'+user},body:data});return {status:r.status,body:await r.json()}}
 try{
 const rack=await api('POST','/racks',{room:'多图机房',name:'P01',u_total:24},201,1);await api('POST','',{category:'server',name:'多图服务器',u_height:1,placement:{kind:'rack',rack_id:rack.id,u_start:1}},201,1);
-let s=await api('POST','/inspections/sheets',{room_name:'多图机房'},201);const badItem=s.items.find(x=>x.item_key==='aircon');
+let s=await api('POST','/inspections/sheets',{room_name:'多图机房'},201);const badItem=s.items.find(x=>x.item_key==='water'); /* C0b：原借用 aircon 改 water（v2 机房项只有 water / cleanliness） */
 const first=await upload(s.id,'rack_front',rack.id);assert.equal(first.status,201);
 await f.run("CREATE UNIQUE INDEX uq_it_inspection_sheet_photos_active ON it_inspection_sheet_photos(sheet_id,slot,target_id) WHERE state='active'");await f.run("CREATE UNIQUE INDEX uq_it_inspection_sheet_photos_pending ON it_inspection_sheet_photos(sheet_id,slot,target_id,pending_by) WHERE state='pending'");
 const second=await upload(s.id,'rack_front',rack.id);assert.equal(second.status,201);s=await api('GET','/inspections/sheets/'+s.id);
@@ -17,7 +17,7 @@ const race=await Promise.all([upload(s.id,'rack_front',rack.id),upload(s.id,'rac
 check('第10张并发竞争只有一个成功',JSON.stringify(race.map(r=>r.status).sort())===JSON.stringify([201,409,409]));s=await api('GET','/inspections/sheets/'+s.id);check('服务端最终最多10张且超限码明确',s.photos.length===10&&race.filter(r=>r.status===409).every(r=>r.body.code==='SHEET_PHOTO_LIMIT'));
 assert.equal((await upload(s.id,'rack_front',rack.id,3)).status,403);check('只读用户不能上传',true);
 for(let i=0;i<2;i++)assert.equal((await upload(s.id,'item',badItem.id)).status,201);
-s=await api('PUT','/inspections/sheets/'+s.id,{expected_version:s.version,items:s.items.map(it=>({id:it.id,result:it.value_kind==='number'?null:it.id===badItem.id?'bad':'ok',number_value:it.value_kind==='number'?(it.item_key==='temperature'?23:48):null,note:it.id===badItem.id?'空调异常，已通知处理':null}))});
+s=await api('PUT','/inspections/sheets/'+s.id,{expected_version:s.version,items:s.items.map(it=>({id:it.id,result:it.value_kind==='number'?null:it.id===badItem.id?'bad':'ok',number_value:it.value_kind==='number'?(it.item_key==='temperature'?23:48):null,note:it.id===badItem.id?'地面渗水，已通知处理':null}))});
 check('照片完整性按位置计算，不以12张充当12处',s.photos.length===12&&s.progress.photosUploaded===2&&s.progress.photosExpected===2&&s.progress.complete);
 s=await api('POST','/inspections/sheets/'+s.id+'/submit',{expected_version:s.version});
 const removeId=s.photos.find(p=>p.slot==='rack_front').id;
@@ -46,7 +46,23 @@ const files=n=>Array.from({length:n},(_,i)=>({name:'巡检-'+i+'.png',mimeType:'
 await picker().setInputFiles(files(11));check('浏览器超限批次整批拒绝',(await root().innerText()).includes('本批次未添加')&&(await api('GET','/inspections/sheets/'+draft.id)).photos.length===0);
 await picker().setInputFiles(files(10));await page.waitForFunction(k=>document.querySelector('.itl-sheet-photo-slot[data-photo-position="'+k+'"] [data-photo-count]')?.textContent==='10 / 10 张',key);
 check('真实多选上传10张并锁定添加入口',await root().locator('[data-photo-id]').count()===10&&await picker().isDisabled());
-await root().locator('[data-photo-view]').first().click();await page.locator('.itl-evidence-viewer').waitFor();await page.getByRole('button',{name:'关闭图片',exact:true}).click();check('多图逐张真实授权预览',true);
+await root().locator('[data-photo-view]').first().click();const closeBtn=page.getByRole('button',{name:'关闭图片',exact:true});await closeBtn.waitFor();
+// #200 C1b-2 (codex 56-R H-1): the real photo viewer is a body-level overlay, so a missing class name silently drops the module theme.
+// The viewer is located through its own close button (not by the class under test) so a missing class fails the assertions below, not a locator timeout.
+// Expected colours are read from the live page (.itl-workbench), never hard-coded.
+const themeProbe=await closeBtn.evaluate(btn=>{const el=btn.parentElement,names=['--sem-done-bg','--color-accent','--color-bg-card'];const read=n=>Object.fromEntries(names.map(v=>[v,getComputedStyle(n).getPropertyValue(v).trim()]));const wb=document.querySelector('.itl-workbench');
+ // Real viewer close button vs a real .u-btn-secondary inside .itl-workbench (probe inserted then removed), same three computed properties.
+ const btnProps=['backgroundColor','color','borderTopColor'],readBtn=n=>{const cs=getComputedStyle(n);return Object.fromEntries(btnProps.map(p=>[p,cs[p]]))};
+ let wbBtn=null;if(wb){const probe=document.createElement('button');probe.type='button';probe.className='u-btn-secondary';probe.textContent='probe';wb.appendChild(probe);try{wbBtn=readBtn(probe)}finally{probe.remove()}}
+ return {names,btnProps,btnClass:btn.classList.contains('u-btn-secondary'),viewerBtn:readBtn(btn),workbenchBtn:wbBtn,hasClass:el.classList.contains('itl-evidence-viewer'),underBody:el.parentElement===document.body,isDialog:el.getAttribute('role')==='dialog'&&el.getAttribute('aria-modal')==='true',viewer:read(el),module:wb?read(wb):null,body:read(document.body)}});
+check('照片查看器是body直接子元素且带itl-evidence-viewer类名',themeProbe.hasClass&&themeProbe.underBody&&themeProbe.isDialog);
+check('照片查看器三个主题变量等于模块容器的计算值',!!themeProbe.module&&themeProbe.names.every(v=>themeProbe.module[v]!==''&&themeProbe.viewer[v]===themeProbe.module[v]));
+// Only the two variables the theme deliberately overrides: each must equal the module value AND differ from the body value (every, not some; no --color-bg-card).
+const OVERRIDDEN=['--color-accent','--sem-done-bg'];
+check('照片查看器的 --color-accent 与 --sem-done-bg 各自等于模块容器值且各自不等于全站(body)值',!!themeProbe.module&&OVERRIDDEN.every(v=>themeProbe.module[v]!==''&&themeProbe.viewer[v]===themeProbe.module[v]&&themeProbe.viewer[v]!==themeProbe.body[v]));
+// D-2: the real viewer's close button (.u-btn-secondary) takes the module secondary-button look, not the platform hard-coded one.
+check('照片查看器「关闭图片」次按钮的背景色、文字色、边框色等于工作台内真实次按钮的计算值',!!themeProbe.workbenchBtn&&themeProbe.btnClass&&themeProbe.btnProps.every(p=>themeProbe.viewerBtn[p]!==''&&themeProbe.viewerBtn[p]===themeProbe.workbenchBtn[p]));
+await closeBtn.click();check('多图逐张真实授权预览',true);
 await root().locator('[data-photo-delete]').first().click();await page.waitForFunction(k=>document.querySelector('.itl-sheet-photo-slot[data-photo-position="'+k+'"] [data-photo-count]')?.textContent==='9 / 10 张',key);check('删除后容量释放且添加入口恢复',!(await picker().isDisabled()));
 await page.setViewportSize({width:390,height:844});check('十张附件布局无页面横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
 fs.mkdirSync(path.resolve(__dirname,'../../_temp/plan-b-verification'),{recursive:true});await page.screenshot({path:path.resolve(__dirname,'../../_temp/plan-b-verification/multi-photos-mobile.png')});

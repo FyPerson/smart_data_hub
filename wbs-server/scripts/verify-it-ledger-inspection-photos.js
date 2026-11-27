@@ -11,7 +11,7 @@
 // 只到"经 withRead / withWrite 注入的 q.get/all/run/assertWrite 四个入口执行的 SQL"为止；路由
 // （或其 require 的本地助手模块）自行打开数据库连接不在探针可见范围内，由 R10 结构规则挡住
 // （G3A-b M5 起覆盖 inspection-sheets.js / inspections.js / inspection-collect.js /
-// inspection-photo-files.js 四个文件），不是"任何写法都绕不过"。
+// inspection-photo-files.js / inspection-period.js 五个文件），不是"任何写法都绕不过"。
 const assert = require('assert/strict');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -71,6 +71,16 @@ function fillPayloadAllOk(items, numberDefault) {
     : { id: it.id, result: 'ok', number_value: null, note: null }));
 }
 const NUMBER_DEFAULT = { temperature: 22, humidity: 45 };
+// C0b：v2 新单机房项只有 water / cleanliness 两个勾选项，没有数值项。要覆盖「v1 旧单里的温湿度数值行」（number 项不收照片、
+// 已提交旧单改数值留 diff）就用夹具直写库，往已建的单里补插 v1 的温度、湿度两行（label 照 v1 原文）并把主表模板版本改回 v1。
+// values 可选，给出时写入对应 number_value（已提交单补行时用，保持与「已填完」一致）。
+async function addLegacyRoomNumbers(f, sheetId, values) {
+  for (const [key, label] of [['temperature', '温度（℃，参考 18–27）'], ['humidity', '湿度（%，参考 40–60）']]) {
+    const v = values && values[key] !== undefined ? values[key] : null;
+    await f.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind,number_value) VALUES(?,?,?,?,?,?,?,?)', [sheetId, 'room', 0, '机房环境', key, label, 'number', v]);
+  }
+  await f.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?", [sheetId]);
+}
 async function buildDraftSheet(f, roomName, ownerUid = 2, rackCount = 1) {
   await makeRoom(f, roomName, rackCount);
   const created = await createSheetAs(f, ownerUid, roomName);
@@ -194,6 +204,7 @@ async function mainHttpTests() {
     {
       const s1 = await buildDraftSheet(f, 'P1-Upload', 2);
       const rackId = s1.scope.racks[0].id;
+      await addLegacyRoomNumbers(f, s1.id); // C0b：number 项不收照片这条靠旧单（v1）里补插的温度行覆盖
       const detail1 = await getSheetAs(f, s1.id, 2);
       const tempItem = detail1.body.items.find((it) => it.item_key === 'temperature');
       const doorItem = detail1.body.items.find((it) => it.item_key === 'door');
@@ -459,6 +470,7 @@ async function mainHttpTests() {
       check('H1只改remark:列表edit_count为1', listH1b.body.items[0].edit_count === 1, listH1b.body.items[0]);
 
       const sH1c = await buildSubmittedSheet(f, 'H1-NumberOnly', 2);
+      await addLegacyRoomNumbers(f, sH1c.id, NUMBER_DEFAULT); // C0b：新单没有数值项；用补了温湿度行（已填 22 / 45）的旧单（v1）覆盖「只改 number_value」
       const detailH1c = await getSheetAs(f, sH1c.id, 2);
       const tempH1c = detailH1c.body.items.find((it) => it.item_key === 'temperature');
       const editH1c = await f.api('PUT', '/inspections/sheets/' + sH1c.id, { expected_version: sH1c.version, items: [{ id: tempH1c.id, result: null, number_value: 19, note: null }] }, 2);
@@ -895,6 +907,7 @@ async function mainHttpTests() {
       // 写事务失败的上传文件被立即删除(不进队列)：item slot 挂在 number 项上，内容校验通过但写
       // 事务里的目标校验会拒绝——文件已经落盘，catch 分支里应立即 unlink，不留队列行。这条走的是
       // 上传失败的 catch 分支（C2b 已改成同步先于响应），不受 M1 的 fire-and-forget 影响。
+      await addLegacyRoomNumbers(f, s7.id, NUMBER_DEFAULT); // C0b：新单没有数值项，补插旧单（v1）温湿度行供「number 项上传被写事务拒绝」用
       const detail7 = await getSheetAs(f, s7.id, 2);
       const tempItem7 = detail7.body.items.find((it) => it.item_key === 'temperature');
       const beforeCleanupCount = (await f.all('SELECT COUNT(*) n FROM it_inspection_file_cleanup'))[0].n;

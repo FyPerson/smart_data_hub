@@ -5,7 +5,7 @@
   const isTerminal=a=>['laptop','desktop'].includes(a.category),isPlace=a=>a.category==='other'&&a.u_height===0;
   const isSoftware=a=>['software','subscription'].includes(a.category);
   let expiryOnly=new URLSearchParams(window.location.search).get('expiry')==='90';
-  const expiryClasses={expired:'sem-failed',soon30:'sem-failed',soon60:'sem-prerelease',soon90:'sem-hold',normal:'sem-done',unset:'sem-intake',cancelled:'sem-voided'};
+  const expiryClasses={expired:'sem-failed',soon30:'sem-failed',soon60:'sem-prerelease',soon90:'sem-hold',normal:'sem-done',unset:'sem-wait',cancelled:'sem-voided'};
   function serverToday(){
     if(!Number.isFinite(L.state.serverTime))return null;
     const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(L.state.serverTime));

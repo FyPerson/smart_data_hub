@@ -109,6 +109,13 @@ async function main(){
  const createSheet=(uid,roomName)=>f.api('POST','/inspections/sheets',{room_name:roomName},uid);
  const getSheet=(sheetId,uid)=>f.api('GET','/inspections/sheets/'+sheetId,undefined,uid);
  async function buildDraftSheet(roomName,ownerUid=2){await makeRoom(roomName);const created=await createSheet(ownerUid,roomName);assert.equal(created.status,201,'buildDraftSheet '+roomName+' '+JSON.stringify(created.body));return created.body;}
+ // C0b：v2 新单机房项只有 water / cleanliness 两个勾选项，没有数值项。要覆盖「v1 旧单里的温湿度数值输入」（软 / 硬范围、焦点与 readonly、
+ // 输入框 DOM 节点保留）就用夹具直写库，往已建草稿里补插 v1 的温度、湿度两行（label 照 v1 原文）并把主表模板版本改回 v1，等同一张旧单。
+ async function addLegacyRoomNumbers(fx,sheetId){
+  for(const [key,label] of [['temperature','温度（℃，参考 18–27）'],['humidity','湿度（%，参考 40–60）']])await fx.run('INSERT INTO it_inspection_sheet_items(sheet_id,section,target_id,target_label,item_key,item_label,value_kind) VALUES(?,?,?,?,?,?,?)',[sheetId,'room',0,'机房环境',key,label,'number']);
+  await fx.run("UPDATE it_inspection_sheets SET template_version='v1' WHERE id=?",[sheetId]);
+ }
+ async function buildLegacyDraftSheet(roomName,ownerUid=2){const d=await buildDraftSheet(roomName,ownerUid);await addLegacyRoomNumbers(f,d.id);const g=await getSheet(d.id,ownerUid);assert.equal(g.status,200,'buildLegacyDraftSheet get '+roomName);return g.body;}
  function fillPayloadAllOk(items){return items.map(it=>(it.value_kind==='number'?{id:it.id,result:null,number_value:NUMBER_DEFAULT[it.item_key]??25,note:null}:{id:it.id,result:'ok',number_value:null,note:null}));}
  async function uploadPhoto(sheetId,slot,targetId,uid){const fd=new FormData();fd.append('slot',slot);fd.append('target_id',String(targetId));fd.append('file',new Blob([MIN_JPEG_BYTES],{type:'image/jpeg'}),'p.jpg');const resp=await fetch(f.base+'/api/it-assets/inspections/sheets/'+sheetId+'/photos',{method:'POST',headers:{Authorization:'Bearer fixture-'+uid},body:fd});return {status:resp.status,body:await resp.json()};}
  async function uploadAllRackFrontPhotos(sheetId,scope,uid){for(const r of scope.racks){const res=await uploadPhoto(sheetId,'rack_front',r.id,uid);assert.equal(res.status,201,'uploadAllRackFrontPhotos '+JSON.stringify(res.body));}}
@@ -154,14 +161,14 @@ async function main(){
   const okBodyA=await pa.locator('.itl-sheet-ok').innerText();
   // LOW（C5a-1c 收紧）：原断言只查"机房/机柜/设备"三个组名字面出现，连组名本身都能被"该分组不显示"
   // 之类的巧合命中；改成分别断言 target_label（机柜名/夹具固定为"SF-Room2-柜1"）与 item_label（正常
-  // 检查项名，submittedBad 的坏项是 aircon"空调运行"，UPS 与供电等其余5项仍正常）。
-  check('正常项-机房段显示具体检查项名(item_label,如"UPS 与供电")',okBodyA.includes('UPS 与供电'),okBodyA);
+  // 检查项名，submittedBad 的坏项是 water"漏水与地面"（C0b：v2 机房项只剩两个），"卫生与杂物"仍正常）。
+  check('正常项-机房段显示具体检查项名(item_label,如"卫生与杂物")',okBodyA.includes('卫生与杂物'),okBodyA);
   check('正常项-机柜段显示机柜名(target_label)与项数(4项全正常)',okBodyA.includes('SF-Room2-柜1')&&okBodyA.includes('四项正常'),okBodyA);
   check('正常项-设备段显示设备名(target_label,如"SF-Room2-设备1")',okBodyA.includes('SF-Room2-设备1'),okBodyA);
-  // LOW（C5a-1c 收紧）：读数断言原来只查"℃"字样，现在断言具体数值22（NUMBER_DEFAULT.temperature）与
-  // 45（humidity）都出现。
+  // C0b：v2 新单没有温湿度项，指标条不再出现「机房温度 / 机房湿度」两张卡（原断言要求出现具体值 22℃ / 45%，
+  // 现改为反向断言；旧单（v1）详情仍显示温湿度卡的覆盖在 verify-it-ledger-inspection-redesign-detail-browser.js）。
   const readingsTextA=await pa.locator('.itl-sheet-readings').innerText();
-  check('读数区显示机房温度实际值(22℃)与湿度实际值(45%)',readingsTextA.includes('22')&&readingsTextA.includes('℃')&&readingsTextA.includes('45')&&readingsTextA.includes('%'),readingsTextA);
+  check('读数区(新单v2)不显示机房温度卡与机房湿度卡,三张卡仍在',!readingsTextA.includes('机房温度')&&!readingsTextA.includes('机房湿度')&&readingsTextA.includes('检查项')&&readingsTextA.includes('异常')&&readingsTextA.includes('照片位置'),readingsTextA);
   const logTextA=await pa.locator('.itl-sheet-log h3').innerText();
   check('操作记录包含创建提交且条数精确为2',logTextA==='操作记录 · 2 条',logTextA);
   check('操作记录最新提交排在创建之前',JSON.stringify(await pa.locator('[data-log-action]').allTextContents())===JSON.stringify(['提交巡检','开始填写']));
@@ -771,7 +778,7 @@ async function main(){
   await cw.close();
 
   // X) 填三段 + "本段其余全部正常"（不覆盖已标异常）+ 越界读数前端拦截 + 防抖后PUT请求体校验。
-  const draftX=await buildDraftSheet('SF-RoomForm1',2);
+  const draftX=await buildLegacyDraftSheet('SF-RoomForm1',2); // C0b：越界读数拦截这条要数字输入框，新单没有，用补了温湿度行的旧单（v1）覆盖
   const cx=await browser.newContext();await cx.addInitScript(()=>localStorage.setItem('token','fixture-2'));const px=await cx.newPage();const errorsX=[];px.on('pageerror',e=>errorsX.push(e.message));
   await px.goto(f.base+'/IT_Ledger.html#inspections');await px.locator('[data-insp-row="'+draftX.id+'"]').waitFor();
   await px.locator('[data-insp-continue="'+draftX.id+'"]').click();
@@ -824,7 +831,8 @@ async function main(){
   await py.goto(f.base+'/IT_Ledger.html#inspections');await py.locator('[data-insp-row="'+draftY.id+'"]').waitFor();
   await py.locator('[data-insp-continue="'+draftY.id+'"]').click();await py.locator('#itlFormActionbar').waitFor();await expandInspectionForm(py);
   const baseSettledY=await py.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  const roomOkBtnsY=await py.locator('[data-sheet-section="room"] [data-seg-ok]').all();
+  // C0b：v2 机房段只有 2 个勾选项（原取前 3 个机房项），第 3 个改取机柜段第 2 项（lights，留着第 1 项 door 给后面的在途锁用例）。
+  const roomOkBtnsY=[...(await py.locator('[data-sheet-section="room"] [data-seg-ok]').all()),(await py.locator('[data-sheet-section="rack"] [data-seg-ok]').all())[1]];
   for(let i=0;i<3;i++)await roomOkBtnsY[i].click();
   await py.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledY);
   check('Y-防抖:1.5秒内连续3次修改只发出1次PUT',putCountY===1,putCountY);
@@ -861,9 +869,9 @@ async function main(){
   // Z) 版本冲突（409 SHEET_VERSION_CONFLICT）：保留本地未保存修改并高亮，重新GET载入(未被本地改动的
   // 项用服务器值)，提示文案，不自动重发，第二次保存(新version)成功。
   const draftZ=await buildDraftSheet('SF-RoomConflict',2);
-  const airconZ=draftZ.items.find(it=>it.item_key==='aircon');
-  const upsZ=draftZ.items.find(it=>it.item_key==='ups');
-  const fireZ=draftZ.items.find(it=>it.item_key==='fire');
+  const waterZ=draftZ.items.find(it=>it.item_key==='water');
+  const cleanZ=draftZ.items.find(it=>it.item_key==='cleanliness');
+  const doorZ=draftZ.items.find(it=>it.item_key==='door'); // C0b：原 fire（消防设施），v2 机房项只有两个，第三项借同一机柜的 door（柜门锁闭）
   const cz=await browser.newContext();await cz.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pz=await cz.newPage();const errorsZ=[];pz.on('pageerror',e=>errorsZ.push(e.message));
   await pz.goto(f.base+'/IT_Ledger.html#inspections');await pz.locator('[data-insp-row="'+draftZ.id+'"]').waitFor();
   await pz.locator('[data-insp-continue="'+draftZ.id+'"]').click();await pz.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pz);
@@ -872,16 +880,16 @@ async function main(){
   let putCountZ=0;pz.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftZ.id))putCountZ++;});
   await pz.clock.install();await pz.clock.pauseAt(new Date());
   const baseSettledZ=await pz.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pz.locator('[data-seg-ok="'+airconZ.id+'"]').click();
-  const otherPutZ=await f.api('PUT','/inspections/sheets/'+draftZ.id,{expected_version:draftZ.version,items:[{id:upsZ.id,result:'bad',number_value:null,note:'其他人标记异常'}]},2);
+  await pz.locator('[data-seg-ok="'+waterZ.id+'"]').click();
+  const otherPutZ=await f.api('PUT','/inspections/sheets/'+draftZ.id,{expected_version:draftZ.version,items:[{id:cleanZ.id,result:'bad',number_value:null,note:'其他人标记异常'}]},2);
   assert.equal(otherPutZ.status,200,'Z other put '+JSON.stringify(otherPutZ.body));
   await pz.clock.fastForward(2500); // 推过1.5秒防抖，触发这次PUT——服务端此刻已被otherPutZ改过，会409
   await pz.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledZ);
   const noticeTextZ=await pz.locator('#itlNotice').innerText();
   check('Z:版本冲突提示文案',noticeTextZ.includes('这张单已在别处被修改，你的改动仍在，请核对后再保存'),noticeTextZ);
-  check('Z:本地未保存的修改(aircon->ok)仍保留',await pz.locator('[data-seg-ok="'+airconZ.id+'"].on-ok').count()===1);
-  check('Z:冲突项被高亮标记',await pz.locator('[data-item-id="'+airconZ.id+'"].itl-sheet-conflict').count()===1);
-  check('Z:未被本地改动的项(ups)用服务器最新值刷新为异常',await pz.locator('[data-seg-bad="'+upsZ.id+'"].on-bad').count()===1);
+  check('Z:本地未保存的修改(water->ok)仍保留',await pz.locator('[data-seg-ok="'+waterZ.id+'"].on-ok').count()===1);
+  check('Z:冲突项被高亮标记',await pz.locator('[data-item-id="'+waterZ.id+'"].itl-sheet-conflict').count()===1);
+  check('Z:未被本地改动的项(cleanliness)用服务器最新值刷新为异常',await pz.locator('[data-seg-bad="'+cleanZ.id+'"].on-bad').count()===1);
   // H5：推过2秒以上（超过1.5秒防抖窗口），按PUT计数断言零重发——如果handleConflict忘了
   // clearTimeout(H3③)，一个更早排的自动保存计时器本可能在这个窗口内重新触发一次PUT。
   const putCountZBeforeClock=putCountZ;
@@ -890,11 +898,11 @@ async function main(){
   await sentinelZ();
   check('Z(H5):409后推过2秒以上(超过1.5秒防抖窗口)不自动重发,PUT计数未增加',putCountZ===putCountZBeforeClock,putCountZ);
   const settledBeforeRetryZ=await pz.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pz.locator('[data-seg-ok="'+fireZ.id+'"]').click();
+  await pz.locator('[data-seg-ok="'+doorZ.id+'"]').click();
   await pz.clock.fastForward(2500); // 用户这次编辑之后新排的防抖计时器同样不会自己流逝，手动推过去。
   await pz.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeRetryZ);
   const finalGetZ=await getSheet(draftZ.id,2);
-  check('Z:第二次保存(新version)成功,服务端落库了aircon(本地保留的冲突项)与fire(新点的项)',finalGetZ.body.items.find(it=>it.id===airconZ.id).result==='ok'&&finalGetZ.body.items.find(it=>it.id===fireZ.id).result==='ok',finalGetZ.body.items);
+  check('Z:第二次保存(新version)成功,服务端落库了water(本地保留的冲突项)与door(新点的项)',finalGetZ.body.items.find(it=>it.id===waterZ.id).result==='ok'&&finalGetZ.body.items.find(it=>it.id===doorZ.id).result==='ok',finalGetZ.body.items);
   check('Z:冲突高亮在成功保存后清除',await pz.locator('.itl-sheet-conflict').count()===0);
   check('浏览器无未捕获异常(Z)',errorsZ.length===0);
   await cz.close();
@@ -902,7 +910,7 @@ async function main(){
   // AA) 切页签冲刷（onLeave）：填写页有防抖中修改时切换页签，先冲刷写队列——断言保存请求确实发出且
   // 落库（方案 v0.5 §6.1 末条）。
   const draftAA=await buildDraftSheet('SF-RoomLeave',2);
-  const airconAA=draftAA.items.find(it=>it.item_key==='aircon');
+  const waterAA=draftAA.items.find(it=>it.item_key==='water');
   const caa=await browser.newContext();await caa.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paa=await caa.newPage();const errorsAA=[];paa.on('pageerror',e=>errorsAA.push(e.message));
   await paa.goto(f.base+'/IT_Ledger.html#inspections');await paa.locator('[data-insp-row="'+draftAA.id+'"]').waitFor();
   await paa.locator('[data-insp-continue="'+draftAA.id+'"]').click();await paa.locator('#itlFormActionbar').waitFor();await expandInspectionForm(paa);
@@ -915,23 +923,23 @@ async function main(){
   await paa.clock.install();
   await paa.clock.pauseAt(new Date());
   const baseSettledAA=await paa.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await paa.locator('[data-seg-ok="'+airconAA.id+'"]').click();
+  await paa.locator('[data-seg-ok="'+waterAA.id+'"]').click();
   await paa.evaluate(()=>{location.hash='racks';});
   await paa.locator('.itl-rack-workspace').waitFor();
   await paa.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAA,{timeout:5000});
   const afterLeaveAA=await getSheet(draftAA.id,2);
-  check('AA:切页签(onLeave)立即冲刷了防抖中的修改,已落库',afterLeaveAA.body.items.find(it=>it.id===airconAA.id).result==='ok',afterLeaveAA.body.items);
+  check('AA:切页签(onLeave)立即冲刷了防抖中的修改,已落库',afterLeaveAA.body.items.find(it=>it.id===waterAA.id).result==='ok',afterLeaveAA.body.items);
   check('浏览器无未捕获异常(AA)',errorsAA.length===0);
   await caa.close();
 
   // AB) beforeunload：队列非空/有未落盘修改时提示离开确认；落盘完成后不再提示。
   const draftAB=await buildDraftSheet('SF-RoomBeforeUnload',2);
-  const airconAB=draftAB.items.find(it=>it.item_key==='aircon');
+  const waterAB=draftAB.items.find(it=>it.item_key==='water');
   const cab=await browser.newContext();await cab.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pab=await cab.newPage();const errorsAB=[];pab.on('pageerror',e=>errorsAB.push(e.message));
   await pab.goto(f.base+'/IT_Ledger.html#inspections');await pab.locator('[data-insp-row="'+draftAB.id+'"]').waitFor();
   await pab.locator('[data-insp-continue="'+draftAB.id+'"]').click();await pab.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pab);
   const baseSettledAB=await pab.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pab.locator('[data-seg-ok="'+airconAB.id+'"]').click();
+  await pab.locator('[data-seg-ok="'+waterAB.id+'"]').click();
   const preventedDirtyAB=await pab.evaluate(()=>{let prevented=null;const listener=e=>{prevented=e.defaultPrevented;};window.addEventListener('beforeunload',listener);window.dispatchEvent(new Event('beforeunload',{cancelable:true}));window.removeEventListener('beforeunload',listener);return prevented;});
   check('AB:有未落盘修改(防抖中)时beforeunload被阻止(离开需确认)',preventedDirtyAB===true,preventedDirtyAB);
   await pab.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAB);
@@ -944,13 +952,13 @@ async function main(){
   // 仍应拦——判据是queuesBySheetId整体是否清空，不能只看"当前是否还有打开的表单"（离开后表单可能已经
   // left=true但队列还在跑，也可能因S-H1冲刷失败被保留）。
   const draftAB2=await buildDraftSheet('SF-RoomBeforeUnload2',2);
-  const airconAB2=draftAB2.items.find(it=>it.item_key==='aircon');
+  const waterAB2=draftAB2.items.find(it=>it.item_key==='water');
   const cab2=await browser.newContext();await cab2.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pab2=await cab2.newPage();const errorsAB2=[];pab2.on('pageerror',e=>errorsAB2.push(e.message));
   await pab2.goto(f.base+'/IT_Ledger.html#inspections');await pab2.locator('[data-insp-row="'+draftAB2.id+'"]').waitFor();
   await pab2.locator('[data-insp-continue="'+draftAB2.id+'"]').click();await pab2.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pab2);
   const baseSettledAB2=await pab2.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   const heldAB2=holdRequestRoute(pab2,'**/api/it-assets/inspections/sheets/'+draftAB2.id,'PUT');
-  await pab2.locator('[data-seg-ok="'+airconAB2.id+'"]').click();
+  await pab2.locator('[data-seg-ok="'+waterAB2.id+'"]').click();
   await heldAB2.entered; // PUT挂起中——这张单的队列非空
   await pab2.locator('#itlFormBack').click(); // 触发leaveForm+返回列表，不等冲刷落定
   await pab2.locator('[data-insp-row]').first().waitFor();
@@ -1040,8 +1048,7 @@ async function main(){
   await pae.goto(f.base+'/IT_Ledger.html#inspections');await pae.locator('[data-insp-row="'+draftAE.id+'"]').waitFor();
   await pae.locator('[data-insp-continue="'+draftAE.id+'"]').click();await pae.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pae);
   const baseSettledAE=await pae.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pae.locator('[data-sheet-section="room"] input[type=number]').nth(0).fill('22');
-  await pae.locator('[data-sheet-section="room"] input[type=number]').nth(1).fill('45');
+  // C0b：v2 新单机房段没有温湿度数字输入框，原先这里填 22 / 45 的两步删除（顺带写读数，不是本用例的目标）。
   await pae.locator('[data-sheet-section="room"] [data-all-normal]').click();
   await pae.locator('[data-sheet-section="rack"] [data-all-normal]').click();
   await pae.locator('[data-sheet-section="device"] [data-all-normal]').click();
@@ -1073,8 +1080,7 @@ async function main(){
   await pae2.locator('[data-insp-continue="'+draftAE2.id+'"]').click();await pae2.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pae2);
   check('AE-2:字段全空时提交按钮disabled',await pae2.locator('#itlFormSubmit[disabled]').count()===1);
   const baseSettledAE2=await pae2.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pae2.locator('[data-sheet-section="room"] input[type=number]').nth(0).fill('22');
-  await pae2.locator('[data-sheet-section="room"] input[type=number]').nth(1).fill('45');
+  // C0b：同 AE-1，删除对温湿度输入框的依赖。
   await pae2.locator('[data-sheet-section="room"] [data-all-normal]').click();
   await pae2.locator('[data-sheet-section="rack"] [data-all-normal]').click();
   await pae2.locator('[data-sheet-section="device"] [data-all-normal]').click();
@@ -1122,17 +1128,17 @@ async function main(){
   // 徒劳的PUT（同一份数据、同一个旧version，必然又是409），直接 return false，只补一次settle计数，
   // 不产生第二次网络请求。用PUT计数断言"全程恰1次PUT"（必修2的用例要求）。
   const draftAG=await buildDraftSheet('SF-RoomLeaveConflict',2);
-  const airconAG=draftAG.items.find(it=>it.item_key==='aircon');
-  const upsAG=draftAG.items.find(it=>it.item_key==='ups');
+  const waterAG=draftAG.items.find(it=>it.item_key==='water');
+  const cleanAG=draftAG.items.find(it=>it.item_key==='cleanliness');
   const cag=await browser.newContext();await cag.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pag=await cag.newPage();const errorsAG=[];pag.on('pageerror',e=>errorsAG.push(e.message));
   let putCountAG=0;pag.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftAG.id))putCountAG++;});
   await pag.goto(f.base+'/IT_Ledger.html#inspections');await pag.locator('[data-insp-row="'+draftAG.id+'"]').waitFor();
   await installNoticeCounter(pag); // M5(C5a-f)
   await pag.locator('[data-insp-continue="'+draftAG.id+'"]').click();await pag.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pag);
   const heldAG=holdRequestRoute(pag,'**/api/it-assets/inspections/sheets/'+draftAG.id,'PUT');
-  await pag.locator('[data-seg-ok="'+airconAG.id+'"]').click(); // 排队冲刷（真实1.5秒防抖，尚未发出）
+  await pag.locator('[data-seg-ok="'+waterAG.id+'"]').click(); // 排队冲刷（真实1.5秒防抖，尚未发出）
   await heldAG.entered; // 等真实防抖计时器触发这次PUT——此刻请求还没转发给服务器，服务端仍是旧version
-  const otherPutAG=await f.api('PUT','/inspections/sheets/'+draftAG.id,{expected_version:draftAG.version,items:[{id:upsAG.id,result:'bad',number_value:null,note:'别处已修改'}]},2);
+  const otherPutAG=await f.api('PUT','/inspections/sheets/'+draftAG.id,{expected_version:draftAG.version,items:[{id:cleanAG.id,result:'bad',number_value:null,note:'别处已修改'}]},2);
   assert.equal(otherPutAG.status,200,'AG other put '+JSON.stringify(otherPutAG.body));
   await pag.evaluate(()=>{location.hash='racks';}); // 触发onLeave：leaveForm同步销毁会话+排一次离开冲刷（挂起的PUT此刻还没放行）
   await pag.locator('.itl-rack-workspace').waitFor();
@@ -1142,7 +1148,7 @@ async function main(){
   check('AG(G5):放行409后仍停在机柜视图(有机房标志元素)',await pag.locator('.itl-rack-workspace').count()===1);
   check('AG(G5):放行409后没有把填写页画回来(无#itlFormActionbar)',await pag.locator('#itlFormActionbar').count()===0);
   const noticeTextAG=await pag.locator('#itlNotice').innerText();
-  check('AG(H2):离开到机柜后常驻条不可达,一次性提示保留完整原文',noticeTextAG.includes('巡检单〈'+sheetLabelStr(draftAG)+'〉有内容未能保存：')&&noticeTextAG.includes('空调运行：正常')&&noticeTextAG.includes('与他人修改冲突')&&!noticeTextAG.includes('详见巡检台账顶部'),noticeTextAG);
+  check('AG(H2):离开到机柜后常驻条不可达,一次性提示保留完整原文',noticeTextAG.includes('巡检单〈'+sheetLabelStr(draftAG)+'〉有内容未能保存：')&&noticeTextAG.includes('漏水与地面：正常')&&noticeTextAG.includes('与他人修改冲突')&&!noticeTextAG.includes('详见巡检台账顶部'),noticeTextAG);
   check('AG(必修2准备):此刻恰好只发出过1次PUT(挂起并放行的那次)',putCountAG===1,putCountAG);
   // C5a-e2（必修3，原"拿不准的点"改写为确定性有界等待，不再吞异常）：leaveForm 自己排的"离开冲刷"
   // 紧跟在上面那次settle之后立即执行——按必修2的短路设计，这次不会再发真实PUT，只是同步返回并补一次
@@ -1155,7 +1161,7 @@ async function main(){
   // 切回巡检页签才能看到#itlUnsavedList这个容器（此刻还在机柜视图里）——核实完整原文只在常驻条里。
   await pag.evaluate(()=>{location.hash='inspections';});await pag.locator('[data-insp-row]').first().waitFor();
   const unsavedListAG=await pag.locator('#itlUnsavedList [data-unsaved-sheet="'+draftAG.id+'"]').innerText();
-  check('AG(N-L6新增):完整原文(原因"与他人修改冲突"+"空调运行：正常")只在常驻条里',unsavedListAG.includes('与他人修改冲突')&&unsavedListAG.includes('空调运行：正常'),unsavedListAG);
+  check('AG(N-L6新增):完整原文(原因"与他人修改冲突"+"漏水与地面：正常")只在常驻条里',unsavedListAG.includes('与他人修改冲突')&&unsavedListAG.includes('漏水与地面：正常'),unsavedListAG);
   check('AG(L5):冲突原因在常驻条里只出现一次',unsavedListAG.split('与他人修改冲突').length-1===1,unsavedListAG);
   check('浏览器无未捕获异常(AG)',errorsAG.length===0);
   await cag.close();
@@ -1240,7 +1246,7 @@ async function main(){
   // 应该立即清掉这个冲突标记，不让"数据其实已经一致"的项继续卡住提交按钮/继续显示高亮。不自动重发
   // （假时钟推过2秒以上，PUT计数不增加）这一断言保留，仍是有价值的独立结论。
   const draftAI=await buildDraftSheet('SF-RoomReconcile',2);
-  const airconAI=draftAI.items.find(it=>it.item_key==='aircon');
+  const waterAI=draftAI.items.find(it=>it.item_key==='water');
   const cai=await browser.newContext();await cai.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pai=await cai.newPage();const errorsAI=[];pai.on('pageerror',e=>errorsAI.push(e.message));
   let putCountAI=0;pai.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftAI.id))putCountAI++;});
   await pai.goto(f.base+'/IT_Ledger.html#inspections');await pai.locator('[data-insp-row="'+draftAI.id+'"]').waitFor();
@@ -1249,17 +1255,17 @@ async function main(){
   // 这个坑——所有排在假时钟装好之后的 scheduleAutosave 调用都受 fastForward 控制。
   await pai.clock.install();await pai.clock.pauseAt(new Date());
   const heldAI=holdRequestRoute(pai,'**/api/it-assets/inspections/sheets/'+draftAI.id,'PUT');
-  await pai.locator('[data-seg-ok="'+airconAI.id+'"]').click(); // 本地标ok
+  await pai.locator('[data-seg-ok="'+waterAI.id+'"]').click(); // 本地标ok
   await pai.clock.fastForward(2000); // 推过防抖，这次PUT触发——此刻请求还没转发给服务器
   await heldAI.entered;
   // 另一个操作者恰好写了同一个值(ok)，只是这一改动会把版本号推高——制造"数据其实一致但版本冲突"。
-  const otherPutAI=await f.api('PUT','/inspections/sheets/'+draftAI.id,{expected_version:draftAI.version,items:[{id:airconAI.id,result:'ok',number_value:null,note:null}]},2);
+  const otherPutAI=await f.api('PUT','/inspections/sheets/'+draftAI.id,{expected_version:draftAI.version,items:[{id:waterAI.id,result:'ok',number_value:null,note:null}]},2);
   assert.equal(otherPutAI.status,200,'AI other put '+JSON.stringify(otherPutAI.body));
   const settledBeforeAI=await pai.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   heldAI.release(); // 放行：这次PUT带的是旧version，会409
   await pai.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeAI);
-  check('AI(S-H5):冲突后本地值(ok)与服务器fresh值一致,不显示冲突高亮(reconcileConflictMarkers立即清除)',await pai.locator('[data-item-id="'+airconAI.id+'"].itl-sheet-conflict').count()===0);
-  check('AI(S-H5):该项仍正确显示为"正常"(ok),没有因为走了合并流程而被清空/回滚',await pai.locator('[data-seg-ok="'+airconAI.id+'"].on-ok').count()===1);
+  check('AI(S-H5):冲突后本地值(ok)与服务器fresh值一致,不显示冲突高亮(reconcileConflictMarkers立即清除)',await pai.locator('[data-item-id="'+waterAI.id+'"].itl-sheet-conflict').count()===0);
+  check('AI(S-H5):该项仍正确显示为"正常"(ok),没有因为走了合并流程而被清空/回滚',await pai.locator('[data-seg-ok="'+waterAI.id+'"].on-ok').count()===1);
   const blockersTextAI=await pai.locator('#itlFormBlockers').innerText();
   check('AI(S-H5):操作条不再显示"有修改未保存"(hasUnsavedWork已因冲突标记清除变为false)',!blockersTextAI.includes('有修改未保存'),blockersTextAI);
   const putCountAIBase=putCountAI;
@@ -1286,7 +1292,7 @@ async function main(){
     const createdAK=await fAK.api('POST','/inspections/sheets',{room_name:'SF-RoomCollectDup'},2);
     assert.equal(createdAK.status,201,'AK create '+JSON.stringify(createdAK.body));
     const deviceItemAK=createdAK.body.items.find(it=>it.section==='device');
-    const airconAK=createdAK.body.items.find(it=>it.item_key==='aircon');
+    const waterAK=createdAK.body.items.find(it=>it.item_key==='water');
     const errorsAK=[];
     cak=await browser.newContext();await cak.addInitScript(()=>localStorage.setItem('token','fixture-2'));pak=await cak.newPage();pak.on('pageerror',e=>errorsAK.push(e.message));
     let collectCountAK=0;pak.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/items/'+deviceItemAK.id+'/collect'))collectCountAK++;});
@@ -1294,7 +1300,7 @@ async function main(){
     await pak.locator('[data-insp-continue="'+createdAK.body.id+'"]').click();await pak.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pak);
     await pak.clock.install();await pak.clock.pauseAt(new Date());
     const heldAK=holdRequestRoute(pak,'**/api/it-assets/inspections/sheets/'+createdAK.body.id,'PUT');
-    await pak.locator('[data-seg-ok="'+airconAK.id+'"]').click(); // 制造脏数据（LOW修正：此处已装假时钟并pauseAt，是fastForward驱动的防抖，不是真实1.5秒等待）
+    await pak.locator('[data-seg-ok="'+waterAK.id+'"]').click(); // 制造脏数据（LOW修正：此处已装假时钟并pauseAt，是fastForward驱动的防抖，不是真实1.5秒等待）
     await pak.clock.fastForward(2000);
     await heldAK.entered; // PUT已发出、被挂住——此刻在途锁生效
     check('AK(T-M1):冲刷在途时采集按钮已disabled',await pak.locator('[data-collect-id="'+deviceItemAK.id+'"][disabled]').count()===1);
@@ -1375,7 +1381,7 @@ async function main(){
   // 一个在跑(挂起)的flush，这次新enqueue的任务连"开始执行"都进不去(runQueue发现queueRunning为真直接
   // return)，所以DELETE请求在结构上不可能先于PUT落定发出，这里断言的是"确实如此"，不依赖真实计时。
   const draftAF3=await buildDraftSheet('SF-RoomDeleteOrder',2);
-  const airconAF3=draftAF3.items.find(it=>it.item_key==='aircon');
+  const waterAF3=draftAF3.items.find(it=>it.item_key==='water');
   const caf3=await browser.newContext();await caf3.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paf3=await caf3.newPage();const errorsAF3=[];paf3.on('pageerror',e=>errorsAF3.push(e.message));
   const eventsAF3=[];
   paf3.on('request',r=>{ if(!r.url().endsWith('/inspections/sheets/'+draftAF3.id))return; if(r.method()==='PUT')eventsAF3.push('PUT-sent'); if(r.method()==='DELETE')eventsAF3.push('DELETE-sent'); });
@@ -1383,7 +1389,7 @@ async function main(){
   await paf3.goto(f.base+'/IT_Ledger.html#inspections');await paf3.locator('[data-insp-row="'+draftAF3.id+'"]').waitFor();
   await paf3.locator('[data-insp-continue="'+draftAF3.id+'"]').click();await paf3.locator('#itlFormActionbar').waitFor();await expandInspectionForm(paf3);
   const heldAF3=holdRequestRoute(paf3,'**/api/it-assets/inspections/sheets/'+draftAF3.id,'PUT');
-  await paf3.locator('[data-seg-ok="'+airconAF3.id+'"]').click();
+  await paf3.locator('[data-seg-ok="'+waterAF3.id+'"]').click();
   await heldAF3.entered; // PUT已发出、被挂住——此刻在途锁生效，队列里正跑着这个flush任务
   check('AF-3准备:在途锁下删除按钮已disabled(方案必做1"…删除按钮同步disabled")',await paf3.locator('#itlFormDelete[disabled]').count()===1);
   // 先摘掉disabled再点——绕开UI层"点不动"，验证confirmDeleteDraftRow内部"排进同一条队列，天然等在途
@@ -1403,12 +1409,12 @@ async function main(){
 
   // AF-4（T-M2，43T M2）：冲刷失败后删除——中止删除、草稿保留（不把还没落盘的修改连同整张单一起扔掉）。
   const draftAF4=await buildDraftSheet('SF-RoomDeleteAbort',2);
-  const airconAF4=draftAF4.items.find(it=>it.item_key==='aircon');
+  const waterAF4=draftAF4.items.find(it=>it.item_key==='water');
   const caf4=await browser.newContext();await caf4.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paf4=await caf4.newPage();const errorsAF4=[];paf4.on('pageerror',e=>errorsAF4.push(e.message));
   let deleteCountAF4=0;paf4.on('request',r=>{if(r.method()==='DELETE'&&r.url().endsWith('/inspections/sheets/'+draftAF4.id))deleteCountAF4++;});
   await paf4.goto(f.base+'/IT_Ledger.html#inspections');await paf4.locator('[data-insp-row="'+draftAF4.id+'"]').waitFor();
   await paf4.locator('[data-insp-continue="'+draftAF4.id+'"]').click();await paf4.locator('#itlFormActionbar').waitFor();await expandInspectionForm(paf4);
-  await paf4.locator('[data-seg-ok="'+airconAF4.id+'"]').click(); // 制造脏数据
+  await paf4.locator('[data-seg-ok="'+waterAF4.id+'"]').click(); // 制造脏数据
   await paf4.route('**/api/it-assets/inspections/sheets/'+draftAF4.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   await paf4.locator('#itlFormDelete').click();
   await paf4.waitForFunction(()=>document.querySelector('#itlModalTitle')?.textContent==='删除草稿');
@@ -1420,11 +1426,11 @@ async function main(){
   check('AF-4(T-M2):仍停在填写页(表单会话未被销毁)',await paf4.locator('#itlFormActionbar').count()===1);
   const afterAbortAF4=await getSheet(draftAF4.id,2);
   check('AF-4(T-M2):服务端确认草稿仍存在(未被删除)',afterAbortAF4.status===200&&afterAbortAF4.body.status==='draft',afterAbortAF4.body);
-  check('AF-4(T-M2):本地未保存的修改(aircon=ok)仍保留',await paf4.locator('[data-seg-ok="'+airconAF4.id+'"].on-ok').count()===1);
+  check('AF-4(T-M2):本地未保存的修改(water=ok)仍保留',await paf4.locator('[data-seg-ok="'+waterAF4.id+'"].on-ok').count()===1);
   // M4（Opus预筛，新增断言）：冲刷失败→中止删除这条路径本就有 activeForm.deleting=false + 重渲染
   // （confirmDeleteDraftRow 的 !flushOk 早退分支），但此前没有断言真正验证过"解锁"这件事——去掉那行
   // deleting=false 套件仍会全绿。补开关/删除按钮恢复可用 + 操作条不再显示"正在删除…"。
-  check('AF-4(M4新增):冲刷失败取消删除后,检查项开关恢复可用(不再disabled)',await paf4.locator('[data-seg-ok="'+airconAF4.id+'"][disabled]').count()===0);
+  check('AF-4(M4新增):冲刷失败取消删除后,检查项开关恢复可用(不再disabled)',await paf4.locator('[data-seg-ok="'+waterAF4.id+'"][disabled]').count()===0);
   check('AF-4(M4新增):冲刷失败取消删除后,删除按钮恢复可用(不再disabled)',await paf4.locator('#itlFormDelete[disabled]').count()===0);
   check('AF-4(M4新增):操作条不再显示"正在删除…"',!(await paf4.locator('#itlFormSavedAt').innerText()).includes('正在删除'));
   check('浏览器无未捕获异常(AF-4)',errorsAF4.length===0);
@@ -1434,7 +1440,7 @@ async function main(){
   // 用try/finally包住enqueue，异常照常冒泡给模态框框架(formError)，但activeForm.deleting必须在finally
   // 里被清掉并重渲染一次，不能像旧版那样只在成功路径清（否则开关/删除按钮/操作条会恒锁死）。
   const draftAF5=await buildDraftSheet('SF-RoomDeleteFail',2);
-  const airconAF5=draftAF5.items.find(it=>it.item_key==='aircon');
+  const waterAF5=draftAF5.items.find(it=>it.item_key==='water');
   const caf5=await browser.newContext();await caf5.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paf5=await caf5.newPage();const errorsAF5=[];paf5.on('pageerror',e=>errorsAF5.push(e.message));
   await paf5.goto(f.base+'/IT_Ledger.html#inspections');await paf5.locator('[data-insp-row="'+draftAF5.id+'"]').waitFor();
   await paf5.locator('[data-insp-continue="'+draftAF5.id+'"]').click();await paf5.locator('#itlFormActionbar').waitFor();await expandInspectionForm(paf5);
@@ -1446,7 +1452,7 @@ async function main(){
   await paf5.locator('#itlModalClose').click();
   check('AF-5(H4):DELETE失败后仍停在填写页(表单会话未被误销毁)',await paf5.locator('#itlFormActionbar').count()===1);
   check('AF-5(H4):删除按钮解锁(不再disabled,不是恒锁死)',await paf5.locator('#itlFormDelete[disabled]').count()===0);
-  check('AF-5(H4):检查项开关按钮解锁(不再disabled)',await paf5.locator('[data-seg-ok="'+airconAF5.id+'"][disabled]').count()===0);
+  check('AF-5(H4):检查项开关按钮解锁(不再disabled)',await paf5.locator('[data-seg-ok="'+waterAF5.id+'"][disabled]').count()===0);
   check('AF-5(H4):操作条不再显示"正在删除…"',!(await paf5.locator('#itlFormSavedAt').innerText()).includes('正在删除'));
   const afterAF5=await getSheet(draftAF5.id,2);
   check('AF-5(H4):服务端确认草稿仍存在(200,未被删除)',afterAF5.status===200&&afterAF5.body.status==='draft',afterAF5.body);
@@ -1505,33 +1511,33 @@ async function main(){
     await fAL.close();
   }
 
-  // AM) M4（切回清空隐藏旧说明）：任意与设备判断规则无关的check项（这里用room段"fire"）标bad+说明→
+  // AM) M4（切回清空隐藏旧说明）：任意与设备判断规则无关的check项（这里用room段"water"）标bad+说明→
   // 切回ok→说明框消失(toggleSeg同步渲染,不等冲刷)、working.note被清空、随下一次PUT发出的note为null
   // ——不是"恰好满足"以后可能出现的规则的历史遗留文字(同H3陷阱,见memory
   // feedback_validate_persisted_state_not_intent)。
   const draftAM=await buildDraftSheet('SF-RoomClearNote',2);
-  const fireAM=draftAM.items.find(it=>it.item_key==='fire');
+  const waterAM=draftAM.items.find(it=>it.item_key==='water');
   const cam=await browser.newContext();await cam.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pam=await cam.newPage();const errorsAM=[];pam.on('pageerror',e=>errorsAM.push(e.message));
   const putBodiesAM=[];pam.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftAM.id)){try{putBodiesAM.push(r.postDataJSON());}catch(_e){putBodiesAM.push(null);}}});
   await pam.goto(f.base+'/IT_Ledger.html#inspections');await pam.locator('[data-insp-row="'+draftAM.id+'"]').waitFor();
   await pam.locator('[data-insp-continue="'+draftAM.id+'"]').click();await pam.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pam);
-  await pam.locator('[data-seg-bad="'+fireAM.id+'"]').click();
-  await pam.locator('[data-note-id="'+fireAM.id+'"]').fill('测试:消防异常待处理');
+  await pam.locator('[data-seg-bad="'+waterAM.id+'"]').click();
+  await pam.locator('[data-note-id="'+waterAM.id+'"]').fill('测试:漏水异常待处理');
   const settledBeforeAM=await pam.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   await pam.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeAM);
-  check('AM准备:bad+说明后PUT请求体带该note',putBodiesAM[putBodiesAM.length-1].items.find(it=>it.id===fireAM.id).note==='测试:消防异常待处理',putBodiesAM);
+  check('AM准备:bad+说明后PUT请求体带该note',putBodiesAM[putBodiesAM.length-1].items.find(it=>it.id===waterAM.id).note==='测试:漏水异常待处理',putBodiesAM);
   const settledBeforeAM2=await pam.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pam.locator('[data-seg-ok="'+fireAM.id+'"]').click();
-  check('AM:切回正常后说明框立即消失(同步渲染,不等冲刷)',await pam.locator('[data-note-id="'+fireAM.id+'"]').count()===0);
+  await pam.locator('[data-seg-ok="'+waterAM.id+'"]').click();
+  check('AM:切回正常后说明框立即消失(同步渲染,不等冲刷)',await pam.locator('[data-note-id="'+waterAM.id+'"]').count()===0);
   await pam.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeAM2);
   const lastPutAM=putBodiesAM[putBodiesAM.length-1];
-  check('AM:切回正常后的PUT请求体note为null(旧说明未随working残留)',lastPutAM.items.find(it=>it.id===fireAM.id).note===null,lastPutAM);
+  check('AM:切回正常后的PUT请求体note为null(旧说明未随working残留)',lastPutAM.items.find(it=>it.id===waterAM.id).note===null,lastPutAM);
   check('浏览器无未捕获异常(AM)',errorsAM.length===0);
   await cam.close();
 
   // AN) 方案§3.1第2条：读数在硬范围内但超出参考范围(SOFT_RANGE)时,输入旁提示"超出参考范围",仍正常
   // 保存(PUT带该值,不拦截)。温度硬-20~60/软18~27,湿度硬0~100/软40~60。
-  const draftAN=await buildDraftSheet('SF-RoomSoftRange',2);
+  const draftAN=await buildLegacyDraftSheet('SF-RoomSoftRange',2); // C0b：软范围提示只在 v1 旧单的温湿度输入框上出现，用补了温湿度行的旧单覆盖
   const tempItemAN=draftAN.items.find(it=>it.item_key==='temperature');
   const humItemAN=draftAN.items.find(it=>it.item_key==='humidity');
   const can1=await browser.newContext();await can1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pan=await can1.newPage();const errorsAN=[];pan.on('pageerror',e=>errorsAN.push(e.message));
@@ -1556,7 +1562,7 @@ async function main(){
 
   // AO) 方案§3.1第3条：越界(硬拦截)时输入框回显working里当前的有效值——不留"框里显示越界值、working
   // 其实没变"的视觉错位(择"回显上一个有效值"这一支,理由见文件头注释,不选"标红+失焦时才回显")。
-  const draftAO=await buildDraftSheet('SF-RoomHardRevert',2);
+  const draftAO=await buildLegacyDraftSheet('SF-RoomHardRevert',2); // C0b：旧单（v1）覆盖
   const tempItemAO=draftAO.items.find(it=>it.item_key==='temperature');
   const cao1=await browser.newContext();await cao1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pao=await cao1.newPage();const errorsAO=[];pao.on('pageerror',e=>errorsAO.push(e.message));
   await pao.goto(f.base+'/IT_Ledger.html#inspections');await pao.locator('[data-insp-row="'+draftAO.id+'"]').waitFor();
@@ -1566,7 +1572,7 @@ async function main(){
   await tempInputAO.fill('200'); // 越界
   check('AO:越界时硬范围错误提示出现',(await pao.locator('[data-num-error="'+tempItemAO.id+'"]').innerText()).includes('超出范围'));
   check('AO:越界时输入框回显上一个有效值(22),不是刚敲的200(working.number_value未变,DOM也回显22,不留视觉错位)',await tempInputAO.inputValue()==='22');
-  const draftAO2=await buildDraftSheet('SF-RoomHardRevertEmpty',2);
+  const draftAO2=await buildLegacyDraftSheet('SF-RoomHardRevertEmpty',2);
   const tempItemAO2=draftAO2.items.find(it=>it.item_key==='temperature');
   await pao.locator('#itlFormBack').click();await pao.locator('[data-insp-row="'+draftAO2.id+'"]').waitFor();
   await pao.locator('[data-insp-continue="'+draftAO2.id+'"]').click();await pao.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pao);
@@ -1580,11 +1586,11 @@ async function main(){
   // 的if(formVisible(f))没有配对的else,这一格本就不该有任何用户可见动作,只需证明"没有把机柜视图覆盖
   // 成表单")。
   const draftAP=await buildDraftSheet('SF-RoomLeaveOk',2);
-  const airconAP=draftAP.items.find(it=>it.item_key==='aircon');
+  const waterAP=draftAP.items.find(it=>it.item_key==='water');
   const cap1=await browser.newContext();await cap1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pap=await cap1.newPage();const errorsAP=[];pap.on('pageerror',e=>errorsAP.push(e.message));
   await pap.goto(f.base+'/IT_Ledger.html#inspections');await pap.locator('[data-insp-row="'+draftAP.id+'"]').waitFor();
   await pap.locator('[data-insp-continue="'+draftAP.id+'"]').click();await pap.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pap);
-  await pap.locator('[data-seg-ok="'+airconAP.id+'"]').click(); // 排队冲刷（真实1.5秒防抖）
+  await pap.locator('[data-seg-ok="'+waterAP.id+'"]').click(); // 排队冲刷（真实1.5秒防抖）
   const settledBeforeAP=await pap.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   await pap.evaluate(()=>{location.hash='racks';}); // 触发onLeave(left=true),冲刷任务照常自然成功
   await pap.locator('.itl-rack-workspace').waitFor();
@@ -1593,7 +1599,7 @@ async function main(){
   check('AP(矩阵①):没有把填写页画回来(无#itlFormActionbar)',await pap.locator('#itlFormActionbar').count()===0);
   check('AP(矩阵①):没有误报"有修改未保存"或其它notice',await pap.locator('#itlNotice:not([hidden])').count()===0);
   const serverAP=await getSheet(draftAP.id,2);
-  check('AP(矩阵①):冲刷确实真正落库(aircon=ok)',serverAP.body.items.find(it=>it.id===airconAP.id).result==='ok',serverAP.body);
+  check('AP(矩阵①):冲刷确实真正落库(water=ok)',serverAP.body.items.find(it=>it.id===waterAP.id).result==='ok',serverAP.body);
   check('浏览器无未捕获异常(AP)',errorsAP.length===0);
   await cap1.close();
 
@@ -1602,30 +1608,30 @@ async function main(){
   // 价值的断言——非409网络异常导致A的冲刷失败后，working仍保留A的本地值（不被清空/回滚）；解锁后可以
   // 正常编辑B，随后的保存把A（此前失败保留的值）与B一起带上、落库。
   const draftAQ=await buildDraftSheet('SF-RoomFlightNet',2);
-  const airconAQ=draftAQ.items.find(it=>it.item_key==='aircon');
-  const upsAQ=draftAQ.items.find(it=>it.item_key==='ups');
+  const waterAQ=draftAQ.items.find(it=>it.item_key==='water');
+  const cleanAQ=draftAQ.items.find(it=>it.item_key==='cleanliness');
   const caq1=await browser.newContext();await caq1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paq=await caq1.newPage();const errorsAQ=[];paq.on('pageerror',e=>errorsAQ.push(e.message));
   const putBodiesAQ=[];paq.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftAQ.id)){try{putBodiesAQ.push(r.postDataJSON());}catch(_e){putBodiesAQ.push(null);}}});
   await paq.goto(f.base+'/IT_Ledger.html#inspections');await paq.locator('[data-insp-row="'+draftAQ.id+'"]').waitFor();
   await paq.locator('[data-insp-continue="'+draftAQ.id+'"]').click();await paq.locator('#itlFormActionbar').waitFor();await expandInspectionForm(paq);
   await paq.route('**/api/it-assets/inspections/sheets/'+draftAQ.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
-  await paq.locator('[data-seg-ok="'+airconAQ.id+'"]').click(); // A：排队冲刷（真实1.5秒防抖，会被网络异常中断)
+  await paq.locator('[data-seg-ok="'+waterAQ.id+'"]').click(); // A：排队冲刷（真实1.5秒防抖，会被网络异常中断)
   const settledBeforeAQ=await paq.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   await paq.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeAQ);
-  check('AQ:非409网络异常导致冲刷失败后,working仍保留A的本地值(aircon=ok,未被清空/回滚)',await paq.locator('[data-seg-ok="'+airconAQ.id+'"].on-ok').count()===1);
+  check('AQ:非409网络异常导致冲刷失败后,working仍保留A的本地值(water=ok,未被清空/回滚)',await paq.locator('[data-seg-ok="'+waterAQ.id+'"].on-ok').count()===1);
   const noticeTextAQ=await paq.locator('#itlNotice').innerText();
   check('AQ:notice提示保存失败(不是版本冲突文案)',noticeTextAQ.includes('巡检单保存失败'),noticeTextAQ);
   const serverAQ=await getSheet(draftAQ.id,2);
-  check('AQ:服务端未落库这次失败的PUT(aircon仍是初始null)',serverAQ.body.items.find(it=>it.id===airconAQ.id).result===null,serverAQ.body);
-  check('AQ:落定解锁后A的按钮已恢复可点(不再disabled)',await paq.locator('[data-seg-ok="'+airconAQ.id+'"][disabled]').count()===0);
+  check('AQ:服务端未落库这次失败的PUT(water仍是初始null)',serverAQ.body.items.find(it=>it.id===waterAQ.id).result===null,serverAQ.body);
+  check('AQ:落定解锁后A的按钮已恢复可点(不再disabled)',await paq.locator('[data-seg-ok="'+waterAQ.id+'"][disabled]').count()===0);
   await paq.unroute('**/api/it-assets/inspections/sheets/'+draftAQ.id); // 解除失败路由，之后的保存应该能正常成功
   const settledBeforeRetryAQ=await paq.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await paq.locator('[data-seg-bad="'+upsAQ.id+'"]').click(); // 解锁后正常编辑B
+  await paq.locator('[data-seg-bad="'+cleanAQ.id+'"]').click(); // 解锁后正常编辑B
   await paq.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeRetryAQ);
   const lastPutAQ=putBodiesAQ[putBodiesAQ.length-1];
-  check('AQ:解锁后编辑B的保存请求体同时带上A(此前失败保留的本地值)与B两项',lastPutAQ.items.some(it=>it.id===airconAQ.id&&it.result==='ok')&&lastPutAQ.items.some(it=>it.id===upsAQ.id&&it.result==='bad'),lastPutAQ);
+  check('AQ:解锁后编辑B的保存请求体同时带上A(此前失败保留的本地值)与B两项',lastPutAQ.items.some(it=>it.id===waterAQ.id&&it.result==='ok')&&lastPutAQ.items.some(it=>it.id===cleanAQ.id&&it.result==='bad'),lastPutAQ);
   const finalGetAQ=await getSheet(draftAQ.id,2);
-  check('AQ:最终服务端落库了A与B两项',finalGetAQ.body.items.find(it=>it.id===airconAQ.id).result==='ok'&&finalGetAQ.body.items.find(it=>it.id===upsAQ.id).result==='bad',finalGetAQ.body.items);
+  check('AQ:最终服务端落库了A与B两项',finalGetAQ.body.items.find(it=>it.id===waterAQ.id).result==='ok'&&finalGetAQ.body.items.find(it=>it.id===cleanAQ.id).result==='bad',finalGetAQ.body.items);
   check('浏览器无未捕获异常(AQ)',errorsAQ.length===0);
   await caq1.close();
 
@@ -1711,13 +1717,13 @@ async function main(){
   // C5a-e H5：备注框锁定时改用 readonly（保留焦点/光标），不再是 disabled——断言随之改成查 readonly
   // 属性（原"已disabled"断言改写，见交付报告"原断言→新断言"清单）。
   check('AT(G5=A′,原T-H3"备注输入框已disabled"改写):提交在途期间备注输入框已readonly',await pat.locator('#itlFormRemark[readonly]').count()===1);
-  const airconAT=putAT.body.items.find(it=>it.item_key==='aircon');
-  check('AT(T-H3):提交在途期间检查项开关按钮已disabled',await pat.locator('[data-seg-ok="'+airconAT.id+'"][disabled]').count()===1);
+  const waterAT=putAT.body.items.find(it=>it.item_key==='water');
+  check('AT(T-H3):提交在途期间检查项开关按钮已disabled',await pat.locator('[data-seg-ok="'+waterAT.id+'"][disabled]').count()===1);
   // 绕开readonly，验证监听器内部isLocked(f)判据本身：改备注+切开关都应该被拒绝，working零变化。
   await pat.evaluate(()=>{document.querySelector('#itlFormRemark').readOnly=false;});
   await pat.locator('#itlFormRemark').fill('提交在途期间的非法编辑');
-  await pat.evaluate(id=>{const btn=document.querySelector('[data-seg-bad="'+id+'"]');btn.disabled=false;btn.click();},airconAT.id);
-  check('AT(T-H3):提交在途期间的开关点击被拒绝,working零变化(仍是ok,不是bad,同步渲染层面立即可见)',await pat.locator('[data-seg-ok="'+airconAT.id+'"].on-ok').count()===1&&await pat.locator('[data-seg-bad="'+airconAT.id+'"].on-bad').count()===0);
+  await pat.evaluate(id=>{const btn=document.querySelector('[data-seg-bad="'+id+'"]');btn.disabled=false;btn.click();},waterAT.id);
+  check('AT(T-H3):提交在途期间的开关点击被拒绝,working零变化(仍是ok,不是bad,同步渲染层面立即可见)',await pat.locator('[data-seg-ok="'+waterAT.id+'"].on-ok').count()===1&&await pat.locator('[data-seg-bad="'+waterAT.id+'"].on-bad').count()===0);
   releaseGateAT(); // 放行：提交失败(网络异常,不是409)
   await pat.locator('#itlNotice:not([hidden])').waitFor();
   check('AT(T-H3):提交失败后解锁,仍停在填写页(未被导航离开)',await pat.locator('#itlFormActionbar').count()===1);
@@ -1785,7 +1791,7 @@ async function main(){
   await caw.close();
 
   // AX) H5必做用例（数字读数框，简化版）：挂起期间焦点保留+readonly；放行后readonly解除、焦点仍在。
-  const draftAX=await buildDraftSheet('SF-RoomFocusNumber',2);
+  const draftAX=await buildLegacyDraftSheet('SF-RoomFocusNumber',2); // C0b：数字输入框只在 v1 旧单里有，用补了温湿度行的旧单覆盖
   const numberItemAX=draftAX.items.find(it=>it.item_key==='temperature');
   const cax2=await browser.newContext();await cax2.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pax2=await cax2.newPage();const errorsAX=[];pax2.on('pageerror',e=>errorsAX.push(e.message));
   await pax2.goto(f.base+'/IT_Ledger.html#inspections');await pax2.locator('[data-insp-row="'+draftAX.id+'"]').waitFor();
@@ -1824,8 +1830,8 @@ async function main(){
   await pay2.clock.fastForward(1600);
   await heldAY.entered; // PUT已发出、被挂住
   // 另一个操作者趁这次PUT还没到服务器，先用当前version改了一项检查项，把版本推高——放行后这次PUT撞409。
-  const upsAY=draftAY.items.find(it=>it.item_key==='ups');
-  const otherPutAY=await f.api('PUT','/inspections/sheets/'+draftAY.id,{expected_version:draftAY.version,items:[{id:upsAY.id,result:'bad',number_value:null,note:'别处已修改'}]},2);
+  const cleanAY=draftAY.items.find(it=>it.item_key==='cleanliness');
+  const otherPutAY=await f.api('PUT','/inspections/sheets/'+draftAY.id,{expected_version:draftAY.version,items:[{id:cleanAY.id,result:'bad',number_value:null,note:'别处已修改'}]},2);
   assert.equal(otherPutAY.status,200,'AY other put '+JSON.stringify(otherPutAY.body));
   const settledBeforeAY=await pay2.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   heldAY.release(); // 放行：这次PUT带的还是旧version,会409→handleConflict→needsFullRender→整表重绘
@@ -1842,7 +1848,7 @@ async function main(){
   // 的修改确实丢了，这是 G5=A′用户裁定接受的已知代价）；常驻提示列出未保存内容原文；重开不会带出第二次
   // PUT（旧版"复用会话→再保存一次"这条路径已经不存在）。
   const draftAU=await buildDraftSheet('SF-RoomLeaveKeep',2);
-  const airconAU=draftAU.items.find(it=>it.item_key==='aircon');
+  const waterAU=draftAU.items.find(it=>it.item_key==='water');
   const cau1=await browser.newContext();await cau1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau=await cau1.newPage();const errorsAU=[];pau.on('pageerror',e=>errorsAU.push(e.message));
   let getCountAU=0,putCountAU=0;pau.on('request',r=>{if(r.url().endsWith('/inspections/sheets/'+draftAU.id)){if(r.method()==='GET')getCountAU++;if(r.method()==='PUT')putCountAU++;}});
   await pau.goto(f.base+'/IT_Ledger.html#inspections');await pau.locator('[data-insp-row="'+draftAU.id+'"]').waitFor();
@@ -1850,23 +1856,23 @@ async function main(){
   // 让这张单的PUT恒失败（网络异常）——离开时排的"离开冲刷"会撞这条路由。
   await pau.route('**/api/it-assets/inspections/sheets/'+draftAU.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   const baseSettledAU=await pau.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pau.locator('[data-seg-ok="'+airconAU.id+'"]').click(); // 制造脏数据（真实1.5秒防抖，但下一步会立即离开，用不到它）
+  await pau.locator('[data-seg-ok="'+waterAU.id+'"]').click(); // 制造脏数据（真实1.5秒防抖，但下一步会立即离开，用不到它）
   await pau.locator('#itlFormBack').click(); // 触发leaveForm——会话同步销毁+排一次离开冲刷，立即回到列表(不等冲刷落定)
   await pau.locator('[data-insp-row]').first().waitFor();
   await pau.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAU); // 等离开冲刷真的落定(失败)
   const afterLeaveFailAU=await getSheet(draftAU.id,2);
-  check('AU(M6):离开时冲刷失败,服务端未落库(aircon仍是初始null)',afterLeaveFailAU.body.items.find(it=>it.id===airconAU.id).result===null,afterLeaveFailAU.body);
+  check('AU(M6):离开时冲刷失败,服务端未落库(water仍是初始null)',afterLeaveFailAU.body.items.find(it=>it.id===waterAU.id).result===null,afterLeaveFailAU.body);
   const noticeTextAU=await pau.locator('#itlNotice').innerText();
-  check('AU(H2):列表尚未就绪时一次性提示保留完整原文',noticeTextAU.includes('巡检单〈'+sheetLabelStr(draftAU)+'〉有内容未能保存：')&&noticeTextAU.includes('空调运行：正常')&&!noticeTextAU.includes('详见巡检台账顶部'),noticeTextAU);
+  check('AU(H2):列表尚未就绪时一次性提示保留完整原文',noticeTextAU.includes('巡检单〈'+sheetLabelStr(draftAU)+'〉有内容未能保存：')&&noticeTextAU.includes('漏水与地面：正常')&&!noticeTextAU.includes('详见巡检台账顶部'),noticeTextAU);
   const unsavedListAU=await pau.locator('#itlUnsavedList [data-unsaved-sheet="'+draftAU.id+'"]').innerText();
-  check('AU(M6，原S-H1"重开直接复用会话"改写，N-L6迁到常驻条):常驻条含机房日期标签+"离开时有修改未能保存"+未保存内容原文"空调运行：正常"',unsavedListAU.includes(sheetLabelStr(draftAU))&&unsavedListAU.includes('离开时有修改未能保存')&&unsavedListAU.includes('空调运行：正常'),unsavedListAU);
+  check('AU(M6，原S-H1"重开直接复用会话"改写，N-L6迁到常驻条):常驻条含机房日期标签+"离开时有修改未能保存"+未保存内容原文"漏水与地面：正常"',unsavedListAU.includes(sheetLabelStr(draftAU))&&unsavedListAU.includes('离开时有修改未能保存')&&unsavedListAU.includes('漏水与地面：正常'),unsavedListAU);
   check('AU(M3，C5a-f/N-M3)：网络异常的原因映射成短语"网络异常"，不透传共享层原始message，也不含诱导刷新的"重新打开页面"（N-L6迁到常驻条)',unsavedListAU.includes('原因：网络异常）')&&!unsavedListAU.includes('重新打开页面'),unsavedListAU);
   await pau.unroute('**/api/it-assets/inspections/sheets/'+draftAU.id); // 解除失败路由
   const getCountBeforeReopenAU=getCountAU;
   await pau.locator('[data-insp-continue="'+draftAU.id+'"]').click(); // 重开同一张单——不再有复用分支，一律走全新GET
   await pau.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau);
   check('AU(M6):重开确实发起了一次新的GET(不是复用会话)',getCountAU===getCountBeforeReopenAU+1,{getCountAU,getCountBeforeReopenAU});
-  check('AU(M6，原"本地未保存的修改仍显示"改写):重开后看到的是服务器旧值(aircon未被标记为正常)——本地未保存的修改确实丢了(G5=A′的已知代价)',await pau.locator('[data-seg-ok="'+airconAU.id+'"].on-ok').count()===0);
+  check('AU(M6，原"本地未保存的修改仍显示"改写):重开后看到的是服务器旧值(water未被标记为正常)——本地未保存的修改确实丢了(G5=A′的已知代价)',await pau.locator('[data-seg-ok="'+waterAU.id+'"].on-ok').count()===0);
   check('AU(M6):全程只有离开冲刷那一次PUT,重开没有带出第二次PUT',putCountAU===1,putCountAU);
   check('浏览器无未捕获异常(AU)',errorsAU.length===0);
   await cau1.close();
@@ -1874,20 +1880,20 @@ async function main(){
   // AU2) M6：入口=返回列表→继续填写；结局=离开冲刷成功——重开看到服务器新值（重开永远走全新GET，不
   // 可能读到比这次冲刷更旧的值，"版本号为冲刷后版本"由此结构性保证，不需要额外读取客户端内部状态）。
   const draftAU2=await buildDraftSheet('SF-RoomLeaveSaveOk',2);
-  const airconAU2=draftAU2.items.find(it=>it.item_key==='aircon');
+  const waterAU2=draftAU2.items.find(it=>it.item_key==='water');
   const cau2=await browser.newContext();await cau2.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau2=await cau2.newPage();const errorsAU2=[];pau2.on('pageerror',e=>errorsAU2.push(e.message));
   await pau2.goto(f.base+'/IT_Ledger.html#inspections');await pau2.locator('[data-insp-row="'+draftAU2.id+'"]').waitFor();
   await pau2.locator('[data-insp-continue="'+draftAU2.id+'"]').click();await pau2.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau2);
   const baseSettledAU2=await pau2.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pau2.locator('[data-seg-ok="'+airconAU2.id+'"]').click();
+  await pau2.locator('[data-seg-ok="'+waterAU2.id+'"]').click();
   await pau2.locator('#itlFormBack').click();
   await pau2.locator('[data-insp-row]').first().waitFor();
   await pau2.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAU2);
   const serverAfterAU2=await getSheet(draftAU2.id,2);
-  check('AU2(M6):离开冲刷成功,服务端已落库(aircon=ok)',serverAfterAU2.body.items.find(it=>it.id===airconAU2.id).result==='ok',serverAfterAU2.body);
+  check('AU2(M6):离开冲刷成功,服务端已落库(water=ok)',serverAfterAU2.body.items.find(it=>it.id===waterAU2.id).result==='ok',serverAfterAU2.body);
   await pau2.locator('[data-insp-continue="'+draftAU2.id+'"]').click();
   await pau2.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau2);
-  check('AU2(M6):重开看到服务器新值(开关显示为正常)',await pau2.locator('[data-seg-ok="'+airconAU2.id+'"].on-ok').count()===1);
+  check('AU2(M6):重开看到服务器新值(开关显示为正常)',await pau2.locator('[data-seg-ok="'+waterAU2.id+'"].on-ok').count()===1);
   check('AU2(M6):重开没有常驻提示(离开冲刷成功,没有需要补填的内容)',await pau2.locator('#itlNotice:not([hidden])').count()===0);
   check('浏览器无未捕获异常(AU2)',errorsAU2.length===0);
   await cau2.close();
@@ -1897,13 +1903,13 @@ async function main(){
   // （同AF-3(T-M2)对DELETE-sent的判据）：holdRequestRoute 挂住的是网络层，GET在结构上不可能在release()
   // 之前发出，不依赖真实计时。
   const draftAU3=await buildDraftSheet('SF-RoomLeaveInflight',2);
-  const airconAU3=draftAU3.items.find(it=>it.item_key==='aircon');
+  const waterAU3=draftAU3.items.find(it=>it.item_key==='water');
   const cau3=await browser.newContext();await cau3.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau3=await cau3.newPage();const errorsAU3=[];pau3.on('pageerror',e=>errorsAU3.push(e.message));
   let getCountAU3=0;pau3.on('request',r=>{if(r.method()==='GET'&&r.url().endsWith('/inspections/sheets/'+draftAU3.id))getCountAU3++;});
   await pau3.goto(f.base+'/IT_Ledger.html#inspections');await pau3.locator('[data-insp-row="'+draftAU3.id+'"]').waitFor();
   await pau3.locator('[data-insp-continue="'+draftAU3.id+'"]').click();await pau3.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau3);
   const heldAU3=holdRequestRoute(pau3,'**/api/it-assets/inspections/sheets/'+draftAU3.id,'PUT');
-  await pau3.locator('[data-seg-ok="'+airconAU3.id+'"]').click(); // 制造脏数据
+  await pau3.locator('[data-seg-ok="'+waterAU3.id+'"]').click(); // 制造脏数据
   await pau3.evaluate(()=>{location.hash='racks';}); // 触发onLeave→leaveForm：同步销毁会话+排一次离开冲刷
   await pau3.locator('.itl-rack-workspace').waitFor();
   await heldAU3.entered; // 等离开冲刷真的发出了这次PUT（此刻还没放行）
@@ -1915,7 +1921,7 @@ async function main(){
   heldAU3.release(); // 放行：离开冲刷这次PUT成功
   await pau3.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau3);
   check('AU3(M6):放行后GET才真正发出(队列落定之后)',getCountAU3===getCountBeforeReopenAU3+1,{getCountAU3});
-  check('AU3(M6):重开看到的是离开冲刷落定之后的值(aircon=正常)',await pau3.locator('[data-seg-ok="'+airconAU3.id+'"].on-ok').count()===1);
+  check('AU3(M6):重开看到的是离开冲刷落定之后的值(water=正常)',await pau3.locator('[data-seg-ok="'+waterAU3.id+'"].on-ok').count()===1);
   check('浏览器无未捕获异常(AU3)',errorsAU3.length===0);
   await cau3.close();
 
@@ -1926,7 +1932,7 @@ async function main(){
   // 冲刷过"，不是无声消失——差别在提示，不在"是否冲刷"）。
   const draftAU4A=await buildDraftSheet('SF-RoomLeaveOtherA',2);
   const draftAU4B=await buildDraftSheet('SF-RoomLeaveOtherB',2);
-  const airconAU4A=draftAU4A.items.find(it=>it.item_key==='aircon');
+  const waterAU4A=draftAU4A.items.find(it=>it.item_key==='water');
   const cau4=await browser.newContext();await cau4.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau4=await cau4.newPage();const errorsAU4=[];pau4.on('pageerror',e=>errorsAU4.push(e.message));
   await pau4.goto(f.base+'/IT_Ledger.html#inspections');await pau4.locator('[data-insp-row="'+draftAU4A.id+'"]').waitFor();
   await pau4.locator('[data-insp-continue="'+draftAU4A.id+'"]').click();await pau4.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau4);
@@ -1940,26 +1946,26 @@ async function main(){
   // setTimeout"的离开冲刷才能触发这次PUT——真正把"是否调用了leaveForm"从"是否最终冲刷"里分离出来。
   await pau4.clock.install();await pau4.clock.pauseAt(new Date());
   const baseSettledAU4=await pau4.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pau4.locator('[data-seg-ok="'+airconAU4A.id+'"]').click(); // A制造脏数据(假时钟下,不会自然触发)
+  await pau4.locator('[data-seg-ok="'+waterAU4A.id+'"]').click(); // A制造脏数据(假时钟下,不会自然触发)
   await pau4.evaluate(id=>window.ITLedger.openInspectionSheet(id),draftAU4B.id); // 直接跳到B，触发openForm→leaveForm(A)
   await pau4.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAU4,{timeout:5000}); // 等A的离开冲刷落定(失败)——L4/L5(C5a-f)：显式timeout，避免断言写错时拖到默认30秒才暴露
   await pau4.locator('.itl-sheet-title h2').waitFor(); // B也是draft带save，走的是填写页
   check('AU4(M6):打开别的单(B)后,页面确实切到了B的填写页',(await pau4.locator('.itl-sheet-title h2').innerText()).includes('SF-RoomLeaveOtherB'));
   const noticeTextAU4=await pau4.locator('#itlNotice').innerText();
-  check('AU4(H2):切到B单时A单常驻条不可达,一次性提示含A的原文',noticeTextAU4.includes('巡检单〈'+sheetLabelStr(draftAU4A)+'〉有内容未能保存：')&&noticeTextAU4.includes('空调运行：正常')&&!noticeTextAU4.includes('详见巡检台账顶部'),noticeTextAU4);
+  check('AU4(H2):切到B单时A单常驻条不可达,一次性提示含A的原文',noticeTextAU4.includes('巡检单〈'+sheetLabelStr(draftAU4A)+'〉有内容未能保存：')&&noticeTextAU4.includes('漏水与地面：正常')&&!noticeTextAU4.includes('详见巡检台账顶部'),noticeTextAU4);
   // 此刻仍在B的填写页上(#itlUnsavedList只在列表视图里)——B自己没有脏数据，先"返回巡检台账"看列表顶部
   // 的常驻条，核实A的原文（N-L6迁到常驻条，不再能从#itlNotice读到）。
   await pau4.locator('#itlFormBack').click();await pau4.locator('[data-insp-row]').first().waitFor();
   const unsavedListAU4=await pau4.locator('#itlUnsavedList [data-unsaved-sheet="'+draftAU4A.id+'"]').innerText();
-  check('AU4(M6，H2另一半修复，N-L6迁到常驻条):跳到别的单没有静默丢弃A的本地修改——离开冲刷确实尝试过(失败给常驻提示,不是无声消失)',unsavedListAU4.includes(sheetLabelStr(draftAU4A))&&unsavedListAU4.includes('离开时有修改未能保存')&&unsavedListAU4.includes('空调运行：正常'),unsavedListAU4);
+  check('AU4(M6，H2另一半修复，N-L6迁到常驻条):跳到别的单没有静默丢弃A的本地修改——离开冲刷确实尝试过(失败给常驻提示,不是无声消失)',unsavedListAU4.includes(sheetLabelStr(draftAU4A))&&unsavedListAU4.includes('离开时有修改未能保存')&&unsavedListAU4.includes('漏水与地面：正常'),unsavedListAU4);
   const serverAU4A=await getSheet(draftAU4A.id,2);
-  check('AU4(M6):A服务端确实未落库(冲刷失败,不是悄悄成功了)',serverAU4A.body.items.find(it=>it.id===airconAU4A.id).result===null,serverAU4A.body);
+  check('AU4(M6):A服务端确实未落库(冲刷失败,不是悄悄成功了)',serverAU4A.body.items.find(it=>it.id===waterAU4A.id).result===null,serverAU4A.body);
   check('浏览器无未捕获异常(AU4)',errorsAU4.length===0);
   await cau4.close();
 
   const draftAU5A=await buildDraftSheet('SF-RoomLeaveOtherOkA',2);
   const draftAU5B=await buildDraftSheet('SF-RoomLeaveOtherOkB',2);
-  const airconAU5A=draftAU5A.items.find(it=>it.item_key==='aircon');
+  const waterAU5A=draftAU5A.items.find(it=>it.item_key==='water');
   const cau5=await browser.newContext();await cau5.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau5=await cau5.newPage();const errorsAU5=[];pau5.on('pageerror',e=>errorsAU5.push(e.message));
   await pau5.goto(f.base+'/IT_Ledger.html#inspections');await pau5.locator('[data-insp-row="'+draftAU5A.id+'"]').waitFor();
   await pau5.locator('[data-insp-continue="'+draftAU5A.id+'"]').click();await pau5.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau5);
@@ -1967,27 +1973,27 @@ async function main(){
   // 的那次(由leaveForm在跳到B时排出的离开冲刷)，让mutation③测不出区别。
   await pau5.clock.install();await pau5.clock.pauseAt(new Date());
   const baseSettledAU5=await pau5.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pau5.locator('[data-seg-ok="'+airconAU5A.id+'"]').click();
+  await pau5.locator('[data-seg-ok="'+waterAU5A.id+'"]').click();
   await pau5.evaluate(id=>window.ITLedger.openInspectionSheet(id),draftAU5B.id);
   await pau5.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,baseSettledAU5,{timeout:5000}); // L4/L5(C5a-f)：同AU4，显式timeout
   await pau5.locator('.itl-sheet-title h2').waitFor();
   check('AU5(M6):跨页跳到B,页面切到了B的填写页(不残留A的内容)',(await pau5.locator('.itl-sheet-title h2').innerText()).includes('SF-RoomLeaveOtherOkB'));
   check('AU5(M6):无残留"未保存"提示(A的离开冲刷成功)',await pau5.locator('#itlNotice:not([hidden])').count()===0);
   const serverAU5A=await getSheet(draftAU5A.id,2);
-  check('AU5(M6，H2另一半修复):A的本地修改在跳走前已经成功落库(不是被静默丢弃)',serverAU5A.body.items.find(it=>it.id===airconAU5A.id).result==='ok',serverAU5A.body);
+  check('AU5(M6，H2另一半修复):A的本地修改在跳走前已经成功落库(不是被静默丢弃)',serverAU5A.body.items.find(it=>it.id===waterAU5A.id).result==='ok',serverAU5A.body);
   check('浏览器无未捕获异常(AU5)',errorsAU5.length===0);
   await cau5.close();
 
   // AU6) M6：入口=新增巡检遇已存在草稿(offerExistingDraft)；结局=离开冲刷在途时立即重开——打开前先
   // queueIdle(fetchSheetForOpen)等这张单的队列落定，不会用离开冲刷之前的旧值覆盖冲刷后的新值。
   const draftAU6=await buildDraftSheet('SF-RoomLeaveOfferDraft',2);
-  const airconAU6=draftAU6.items.find(it=>it.item_key==='aircon');
+  const waterAU6=draftAU6.items.find(it=>it.item_key==='water');
   const cau6=await browser.newContext();await cau6.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pau6=await cau6.newPage();const errorsAU6=[];pau6.on('pageerror',e=>errorsAU6.push(e.message));
   let getCountAU6=0;pau6.on('request',r=>{if(r.method()==='GET'&&r.url().endsWith('/inspections/sheets/'+draftAU6.id))getCountAU6++;});
   await pau6.goto(f.base+'/IT_Ledger.html#inspections');await pau6.locator('[data-insp-row="'+draftAU6.id+'"]').waitFor();
   await pau6.locator('[data-insp-continue="'+draftAU6.id+'"]').click();await pau6.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau6);
   const heldAU6=holdRequestRoute(pau6,'**/api/it-assets/inspections/sheets/'+draftAU6.id,'PUT');
-  await pau6.locator('[data-seg-ok="'+airconAU6.id+'"]').click(); // 制造脏数据
+  await pau6.locator('[data-seg-ok="'+waterAU6.id+'"]').click(); // 制造脏数据
   await pau6.locator('#itlFormBack').click(); // 触发leaveForm——排一次离开冲刷，立即回到列表
   await pau6.locator('[data-insp-row]').first().waitFor();
   await heldAU6.entered; // 等离开冲刷真的发出了这次PUT（此刻还没放行）
@@ -2001,7 +2007,7 @@ async function main(){
   heldAU6.release(); // 放行：离开冲刷这次PUT成功
   await pau6.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pau6);
   check('AU6(M6):放行后GET才真正发出(队列落定之后,queueIdle生效)',getCountAU6===getCountBeforeAU6+1,{getCountAU6});
-  check('AU6(M6):重开看到的是离开冲刷落定之后的值(aircon=正常)',await pau6.locator('[data-seg-ok="'+airconAU6.id+'"].on-ok').count()===1);
+  check('AU6(M6):重开看到的是离开冲刷落定之后的值(water=正常)',await pau6.locator('[data-seg-ok="'+waterAU6.id+'"].on-ok').count()===1);
   check('浏览器无未捕获异常(AU6)',errorsAU6.length===0);
   await cau6.close();
 
@@ -2011,14 +2017,14 @@ async function main(){
   // 路径也推进sequence）→ 放行A的离开冲刷→A卡住的queueIdle解除、GET终于真的发出→响应到达时应因
   // sequence已经被"新建C"推进而被判定过期丢弃，页面仍停在C，不会被拉回A。
   const draftP6A=await buildDraftSheet('SF-RoomP6A',2);
-  const airconP6A=draftP6A.items.find(it=>it.item_key==='aircon');
+  const waterP6A=draftP6A.items.find(it=>it.item_key==='water');
   await makeRoom('SF-RoomP6C');
   const cp6=await browser.newContext();await cp6.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pp6=await cp6.newPage();const errorsP6=[];pp6.on('pageerror',e=>errorsP6.push(e.message));
   let getCountP6A=0;pp6.on('request',r=>{if(r.method()==='GET'&&r.url().endsWith('/inspections/sheets/'+draftP6A.id))getCountP6A++;});
   await pp6.goto(f.base+'/IT_Ledger.html#inspections');await pp6.locator('[data-insp-row="'+draftP6A.id+'"]').waitFor();
   await pp6.locator('[data-insp-continue="'+draftP6A.id+'"]').click();await pp6.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pp6);
   const heldP6A=holdRequestRoute(pp6,'**/api/it-assets/inspections/sheets/'+draftP6A.id,'PUT');
-  await pp6.locator('[data-seg-ok="'+airconP6A.id+'"]').click(); // A制造脏数据
+  await pp6.locator('[data-seg-ok="'+waterP6A.id+'"]').click(); // A制造脏数据
   await pp6.locator('#itlFormBack').click(); // 触发leaveForm——排一次离开冲刷，立即回到列表
   await pp6.locator('[data-insp-row]').first().waitFor();
   await heldP6A.entered; // 等离开冲刷真的发出了这次PUT（此刻还没放行，A的队列非空）
@@ -2097,7 +2103,7 @@ async function main(){
     const createdAV=await fAV.api('POST','/inspections/sheets',{room_name:'SF-RoomCollectRemark'},2);
     assert.equal(createdAV.status,201,'AV create '+JSON.stringify(createdAV.body));
     const deviceItemAV=createdAV.body.items.find(it=>it.section==='device');
-    const airconAV=createdAV.body.items.find(it=>it.item_key==='aircon');
+    const waterAV=createdAV.body.items.find(it=>it.item_key==='water');
     const errorsAV=[];
     cav1=await browser.newContext();await cav1.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pav=await cav1.newPage();pav.on('pageerror',e=>errorsAV.push(e.message));
     await pav.goto(fAV.base+'/IT_Ledger.html#inspections');await pav.locator('[data-insp-row="'+createdAV.body.id+'"]').waitFor();
@@ -2112,7 +2118,7 @@ async function main(){
     check('AV(S-H4):采集完成后备注取了服务器最新值(采集期间他人改的备注)',(await pav.locator('#itlFormRemark').inputValue())==='别处写的备注(采集期间)');
     const putBodiesAV=[];pav.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+createdAV.body.id)){try{putBodiesAV.push(r.postDataJSON());}catch(_e){putBodiesAV.push(null);}}});
     const settledBeforeAV=await pav.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pav.locator('[data-seg-ok="'+airconAV.id+'"]').click(); // 顺手编辑一项，触发下一次保存
+    await pav.locator('[data-seg-ok="'+waterAV.id+'"]').click(); // 顺手编辑一项，触发下一次保存
     await pav.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeAV);
     const lastPutAV=putBodiesAV[putBodiesAV.length-1];
     check('AV(S-H4):下一次保存的请求体不含remark字段(备注本身未被本地改动,不会被当脏数据发回去覆盖)',!Object.hasOwn(lastPutAV,'remark'),lastPutAV);
@@ -2141,7 +2147,7 @@ async function main(){
     const createdAZ=await fAZ.api('POST','/inspections/sheets',{room_name:'SF-RoomCollectConflict'},2);
     assert.equal(createdAZ.status,201,'AZ create '+JSON.stringify(createdAZ.body));
     const deviceItemAZ=createdAZ.body.items.find(it=>it.section==='device');
-    const airconAZ=createdAZ.body.items.find(it=>it.item_key==='aircon');
+    const waterAZ=createdAZ.body.items.find(it=>it.item_key==='water');
     const errorsAZ=[];
     caz=await browser.newContext();await caz.addInitScript(()=>localStorage.setItem('token','fixture-2'));const paz=await caz.newPage();paz.on('pageerror',e=>errorsAZ.push(e.message));
     await paz.goto(fAZ.base+'/IT_Ledger.html#inspections');await paz.locator('[data-insp-row="'+createdAZ.body.id+'"]').waitFor();
@@ -2149,15 +2155,15 @@ async function main(){
     // 采集前的冲刷以非409失败——这是M1前提：让这张单的PUT恒失败(网络异常)，本地脏项无法通过冲刷落定，
     // 会带着dirty状态进入performCollect自己的重取。
     await paz.route('**/api/it-assets/inspections/sheets/'+createdAZ.body.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
-    await paz.locator('[data-seg-ok="'+airconAZ.id+'"]').click(); // 本地把aircon标正常(脏)
-    // 另一个操作者直接改了同一项(绕开会失败的浏览器路由，走后端API直连)——服务端此刻aircon已经是bad。
-    const otherPutAZ=await fAZ.api('PUT','/inspections/sheets/'+createdAZ.body.id,{expected_version:createdAZ.body.version,items:[{id:airconAZ.id,result:'bad',number_value:null,note:'别处已修改(采集期间)'}]},2);
+    await paz.locator('[data-seg-ok="'+waterAZ.id+'"]').click(); // 本地把water标正常(脏)
+    // 另一个操作者直接改了同一项(绕开会失败的浏览器路由，走后端API直连)——服务端此刻water已经是bad。
+    const otherPutAZ=await fAZ.api('PUT','/inspections/sheets/'+createdAZ.body.id,{expected_version:createdAZ.body.version,items:[{id:waterAZ.id,result:'bad',number_value:null,note:'别处已修改(采集期间)'}]},2);
     assert.equal(otherPutAZ.status,200,'AZ other put '+JSON.stringify(otherPutAZ.body));
     await paz.locator('[data-collect-id="'+deviceItemAZ.id+'"]').click();
     await paz.locator('#itlToast:not([hidden])').waitFor(); // 采集POST本身成功(与失败的PUT路由无关的独立端点)
     await paz.waitForFunction(id=>{const el=document.querySelector('[data-collect-id="'+id+'"]');return el&&!el.disabled;},deviceItemAZ.id,{timeout:5000}); // 等采集彻底落定解锁
-    check('AZ(M1):采集重取发现别的操作者真的改了本地正在编辑的这一项——标成真实冲突(高亮)',await paz.locator('[data-item-id="'+airconAZ.id+'"].itl-sheet-conflict').count()===1);
-    check('AZ(M1):冲突高亮的同时,本地值(正常)没有被服务器的fresh值(异常)悄悄覆盖',await paz.locator('[data-seg-ok="'+airconAZ.id+'"].on-ok').count()===1);
+    check('AZ(M1):采集重取发现别的操作者真的改了本地正在编辑的这一项——标成真实冲突(高亮)',await paz.locator('[data-item-id="'+waterAZ.id+'"].itl-sheet-conflict').count()===1);
+    check('AZ(M1):冲突高亮的同时,本地值(正常)没有被服务器的fresh值(异常)悄悄覆盖',await paz.locator('[data-seg-ok="'+waterAZ.id+'"].on-ok').count()===1);
     check('AZ(M1):提交按钮因为这条真实冲突而不可点(lastFlushOk=false)',await paz.locator('#itlFormSubmit[disabled]').count()===1);
     check('浏览器无未捕获异常(AZ)',errorsAZ.length===0);
   } finally {
@@ -2193,26 +2199,26 @@ async function main(){
   const putBB0=await f.api('PUT','/inspections/sheets/'+draftBB.id,{expected_version:draftBB.version,items:filledBB},2);
   assert.equal(putBB0.status,200,'BB initial fill put '+JSON.stringify(putBB0.body));
   await uploadAllRackFrontPhotos(draftBB.id,draftBB.scope,2);
-  const airconBB=putBB0.body.items.find(it=>it.item_key==='aircon'); // 此刻服务端是'ok'(全部正常填法)
+  const waterBB=putBB0.body.items.find(it=>it.item_key==='water'); // 此刻服务端是'ok'(全部正常填法)
   const cbb=await browser.newContext();await cbb.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pbb=await cbb.newPage();const errorsBB=[];pbb.on('pageerror',e=>errorsBB.push(e.message));
   await pbb.goto(f.base+'/IT_Ledger.html#inspections');await pbb.locator('[data-insp-row="'+draftBB.id+'"]').waitFor();
   await pbb.locator('[data-insp-continue="'+draftBB.id+'"]').click();await pbb.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbb);
   check('BB准备:进表单时字段已齐全,提交按钮此刻可点(complete=true)',await pbb.locator('#itlFormSubmit[disabled]').count()===0);
   const heldBB=holdRequestRoute(pbb,'**/api/it-assets/inspections/sheets/'+draftBB.id,'PUT');
-  await pbb.locator('[data-seg-bad="'+airconBB.id+'"]').click(); // 本地改成异常（真实1.5秒防抖）
+  await pbb.locator('[data-seg-bad="'+waterBB.id+'"]').click(); // 本地改成异常（真实1.5秒防抖）
   await heldBB.entered;
-  const otherPutBB=await f.api('PUT','/inspections/sheets/'+draftBB.id,{expected_version:putBB0.body.version,items:[{id:airconBB.id,result:'ok',number_value:null,note:null}]},2); // 别处仍改回'正常'——与本地分歧
+  const otherPutBB=await f.api('PUT','/inspections/sheets/'+draftBB.id,{expected_version:putBB0.body.version,items:[{id:waterBB.id,result:'ok',number_value:null,note:null}]},2); // 别处仍改回'正常'——与本地分歧
   assert.equal(otherPutBB.status,200,'BB other put '+JSON.stringify(otherPutBB.body));
   const settledBeforeConflictBB=await pbb.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   heldBB.release(); // 放行：这次PUT撞409→handleConflict合并
   await pbb.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeConflictBB);
-  check('BB准备:冲突高亮已出现',await pbb.locator('[data-item-id="'+airconBB.id+'"].itl-sheet-conflict').count()===1);
+  check('BB准备:冲突高亮已出现',await pbb.locator('[data-item-id="'+waterBB.id+'"].itl-sheet-conflict').count()===1);
   check('BB准备:提交按钮因冲突不可点',await pbb.locator('#itlFormSubmit[disabled]').count()===1);
   // 把冲突项点回服务器此刻的值(正常)——working与detail重新一致，不再脏；接下来的自动保存是"空冲刷"。
   const settledBeforeReconcileBB=await pbb.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbb.locator('[data-seg-ok="'+airconBB.id+'"]').click();
+  await pbb.locator('[data-seg-ok="'+waterBB.id+'"]').click();
   await pbb.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeReconcileBB); // 空冲刷落定
-  check('BB(M5):点回服务器值后空冲刷落定,冲突高亮被清除',await pbb.locator('[data-item-id="'+airconBB.id+'"].itl-sheet-conflict').count()===0);
+  check('BB(M5):点回服务器值后空冲刷落定,冲突高亮被清除',await pbb.locator('[data-item-id="'+waterBB.id+'"].itl-sheet-conflict').count()===0);
   check('BB(M5):提交按钮恢复可点(lastFlushOk重置为true,不再被冲突残留卡住,字段仍齐全)',await pbb.locator('#itlFormSubmit[disabled]').count()===0);
   check('浏览器无未捕获异常(BB)',errorsBB.length===0);
   await cbb.close();
@@ -2220,23 +2226,23 @@ async function main(){
   // BC) M2（spec-C5a-e.md §必做1第2条，新增用例）：离开时若已经带着冲突标记(conflictIds)的项——离开
   // 冲刷的PUT请求体不应该包含这些冲突项(不用本地值覆盖对方还没被核对过的修改)，只发其余真正的脏项。
   const draftBC=await buildDraftSheet('SF-RoomLeaveExcludeConflict',2);
-  const airconBC=draftBC.items.find(it=>it.item_key==='aircon');
-  const upsBC=draftBC.items.find(it=>it.item_key==='ups');
+  const waterBC=draftBC.items.find(it=>it.item_key==='water');
+  const cleanBC=draftBC.items.find(it=>it.item_key==='cleanliness');
   const cbc=await browser.newContext();await cbc.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pbc=await cbc.newPage();const errorsBC=[];pbc.on('pageerror',e=>errorsBC.push(e.message));
   await pbc.goto(f.base+'/IT_Ledger.html#inspections');await pbc.locator('[data-insp-row="'+draftBC.id+'"]').waitFor();
   await installNoticeCounter(pbc); // M5(C5a-f)
   await pbc.locator('[data-insp-continue="'+draftBC.id+'"]').click();await pbc.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbc);
   const heldBC=holdRequestRoute(pbc,'**/api/it-assets/inspections/sheets/'+draftBC.id,'PUT');
-  await pbc.locator('[data-seg-ok="'+airconBC.id+'"]').click(); // 本地改aircon（真实1.5秒防抖）
+  await pbc.locator('[data-seg-ok="'+waterBC.id+'"]').click(); // 本地改water（真实1.5秒防抖）
   await heldBC.entered;
-  const otherPutBC=await f.api('PUT','/inspections/sheets/'+draftBC.id,{expected_version:draftBC.version,items:[{id:airconBC.id,result:'bad',number_value:null,note:'别处已改'}]},2);
+  const otherPutBC=await f.api('PUT','/inspections/sheets/'+draftBC.id,{expected_version:draftBC.version,items:[{id:waterBC.id,result:'bad',number_value:null,note:'别处已改'}]},2);
   assert.equal(otherPutBC.status,200,'BC other put '+JSON.stringify(otherPutBC.body));
   const settledBeforeConflictBC=await pbc.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  heldBC.release(); // 放行：撞409→handleConflict→aircon进conflictIds
+  heldBC.release(); // 放行：撞409→handleConflict→water进conflictIds
   await pbc.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeConflictBC);
-  check('BC准备:aircon已带冲突标记',await pbc.locator('[data-item-id="'+airconBC.id+'"].itl-sheet-conflict').count()===1);
-  // 不解决冲突，另外编辑一个不相关的项(ups)，制造"冲突项+新脏项"并存的局面，再立即离开——不给自然
-  // 1.5秒防抖机会先把它当普通冲刷发出去(普通冲刷不带excludeConflicts，会把aircon也一起带上，混淆
+  check('BC准备:water已带冲突标记',await pbc.locator('[data-item-id="'+waterBC.id+'"].itl-sheet-conflict').count()===1);
+  // 不解决冲突，另外编辑一个不相关的项(cleanliness)，制造"冲突项+新脏项"并存的局面，再立即离开——不给自然
+  // 1.5秒防抖机会先把它当普通冲刷发出去(普通冲刷不带excludeConflicts，会把water也一起带上，混淆
   // 本用例要证明的东西)。
   const putBodiesBC=[];pbc.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftBC.id)){try{putBodiesBC.push(r.postDataJSON());}catch(_e){putBodiesBC.push(null);}}});
   // 基线必须在触发leaveForm之前取（同AU/AA等既有用例的写法）——本地服务器响应很快，若在"#itlFormBack"
@@ -2246,23 +2252,23 @@ async function main(){
   // M5(C5a-f)：从这里(真正触发离开动作之前)开始数——前面为制造冲突标记走过一次handleConflict可见分支
   // 通知，不算在"离开"这一步的计数里。
   const noticeBaselineBC=await noticeCallsLength(pbc);
-  await pbc.locator('[data-seg-bad="'+upsBC.id+'"]').click();
+  await pbc.locator('[data-seg-bad="'+cleanBC.id+'"]').click();
   await pbc.locator('#itlFormBack').click(); // 触发leaveForm——立即clearTimeout+排一次离开冲刷(excludeConflicts:true)
   await pbc.locator('[data-insp-row]').first().waitFor();
   await pbc.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeLeaveBC,{timeout:5000});
   const lastPutBC=putBodiesBC[putBodiesBC.length-1];
   check('BC(M2):离开冲刷的请求体存在(确实发出了一次PUT)',!!lastPutBC,lastPutBC);
-  check('BC(M2):离开冲刷请求体不包含带冲突标记的aircon项',!!lastPutBC&&(!lastPutBC.items||!lastPutBC.items.some(it=>it.id===airconBC.id)),lastPutBC);
-  check('BC(M2):离开冲刷请求体包含真正的脏项ups(未被一并挡住)',!!lastPutBC&&!!lastPutBC.items&&lastPutBC.items.some(it=>it.id===upsBC.id&&it.result==='bad'),lastPutBC);
+  check('BC(M2):离开冲刷请求体不包含带冲突标记的water项',!!lastPutBC&&(!lastPutBC.items||!lastPutBC.items.some(it=>it.id===waterBC.id)),lastPutBC);
+  check('BC(M2):离开冲刷请求体包含真正的脏项cleanliness(未被一并挡住)',!!lastPutBC&&!!lastPutBC.items&&lastPutBC.items.some(it=>it.id===cleanBC.id&&it.result==='bad'),lastPutBC);
   const serverBC=await getSheet(draftBC.id,2);
-  check('BC(M2):服务端确认ups已落库为异常(离开冲刷确实发出且成功)',serverBC.body.items.find(it=>it.id===upsBC.id).result==='bad',serverBC.body);
-  check('BC(M2):服务端确认aircon仍是别处写的值(bad)——没有被本地冲突值(ok)覆盖回去',serverBC.body.items.find(it=>it.id===airconBC.id).result==='bad',serverBC.body);
-  // C5a-e2（必修1，用例②"冲突项+非冲突项离开"）：非冲突项(ups)保存成功了，但被排除的冲突项(aircon)
+  check('BC(M2):服务端确认cleanliness已落库为异常(离开冲刷确实发出且成功)',serverBC.body.items.find(it=>it.id===cleanBC.id).result==='bad',serverBC.body);
+  check('BC(M2):服务端确认water仍是别处写的值(bad)——没有被本地冲突值(ok)覆盖回去',serverBC.body.items.find(it=>it.id===waterBC.id).result==='bad',serverBC.body);
+  // C5a-e2（必修1，用例②"冲突项+非冲突项离开"）：非冲突项(cleanliness)保存成功了，但被排除的冲突项(water)
   // 依然没有保存——成功分支也要给常驻提示，只列被排除的那一项，不是所有脏项。
   const noticeTextBC=await pbc.locator('#itlNotice').innerText();
   check('BC(N-L6):notice是短句"有内容未能保存，详见巡检台账顶部"',noticeTextBC==='巡检单〈'+sheetLabelStr(draftBC)+'〉有内容未能保存，详见巡检台账顶部。',noticeTextBC);
   const unsavedListBC=await pbc.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBC.id+'"]').innerText();
-  check('BC(必修1，用例②，N-L6迁到常驻条+MED-3逐项原因):离开冲刷成功后常驻条只列被排除的冲突项(aircon/空调运行)与"（原因：与他人修改冲突）"',unsavedListBC.includes(sheetLabelStr(draftBC))&&unsavedListBC.includes('（原因：与他人修改冲突）')&&unsavedListBC.includes('空调运行'),unsavedListBC);
+  check('BC(必修1，用例②，N-L6迁到常驻条+MED-3逐项原因):离开冲刷成功后常驻条只列被排除的冲突项(water/漏水与地面)与"（原因：与他人修改冲突）"',unsavedListBC.includes(sheetLabelStr(draftBC))&&unsavedListBC.includes('（原因：与他人修改冲突）')&&unsavedListBC.includes('漏水与地面'),unsavedListBC);
   check('BC(M5，C5a-f新增):离开这一步的"离开失败/冲突"类提示恰好调用1次(不含前面制造冲突标记那一条)',await leaveOrConflictNoticeCount(pbc,noticeBaselineBC)===1,await pbc.evaluate(()=>window.__noticeCalls));
   check('浏览器无未捕获异常(BC)',errorsBC.length===0);
   await cbc.close();
@@ -2270,21 +2276,21 @@ async function main(){
   // BD) C5a-e2 必修1，用例①：冲突后只改冲突项本身再离开(不碰任何其它项)——过滤后没有非冲突脏数据可
   // 发，performFlush 走早退分支，零PUT；但被排除的冲突项依然没有保存，早退分支也要给常驻提示。
   const draftBD=await buildDraftSheet('SF-RoomLeaveOnlyConflict',2);
-  const airconBD=draftBD.items.find(it=>it.item_key==='aircon');
+  const waterBD=draftBD.items.find(it=>it.item_key==='water');
   const cbd=await browser.newContext();await cbd.addInitScript(()=>localStorage.setItem('token','fixture-2'));const pbd=await cbd.newPage();const errorsBD=[];pbd.on('pageerror',e=>errorsBD.push(e.message));
   await pbd.goto(f.base+'/IT_Ledger.html#inspections');await pbd.locator('[data-insp-row="'+draftBD.id+'"]').waitFor();
   await installNoticeCounter(pbd); // M5(C5a-f)
   await pbd.locator('[data-insp-continue="'+draftBD.id+'"]').click();await pbd.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbd);
   const heldBD=holdRequestRoute(pbd,'**/api/it-assets/inspections/sheets/'+draftBD.id,'PUT');
-  await pbd.locator('[data-seg-ok="'+airconBD.id+'"]').click();
+  await pbd.locator('[data-seg-ok="'+waterBD.id+'"]').click();
   await heldBD.entered;
-  const otherPutBD=await f.api('PUT','/inspections/sheets/'+draftBD.id,{expected_version:draftBD.version,items:[{id:airconBD.id,result:'bad',number_value:null,note:'别处已改'}]},2);
+  const otherPutBD=await f.api('PUT','/inspections/sheets/'+draftBD.id,{expected_version:draftBD.version,items:[{id:waterBD.id,result:'bad',number_value:null,note:'别处已改'}]},2);
   assert.equal(otherPutBD.status,200,'BD other put '+JSON.stringify(otherPutBD.body));
   const settledBeforeConflictBD=await pbd.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  heldBD.release(); // 放行：撞409→handleConflict→aircon进conflictIds，working仍是本地的'ok'
+  heldBD.release(); // 放行：撞409→handleConflict→water进conflictIds，working仍是本地的'ok'
   await pbd.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeConflictBD);
-  check('BD准备:aircon已带冲突标记',await pbd.locator('[data-item-id="'+airconBD.id+'"].itl-sheet-conflict').count()===1);
-  // 不碰任何其它项，立即离开——离开冲刷过滤后 items 为空（唯一的脏项就是被排除的aircon），走早退分支。
+  check('BD准备:water已带冲突标记',await pbd.locator('[data-item-id="'+waterBD.id+'"].itl-sheet-conflict').count()===1);
+  // 不碰任何其它项，立即离开——离开冲刷过滤后 items 为空（唯一的脏项就是被排除的water），走早退分支。
   let putCountBD=0;pbd.on('request',r=>{if(r.method()==='PUT'&&r.url().endsWith('/inspections/sheets/'+draftBD.id))putCountBD++;});
   const settledBeforeLeaveBD=await pbd.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
   const noticeBaselineBD=await noticeCallsLength(pbd); // M5(C5a-f)：从这里开始数，不含前面制造冲突的那一条
@@ -2293,12 +2299,12 @@ async function main(){
   await pbd.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeLeaveBD,{timeout:5000});
   check('BD(必修1，用例①):离开冲刷走早退分支,零PUT(唯一的脏项是被排除的冲突项,过滤后没有可发的内容)',putCountBD===0,putCountBD);
   const noticeTextBD=await pbd.locator('#itlNotice').innerText();
-  check('BD(H2):无请求的早退先于列表渲染,一次性提示含完整原文',noticeTextBD.includes('巡检单〈'+sheetLabelStr(draftBD)+'〉有内容未能保存：')&&noticeTextBD.includes('空调运行：正常')&&!noticeTextBD.includes('详见巡检台账顶部'),noticeTextBD);
+  check('BD(H2):无请求的早退先于列表渲染,一次性提示含完整原文',noticeTextBD.includes('巡检单〈'+sheetLabelStr(draftBD)+'〉有内容未能保存：')&&noticeTextBD.includes('漏水与地面：正常')&&!noticeTextBD.includes('详见巡检台账顶部'),noticeTextBD);
   const unsavedListBD=await pbd.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBD.id+'"]').innerText();
-  check('BD(必修1，用例①，N-L6迁到常驻条+MED-3逐项原因):早退分支仍给出常驻条,含被排除项原文(空调运行：正常)与"（原因：与他人修改冲突）"',unsavedListBD.includes(sheetLabelStr(draftBD))&&unsavedListBD.includes('（原因：与他人修改冲突）')&&unsavedListBD.includes('空调运行：正常'),unsavedListBD);
+  check('BD(必修1，用例①，N-L6迁到常驻条+MED-3逐项原因):早退分支仍给出常驻条,含被排除项原文(漏水与地面：正常)与"（原因：与他人修改冲突）"',unsavedListBD.includes(sheetLabelStr(draftBD))&&unsavedListBD.includes('（原因：与他人修改冲突）')&&unsavedListBD.includes('漏水与地面：正常'),unsavedListBD);
   check('BD(M5，C5a-f新增):离开这一步的"离开失败/冲突"类提示恰好调用1次',await leaveOrConflictNoticeCount(pbd,noticeBaselineBD)===1,await pbd.evaluate(()=>window.__noticeCalls));
   const serverBD=await getSheet(draftBD.id,2);
-  check('BD(必修1，用例①):服务端确认aircon仍是别处写的值(bad)——零PUT意味着完全没有尝试覆盖',serverBD.body.items.find(it=>it.id===airconBD.id).result==='bad',serverBD.body);
+  check('BD(必修1，用例①):服务端确认water仍是别处写的值(bad)——零PUT意味着完全没有尝试覆盖',serverBD.body.items.find(it=>it.id===waterBD.id).result==='bad',serverBD.body);
   check('浏览器无未捕获异常(BD)',errorsBD.length===0);
   await cbd.close();
 
@@ -2336,7 +2342,7 @@ async function main(){
   await cbe.close();
 
   // BF) H1+H2 用例①（C5a-f新增，spec-C5a-f.md）：采集+冲刷挂起→返回→冲刷中断（网络异常）→采集分
-  // 失败、成功两种；最终巡检台账顶部常驻条含原文。构造：编辑aircon(脏)→点采集(doCollect排队"冲刷+
+  // 失败、成功两种；最终巡检台账顶部常驻条含原文。构造：编辑water(脏)→点采集(doCollect排队"冲刷+
   // 采集"两个任务)→冲刷的PUT被挂住→立即"返回"(leaveForm：会话销毁+因冲刷还没落定,hasUnsavedWork仍
   // 真,再排第三个任务"离开冲刷(excludeConflicts)")→放行PUT(abort，网络异常)→冲刷任务落在已销毁会话
   // 上，notifyLeaveFlushFailure登记表+一次即时提醒→队列接着跑采集任务(按用例分支fulfill成功/abort
@@ -2346,7 +2352,7 @@ async function main(){
   // 的常驻条依然完整保留原文——H1把原文换了个不受#itlNotice覆盖影响的载体，这条用例直接证明这一点。
   async function runBF(nameSuffix,collectOutcome,collectExpectSubstr){
     const draftBF=await buildDraftSheet('SF-RoomBF'+nameSuffix,2);
-    const airconBF=draftBF.items.find(it=>it.item_key==='aircon');
+    const waterBF=draftBF.items.find(it=>it.item_key==='water');
     const deviceItemBF=draftBF.items.find(it=>it.section==='device');
     const cbf=await browser.newContext();await cbf.addInitScript(()=>localStorage.setItem('token','fixture-2'));
     const pbf=await cbf.newPage();const errorsBF=[];pbf.on('pageerror',e=>errorsBF.push(e.message));
@@ -2362,7 +2368,7 @@ async function main(){
       if(collectOutcome==='success')await route.fulfill({status:201,contentType:'application/json',body:JSON.stringify({})});
       else await route.abort('failed');
     });
-    await pbf.locator('[data-seg-ok="'+airconBF.id+'"]').click(); // 制造脏数据
+    await pbf.locator('[data-seg-ok="'+waterBF.id+'"]').click(); // 制造脏数据
     await pbf.locator('[data-collect-id="'+deviceItemBF.id+'"]').click(); // doCollect: enqueue(冲刷)+enqueue(采集)
     await enteredPutBFP; // 等冲刷的PUT真的发出、被挂住
     const settledBeforeBF=await pbf.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
@@ -2375,7 +2381,7 @@ async function main(){
     check('BF-'+nameSuffix+'(H1①):最终#itlNotice是采集这一步的结果文案("'+collectExpectSubstr+'")且带登记表指引后缀,不再是离开失败原文本身(共享槽位确实被后来的提示覆盖)',noticeTextBF.includes(collectExpectSubstr)&&noticeTextBF.includes(sheetLabelStr(draftBF))&&noticeTextBF.includes('该单另有未保存内容，见巡检台账顶部'),noticeTextBF);
     if(nameSuffix==='Fail')check('BF-Fail(N-M3新增):采集失败的原因走mapFailureReason短语,不含诱导刷新的"重新打开页面"（预筛Q5同款场景）',!noticeTextBF.includes('重新打开页面'),noticeTextBF);
     const unsavedEntryBF=await pbf.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBF.id+'"]').innerText();
-    check('BF-'+nameSuffix+'(H1①，必修):共享槽位被覆盖之后，巡检台账顶部常驻条(登记表自己的载体)仍含原文"空调运行：正常"',unsavedEntryBF.includes(sheetLabelStr(draftBF))&&unsavedEntryBF.includes('空调运行：正常'),unsavedEntryBF);
+    check('BF-'+nameSuffix+'(H1①，必修):共享槽位被覆盖之后，巡检台账顶部常驻条(登记表自己的载体)仍含原文"漏水与地面：正常"',unsavedEntryBF.includes(sheetLabelStr(draftBF))&&unsavedEntryBF.includes('漏水与地面：正常'),unsavedEntryBF);
     check('BF-'+nameSuffix+'(M5，C5a-f新增):"离开失败/冲突"类提示恰好调用1次(采集自己的提示不匹配这个过滤器,不重复计入)',await leaveOrConflictNoticeCount(pbf)===1,await pbf.evaluate(()=>window.__noticeCalls));
     check('浏览器无未捕获异常(BF-'+nameSuffix+')',errorsBF.length===0);
     await cbf.close();
@@ -2387,7 +2393,7 @@ async function main(){
   // 该单，表单顶部也有；点"知道了"后两处都消失。这条直接证明"共享层autoRefresh的notice('')清空"（H2
   // 病根之二）不再影响登记表驱动的常驻条。
   const draftBG=await buildDraftSheet('SF-RoomBG',2);
-  const airconBG=draftBG.items.find(it=>it.item_key==='aircon');
+  const waterBG=draftBG.items.find(it=>it.item_key==='water');
   const cbg=await browser.newContext();await cbg.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbg=await cbg.newPage();const errorsBG=[];pbg.on('pageerror',e=>errorsBG.push(e.message));
   await pbg.goto(f.base+'/IT_Ledger.html#inspections');await pbg.locator('[data-insp-row="'+draftBG.id+'"]').waitFor();
@@ -2395,7 +2401,7 @@ async function main(){
   await pbg.locator('[data-insp-continue="'+draftBG.id+'"]').click();await pbg.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbg);
   await pbg.route('**/api/it-assets/inspections/sheets/'+draftBG.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   const settledBeforeBG=await pbg.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbg.locator('[data-seg-ok="'+airconBG.id+'"]').click(); // 制造脏数据
+  await pbg.locator('[data-seg-ok="'+waterBG.id+'"]').click(); // 制造脏数据
   await pbg.evaluate(()=>{location.hash='racks';}); // 触发onLeave→leaveForm：会话同步销毁+排一次离开冲刷（网络异常）
   await pbg.locator('.itl-rack-workspace').waitFor();
   await pbg.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeBG,{timeout:5000}); // 等离开冲刷落定(失败)
@@ -2408,11 +2414,11 @@ async function main(){
   const noticeHiddenAfterRefreshBG=await pbg.locator('#itlNotice[hidden]').count();
   check('BG(H2)：切回巡检页签触发autoRefresh后,#itlNotice确实被共享层清空(hidden或空)',noticeHiddenAfterRefreshBG===1||noticeTextAfterRefreshBG==='',{noticeTextAfterRefreshBG,noticeHiddenAfterRefreshBG});
   const unsavedListTextBG=await pbg.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBG.id+'"]').innerText();
-  check('BG(H2，必修)：#itlNotice被autoRefresh清空之后,巡检台账顶部常驻条依然在且含原文"空调运行：正常"',unsavedListTextBG.includes(sheetLabelStr(draftBG))&&unsavedListTextBG.includes('空调运行：正常'),unsavedListTextBG);
+  check('BG(H2，必修)：#itlNotice被autoRefresh清空之后,巡检台账顶部常驻条依然在且含原文"漏水与地面：正常"',unsavedListTextBG.includes(sheetLabelStr(draftBG))&&unsavedListTextBG.includes('漏水与地面：正常'),unsavedListTextBG);
   await pbg.locator('[data-insp-continue="'+draftBG.id+'"]').click(); // 再打开该单
   await pbg.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbg);
   const unsavedFormTextBG=await pbg.locator('#itlUnsavedForm [data-unsaved-sheet="'+draftBG.id+'"]').innerText();
-  check('BG(H1+H2，必修)：重开该单的填写页顶部也显示"上次离开时未保存"的同一份原文',unsavedFormTextBG.includes(sheetLabelStr(draftBG))&&unsavedFormTextBG.includes('空调运行：正常'),unsavedFormTextBG);
+  check('BG(H1+H2，必修)：重开该单的填写页顶部也显示"上次离开时未保存"的同一份原文',unsavedFormTextBG.includes(sheetLabelStr(draftBG))&&unsavedFormTextBG.includes('漏水与地面：正常'),unsavedFormTextBG);
   await pbg.locator('#itlUnsavedForm [data-unsaved-ack="'+draftBG.id+'"]').click(); // 点"知道了"
   const unsavedFormCountAfterAckBG=await pbg.locator('#itlUnsavedForm [data-unsaved-sheet="'+draftBG.id+'"]').count();
   check('BG(H1+H2)：点"知道了"后表单顶部这处立即消失',unsavedFormCountAfterAckBG===0,unsavedFormCountAfterAckBG);
@@ -2426,14 +2432,14 @@ async function main(){
   // BH) H1+H2 用例③（C5a-f新增）：登记表非空时beforeunload也拦截——即便当前没有打开任何表单会话、
   // 写队列也已经空了(不满足旧判据 dirty||queuesBySheetId.size>0)。
   const draftBH=await buildDraftSheet('SF-RoomBH',2);
-  const airconBH=draftBH.items.find(it=>it.item_key==='aircon');
+  const waterBH=draftBH.items.find(it=>it.item_key==='water');
   const cbh=await browser.newContext();await cbh.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbh=await cbh.newPage();const errorsBH=[];pbh.on('pageerror',e=>errorsBH.push(e.message));
   await pbh.goto(f.base+'/IT_Ledger.html#inspections');await pbh.locator('[data-insp-row="'+draftBH.id+'"]').waitFor();
   await pbh.locator('[data-insp-continue="'+draftBH.id+'"]').click();await pbh.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbh);
   await pbh.route('**/api/it-assets/inspections/sheets/'+draftBH.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   const settledBeforeBH=await pbh.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbh.locator('[data-seg-ok="'+airconBH.id+'"]').click();
+  await pbh.locator('[data-seg-ok="'+waterBH.id+'"]').click();
   await pbh.locator('#itlFormBack').click(); // leaveForm：会话销毁+排离开冲刷(网络异常)
   await pbh.locator('[data-insp-row]').first().waitFor();
   await pbh.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeBH,{timeout:5000}); // 等离开冲刷落定(失败)——登记表现在非空
@@ -2454,7 +2460,7 @@ async function main(){
   // 因合并而标好）又发一条"离开时有修改未能保存"——两条几乎重复。新版handleConflict在GET落地后先判
   // f.destroyed，会话已结束就什么都不发，全部交给随后的离开冲刷统一给那一条。
   const draftBI=await buildDraftSheet('SF-RoomBI',2);
-  const airconBI=draftBI.items.find(it=>it.item_key==='aircon');
+  const waterBI=draftBI.items.find(it=>it.item_key==='water');
   const cbi=await browser.newContext();await cbi.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbi=await cbi.newPage();const errorsBI=[];pbi.on('pageerror',e=>errorsBI.push(e.message));
   await pbi.goto(f.base+'/IT_Ledger.html#inspections');await pbi.locator('[data-insp-row="'+draftBI.id+'"]').waitFor();
@@ -2468,9 +2474,9 @@ async function main(){
     if(method==='GET'){enteredGetBI();await heldGetBIP;return route.fallback();}
     return route.fallback();
   });
-  await pbi.locator('[data-seg-ok="'+airconBI.id+'"]').click(); // 排队冲刷（真实1.5秒防抖）
+  await pbi.locator('[data-seg-ok="'+waterBI.id+'"]').click(); // 排队冲刷（真实1.5秒防抖）
   await enteredPutBIP; // 冲刷的PUT已经被挡住，还没真正发给服务器
-  const otherPutBI=await f.api('PUT','/inspections/sheets/'+draftBI.id,{expected_version:draftBI.version,items:[{id:airconBI.id,result:'bad',number_value:null,note:'别处已改BI'}]},2);
+  const otherPutBI=await f.api('PUT','/inspections/sheets/'+draftBI.id,{expected_version:draftBI.version,items:[{id:waterBI.id,result:'bad',number_value:null,note:'别处已改BI'}]},2);
   assert.equal(otherPutBI.status,200,'BI other put '+JSON.stringify(otherPutBI.body));
   releasePutBI(); // 放行：这次PUT带旧version,会409→performFlush的catch调用handleConflict(f)→handleConflict自己发起重取GET
   await enteredGetBIP; // 等handleConflict的重取GET也被挡住(还没真正发给服务器)——此刻会话还没结束
@@ -2483,11 +2489,11 @@ async function main(){
   await pbi.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+2,settledBeforeBI,{timeout:5000});
   check('BI(M1)：放行后仍停在机柜视图,没有把填写页画回来',await pbi.locator('.itl-rack-workspace').count()===1&&await pbi.locator('#itlFormActionbar').count()===0);
   const noticeTextBI=await pbi.locator('#itlNotice').innerText();
-  check('BI(H2):机柜视图里常驻条不可达,离开冲刷一次性提示含完整原文',noticeTextBI.includes('巡检单〈'+sheetLabelStr(draftBI)+'〉有内容未能保存：')&&noticeTextBI.includes('空调运行：正常')&&!noticeTextBI.includes('详见巡检台账顶部'),noticeTextBI);
+  check('BI(H2):机柜视图里常驻条不可达,离开冲刷一次性提示含完整原文',noticeTextBI.includes('巡检单〈'+sheetLabelStr(draftBI)+'〉有内容未能保存：')&&noticeTextBI.includes('漏水与地面：正常')&&!noticeTextBI.includes('详见巡检台账顶部'),noticeTextBI);
   check('BI(M1，必修)：handleConflict在GET落地时发现会话已结束，没有额外发一条提示——全程"离开失败/冲突"类提示恰好调用1次(旧版是2次)',await leaveOrConflictNoticeCount(pbi)===1,await pbi.evaluate(()=>window.__noticeCalls));
   await pbi.evaluate(()=>{location.hash='inspections';}); // 切回巡检列表才能看到#itlUnsavedList这个容器（此刻还在机柜视图里）
   const unsavedEntryBI=await pbi.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBI.id+'"]').innerText();
-  check('BI(H1+H2)：巡检台账顶部常驻条也含同一份原文',unsavedEntryBI.includes(sheetLabelStr(draftBI))&&unsavedEntryBI.includes('空调运行：正常'),unsavedEntryBI);
+  check('BI(H1+H2)：巡检台账顶部常驻条也含同一份原文',unsavedEntryBI.includes(sheetLabelStr(draftBI))&&unsavedEntryBI.includes('漏水与地面：正常'),unsavedEntryBI);
   check('浏览器无未捕获异常(BI)',errorsBI.length===0);
   await cbi.close();
 
@@ -2532,45 +2538,45 @@ async function main(){
   // （不碰 X）→ 离开再失败 → 常驻条应同时含 X 与 Y 的原文，不是只剩 Y（旧版 Map.set 覆盖会让第二次
   // 登记直接冲掉第一次的 X，用户永远找不回 X 丢失的内容）。两轮用同一张单、同一条恒失败的 PUT 路由。
   const draftBK=await buildDraftSheet('SF-RoomBK',2);
-  const airconBK=draftBK.items.find(it=>it.item_key==='aircon');
-  const upsBK=draftBK.items.find(it=>it.item_key==='ups');
+  const waterBK=draftBK.items.find(it=>it.item_key==='water');
+  const cleanBK=draftBK.items.find(it=>it.item_key==='cleanliness');
   const cbk=await browser.newContext();await cbk.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbk=await cbk.newPage();const errorsBK=[];pbk.on('pageerror',e=>errorsBK.push(e.message));
   await pbk.goto(f.base+'/IT_Ledger.html#inspections');await pbk.locator('[data-insp-row="'+draftBK.id+'"]').waitFor();
   await pbk.route('**/api/it-assets/inspections/sheets/'+draftBK.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
-  // 第一轮：打开→改X(aircon=ok)→离开→PUT恒网络异常→notifyLeaveFlushFailure第一次registerUnsaved，只带X。
+  // 第一轮：打开→改X(water=ok)→离开→PUT恒网络异常→notifyLeaveFlushFailure第一次registerUnsaved，只带X。
   await pbk.locator('[data-insp-continue="'+draftBK.id+'"]').click();await pbk.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbk);
   const settledBeforeFirstBK=await pbk.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbk.locator('[data-seg-ok="'+airconBK.id+'"]').click(); // 改X
+  await pbk.locator('[data-seg-ok="'+waterBK.id+'"]').click(); // 改X
   await pbk.locator('#itlFormBack').click(); // 离开——排一次离开冲刷(会失败)
   await pbk.locator('[data-insp-row]').first().waitFor();
   await pbk.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeFirstBK,{timeout:5000});
   const unsavedAfterFirstBK=await pbk.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBK.id+'"]').innerText();
-  check('BK准备:第一轮离开失败,常驻条含X(空调运行：正常)',unsavedAfterFirstBK.includes('空调运行：正常'),unsavedAfterFirstBK);
-  // 第二轮：重开(服务端X仍是null,因为第一轮PUT从没成功过)→只改Y(ups)，全程不碰X→离开→PUT再次恒失败→
+  check('BK准备:第一轮离开失败,常驻条含X(漏水与地面：正常)',unsavedAfterFirstBK.includes('漏水与地面：正常'),unsavedAfterFirstBK);
+  // 第二轮：重开(服务端X仍是null,因为第一轮PUT从没成功过)→只改Y(cleanliness)，全程不碰X→离开→PUT再次恒失败→
   // 第二次registerUnsaved的parts只带着Y(X这次没脏，根本不在这次的dirty集合里)——合并逻辑要靠它才补回来。
   await pbk.locator('[data-insp-continue="'+draftBK.id+'"]').click();await pbk.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbk);
   const settledBeforeSecondBK=await pbk.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbk.locator('[data-seg-bad="'+upsBK.id+'"]').click(); // 改Y，不碰X
+  await pbk.locator('[data-seg-bad="'+cleanBK.id+'"]').click(); // 改Y，不碰X
   await pbk.locator('#itlFormBack').click();
   await pbk.locator('[data-insp-row]').first().waitFor();
   await pbk.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeSecondBK,{timeout:5000});
   const unsavedAfterSecondBK=await pbk.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBK.id+'"]').innerText();
-  check('BK(第8条必修):第二轮离开失败后,常驻条同时含X(空调运行：正常)与Y(UPS 与供电：异常)——不是被覆盖只剩Y',unsavedAfterSecondBK.includes('空调运行：正常')&&unsavedAfterSecondBK.includes('UPS 与供电：异常'),unsavedAfterSecondBK);
+  check('BK(第8条必修):第二轮离开失败后,常驻条同时含X(漏水与地面：正常)与Y(卫生与杂物：异常)——不是被覆盖只剩Y',unsavedAfterSecondBK.includes('漏水与地面：正常')&&unsavedAfterSecondBK.includes('卫生与杂物：异常'),unsavedAfterSecondBK);
   // 第三轮（item A 追加，MED-3）：重开→把X从"正常"改成"异常"后再离开→PUT再次恒失败→按key合并，X这次
-  // 的新值应该"替换"掉旧值而不是并列出现两次——用 split 统计"空调运行"这个词出现的次数应恰好1次，且
-  // 内容是新值(异常)，不再是旧值(正常)。同时验证 Y(UPS) 依旧完好保留。
+  // 的新值应该"替换"掉旧值而不是并列出现两次——用 split 统计"漏水与地面"这个词出现的次数应恰好1次，且
+  // 内容是新值(异常)，不再是旧值(正常)。同时验证 Y(卫生) 依旧完好保留。
   await pbk.locator('[data-insp-continue="'+draftBK.id+'"]').click();await pbk.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbk);
   const settledBeforeThirdBK=await pbk.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbk.locator('[data-seg-bad="'+airconBK.id+'"]').click(); // 把X从"正常"改成"异常"
+  await pbk.locator('[data-seg-bad="'+waterBK.id+'"]').click(); // 把X从"正常"改成"异常"
   await pbk.locator('#itlFormBack').click();
   await pbk.locator('[data-insp-row]').first().waitFor();
   await pbk.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeThirdBK,{timeout:5000});
   const unsavedAfterThirdBK=await pbk.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBK.id+'"]').innerText();
-  const airconMentionsBK=unsavedAfterThirdBK.split('空调运行').length-1;
-  check('BK第三轮(item A必修):X出现恰好1次(不是新旧并列两次,证明按key合并新值替换旧值,不是简单拼接不去重)',airconMentionsBK===1,unsavedAfterThirdBK);
-  check('BK第三轮(item A必修):X是新值(异常),不再是旧值(正常)',unsavedAfterThirdBK.includes('空调运行：异常')&&!unsavedAfterThirdBK.includes('空调运行：正常'),unsavedAfterThirdBK);
-  check('BK第三轮(item A必修):Y(UPS)依旧保留',unsavedAfterThirdBK.includes('UPS 与供电：异常'),unsavedAfterThirdBK);
+  const waterMentionsBK=unsavedAfterThirdBK.split('漏水与地面').length-1;
+  check('BK第三轮(item A必修):X出现恰好1次(不是新旧并列两次,证明按key合并新值替换旧值,不是简单拼接不去重)',waterMentionsBK===1,unsavedAfterThirdBK);
+  check('BK第三轮(item A必修):X是新值(异常),不再是旧值(正常)',unsavedAfterThirdBK.includes('漏水与地面：异常')&&!unsavedAfterThirdBK.includes('漏水与地面：正常'),unsavedAfterThirdBK);
+  check('BK第三轮(item A必修):Y(卫生)依旧保留',unsavedAfterThirdBK.includes('卫生与杂物：异常'),unsavedAfterThirdBK);
   check('浏览器无未捕获异常(BK)',errorsBK.length===0);
   await cbk.close();
 
@@ -2611,38 +2617,38 @@ async function main(){
 
   // BT) M4：后续保存成功仍保留上次丢失的原文，并在该项旁标注新值，直到用户确认。
   const draftBT=await buildDraftSheet('SF-RoomBT',2);
-  const airconBT=draftBT.items.find(it=>it.item_key==='aircon');
-  const upsBT=draftBT.items.find(it=>it.item_key==='ups');
+  const waterBT=draftBT.items.find(it=>it.item_key==='water');
+  const cleanBT=draftBT.items.find(it=>it.item_key==='cleanliness');
   const cbt=await browser.newContext();await cbt.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbt=await cbt.newPage();const errorsBT=[];pbt.on('pageerror',e=>errorsBT.push(e.message));
   await pbt.goto(f.base+'/IT_Ledger.html#inspections');await pbt.locator('[data-insp-row="'+draftBT.id+'"]').waitFor();
   await pbt.route('**/api/it-assets/inspections/sheets/'+draftBT.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   await pbt.locator('[data-insp-continue="'+draftBT.id+'"]').click();await pbt.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbt);
   const settledBeforeFirstBT=await pbt.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbt.locator('[data-seg-ok="'+airconBT.id+'"]').click(); // X=空调，正常
-  await pbt.locator('[data-seg-bad="'+upsBT.id+'"]').click(); // Y=UPS，异常
+  await pbt.locator('[data-seg-ok="'+waterBT.id+'"]').click(); // X=漏水，正常
+  await pbt.locator('[data-seg-bad="'+cleanBT.id+'"]').click(); // Y=卫生，异常
   await pbt.locator('#itlFormBack').click();await pbt.locator('[data-insp-row]').first().waitFor();
   await pbt.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeFirstBT,{timeout:5000});
   const bannerAfterFirstBT=await pbt.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBT.id+'"]').innerText();
-  check('BT准备:第一轮离开失败,常驻条同时含X与Y(前提成立)',bannerAfterFirstBT.includes('空调运行：正常')&&bannerAfterFirstBT.includes('UPS 与供电：异常'),bannerAfterFirstBT);
+  check('BT准备:第一轮离开失败,常驻条同时含X与Y(前提成立)',bannerAfterFirstBT.includes('漏水与地面：正常')&&bannerAfterFirstBT.includes('卫生与杂物：异常'),bannerAfterFirstBT);
   await pbt.unroute('**/api/it-assets/inspections/sheets/'+draftBT.id); // 解除失败路由——第二轮真的要保存成功
   await pbt.locator('[data-insp-continue="'+draftBT.id+'"]').click();await pbt.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbt);
   const settledBeforeSecondBT=await pbt.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbt.locator('[data-seg-bad="'+airconBT.id+'"]').click(); // X改成异常，这次要真的存上
+  await pbt.locator('[data-seg-bad="'+waterBT.id+'"]').click(); // X改成异常，这次要真的存上
   await pbt.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeSecondBT,{timeout:5000});
   const serverAfterSaveBT=await getSheet(draftBT.id,2);
-  check('BT准备:X这次真的保存成功了(服务端aircon=bad)',serverAfterSaveBT.body.items.find(it=>it.id===airconBT.id).result==='bad',serverAfterSaveBT.body);
+  check('BT准备:X这次真的保存成功了(服务端water=bad)',serverAfterSaveBT.body.items.find(it=>it.id===waterBT.id).result==='bad',serverAfterSaveBT.body);
   await pbt.locator('#itlFormBack').click();await pbt.locator('[data-insp-row]').first().waitFor();
   const bannerCountAfterSaveBT=await pbt.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBT.id+'"]').count();
   const bannerTextAfterSaveBT=bannerCountAfterSaveBT?await pbt.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBT.id+'"]').innerText():'';
-  check('BT(M4)：X旧原文仍在,并标注后续保存的新值',bannerTextAfterSaveBT.includes('空调运行：正常')&&bannerTextAfterSaveBT.includes('（已被后续保存为：异常）'),bannerTextAfterSaveBT);
-  check('BT(M4)：Y(UPS)旧原文仍在,两项都等用户确认',bannerTextAfterSaveBT.includes('UPS 与供电：异常')&&bannerCountAfterSaveBT===1,bannerTextAfterSaveBT);
+  check('BT(M4)：X旧原文仍在,并标注后续保存的新值',bannerTextAfterSaveBT.includes('漏水与地面：正常')&&bannerTextAfterSaveBT.includes('（已被后续保存为：异常）'),bannerTextAfterSaveBT);
+  check('BT(M4)：Y(卫生)旧原文仍在,两项都等用户确认',bannerTextAfterSaveBT.includes('卫生与杂物：异常')&&bannerCountAfterSaveBT===1,bannerTextAfterSaveBT);
   check('浏览器无未捕获异常(BT)',errorsBT.length===0);
   await cbt.close();
 
   // W1 M2：用带账号 id 的 JWT 形状覆盖正式令牌路径；夹具服务器仍按 fixture uid 验权。
   // 两个不同 id 的令牌在同一页切换，分别直接证明渲染与 beforeunload 按账号 id 过滤。
-  const draftOwner=await buildDraftSheet('SF-RoomAccountId',2),airconOwner=draftOwner.items.find(it=>it.item_key==='aircon');
+  const draftOwner=await buildDraftSheet('SF-RoomAccountId',2),waterOwner=draftOwner.items.find(it=>it.item_key==='water');
   const jwtFor=(id,login)=>Buffer.from('{"alg":"none"}').toString('base64')+'.'+Buffer.from(JSON.stringify({id,login})).toString('base64')+'.fixture';
   const jwt2=jwtFor(2,'first'),jwt2Renewed=jwtFor(2,'renewed'),jwt3=jwtFor(3,'other');
   const cOwner=await browser.newContext();
@@ -2657,7 +2663,7 @@ async function main(){
     await pOwner.route('**/api/it-assets/inspections/sheets/'+draftOwner.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
     await pOwner.locator('[data-insp-continue="'+draftOwner.id+'"]').click();await pOwner.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pOwner);
     const beforeOwner=await pOwner.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pOwner.locator('[data-seg-ok="'+airconOwner.id+'"]').click();await pOwner.locator('#itlFormBack').click();
+    await pOwner.locator('[data-seg-ok="'+waterOwner.id+'"]').click();await pOwner.locator('#itlFormBack').click();
     await pOwner.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,beforeOwner,{timeout:5000});
     await pOwner.locator('#itlUnsavedList [data-unsaved-sheet="'+draftOwner.id+'"]').waitFor({timeout:5000});
     const pOwnerOther=await cOwner.newPage();await pOwnerOther.goto(f.base+'/IT_Ledger.html#inspections');
@@ -2668,7 +2674,7 @@ async function main(){
     check('W1-MB:账号3的beforeunload不替账号2拦截',blockedOwner===false,blockedOwner);
     await pOwnerOther.evaluate(token=>localStorage.setItem('token',token),jwt2Renewed);
     await pOwner.locator('#itlUnsavedList[data-account-id="2"] [data-unsaved-sheet="'+draftOwner.id+'"]').waitFor({timeout:5000});
-    check('W1-M2:同账号用新token登录后原文恢复', (await pOwner.locator('#itlUnsavedList [data-unsaved-sheet="'+draftOwner.id+'"]').innerText()).includes('空调运行：正常'));
+    check('W1-M2:同账号用新token登录后原文恢复', (await pOwner.locator('#itlUnsavedList [data-unsaved-sheet="'+draftOwner.id+'"]').innerText()).includes('漏水与地面：正常'));
   }finally{await cOwner.close();}
 
   // BL) N-H1（C5a-g，预筛HIGH，搬Q3进正式测试）：登记表按账号隔离——fixture-2离开失败留下条目→同一
@@ -2676,19 +2682,19 @@ async function main(){
   // 重新渲染巡检列表后，登记表条目不应该再显示(不是fixture-3自己的)，beforeunload也不该替fixture-3拦着
   // fixture-2的未保存内容。再切回fixture-2：原文应恢复显示，直到本人点"知道了"。
   const draftBL=await buildDraftSheet('SF-RoomBL',2);
-  const airconBL=draftBL.items.find(it=>it.item_key==='aircon');
+  const waterBL=draftBL.items.find(it=>it.item_key==='water');
   const cbl=await browser.newContext();await cbl.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbl=await cbl.newPage();const errorsBL=[];pbl.on('pageerror',e=>errorsBL.push(e.message));
   await pbl.goto(f.base+'/IT_Ledger.html#inspections');await pbl.locator('[data-insp-row="'+draftBL.id+'"]').waitFor();
   await pbl.route('**/api/it-assets/inspections/sheets/'+draftBL.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   await pbl.locator('[data-insp-continue="'+draftBL.id+'"]').click();await pbl.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbl);
   const settledBeforeBL=await pbl.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbl.locator('[data-seg-ok="'+airconBL.id+'"]').click();
+  await pbl.locator('[data-seg-ok="'+waterBL.id+'"]').click();
   await pbl.locator('#itlFormBack').click();
   await pbl.locator('[data-insp-row]').first().waitFor();
   await pbl.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeBL,{timeout:5000});
   const bannerBeforeSwitchBL=await pbl.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBL.id+'"]').innerText();
-  check('BL准备:fixture-2留下常驻条(换号前,前提成立)',bannerBeforeSwitchBL.includes(sheetLabelStr(draftBL))&&bannerBeforeSwitchBL.includes('空调运行：正常'),bannerBeforeSwitchBL);
+  check('BL准备:fixture-2留下常驻条(换号前,前提成立)',bannerBeforeSwitchBL.includes(sheetLabelStr(draftBL))&&bannerBeforeSwitchBL.includes('漏水与地面：正常'),bannerBeforeSwitchBL);
   const beforeunloadBeforeBL=await pbl.evaluate(()=>{let prevented=null;const l=e=>{prevented=e.defaultPrevented;};window.addEventListener('beforeunload',l);window.dispatchEvent(new Event('beforeunload',{cancelable:true}));window.removeEventListener('beforeunload',l);return prevented;});
   check('BL准备:fixture-2此刻beforeunload被拦(换号前,前提成立)',beforeunloadBeforeBL===true,beforeunloadBeforeBL);
   const settledBeforeAccountSwitchBL=await pbl.evaluate(()=>window.ITLedger.__inspLoadSettled);
@@ -2714,7 +2720,7 @@ async function main(){
   // 两种目标身份都必须零 PUT，且只读账号自己的页签不能被旧会话请求清空。
   for(const targetUid of [1,3]){
     const draftR1=await buildDraftSheet('SF-RoomR1-'+targetUid,2);
-    const airconR1=draftR1.items.find(it=>it.item_key==='aircon');
+    const waterR1=draftR1.items.find(it=>it.item_key==='water');
     const cR1=await browser.newContext();await cR1.addInitScript(()=>localStorage.setItem('token','fixture-2'));
     try{
       const pR1=await cR1.newPage();let putCountR1=0;const errorsR1=[];pR1.on('pageerror',e=>errorsR1.push(e.message));
@@ -2722,7 +2728,7 @@ async function main(){
       await pR1.locator('[data-insp-continue="'+draftR1.id+'"]').click();await pR1.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pR1);
       await pR1.clock.install();await pR1.clock.pauseAt(new Date());
       await pR1.route('**/api/it-assets/inspections/sheets/'+draftR1.id,route=>{if(route.request().method()==='PUT')putCountR1++;return route.fallback();});
-      await pR1.locator('[data-seg-ok="'+airconR1.id+'"]').click();
+      await pR1.locator('[data-seg-ok="'+waterR1.id+'"]').click();
       const pR1Other=await cR1.newPage();await pR1Other.goto(f.base+'/IT_Ledger.html#inspections');
       await pR1Other.evaluate(uid=>localStorage.setItem('token','fixture-'+uid),targetUid);
       await pR1.waitForFunction(uid=>window.ITLedger.state.level===(uid===1?'admin':'read'),targetUid,{timeout:5000});
@@ -2730,7 +2736,7 @@ async function main(){
       await pR1.clock.runFor(2000);
       const serverR1=await getSheet(draftR1.id,2);
       check('R1'+(targetUid===1?'a':'b')+'(H1):换号后旧会话零PUT',putCountR1===0,putCountR1);
-      check('R1'+(targetUid===1?'a':'b')+'(H1):旧草稿没有以新账号写库',serverR1.body.items.find(it=>it.id===airconR1.id).result===null,serverR1.body);
+      check('R1'+(targetUid===1?'a':'b')+'(H1):旧草稿没有以新账号写库',serverR1.body.items.find(it=>it.id===waterR1.id).result===null,serverR1.body);
       check('R1'+(targetUid===1?'a':'b')+'(H1):新账号没有收到旧草稿原文提示',!(await pR1.locator('#itlNotice').innerText()).includes('SF-RoomR1-'+targetUid));
       if(targetUid===3)check('R1b(H1):只读账号的巡检页签仍可见',await pR1.locator('#itlTabs').isVisible());
       check('R1'+(targetUid===1?'a':'b')+':浏览器无未捕获异常',errorsR1.length===0,errorsR1);
@@ -2741,7 +2747,7 @@ async function main(){
   // 核对从未单独被证明过（两层都在时去掉任一层仍全绿）。这里同页直接改 localStorage——同一文档不收
   // storage 事件，等价于他页已写入而事件尚未送达——计时器照常触发，只剩发请求前的核对能挡住。
   {
-    const draftH1T=await buildDraftSheet('SF-RoomH1T',2),airconH1T=draftH1T.items.find(it=>it.item_key==='aircon');
+    const draftH1T=await buildDraftSheet('SF-RoomH1T',2),waterH1T=draftH1T.items.find(it=>it.item_key==='water');
     const cH1T=await browser.newContext();await cH1T.addInitScript(()=>localStorage.setItem('token','fixture-2'));
     try{
       const pH1T=await cH1T.newPage();let putCountH1T=0;const errorsH1T=[];pH1T.on('pageerror',e=>errorsH1T.push(e.message));
@@ -2749,14 +2755,14 @@ async function main(){
       await pH1T.locator('[data-insp-continue="'+draftH1T.id+'"]').click();await pH1T.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pH1T);
       await pH1T.clock.install();await pH1T.clock.pauseAt(new Date());
       await pH1T.route('**/api/it-assets/inspections/sheets/'+draftH1T.id,route=>{if(route.request().method()==='PUT')putCountH1T++;return route.fallback();});
-      await pH1T.locator('[data-seg-ok="'+airconH1T.id+'"]').click();
+      await pH1T.locator('[data-seg-ok="'+waterH1T.id+'"]').click();
       await pH1T.evaluate(()=>localStorage.setItem('token','fixture-1'));
       const flushBefore=await pH1T.evaluate(()=>window.ITLedger.__inspFormFlushSettled||0);
       await pH1T.clock.runFor(2000);
       await pH1T.waitForFunction(b=>(window.ITLedger.__inspFormFlushSettled||0)>=b+1,flushBefore,{timeout:5000});
       const serverH1T=await getSheet(draftH1T.id,2);
       check('H1T(外审M-2):计时器冲刷在token已变而事件未达时零PUT',putCountH1T===0,putCountH1T);
-      check('H1T(外审M-2):旧草稿没有以新账号写库',serverH1T.body.items.find(it=>it.id===airconH1T.id).result===null,serverH1T.body);
+      check('H1T(外审M-2):旧草稿没有以新账号写库',serverH1T.body.items.find(it=>it.id===waterH1T.id).result===null,serverH1T.body);
       check('H1T:浏览器无未捕获异常',errorsH1T.length===0,errorsH1T);
     }finally{await cH1T.close();}
   }
@@ -2788,7 +2794,7 @@ async function main(){
   }finally{await cR1c.close();}
 
   // W1 R1d：PUT 的 409 已抵达、冲突重取 GET 尚未发出时换号，旧会话不以新身份读取或重画。
-  const draftR1d=await buildDraftSheet('SF-RoomR1d',2),airconR1d=draftR1d.items.find(it=>it.item_key==='aircon');
+  const draftR1d=await buildDraftSheet('SF-RoomR1d',2),waterR1d=draftR1d.items.find(it=>it.item_key==='water');
   const cR1d=await browser.newContext();await cR1d.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   try{
     const pR1d=await cR1d.newPage();let conflictGets=0;
@@ -2808,7 +2814,7 @@ async function main(){
       };
     },draftR1d.id);
     const beforeR1d=await pR1d.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pR1d.locator('[data-seg-ok="'+airconR1d.id+'"]').click();
+    await pR1d.locator('[data-seg-ok="'+waterR1d.id+'"]').click();
     await pR1d.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,beforeR1d,{timeout:5000});
     check('R1d(H1):换号后冲突重取零GET',conflictGets===0,conflictGets);
     check('R1d(H1):新账号没有收到旧单提示',!(await pR1d.locator('#itlNotice').innerText()).includes('SF-RoomR1d'));
@@ -2816,14 +2822,14 @@ async function main(){
   }finally{await cR1d.close();}
 
   // W1 R2：旧 PUT 已被服务端处理、响应仍挂起时换号；迟到的 401 只能记在旧账号名下。
-  const draftR2=await buildDraftSheet('SF-RoomR2',2),airconR2=draftR2.items.find(it=>it.item_key==='aircon');
+  const draftR2=await buildDraftSheet('SF-RoomR2',2),waterR2=draftR2.items.find(it=>it.item_key==='water');
   const cR2=await browser.newContext();await cR2.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   try{
     const pR2=await cR2.newPage();await pR2.goto(f.base+'/IT_Ledger.html#inspections');await pR2.locator('[data-insp-row="'+draftR2.id+'"]').waitFor();
     await pR2.locator('[data-insp-continue="'+draftR2.id+'"]').click();await pR2.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pR2);
     const heldR2=holdRoute(pR2,'**/api/it-assets/inspections/sheets/'+draftR2.id,'PUT');
     const settledR2=await pR2.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pR2.locator('[data-seg-ok="'+airconR2.id+'"]').click();await reachedWithin(heldR2.entered,'R2 PUT');
+    await pR2.locator('[data-seg-ok="'+waterR2.id+'"]').click();await reachedWithin(heldR2.entered,'R2 PUT');
     const pR2Other=await cR2.newPage();await pR2Other.goto(f.base+'/IT_Ledger.html#inspections');
     await pR2Other.evaluate(()=>localStorage.setItem('token','fixture-3'));
     await pR2.waitForFunction(()=>window.ITLedger.state.level==='read',null,{timeout:5000});
@@ -2834,7 +2840,7 @@ async function main(){
     await pR2.waitForFunction(()=>window.ITLedger.state.level==='write',null,{timeout:5000});
     await pR2.locator('#itlUnsavedList [data-unsaved-sheet="'+draftR2.id+'"]').waitFor({timeout:5000});
     const r2Banner=await pR2.locator('#itlUnsavedList [data-unsaved-sheet="'+draftR2.id+'"]').innerText();
-    check('R2(M1/M6):迟到401登记在原账号,原因是结果未能确认',r2Banner.includes('空调运行：正常')&&r2Banner.includes('登录状态已变化，结果未能确认')&&!r2Banner.includes('未能保存（操作失败）'),r2Banner);
+    check('R2(M1/M6):迟到401登记在原账号,原因是结果未能确认',r2Banner.includes('漏水与地面：正常')&&r2Banner.includes('登录状态已变化，结果未能确认')&&!r2Banner.includes('未能保存（操作失败）'),r2Banner);
   }finally{await cR2.close();}
 
   // W1 MC：采集响应晚于换号落地，等待被采集的这一台设备的完成信号，再查新账号提示。
@@ -2908,29 +2914,29 @@ async function main(){
   }finally{heldMS?.release();await cMS.close();}
 
   // W1 R3：真实 403 清空整页之后，原文必须在一次性提示里，连同共享层的权限变化原因。
-  const draftR3=await buildDraftSheet('SF-RoomR3',2),airconR3=draftR3.items.find(it=>it.item_key==='aircon');
+  const draftR3=await buildDraftSheet('SF-RoomR3',2),waterR3=draftR3.items.find(it=>it.item_key==='water');
   const cR3=await browser.newContext();await cR3.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   try{
     const pR3=await cR3.newPage();await pR3.goto(f.base+'/IT_Ledger.html#inspections');await pR3.locator('[data-insp-row="'+draftR3.id+'"]').waitFor();
     await pR3.locator('[data-insp-continue="'+draftR3.id+'"]').click();await pR3.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pR3);
     await pR3.route('**/api/it-assets/inspections/sheets/'+draftR3.id,route=>route.request().method()==='PUT'?route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({code:'LEDGER_FORBIDDEN',message:'访问权限已变化'})}):route.fallback());
     const settledR3=await pR3.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pR3.locator('[data-seg-ok="'+airconR3.id+'"]').click();
+    await pR3.locator('[data-seg-ok="'+waterR3.id+'"]').click();
     await pR3.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledR3,{timeout:5000});
     const r3Notice=await pR3.locator('#itlNotice').innerText();
-    check('R3(H2):403清页后一次性提示保留权限原因与完整原文',r3Notice.includes('访问权限已变化')&&r3Notice.includes('空调运行：正常')&&!r3Notice.includes('详见巡检台账顶部')&&!r3Notice.includes('补填'),r3Notice);
+    check('R3(H2):403清页后一次性提示保留权限原因与完整原文',r3Notice.includes('访问权限已变化')&&r3Notice.includes('漏水与地面：正常')&&!r3Notice.includes('详见巡检台账顶部')&&!r3Notice.includes('补填'),r3Notice);
     check('R3(H2):403后常驻条确实不可达,页签被隐藏',!(await pR3.locator('#itlTabs').isVisible())&&await pR3.locator('#itlUnsavedList [data-unsaved-sheet="'+draftR3.id+'"]').count()===0);
   }finally{await cR3.close();}
 
   // W1 L6/MJ：队列排空以后、下一次 GET 仍挂起时，占位必须已隐藏，不能靠后续整页重绘掩盖。
-  const draftMJ=await buildDraftSheet('SF-RoomMJ',2),airconMJ=draftMJ.items.find(it=>it.item_key==='aircon');
+  const draftMJ=await buildDraftSheet('SF-RoomMJ',2),waterMJ=draftMJ.items.find(it=>it.item_key==='water');
   const cMJ=await browser.newContext();await cMJ.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   let heldPutMJ,heldGetMJ;
   try{
     const pMJ=await cMJ.newPage();await pMJ.goto(f.base+'/IT_Ledger.html#inspections');await pMJ.locator('[data-insp-row="'+draftMJ.id+'"]').waitFor();
     await pMJ.locator('[data-insp-continue="'+draftMJ.id+'"]').click();await pMJ.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pMJ);
     heldPutMJ=holdRoute(pMJ,'**/api/it-assets/inspections/sheets/'+draftMJ.id,'PUT');
-    await pMJ.locator('[data-seg-ok="'+airconMJ.id+'"]').click();await reachedWithin(heldPutMJ.entered,'MJ PUT');
+    await pMJ.locator('[data-seg-ok="'+waterMJ.id+'"]').click();await reachedWithin(heldPutMJ.entered,'MJ PUT');
     heldGetMJ=holdRequestRoute(pMJ,'**/api/it-assets/inspections/sheets/'+draftMJ.id,'GET');
     await pMJ.locator('#itlFormBack').click();await pMJ.locator('[data-insp-row="'+draftMJ.id+'"]').waitFor();
     await pMJ.locator('[data-insp-continue="'+draftMJ.id+'"]').click();
@@ -2941,7 +2947,7 @@ async function main(){
   }finally{heldPutMJ?.release();heldGetMJ?.release();await cMJ.close();}
 
   // W1 L6/ME：旧备注失败后，只保存另一个检查项不能把旧备注误标为已经后续保存。
-  const draftME=await buildDraftSheet('SF-RoomME',2),airconME=draftME.items.find(it=>it.item_key==='aircon');
+  const draftME=await buildDraftSheet('SF-RoomME',2),waterME=draftME.items.find(it=>it.item_key==='water');
   const cME=await browser.newContext();await cME.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   try{
     const pME=await cME.newPage();await pME.goto(f.base+'/IT_Ledger.html#inspections');await pME.locator('[data-insp-row="'+draftME.id+'"]').waitFor();
@@ -2954,7 +2960,7 @@ async function main(){
     await pME.unroute('**/api/it-assets/inspections/sheets/'+draftME.id);
     await pME.locator('[data-insp-continue="'+draftME.id+'"]').click();await pME.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pME);
     const secondME=await pME.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-    await pME.locator('[data-seg-ok="'+airconME.id+'"]').click();
+    await pME.locator('[data-seg-ok="'+waterME.id+'"]').click();
     await pME.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,secondME,{timeout:5000});
     const bannerME=await pME.locator('#itlUnsavedForm [data-unsaved-sheet="'+draftME.id+'"]').innerText();
     check('ME(L6):只保存检查项后旧备注原文保留且没有误标已保存',bannerME.includes('备注：旧备注ME（原因：网络异常）')&&!bannerME.includes('备注：旧备注ME（原因：网络异常）（已被后续保存为：'),bannerME);
@@ -2999,13 +3005,13 @@ async function main(){
   // 机柜页签——占位不应该残留在机柜视图上(放到列表视图自己的容器里，切页签后列表视图的DOM整体被替换，
   // 占位自然消失，不用专门清理)。
   const draftBN=await buildDraftSheet('SF-RoomBN',2);
-  const airconBN=draftBN.items.find(it=>it.item_key==='aircon');
+  const waterBN=draftBN.items.find(it=>it.item_key==='water');
   const cbn=await browser.newContext();await cbn.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbn=await cbn.newPage();const errorsBN=[];pbn.on('pageerror',e=>errorsBN.push(e.message));
   await pbn.goto(f.base+'/IT_Ledger.html#inspections');await pbn.locator('[data-insp-row="'+draftBN.id+'"]').waitFor();
   await pbn.locator('[data-insp-continue="'+draftBN.id+'"]').click();await pbn.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbn);
   const heldBN=holdRequestRoute(pbn,'**/api/it-assets/inspections/sheets/'+draftBN.id,'PUT');
-  await pbn.locator('[data-seg-ok="'+airconBN.id+'"]').click();
+  await pbn.locator('[data-seg-ok="'+waterBN.id+'"]').click();
   await pbn.locator('#itlFormBack').click();await pbn.locator('[data-insp-row]').first().waitFor();
   await heldBN.entered;
   await pbn.locator('[data-insp-continue="'+draftBN.id+'"]').click(); // 继续填写——queueIdle等待,占位出现
@@ -3059,7 +3065,7 @@ async function main(){
   // 填写页DOM应该被同步换成加载占位——不再是原样留着、可点、点了真的发PUT。
   const draftBP_A=await buildDraftSheet('SF-RoomBPA',2);
   const draftBP_B=await buildDraftSheet('SF-RoomBPB',2);
-  const upsBP=draftBP_A.items.find(it=>it.item_key==='ups');
+  const cleanBP=draftBP_A.items.find(it=>it.item_key==='cleanliness');
   const cbp=await browser.newContext();await cbp.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbp=await cbp.newPage();const errorsBP=[];pbp.on('pageerror',e=>errorsBP.push(e.message));
   await pbp.goto(f.base+'/IT_Ledger.html#inspections');await pbp.locator('[data-insp-row="'+draftBP_A.id+'"]').waitFor();
@@ -3071,8 +3077,8 @@ async function main(){
   const stillAVisibleBP=await pbp.locator('[data-sheet-id="'+draftBP_A.id+'"]').count();
   check('BP(N-L1必修)：leaveForm(A)后A的填写页根节点已经不在DOM里(被同步换成加载占位)',stillAVisibleBP===0,stillAVisibleBP);
   check('BP(N-L1必修)：内容区显示加载占位文案"正在读取…"',(await pbp.locator('#itlContent').innerText()).includes('正在读取'));
-  const upsSelectorCountBP=await pbp.locator('[data-seg-ok="'+upsBP.id+'"]').count();
-  check('BP(N-L1必修)：原来的开关按钮选择器在当前DOM里也查不到(不只是视觉盖住，是真的被替换掉了)',upsSelectorCountBP===0,upsSelectorCountBP);
+  const cleanSelectorCountBP=await pbp.locator('[data-seg-ok="'+cleanBP.id+'"]').count();
+  check('BP(N-L1必修)：原来的开关按钮选择器在当前DOM里也查不到(不只是视觉盖住，是真的被替换掉了)',cleanSelectorCountBP===0,cleanSelectorCountBP);
   heldGetBP.release();
   await pbp.locator('[data-sheet-id="'+draftBP_B.id+'"]').waitFor({timeout:10000});
   check('BP(N-L1必修)：全程对A没有发出过任何PUT(没有发生Q6原本那种"点了真的写库"的误操作)',putsBP.length===0,putsBP);
@@ -3121,14 +3127,14 @@ async function main(){
   // (error.status===403时返回该文案)与unsavedEntryHtml的allPermission分支代码本身核对，不在此处用
   // 无法达成的真实403构造去验证（见上述平台约束）。
   const draftBQ=await buildDraftSheet('SF-RoomBQ',2);
-  const airconBQ=draftBQ.items.find(it=>it.item_key==='aircon');
+  const waterBQ=draftBQ.items.find(it=>it.item_key==='water');
   const cbq=await browser.newContext();await cbq.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbq=await cbq.newPage();const errorsBQ=[];pbq.on('pageerror',e=>errorsBQ.push(e.message));
   await pbq.goto(f.base+'/IT_Ledger.html#inspections');await pbq.locator('[data-insp-row="'+draftBQ.id+'"]').waitFor();
   await pbq.route('**/api/it-assets/inspections/sheets/'+draftBQ.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   await pbq.locator('[data-insp-continue="'+draftBQ.id+'"]').click();await pbq.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbq);
   const settledBeforeBQ=await pbq.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbq.locator('[data-seg-ok="'+airconBQ.id+'"]').click();
+  await pbq.locator('[data-seg-ok="'+waterBQ.id+'"]').click();
   await pbq.locator('#itlFormBack').click();await pbq.locator('[data-insp-row]').first().waitFor();
   await pbq.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeBQ,{timeout:5000});
   check('BQ准备:离开失败,常驻条已生成(前提成立)',await pbq.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBQ.id+'"]').count()===1);
@@ -3148,7 +3154,7 @@ async function main(){
   await pbq.locator('.itl-sheet-title h2').waitFor();
   check('BQ准备:重开确实落到只读详情(无#itlFormActionbar,前提成立)',await pbq.locator('#itlFormActionbar').count()===0);
   const bannerBQ=await pbq.locator('#itlUnsavedForm [data-unsaved-sheet="'+draftBQ.id+'"]').innerText();
-  check('BQ(N-L2必修，结构性)：只读详情页顶部也显示常驻条(renderDetailView确实调用了renderUnsavedFormBanner)，含原文"空调运行：正常"',bannerBQ.includes('空调运行：正常'),bannerBQ);
+  check('BQ(N-L2必修，结构性)：只读详情页顶部也显示常驻条(renderDetailView确实调用了renderUnsavedFormBanner)，含原文"漏水与地面：正常"',bannerBQ.includes('漏水与地面：正常'),bannerBQ);
   check('BQ(L2)：只读详情常驻条不指示用户在本页补填',!bannerBQ.includes('补填'),bannerBQ);
   await pbq.locator('#itlUnsavedForm [data-unsaved-ack="'+draftBQ.id+'"]').click();
   check('BQ(M3)：只读详情点知道了后常驻条立即消失',await pbq.locator('#itlUnsavedForm [data-unsaved-sheet="'+draftBQ.id+'"]').count()===0);
@@ -3157,14 +3163,14 @@ async function main(){
 
   // BR) N-L3（C5a-g）：单据已删除时常驻条加"（该单已删除）"且不说"重新打开该单补填"。
   const draftBR=await buildDraftSheet('SF-RoomBR',2);
-  const airconBR=draftBR.items.find(it=>it.item_key==='aircon');
+  const waterBR=draftBR.items.find(it=>it.item_key==='water');
   const cbr=await browser.newContext();await cbr.addInitScript(()=>localStorage.setItem('token','fixture-2'));
   const pbr=await cbr.newPage();const errorsBR=[];pbr.on('pageerror',e=>errorsBR.push(e.message));
   await pbr.goto(f.base+'/IT_Ledger.html#inspections');await pbr.locator('[data-insp-row="'+draftBR.id+'"]').waitFor();
   await pbr.route('**/api/it-assets/inspections/sheets/'+draftBR.id,route=>route.request().method()==='PUT'?route.abort('failed'):route.fallback());
   await pbr.locator('[data-insp-continue="'+draftBR.id+'"]').click();await pbr.locator('#itlFormActionbar').waitFor();await expandInspectionForm(pbr);
   const settledBeforeBR=await pbr.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-  await pbr.locator('[data-seg-ok="'+airconBR.id+'"]').click();
+  await pbr.locator('[data-seg-ok="'+waterBR.id+'"]').click();
   await pbr.locator('#itlFormBack').click();await pbr.locator('[data-insp-row]').first().waitFor();
   await pbr.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,settledBeforeBR,{timeout:5000});
   const bannerBeforeDeleteBR=await pbr.locator('#itlUnsavedList [data-unsaved-sheet="'+draftBR.id+'"]').innerText();
@@ -3203,7 +3209,10 @@ async function main(){
     assert.equal(createdBS.status,201,'BS create '+JSON.stringify(createdBS.body));
     const deviceItemsBS=createdBS.body.items.filter(it=>it.section==='device');
     const item1BS=deviceItemsBS.find(it=>it.target_id===dev1BS.id),item2BS=deviceItemsBS.find(it=>it.target_id===dev2BS.id),item3BS=deviceItemsBS.find(it=>it.target_id===dev3BS.id),item4BS=deviceItemsBS.find(it=>it.target_id===dev4BS.id);
-    const tempItemIdBS=createdBS.body.items.find(it=>it.item_key==='temperature').id;
+    // C0b：新单没有温度输入框；BS 组「展开设备不影响其它输入框」靠旧单（v1）里补插的温度行覆盖。直写库补行不改版本号，
+    // 设备行 id 与上面的 createdBS.body.items 不变；温度行 id 从库里取。
+    await addLegacyRoomNumbers(fBS,createdBS.body.id);
+    const tempItemIdBS=(await fBS.all("SELECT id FROM it_inspection_sheet_items WHERE sheet_id=? AND item_key='temperature'",[createdBS.body.id]))[0].id;
     const collectAsBS=async(item,sn,opts)=>{
       // L4：cpus 默认仍是普通数字；device1 专门传 XSS payload 进 cores，验证前端 esc() 自己转义（假
       // 采集器是测试替身，不经真实 collector 的 Number(...)||0 强制转换，不能靠"上游一定是数字"这个
@@ -3377,9 +3386,11 @@ async function main(){
     // Pseudo-element styles are not readable via getComputedStyle; sample the rendered fill pixel instead.
     const barFillBS=async loc=>{const bar=loc.locator('progress');await bar.scrollIntoViewIfNeeded();const value=await bar.evaluate(el=>el.value);const png=(await bar.screenshot()).toString('base64');const fill=await pbs.evaluate(async b64=>{const img=new Image();img.src='data:image/png;base64,'+b64;await img.decode();const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const x=c.getContext('2d');x.drawImage(img,0,0);const d=x.getImageData(3,Math.floor(img.height/2),1,1).data;return 'rgb('+d[0]+', '+d[1]+', '+d[2]+')';},png);return {value,fill};};
     const okBarBS=await barFillBS(okVolCellBS),lowBarBS=await barFillBS(badVolCellBS),edge10BarBS=await barFillBS(boundary10CellBS);
-    const doneColorBS=await pbs.evaluate(()=>{const el=document.createElement('span');el.style.color='var(--sem-done-dot)';document.body.appendChild(el);const c=getComputedStyle(el).color;el.remove();return c;});
+    // #200 C1a: the bar sits inside .itl-workbench where --sem-done-* is overridden (grey); the probe must be mounted in that same module container, not directly under body (body sees the global green).
+    const doneColorBS=await pbs.evaluate(()=>{const host=document.querySelector('.itl-workbench');if(!host)throw new Error('module container .itl-workbench missing');const el=document.createElement('span');el.style.color='var(--sem-done-dot)';host.appendChild(el);const c=getComputedStyle(el).color;el.remove();return c;});
     check('VB:条形图按已用比例填充(可用50%→已用50,可用5%→已用95)',okBarBS.value===50&&lowBarBS.value===95,{okBarBS,lowBarBS});
     check('VB:正常卷条形填充为系统进度色--sem-done-dot',okBarBS.fill===doneColorBS&&edge10BarBS.fill===doneColorBS,{okBarBS,edge10BarBS,doneColorBS});
+    check('VB(#200 C1a):模块内--sem-done-dot为中性灰#8a8d90(rgb字面量取自主题文件变量定义，非运行时回读)',doneColorBS==='rgb(138, 141, 144)',{doneColorBS});
     check('VB:可用<10%条形填充为--color-warning',lowBarBS.fill===warningColorBS,{lowBarBS,warningColorBS});
     check('VB:可用比例未知时不画条形',(await naCellBS.locator('progress').count())===0);
 

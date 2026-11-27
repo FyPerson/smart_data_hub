@@ -22,7 +22,7 @@
   const tabs = { all: '全部资产', racks: '机房', depot: '库房', aps: 'AP 房间', terminals: '终端与其他', software: '软件与订阅', stocktakes: '盘点', reconciles: '对账', inspections: '巡检' };
   const navGroups=[[null,['all']],['按位置',['racks','depot','aps']],['按类型',['terminals','software']],['核对作业',['stocktakes','reconciles','inspections']]];
   const errors = { VERSION_CONFLICT: '资料已被其他操作更新。已刷新列表，请关闭后重新打开，核对最新资料再提交。', INSPECTION_PHASE_CHANGED: '巡检提交状态已变化，已更新为最新状态，请重新上传。', LEDGER_FORBIDDEN: '访问权限已变化，请重新打开页面。', LEDGER_BUSY: '台账正忙，请稍后手动重试。', LEDGER_UNAVAILABLE: '台账暂不可用，请稍后重试。', SN_CONFLICT: '此序列号已经登记。', U_HEIGHT_LOCKED: '在架设备须先下架，才能修改占用高度。', RETIRE_BLOCKED_BY_DISKS: '设备仍有随装盘，请先逐盘拆出。', NO_OP_TRANSITION: '目标与当前状态相同，无需操作。' };
-  const state = { level: null, assets: [], racks: [], floors: [], tab: 'all', search: '', category: '', status: '', listScope:'all', showAssetNo:false, showOwner:false, health:{}, healthDirty:false, detailId: null, sortBy: null, sortDir: 'desc', tablePage: 1, viewContexts: {}, scrollContexts: {}, views: {}, busy: false };
+  const state = { level: null, assetsReady: false, assets: [], racks: [], floors: [], tab: 'all', search: '', category: '', status: '', listScope:'all', showAssetNo:false, showOwner:false, health:{}, healthDirty:false, detailId: null, sortBy: null, sortDir: 'desc', tablePage: 1, viewContexts: {}, scrollContexts: {}, views: {}, busy: false };
   let refreshSequence = 0, detailSequence = 0, drawerCleanupTimer, toastTimer, returnFocus, modalSubmit = null, modalBusy = false, modalStale = false, modalToken = 0;
   let lastRefreshAt = 0; const AUTO_REFRESH_MIN_MS = 10000;
   const contextKey='itl-workspace-context-v1';
@@ -56,9 +56,31 @@
     if(state.tab==='all'&&allSorter&&$('#itlTable')){const c=allSorter.getState();state.sortBy=c.sortBy;state.sortDir=c.sortDir;state.tablePage=c.page;}
     state.scrollContexts[state.tab]={y:window.scrollY,x:$('#itlContent .u-corr-table-wrap')?.scrollLeft||0};saveContext();
   }
-  function restoreContext(){
-    const c=state.scrollContexts[state.tab];cancelAnimationFrame(contextFrame);restoringContext=true;
-    contextFrame=requestAnimationFrame(()=>{if(c){window.scrollTo({top:Number.isFinite(c.y)?c.y:0,behavior:'instant'});const el=$('#itlContent .u-corr-table-wrap');if(el)el.scrollLeft=Number.isFinite(c.x)?c.x:0;}restoringContext=false;saveContext();});
+  // #200 C2 (fix 1, H-1): on the default screen the pending block can arrive after the scroll restore and push the table down; the browser's scroll
+  // anchoring then rewrites scrollY and captureContext saves the wrong value. restoredAll remembers what the last restore applied so the block can
+  // re-apply it once, right after it is painted (L.reapplyRestoredScroll). Any real user input, a tab switch or clearData voids it. Input is detected
+  // by wheel / touchstart / keydown / pointerdown in the capture phase, never by the scroll event (programmatic scrolls and anchoring fire it too).
+  let restoredAll=null;
+  ['wheel','touchstart','keydown','pointerdown'].forEach(type=>window.addEventListener(type,()=>{restoredAll=null;},{capture:true,passive:true}));
+  // Fix 2 (MED-1): only render()'s restore arms restoredAll (arm=true). detail() / closeDrawer() also call restoreContext, but at those moments the user has
+  // already acted (a row click voided restoredAll) and the layout may be block-less; re-arming there would let the block's reapply undo scroll anchoring.
+  // arm=false never touches restoredAll (neither sets nor clears it): voiding belongs to user input, setTab and clearData. The tab is read at call time too,
+  // because setTab calls closeDrawer before state.tab changes. Known limit (fix 3, LOW-C): every call starts with cancelAnimationFrame, so an arm=false call
+  // also cancels a not-yet-run restore from the previous frame, including an arm=true one; that restore is not made up for, the page falls back to the
+  // browser's own scroll anchoring, and the block is already in the page by then, so the effect is negligible.
+  function restoreContext(arm=false){
+    const tab=state.tab,c=state.scrollContexts[tab];cancelAnimationFrame(contextFrame);restoringContext=true;
+    contextFrame=requestAnimationFrame(()=>{if(c){const y=Number.isFinite(c.y)?c.y:0,x=Number.isFinite(c.x)?c.x:0;window.scrollTo({top:y,behavior:'instant'});const el=$('#itlContent .u-corr-table-wrap');if(el)el.scrollLeft=x;if(arm)restoredAll=tab==='all'&&state.tab==='all'?{y,x}:null;}restoringContext=false;saveContext();});
+  }
+  function reapplyRestoredScroll(){
+    if(!restoredAll||state.tab!=='all')return;
+    // Fix 2 (LOW-1): do nothing (and keep restoredAll) while the block is not in the page or a refresh is still in flight; the render that follows re-arms.
+    // The refresh-in-flight branch is one of two independent layers: since segment 6 F1 a late B is also dropped by the refresh-generation check (the gen check in it-ledger-pending.js) before it gets here. The P0 / P1 checks go red only when both are removed; removing this branch alone leaves the whole pending suite green, so it is defence in depth with no dedicated assertion.
+    // The block-not-in-page branch is defence in depth too, unreachable on today's paths (paint() runs before this call).
+    if(!$('#itlPending')?.isConnected||$('#itlContent').getAttribute('aria-busy')==='true')return;
+    const r=restoredAll;restoredAll=null;
+    window.scrollTo({top:r.y,behavior:'instant'});const el=$('#itlContent .u-corr-table-wrap');if(el)el.scrollLeft=r.x;
+    captureContext();
   }
   function rememberView(key,value){state.viewContexts[key]=value;saveContext();}
   const viewContext=key=>state.viewContexts[key]||{};
@@ -76,7 +98,7 @@
   function notice(message) { $('#itlNotice').textContent = message; $('#itlNotice').hidden = !message; }
   function clearData() {
     contextReady=false;contextOwner='';contextToken=null;allSorter=null;state.search='';state.category='';state.status='';state.sortBy=null;state.sortDir='desc';state.tablePage=1;state.listScope='all';state.showAssetNo=false;state.showOwner=false;state.viewContexts={};state.scrollContexts={};cancelAnimationFrame(contextFrame);restoringContext=false;try{sessionStorage.removeItem(contextKey);}catch(_){}
-    refreshSequence++; detailSequence++; state.assets = []; state.health = {}; state.healthDirty=false; state.racks = []; state.floors = [];
+    restoredAll=null; refreshSequence++; detailSequence++; state.assetsReady = false; state.assets = []; state.health = {}; state.healthDirty=false; state.racks = []; state.floors = [];
     Object.values(state.views).forEach(view => { if (view.onAccessLost) view.onAccessLost(); });
     closeModal(true); closeDrawer(); $('#itlDrawerBody').replaceChildren(); $('#itlContent').replaceChildren(); $('#itlContent').removeAttribute('aria-busy');
   }
@@ -136,7 +158,7 @@
       const [assets, racks, floors] = await Promise.all([api(), api('/racks'), api('/floors')]);
       if (seq !== refreshSequence) return;
       if(refreshToken!==getToken()){resetAccessUI('尚未获准访问');notice('登录状态已变化，请重新打开页面。');return;}
-      state.assets = assets.items; state.health = assets.health||{}; state.healthDirty=false; state.racks = racks.items; state.floors = floors.items;
+      state.assets = assets.items; state.health = assets.health||{}; state.healthDirty=false; state.racks = racks.items; state.floors = floors.items; state.assetsReady = true;
       state.expiringCount = permission.expiring_count;
       $('#itlAccess').textContent = `台账共 ${state.assets.length} 项${{ admin: '', write: ' · 可登记与维护', read: ' · 只读查阅' }[state.level]}`;
       $('#itlRegister').hidden = !canWrite(); $('#itlTabs').hidden = false; renderTabs(); render();
@@ -147,6 +169,8 @@
       if (seq !== refreshSequence) return;
       // The login changed mid-request: the cache belongs to the previous account, so drop it instead of rendering it.
       if (refreshToken !== getToken()) { resetAccessUI('尚未获准访问'); notice('登录状态已变化，请重新打开页面。'); return; }
+      // #200 C2: the cache is kept for the table, but the pending block must not be computed from it (plan v1.5 5.4).
+      state.assetsReady = false;
       notice(error.message);
       // A tab switch shows a placeholder until this refresh renders; on failure fall back to the cached view.
       if (state.level) render();
@@ -178,7 +202,7 @@
   // 不等它的返回值，视图自己的队列在后台继续发送，不阻塞本次切换。C5a-c：同页签重复点击（转换别名之后
   // 的 tab 与 state.tab 相同）不再调用 onLeave（不是"离开"，不该触发离开语义）；onLeave 本身包 try/catch
   // ——任何视图的 onLeave 抛错都只 console.warn，不挡住这次页签切换。
-  function setTab(tab) { if(tab==='inventory')tab='stocktakes';if (!Object.hasOwn(tabs, tab)) return; captureContext();closeDrawer();if(tab!==state.tab){try{state.views[state.tab]?.onLeave?.();}catch(e){console.warn('onLeave failed',e);}}state.tab = tab; history.replaceState(null, '', '#'+tab); renderTabs();
+  function setTab(tab) { if(tab==='inventory')tab='stocktakes';if (!Object.hasOwn(tabs, tab)) return; restoredAll=null;captureContext();closeDrawer();if(tab!==state.tab){try{state.views[state.tab]?.onLeave?.();}catch(e){console.warn('onLeave failed',e);}}state.tab = tab; history.replaceState(null, '', '#'+tab); renderTabs();
     // Render from cache only when no refresh is starting: the refresh renders the view itself once data arrives.
     if (autoRefresh()) $('#itlContent').innerHTML = '<div class="itl-empty">正在读取…</div>'; else render(); }
   function location(asset) {
@@ -191,7 +215,8 @@
     return [asset.custodian_name, asset.location_text].filter(Boolean).join(' · ') || (asset.status==='in_depot'?'位置待确认':(['software','subscription'].includes(asset.category)?'使用范围未填写':'位置未登记'));
   }
   const children = asset => state.assets.filter(a => a.parent_asset_id === asset.id);
-  function assetButton(asset) { return `<button type="button" class="itl-link itl-card-name" data-detail="${asset.id}">${esc(asset.name)}</button>`; }
+  // `label` (optional, #200 C3 D2) replaces the visible name; the full original name then stays in title. Without it the output is unchanged.
+  function assetButton(asset,label) { return `<button type="button" class="itl-link itl-card-name" data-detail="${asset.id}"${label===undefined?'':` title="${esc(asset.name)}"`}>${esc(label===undefined?asset.name:label)}</button>`; }
   // ── All-assets table cells (codex 50) ──
   const modelLabel = a => [a.brand, a.model].filter(Boolean).join(' ');
   const ipOf = a => a.attrs?.ip || a.attrs?.mgmt_ip || '';
@@ -206,9 +231,11 @@
   }
   // Per-category extra information: structured fields only, never parsed out of free-text notes.
   function purposeInfo(a) { return {main:a.attrs?.purpose==null?'':String(a.attrs.purpose),sub:ipOf(a)}; }
+  // The asset's display name: shared by the table's main cell and the pending block (#200 C2), so the two never drift.
+  const assetLabel = a => modelLabel(a) || nameParts(a.name).rest || '未命名资产';
   function listRow(a) {
     // A name made only of markers leaves nothing to show once they become tags; the accessible name keeps the raw name (codex 52 L-1).
-    const info = purposeInfo(a), { flags, rest } = nameParts(a.name), label = modelLabel(a) || rest || '未命名资产';
+    const info = purposeInfo(a), { flags, rest } = nameParts(a.name), label = assetLabel(a);
     return { ...a, asset_label: label, purpose_label: [info.main, info.sub].filter(Boolean).join(' '), _info: info, _flags: flags, _rest: rest };
   }
   function categoryCell(a) { const sub = subtypeLabel(a); return esc(businessTypes.label(a)) + (sub ? `<div class="itl-cell-sub">${esc(sub)}</div>` : ''); }
@@ -230,17 +257,17 @@
     Object.values(state.views).forEach(view => { if (view.actions) actions.push(...view.actions(asset)); });
     return `<details class="itl-menu"><summary aria-label="${esc(asset.name)}的操作">⋯</summary><div class="itl-menu-panel">${actions.map(a => `<button type="button" data-action="${esc(a.key)}" data-id="${asset.id}">${esc(a.label)}</button>`).join('')}</div></details>`;
   }
-  const categoryIcons={laptop:'<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',desktop:'<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/>',server:'<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/>',disk:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>',ap:'<path d="M3 9a14 14 0 0 1 18 0M6 12a9 9 0 0 1 12 0M9 15a4 4 0 0 1 6 0"/><circle cx="12" cy="19" r="1"/>',other:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',software:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m9 10-3 2 3 2m6-4 3 2-3 2"/>',subscription:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 14h4"/>'};
   // Asset card: the category is the heading so the device type is recognisable at a glance; the name stays the detail button.
-  function assetCard(asset,{rows=[],extra='',actions=''}={}) {
-    return `<article class="itl-card itl-asset-card"><div class="itl-card-top"><span class="itl-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${categoryIcons[asset.category]||categoryIcons.other}</svg></span><div class="itl-card-id"><div class="itl-card-kind">${esc(categories[asset.category]||asset.category)}${badge(asset.status)}</div>${assetButton(asset)}</div>${menu(asset)}</div>${rows.length?`<dl class="itl-card-rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||'—')}</dd>`).join('')}</dl>`:''}${extra}${actions?`<div class="itl-actions">${actions}</div>`:''}</article>`;
+  function assetCard(asset,{rows=[],extra='',actions='',label}={}) {
+    return `<article class="itl-card itl-asset-card"><div class="itl-card-top"><div class="itl-card-id"><div class="itl-card-kind">${esc(categories[asset.category]||asset.category)}${badge(asset.status)}</div>${assetButton(asset,label)}</div>${menu(asset)}</div>${rows.length?`<dl class="itl-card-rows">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||'—')}</dd>`).join('')}</dl>`:''}${extra}${actions?`<div class="itl-actions">${actions}</div>`:''}</article>`;
   }
   function renderDepot() {
     $('#itlContent').innerHTML = `<div class="itl-depot">${['in_depot','faulty','to_retire'].map(status => {
       const assets = state.assets.filter(a => a.status === status && !a.parent_asset_id);
       return `<section class="itl-lane"><h2>${statuses[status]}<span>${assets.length} 件</span></h2>${assets.length ? assets.map(asset => {
         const disks = children(asset);
-        return assetCard(asset,{rows:[['型号',[asset.brand,asset.model].filter(Boolean).join(' ')],['SN',asset.sn]],extra:disks.length ? `<details class="itl-children"><summary>随机 ${disks.length} 盘</summary><ul>${disks.map(d => `<li>盘位 ${d.slot_no} · ${assetButton(d)}</li>`).join('')}</ul></details>` : ''});
+        // #200 C3 D2: the depot card shows the name without its known leading markers (same rule as the table: nameParts), then the model, then a fixed fallback.
+        return assetCard(asset,{label:nameParts(asset.name).rest||asset.model||'未命名资产',rows:[['型号',[asset.brand,asset.model].filter(Boolean).join(' ')],['SN',asset.sn]],extra:disks.length ? `<details class="itl-children"><summary>随机 ${disks.length} 盘</summary><ul>${disks.map(d => `<li>盘位 ${d.slot_no} · ${assetButton(d)}</li>`).join('')}</ul></details>` : ''});
       }).join('') : `<div class="itl-empty">暂无${statuses[status]}设备</div>`}</section>`;
     }).join('')}</div>`;
   }
@@ -274,11 +301,21 @@
     const reason=[h.reason,h.evidence,'巡检时间：'+at].filter(Boolean).join('；');
     return '<span class="itl-health-badge itl-health-'+esc(h.kind)+'" title="'+esc(reason)+'">● '+esc(h.label)+'</span><div class="itl-health-meta">'+esc(hint)+'</div>';
   }
+  // Health wording shared by the rack view (healthMark) and the pending block (#200 C2). `info` is the exact title text the rack
+  // view has always shown; null when the asset has no conclusion (kind is empty).
+  function healthInfo(asset) {
+    const h=state.health?.[asset.id];if(!h?.kind)return null;
+    const history=h.latest_attempt&&h.latest_attempt.id!==h.source_inspection_id;
+    // The two wording pieces are computed once and exported: the pending block builds its own detail line from them instead of repeating the words.
+    const judged=h.confirmed?'运维已判断':'待运维判断',historyNote=history?'本次采集未形成新结论':'';
+    const info=[h.observed_at||'',judged,historyNote,h.reason||h.evidence||''].filter(Boolean).join(' · ');
+    return {kind:h.kind,label:h.label,history:!!history,info,judged,historyNote};
+  }
   function visibleAllColumns(){return [...allColumns,...(state.showAssetNo?[['asset_no','资产编号']]:[]),...(state.showOwner?[['owner_name','责任人']]:[])];}
   function businessOptions(selected){return '<option value="">全部类别</option>'+[...new Set(businessTypes.entries.map(e=>e.group))].map(group=>'<optgroup label="'+esc(group)+'">'+businessTypes.entries.filter(e=>e.group===group).map(e=>'<option value="'+e.key+'"'+(e.key===selected?' selected':'')+'>'+e.label+'</option>').join('')+'</optgroup>').join('');}
   function renderAll() {
     const columns=visibleAllColumns();
-    $('#itlContent').innerHTML='<div class="itl-list-scopes" role="group" aria-label="资产范围">'+[['all','全部资产'],['equipment','整机与设备'],['parts','硬盘与部件']].map(([k,l])=>'<button type="button" data-list-scope="'+k+'" aria-pressed="'+(state.listScope===k)+'">'+l+'</button>').join('')+'</div><div class="u-filter-bar itl-toolbar"><label class="itl-list-search">搜索 <input id="itlSearch" type="search" value="'+esc(state.search)+'" placeholder="名称、型号、IP、序列号、编号、责任人"></label><label>类别 <select id="itlCategory">'+businessOptions(state.category)+'</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>'+Object.entries(statuses).map(([k,v])=>'<option value="'+k+'"'+(k===state.status?' selected':'')+'>'+v+'</option>').join('')+'</select></label>'+ITLedger.recordScopeControl('active')+'<button type="button" class="u-btn-secondary" id="itlResetFilters">重置筛选</button></div><div class="itl-list-options"><span id="itlResultCount"></span><div><label><input type="checkbox" id="itlShowAssetNo"'+(state.showAssetNo?' checked':'')+'>资产编号</label><label><input type="checkbox" id="itlShowOwner"'+(state.showOwner?' checked':'')+'>责任人</label></div></div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table itl-table-compact"><thead><tr><th class="itl-sequence">序号</th>'+columns.map(([key,label])=>'<th class="u-sortable" data-sort-by="'+key+'">'+label+'<span class="u-sort-icon">⇅</span></th>').join('')+'<th>位置 / 保管人</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div></div>';
+    $('#itlContent').innerHTML='<section id="itlPending" class="itl-pending" hidden></section><div class="itl-list-scopes" role="group" aria-label="资产范围">'+[['all','全部资产'],['equipment','整机与设备'],['parts','硬盘与部件']].map(([k,l])=>'<button type="button" data-list-scope="'+k+'" aria-pressed="'+(state.listScope===k)+'">'+l+'</button>').join('')+'</div><div class="u-filter-bar itl-toolbar"><label class="itl-list-search">搜索 <input id="itlSearch" type="search" value="'+esc(state.search)+'" placeholder="名称、型号、IP、序列号、编号、责任人"></label><label>类别 <select id="itlCategory">'+businessOptions(state.category)+'</select></label><label>状态 <select id="itlStatus"><option value="">全部状态</option>'+Object.entries(statuses).map(([k,v])=>'<option value="'+k+'"'+(k===state.status?' selected':'')+'>'+v+'</option>').join('')+'</select></label>'+ITLedger.recordScopeControl('active')+'<button type="button" class="u-btn-secondary" id="itlResetFilters">重置筛选</button></div><div class="itl-list-options"><span id="itlResultCount"></span><div><label><input type="checkbox" id="itlShowAssetNo"'+(state.showAssetNo?' checked':'')+'>资产编号</label><label><input type="checkbox" id="itlShowOwner"'+(state.showOwner?' checked':'')+'>责任人</label></div></div><div class="u-corr-table-wrap"><table id="itlTable" class="u-corr-table itl-table-compact"><thead><tr><th class="itl-sequence">序号</th>'+columns.map(([key,label])=>'<th class="u-sortable" data-sort-by="'+key+'">'+label+'<span class="u-sort-icon">⇅</span></th>').join('')+'<th>位置 / 保管人</th><th>操作</th></tr></thead><tbody></tbody></table></div><div class="itl-table-footer"><div id="itlPager" class="u-pagination"></div></div>';
     let count=0;
     const sorter=UnifyHelpers.attachTableSort({tableSelector:'#itlTable',fieldTypes: { id: 'number', category:'string',asset_label:'string',purpose_label:'string',status:'labelMap',sn:'string',asset_no:'string',owner_name:'string'},labelMaps:{status:statuses},defaultSort: { field: 'id', dir: 'desc' },pagination:{containerSelector:'#itlPager',pageSize:25},getList:()=>{
       const q=state.search.trim().toLowerCase();const rows=state.assets.filter(a=>(!state.category||businessTypes.key(a)===state.category)&&(!state.status||a.status===state.status)&&(state.listScope==='all'||(state.listScope==='parts'?a.category==='disk':!['disk','software','subscription'].includes(a.category)))).map(a=>{const row=listRow(a);row._category=a.category;row.category=businessTypes.label(a);return row;}).filter(r=>!q||[r.name,r.brand,r.model,r.asset_label,r.purpose_label,r.sn,r.asset_no,r.owner_name,r.owner_dept,r.attrs?.subtype,r.attrs?.device_type,r.category,subtypeLabel({...r,category:r._category})].some(v=>String(v??'').toLowerCase().includes(q)));count=rows.length;return rows;
@@ -293,6 +330,7 @@
     document.querySelectorAll('[data-list-scope]').forEach(b=>b.onclick=()=>{state.listScope=b.dataset.listScope;state.tablePage=1;renderAll();captureContext();});
     [['#itlShowAssetNo','showAssetNo'],['#itlShowOwner','showOwner']].forEach(([selector,key])=>$(selector).onchange=e=>{captureContext();state[key]=e.target.checked;renderAll();captureContext();});
     $('#itlResetFilters').onclick=()=>{state.search='';state.category='';state.status='';state.tablePage=1;renderAll();captureContext();};
+    ITLedger.pending?.paint();
   }
   function render() {
     if (!state.level) return;
@@ -302,7 +340,7 @@
     if (state.tab === 'all') return renderAll();
     console.error('[ITLedger] view failed to load:', state.tab);
     $('#itlContent').innerHTML = '<div class="itl-empty">该视图加载失败，请刷新页面</div>';
-    } finally {restoreContext();}
+    } finally {restoreContext(true);}
   }
   function valueText(key, value) {
     if (value === null || value === undefined || value === '') return '—';
@@ -327,7 +365,8 @@
       if (seq !== detailSequence) return;
       $('#itlDrawerTitle').textContent = asset.name;
       $('#itlDrawerMeta').innerHTML=`${badge(asset.status)}<span>${esc(categories[asset.category])}</span><span>资产 #${asset.id}</span>`;
-      const groups=[['基本信息',['category','brand','model','sn','asset_no','asset_class','attrs','note']],['位置与归属',['owner_name','owner_dept','custodian_name',...(asset.category==='laptop'&&asset.location_text?['location_text']:[]),'u_height','slot_count']],[isAdmin()?'采购与财务':'采购信息',['purchased_at','expires_at',...(isAdmin()?['fin_amount','fin_vendor','fin_contract_no']:[])]]];
+      // #200 C3 D1: U 数 / 盘位数 are listed only for the categories whose edit form has those two inputs (it-ledger-forms.js: ['server','other'].includes(category)).
+      const groups=[['基本信息',['category','brand','model','sn','asset_no','asset_class','attrs','note']],['位置与归属',['owner_name','owner_dept','custodian_name',...(asset.category==='laptop'&&asset.location_text?['location_text']:[]),...(['server','other'].includes(asset.category)?['u_height','slot_count']:[])]],[isAdmin()?'采购与财务':'采购信息',['purchased_at','expires_at',...(isAdmin()?['fin_amount','fin_vendor','fin_contract_no']:[])]]];
       const attrLabels={device_type:'设备细分',subtype:'业务类别编码',ip:'IP',purpose:'用途',os:'操作系统',capacity:'容量',interface:'接口',form_factor:'规格',cpu:'CPU',ram:'内存',mgmt_ip:'管理IP',ssid_group:'SSID组'};
       // Platform u-kv layout only: every field is label-over-value; long values span the row, half-width ones come first.
       const kvItem=(label,value,full)=>`<div class="u-kv-item${full?' full':''}"><label>${label}</label><div class="v">${value}</div></div>`;
@@ -406,7 +445,7 @@
       } else { for (const view of Object.values(state.views)) if (view.action && await view.action(key,asset)) break; }
     } catch (error) { notice(error.message); }
   }
-  window.ITLedger = { $, esc, state, businessTypes, syncHeaderEmphasis, assetCard, categories, statuses, fields, canWrite, isAdmin, api, refresh, render, setTab, location, children, badge, type, menu, assetButton, rememberView, viewContext, detail, closeDrawer, toast, notice, openModal, closeModal, currentModalToken: () => modalToken, formError, action, valueText, registerView: (key, view) => { state.views[key] = view; } };
+  window.ITLedger = { $, esc, state, businessTypes, syncHeaderEmphasis, assetCard, categories, statuses, fields, canWrite, isAdmin, api, refresh, refreshSeq: () => refreshSequence, render, setTab, location, children, badge, type, menu, assetButton, rememberView, viewContext, detail, closeDrawer, toast, notice, openModal, closeModal, currentModalToken: () => modalToken, healthInfo, assetLabel, reapplyRestoredScroll, formError, action, valueText, registerView: (key, view) => { state.views[key] = view; } };
   document.addEventListener('DOMContentLoaded', () => {
     const requested = locationHash(); if (Object.hasOwn(tabs,requested)) state.tab = requested;
     $('#itlTabs').addEventListener('click', e => { const tab = e.target.closest('[data-tab]'); if (tab) setTab(tab.dataset.tab); });

@@ -3,7 +3,7 @@
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict'),acorn=require('acorn');
 const publicRoot=path.resolve(__dirname,'../public');
 const read=p=>fs.readFileSync(path.join(publicRoot,p),'utf8');
-const modules=['it-ledger-types','it-ledger','it-ledger-forms','it-ledger-records','it-ledger-racks','it-ledger-disks','it-ledger-category-views','it-ledger-aps','it-ledger-stocktakes','it-ledger-evidence','it-ledger-inspection-sheets','it-ledger-inspections','it-ledger-export-layout','it-ledger-reconciles'];
+const modules=['it-ledger-types','it-ledger','it-ledger-forms','it-ledger-records','it-ledger-racks','it-ledger-disks','it-ledger-category-views','it-ledger-aps','it-ledger-stocktakes','it-ledger-evidence','it-ledger-inspection-sheets','it-ledger-pending','it-ledger-inspections','it-ledger-export-layout','it-ledger-reconciles'];
 const expected={
  categories:{server:'服务器',disk:'硬盘',laptop:'笔记本',desktop:'台式机',ap:'无线 AP',other:'其他设备',software:'软件',subscription:'订阅'},
  statuses:{in_service:'在用',in_depot:'库房',faulty:'故障',to_retire:'待报废',retired:'已报废',active:'有效',cancelled:'已停用'},
@@ -12,8 +12,8 @@ const expected={
 function walk(node,fn){if(!node||typeof node!=='object')return;fn(node);for(const value of Object.values(node)){if(Array.isArray(value))value.forEach(v=>walk(v,fn));else if(value&&typeof value==='object')walk(value,fn);}}
 function literalObject(ast,name){const nodes=[];walk(ast,n=>{if(n.type==='VariableDeclarator'&&n.id.name===name)nodes.push(n.init);});assert.equal(nodes.length,1,'one '+name);assert.equal(nodes[0].type,'ObjectExpression');const out={};for(const p of nodes[0].properties){assert.equal(p.type,'Property');assert.equal(p.computed,false);assert.equal(p.value.type,'Literal');const key=p.key.name??p.key.value;assert.ok(!Object.hasOwn(out,key));out[key]=p.value.value;}return out;}
 function validate(html,sources){
- assert.ok(/<body class="unified-page itl-plan-b">/.test(html));
- assert.ok(/it-ledger-plan-b\.css\?v=[^"\s]+/.test(html),'Plan B theme registered after base stylesheet');
+ assert.ok(/<body class="unified-page itl-theme">/.test(html));
+ assert.ok(/it-ledger-theme\.css\?v=[^"\s]+/.test(html),'Theme B stylesheet registered after base stylesheet');
  // Copying the complete standard header also guards SVGs, dropdown children,
  // nav-item count, and userProfileArea nesting without a permissive regex parser.
  const navbar=html.match(/<nav class="navbar fixed-header">[\s\S]*?<\/nav>/);
@@ -58,6 +58,7 @@ check('rack U geometry CSS and JS agree',()=>{
 check('missing nav-right fails closed',()=>assert.throws(()=>validate(html.replace('class="nav-right"','class="wrong"'),sources)));
 check('profile outside nav-right fails closed',()=>assert.throws(()=>validate(html.replace('<div id="userProfileArea"></div>','').replace('</nav>','<div id="userProfileArea"></div></nav>'),sources)));
 check('missing dropdown fails closed',()=>assert.throws(()=>validate(html.replace('class="nav-dropdown"','class="wrong"'),sources)));
+check('old body class / old theme file name fail closed (#200 C1a rename)',()=>{assert.throws(()=>validate(html.replace('itl-theme','itl-plan-b'),sources));assert.throws(()=>validate(html.replace('it-ledger-theme.css','it-ledger-plan-b.css'),sources));});
 check('missing workspace sidebar fails closed',()=>assert.throws(()=>validate(html.replace('class="itl-sidebar"','class="wrong"'),sources)));
 check('missing detail workspace fails closed',()=>assert.throws(()=>validate(html.replace('id="itlWorkspace"','id="wrong"'),sources)));
 check('missing module fails closed',()=>assert.throws(()=>validate(html.replace(/<script src="assets\/js\/it-ledger-racks[^>]+><\/script>/,''),sources)));
@@ -133,4 +134,42 @@ check('explicit defaultSort without field fails closed',()=>assert.throws(()=>va
 check('bracket-access call is checked too',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers['attachTableSort']({ tableSelector: '#probeTable', fieldTypes: { name: 'string' } });")),/it-ledger-forms #probeTable default id order is numeric/));
 check('duplicate config key fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers.attachTableSort({ tableSelector: '#probeTable', fieldTypes: { id: 'number' }, fieldTypes: {} });")),/declares fieldTypes once/));
 check('spread config fails closed',()=>assert.throws(()=>validateDefaultIdSort(withSource('it-ledger-forms',s=>s+"\nUnifyHelpers.attachTableSort({ ...probeConfig, tableSelector: '#probeTable' });")),/attachTableSort config has no spread/));
+// #200 C1b-2 (codex 56-R H-1, §9 #8): L.mountInspectionEvidence is a dead component. Its evidence viewer (same itl-evidence-viewer class as the live
+// inspection-sheet photo viewer) has no caller anywhere since the device-inspection attachment route retired with long task E / C7, so nothing in the
+// browser checks ever opens it. Hard rule + hand-written inventory: across every .js / .html under wbs-server/public the name may appear exactly once,
+// at its definition. Plain substring count on LF-normalised text, so it does not depend on how the call is spelled or wrapped.
+// Scope of the count (prescreen C1b-2 LOW-4): comments and string literals count exactly like code, so a retirement note inside any public .js / .html
+// must not spell the full function name (this very file lives outside wbs-server/public and is not scanned). Over-reporting here is intentional and safe.
+// What the controls below prove (prescreen C1b-2 LOW-3): the injection / second-occurrence / drift controls are the discriminating ones (each must turn red).
+// The CRLF normalisation and the two "reflowed" controls only document that the rule is independent of line endings and whitespace layout: they hold
+// by construction (the name is one contiguous token, and the count is a plain substring split), so they are explanatory, not discriminating controls.
+const DEAD_COMPONENT='mountInspectionEvidence';
+const DEAD_COMPONENT_ALLOWED=[['assets/js/it-ledger-evidence.js',1]]; // [published path under wbs-server/public, occurrence count]
+const DEAD_COMPONENT_MESSAGE='重新挂上设备巡检附件组件前，先补真实打开证据查看器的浏览器检查（#200 C1b-2，§9 #8）';
+function listPublicSources(dir=publicRoot,out=[]){
+ for(const ent of fs.readdirSync(dir,{withFileTypes:true})){
+  const full=path.join(dir,ent.name);
+  if(ent.isDirectory())listPublicSources(full,out);
+  else if(ent.isFile()&&/\.(js|html)$/i.test(ent.name))out.push(path.relative(publicRoot,full).split(path.sep).join('/'));
+ }
+ return out;
+}
+function validateDeadComponent(texts){ // texts: Map<published path, raw file text>
+ const found=[];
+ for(const [rel,raw] of texts){const n=raw.replace(/\r\n/g,'\n').split(DEAD_COMPONENT).length-1;if(n)found.push([rel,n]);}
+ found.sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
+ assert.deepEqual(found,DEAD_COMPONENT_ALLOWED,DEAD_COMPONENT_MESSAGE+'；'+DEAD_COMPONENT+' 出现位置应恰为 '+JSON.stringify(DEAD_COMPONENT_ALLOWED)+'，实际 '+JSON.stringify(found));
+}
+const publicTexts=new Map(listPublicSources().map(rel=>[rel,read(rel)]));
+const withText=(rel,fn)=>{const m=new Map(publicTexts);assert.ok(m.has(rel),'control target exists: '+rel);m.set(rel,fn(m.get(rel)));return m;};
+const reflow=s=>s.replace(/\r\n/g,'\n').replace(/[ \t]+/g,'\t').replace(/\n/g,'\r\n\r\n');
+check('dead evidence component is not mounted anywhere (inventory: definition only)',()=>validateDeadComponent(publicTexts));
+check('inventory sanity: public tree scanned includes the definition file, pages and shared scripts',()=>{assert.ok(publicTexts.has('assets/js/it-ledger-evidence.js')&&publicTexts.has('IT_Ledger.html')&&publicTexts.has('assets/js/it-ledger-inspection-sheets.js'));assert.ok(publicTexts.size>=30,'scanned '+publicTexts.size);});
+check('injected call in another module fails closed with the guidance message',()=>assert.throws(()=>validateDeadComponent(withText('assets/js/it-ledger-inspection-sheets.js',s=>s+'\nL.mountInspectionEvidence(root, {});')),/重新挂上设备巡检附件组件前，先补真实打开证据查看器的浏览器检查（#200 C1b-2，§9 #8）/));
+check('injected call in an html page fails closed',()=>assert.throws(()=>validateDeadComponent(withText('IT_Ledger.html',s=>s+'\n<script>L.mountInspectionEvidence();</script>')),/出现位置应恰为/)); // appended to the in-memory text, so the injection always happens whatever the closing tag looks like (codex 57 M-1)
+check('injected call in a brand-new file fails closed',()=>assert.throws(()=>validateDeadComponent(new Map([...publicTexts,['assets/js/probe-new-module.js','window.L.mountInspectionEvidence();']])),/出现位置应恰为/));
+check('second occurrence in the definition file fails closed',()=>assert.throws(()=>validateDeadComponent(withText('assets/js/it-ledger-evidence.js',s=>s+'\nL.mountInspectionEvidence(document.body);')),/出现位置应恰为/));
+check('definition removed (inventory drift) fails closed',()=>assert.throws(()=>validateDeadComponent(withText('assets/js/it-ledger-evidence.js',s=>s.split(DEAD_COMPONENT).join('mountSomethingElse'))),/出现位置应恰为/));
+check('layout independence (explanatory, not a discriminating control): reflowed whitespace / CRLF on the real tree stays green',()=>validateDeadComponent(new Map([...publicTexts].map(([rel,s])=>[rel,reflow(s)]))));
+check('layout independence (explanatory, not a discriminating control): reflowed injected call (split across lines, CRLF, tabs) still fails closed',()=>assert.throws(()=>validateDeadComponent(new Map([...withText('assets/js/it-ledger-inspection-sheets.js',s=>s+'\nL\n  .mountInspectionEvidence\n  (root);')].map(([rel,s])=>[rel,reflow(s)]))),/出现位置应恰为/));
 console.log(`PASS=${pass} FAIL=0`);

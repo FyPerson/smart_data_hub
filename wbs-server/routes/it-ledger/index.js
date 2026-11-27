@@ -58,7 +58,7 @@ module.exports = (deps) => {
   //   路由文件（或其 require 的本地助手模块）若自行引入数据库驱动、绕开这四个入口直接执行 SQL，
   //   探针看不到，不在这套运行时保证的覆盖范围内，由 R10 静态结构规则挡住（G3A-b M5 起白名单式
   //   全等比较，覆盖 inspection-sheets.js / inspections.js / inspection-collect.js /
-  //   inspection-photo-files.js 四个文件），不是本探针的职责。
+  //   inspection-photo-files.js / inspection-period.js 五个文件），不是本探针的职责。
   const ledgerRequestContext = new AsyncLocalStorage();
 
   const router = express.Router();

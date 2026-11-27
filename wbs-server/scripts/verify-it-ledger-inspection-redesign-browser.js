@@ -5,12 +5,13 @@ const {createFixture}=require('./it-ledger-browser-fixture');
 let pass=0;
 function equal(name,actual,expected){assert.deepEqual(actual,expected,name);pass++;console.log('[OK] '+name);}
 async function main(){
+ delete process.env.IT_INSPECTION_CYCLE; // 概览周期取环境变量；钉成未设置 = 默认 week，不受运行者 shell 残留影响
  const f=await createFixture({cleanup:true}); let browser;
  const api=async(method,url,body,uid=2,status=200)=>{const r=await f.api(method,url,body,uid);assert.equal(r.status,status,JSON.stringify(r.body));return r.body;};
  const draft=room=>api('POST','/inspections/sheets',{room_name:room},2,201);
  const photo=async(s,slot,target,uid)=>{const fd=new FormData();fd.append('slot',slot);fd.append('target_id',String(target));fd.append('file',new Blob([Buffer.from([255,216,255,224,0,0,255,217])],{type:'image/jpeg'}),'front.jpg');assert.equal((await fetch(f.base+'/api/it-assets/inspections/sheets/'+s.id+'/photos',{method:'POST',headers:{Authorization:'Bearer fixture-'+uid},body:fd})).status,201);};
  async function submit(room,uid=2,bad=false){
-  const s=await draft(room),badItem=s.items.find(it=>it.item_key==='aircon');
+  const s=await draft(room),badItem=s.items.find(it=>it.item_key==='water');
   const filled=await api('PUT','/inspections/sheets/'+s.id,{expected_version:s.version,items:s.items.map(it=>({id:it.id,result:it.value_kind==='check'?(bad&&it.id===badItem.id?'bad':'ok'):null,number_value:it.value_kind==='number'?(it.item_key==='temperature'?22:45):null,note:bad&&it.id===badItem.id?'检查异常':null}))},uid);
   await photo(s,'rack_front',s.scope.racks[0].id,uid);if(bad)await photo(s,'item',badItem.id,uid);
   return api('POST','/inspections/sheets/'+s.id+'/submit',{expected_version:filled.version},uid);
@@ -48,8 +49,10 @@ async function main(){
   const expectedYear=[od.id,e.id,c.id,b.id,ad.id,a.id].filter(id=>id!==e.id&&id!==c.id || (id===e.id?before(90):before(91)).slice(0,4)===String(y));
   equal('RD今年排除去年提交',year,expectedYear);
   equal('RD默认时间选项',await page.locator('#itlInspTimeFilter').inputValue(),'90');
-  equal('RD卡片状态优先草稿',states,['填写中','本月已巡检','本月未巡检','本月未巡检','本月未巡检','填写中','本月未巡检']);
-  equal('RD标题月份机房数全等',title,y+' 年 '+m+' 月 · 7 个机房，2 个本月已巡检');
+  equal('RD卡片状态优先草稿',states,['填写中','本周已巡检','本周未巡检','本周未巡检','本周未巡检','填写中','本周未巡检']);
+  // 期望标题按今天算本周起止（测试内独立算法：UTC 日期 + 周一起算），跨月时写 M 月 D 日–M2 月 D2 日。
+  const weekTitle=(()=>{const t=Date.UTC(y,m-1,d),monday=t-((new Date(t).getUTCDay()+6)%7)*86400000,s=new Date(monday),e=new Date(monday+6*86400000),sm=s.getUTCMonth()+1,em=e.getUTCMonth()+1;return sm+' 月 '+s.getUTCDate()+' 日–'+(em===sm?'':em+' 月 ')+e.getUTCDate()+' 日';})();
+  equal('RD标题周期机房数全等',title,weekTitle+' · 7 个机房，2 个本周已巡检');
   equal('RD初始页签计数全等',initialCounts,['5','2','3','1','0']);
   equal('RD概览进度值与草稿及历史记录全等',await page.locator('#itlInspOverview progress').evaluateAll(nodes=>nodes.map(n=>n.value)),[0,100,100,0,100,0,100]);
   equal('RD警示描边为语义色',await page.locator('[data-insp-room="Never"]').evaluate(el=>{const probe=document.createElement('span');probe.style.color='var(--sem-hold-bd)';el.append(probe);const r={actual:getComputedStyle(el).borderTopColor,expected:getComputedStyle(probe).color};probe.remove();return r.actual===r.expected;}),true);

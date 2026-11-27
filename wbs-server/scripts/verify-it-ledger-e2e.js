@@ -10,9 +10,15 @@ const paths=[
  ['续费','c10','续费后离开90天列表'],['盘点闭环','c11','无pending正常关闭200']
 ];
 let pass=0,fail=0;const runs=[];
-for(const stage of ['c7','c8','c9','c10','c11','low','workspace','priority','inspections','evidence','records','sheets','inspection-sheet-form','inspection-photo']){
+// Per-stage child timeout. 2026-10-31 #200 C1b-2: only inspection-sheet-form gets 420 s; basis = the before/after-C1a timed runs of that single script took
+// 190-218 s (machine load 82-100%) so the old uniform 180 s limit sat on the line; 420 s is about 2x the measured time. Every other stage keeps 180 s.
+const STAGE_TIMEOUT_MS={'inspection-sheet-form':420000},DEFAULT_STAGE_TIMEOUT_MS=180000;
+const STAGES=['c7','c8','c9','c10','c11','low','workspace','priority','inspections','evidence','records','sheets','inspection-sheet-form','inspection-photo'];
+// Prescreen C1b-2 LOW-5: a misspelt key would silently fall back to the 180 s default, so every key must be a real stage (hard rule, throws before any stage runs).
+for(const key of Object.keys(STAGE_TIMEOUT_MS))if(!STAGES.includes(key))throw new Error('STAGE_TIMEOUT_MS key is not in the stage list: '+key);
+for(const stage of STAGES){
  const script='verify-it-ledger-'+stage+'-browser.js';
- const r=spawnSync(process.execPath,[path.join(__dirname,script)],{cwd:root,encoding:'utf8',windowsHide:true,timeout:180000,maxBuffer:8*1024*1024,env:{...process.env,IT_LEDGER_E2E_COPY:'1'}});
+ const r=spawnSync(process.execPath,[path.join(__dirname,script)],{cwd:root,encoding:'utf8',windowsHide:true,timeout:STAGE_TIMEOUT_MS[stage]??DEFAULT_STAGE_TIMEOUT_MS,maxBuffer:8*1024*1024,env:{...process.env,IT_LEDGER_E2E_COPY:'1'}});
  const output=String(r.stdout||'')+String(r.stderr||'');fs.writeFileSync(path.join(dir,stage+'.log'),output);
  try{
   assert.equal(r.status,0,output.slice(-4000));assert.ok(!r.error&&!r.signal);

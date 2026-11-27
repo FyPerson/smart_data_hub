@@ -7,7 +7,7 @@ const api=async(method,url,body,status=200,user=2)=>{const r=await f.api(method,
 try{
 const rack=await api('POST','/racks',{room:'人工观察测试',name:'M01',u_total:24},201,1);
 await api('POST','',{category:'server',name:'手填主机',u_height:1,placement:{kind:'rack',rack_id:rack.id,u_start:1}},201,1);
-let sheet=await api('POST','/inspections/sheets',{room_name:'人工观察测试'},201),device=sheet.items.find(x=>x.section==='device'),room=sheet.items.find(x=>x.item_key==='aircon');
+let sheet=await api('POST','/inspections/sheets',{room_name:'人工观察测试'},201),device=sheet.items.find(x=>x.section==='device'),room=sheet.items.find(x=>x.item_key==='water'); /* C0b：v2 机房项只有 water / cleanliness，原借用 aircon 改 water */
 await f.run('ALTER TABLE it_inspection_sheet_items DROP COLUMN manual_observation_json');
 sheet=await api('GET','/inspections/sheets/'+sheet.id);check('旧表读取兼容且未写DDL',sheet.items.every(x=>x.manual_observation===null)&&!(await f.all('PRAGMA table_info(it_inspection_sheet_items)')).some(c=>c.name==='manual_observation_json'));
 const patch=(id,manual)=>({id,result:'ok',number_value:null,note:null,manual_observation:manual});

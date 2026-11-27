@@ -24,8 +24,11 @@
  * S5（W9）：6 月数据修正搬家的 5 个一次性脚本（apply-routes-corrections / build-routes-corrections / probe-correction-external-refs / probe-correction-suspects / probe-correction-symbols）移入 scripts/_archive/（不在扫描集合），删掉它们的 EXEMPT 条目；S.16a / S.15 改为 EXEMPT 45（并集 187）、其余不变。
  * S6b：MIGRATED 追加 1 个（独立写出的 S6B 名单：verify-html-fingerprint-e2e.js，页面缓存串注入的实例级检查）；S.16a / S.16e / S.15 改为 MIGRATED 124（并集 188）、其余不变。
  * S7：INFRA 追加 1 个（verify-lines-merge.js，line merge 自检）；S.16a / S.16b / S.15 改为 INFRA 20（并集 189）、其余不变。
- * #208 C3（2026-11-10，独立发布树）：MIGRATED 追加 2 个备注附件浏览器入口（独立写出的 S208 名单）；S.16a / S.16e / S.15 改为 MIGRATED 126（并集 191），不带未发布的sysbuild两项，其余不变。
- * #113 C1–C9（本次单独发布候选）：在生产126项及其独立S208组上仅新增独立S113四项；实数MIGRATED130、EXEMPT45、INFRA20，并集195；SELF_ISOLATED仍为独立手写的6项。
+ * #113 C1c（2026-10-28，线 sysbuild）：MIGRATED 追加 1 个（独立写出的 S113 名单：verify-sysbuild-e2e.js，项目管理模块附件端到端）；S.16a / S.16e / S.15 改为 MIGRATED 125（并集 190）、其余不变。
+ * #113 C2a（2026-10-29，线 sysbuild）：MIGRATED 再追加 1 个（S113 名单加入 verify-sysbuild-api.js，项目管理权限核心与项目端点）；S.16a / S.16e / S.15 改为 MIGRATED 126（并集 191）、其余不变。
+ * #208 C3（2026-11-10）：MIGRATED 追加 2 个备注附件浏览器入口（独立写出的 S208 名单）；S.16a / S.16e / S.15 改为 MIGRATED 128（并集 193），其余不变。
+ * #113 C7（2026-11-09，线 sysbuild）：新增 verify-sysbuild-browser.js；S113 从 2 到 3；与 main 的 S208 两项合并后 MIGRATED 129、三类并集 194，未迁移基线与 SELF_ISOLATED 不变。
+ * #113 C9（2026-11-10，线 sysbuild）：新增 verify-sysbuild-predeploy.js；S113 从 3 到 4；与 main 的 S208 两项合并后 MIGRATED 130、三类并集 195，未迁移基线仍 14、SELF_ISOLATED 仍 6。
  * S5 修复批：扫描前提新增 ARCHIVE 门（_archive/ 下 .js 不得 verify- / test- / smoke- 命名、前 10 行须含「历史工具，不再运行」、git 失败 / 无法解析 / 读不到判红），自检 S.45a–S.45k；OK 行字段不变。
  * 收口小批：blob 读取器返回值非法（S.22h）· 只靠文件级判据的模板串命令 / 嵌套在 sink 实参子树里的命令串（S.30u / S.30v）· 环境变量解构的声明 / 赋值 / 参数默认值三种语法（S.31e / S.31f）。
  *
@@ -1065,7 +1068,7 @@ function sectionControls() {
 
 function sectionRealRepo() {
     const keys = (o) => Object.keys(o);
-    check('S.16a', '真实登记表：生产MIGRATED126项（保留独立S208两项）加独立S113四项，共130；EXEMPT45、INFRA20及各项配置保持生产基线，三类互不相交（并集195）；EXEMPT_NO_READY的键都在MIGRATED里；DB_PATH_ASSERTERS为空',
+    check('S.16a', '真实登记表：MIGRATED 130 个（既有各批 124 个 + #113 C1c / C2a / C7 / C9 的 4 个 + #208 C3 的 2 个）、EXEMPT 45 个、INFRA 20 个，三类互不相交（并集 195）；EXEMPT_NO_READY 的键都在 MIGRATED 里；DB_PATH_ASSERTERS 为空',
         keys(REAL_REG.MIGRATED).length === 130 && keys(REAL_REG.EXEMPT).length === 45 && keys(REAL_REG.INFRA).length === 20
         && new Set([...keys(REAL_REG.MIGRATED), ...keys(REAL_REG.EXEMPT), ...keys(REAL_REG.INFRA)]).size === 195 && keys(REAL_REG.EXEMPT_NO_READY).every((n) => n in REAL_REG.MIGRATED) && keys(REAL_REG.DB_PATH_ASSERTERS).length === 0,
         { m: keys(REAL_REG.MIGRATED).length, e: keys(REAL_REG.EXEMPT).length, i: keys(REAL_REG.INFRA).length });
@@ -1104,11 +1107,11 @@ function sectionRealRepo() {
         'run-badge-computed-with-pf-fixture.js', 'test-unify-visual-playwright.js'];
     // S6b 的 1 个（名单独立写在这里）：页面缓存串注入的实例级检查
     const S6B = ['verify-html-fingerprint-e2e.js'];
-    const S208 = ['test-sys-hold-note-playwright.js', 'test-sys-hold-note-mutations-playwright.js'];   // #208 C3：独立名单，不从登记表派生
-    const S113 = ['verify-sysbuild-e2e.js', 'verify-sysbuild-api.js', 'verify-sysbuild-browser.js', 'verify-sysbuild-predeploy.js'];   // #113 C1c / C2a / C7 / C9：独立手写，不从登记表派生
-    const ALL_MIG = [...S3B_REPS, ...S4B1, ...S4B2A, ...S4B2B, ...S4C1, ...S4C2, ...S4D1, ...S4D2, ...S4D3, ...S4D4, ...S4D5, ...S6B, ...S208, ...S113];
-    check('S.16e', '真实登记表的MIGRATED成员分批精确：生产各独立组及S208两项不变，另独立S113四项，合计130；没有ready的void-migration/periodic-push与不登记的v1740/collab-resume四个不在',
-        S3B_REPS.length === 8 && S4B1.length === 12 && S4B2A.length === 5 && S4B2B.length === 2 && S4C1.length === 27 && S4C2.length === 4 && S4D1.length === 17 && S4D2.length === 15 && S4D3.length === 11 && S4D4.length === 12 && S4D5.length === 10 && S6B.length === 1 && S208.length === 2 && S113.length === 4 && new Set(ALL_MIG).size === 130
+    const S113 = ['verify-sysbuild-e2e.js', 'verify-sysbuild-api.js', 'verify-sysbuild-browser.js', 'verify-sysbuild-predeploy.js'];   // #113 C1c / C2a / C7 / C9
+    const S208 = ['test-sys-hold-note-playwright.js', 'test-sys-hold-note-mutations-playwright.js'];   // #208 C3：备注附件表单/历史/下载与前端变异（名单独立写在这里，不从登记表派生）
+    const ALL_MIG = [...S3B_REPS, ...S4B1, ...S4B2A, ...S4B2B, ...S4C1, ...S4C2, ...S4D1, ...S4D2, ...S4D3, ...S4D4, ...S4D5, ...S6B, ...S113, ...S208];
+    check('S.16e', '真实登记表的 MIGRATED 成员分批精确：既有各批名单不变，#113 C1c / C2a / C7 / C9 的 4 个、#208 C3 的 2 个都在，合起来恰是 130 个；没有 ready 的 void-migration / periodic-push 与不登记的 v1740 / collab-resume 四个不在',
+        S3B_REPS.length === 8 && S4B1.length === 12 && S4B2A.length === 5 && S4B2B.length === 2 && S4C1.length === 27 && S4C2.length === 4 && S4D1.length === 17 && S4D2.length === 15 && S4D3.length === 11 && S4D4.length === 12 && S4D5.length === 10 && S6B.length === 1 && S113.length === 4 && S208.length === 2 && new Set(ALL_MIG).size === 130
         && 'test-issue-c6d-notify-playwright.js' in REAL_REG.SOURCE_READERS
         && ALL_MIG.every((n) => n in REAL_REG.MIGRATED) && keys(REAL_REG.MIGRATED).every((n) => ALL_MIG.includes(n)) && NOT_MIG.every((n) => !(n in REAL_REG.MIGRATED)),
         { m: keys(REAL_REG.MIGRATED).filter((n) => !ALL_MIG.includes(n)), miss: ALL_MIG.filter((n) => !(n in REAL_REG.MIGRATED)) });
@@ -1166,7 +1169,7 @@ function sectionRealRepo() {
     const r = spawnSync(process.execPath, [path.join(__dirname, 'verify-test-isolation-static.js')], { encoding: 'utf8', timeout: 300000, windowsHide: true });
     const m = (r.stdout || '').trim().match(/^OK verify-test-isolation-static: scanned=(\d+) migrated=(\d+) exempt=(\d+) infra=(\d+) baseline=(\d+)\((.*)\) other=(\d+) sourceReaders=(\d+) selfIsolated=(\d+) dbPathAsserters=(\d+)$/);
     const n = m ? m.slice(1, 11).map((x, i) => (i === 5 ? x : Number(x))) : null;
-    check('S.15', '端到端（只读真实工作树）：守卫本体退出码0，输出OK行；migrated130 / exempt45 / infra20 / baseline14 / sourceReaders / selfIsolated6与登记表和独立名单全等；dbPathAsserters0；scanned = migrated + exempt + infra + baseline + other',
+    check('S.15', '端到端（只读真实工作树）：守卫本体退出码 0，输出 OK 行；migrated 130 / exempt 45 / infra 20 / baseline 14 / sourceReaders / selfIsolated 6 与登记表和基线条数全等；dbPathAsserters 0；scanned = migrated + exempt + infra + baseline + other',
         r.status === 0 && n !== null && n[1] === 130 && n[2] === 45 && n[3] === 20 && n[4] === 14 && n[7] === Object.keys(REAL_REG.SOURCE_READERS).length && n[8] === Object.keys(REAL_REG.SELF_ISOLATED).length && n[8] === 6 && n[9] === 0 && n[0] === n[1] + n[2] + n[3] + n[4] + n[6], { status: r.status, out: (r.stdout || '').slice(0, 300), err: (r.stderr || '').slice(0, 300) });
     const own = ['verify-test-isolation-static.js', 'verify-test-isolation-static-suite.js'].map((f) => ({ f, hits: L.scanTier1(f, fs.readFileSync(path.join(__dirname, f), 'utf8')).map((h) => `${h.code}@${h.line}`) }));
     check('S.17', '守卫本体与自检套件自己是未登记类：Tier-1 零命中（合成片段都经 cat 拼接，没有整串触发字面量）', own.every((o) => o.hits.length === 0), own);

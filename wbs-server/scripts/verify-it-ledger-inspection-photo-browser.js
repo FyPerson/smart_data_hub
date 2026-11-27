@@ -43,7 +43,7 @@ async function main(){
   try{
     browser=await chromium.launch({headless:true});
     const draft=await createDraft('PhotoDraft');
-    const aircon=draft.sheet.items.find(it=>it.item_key==='aircon');
+    const water=draft.sheet.items.find(it=>it.item_key==='water');
     const {ctx,page}=await openPage(2);
     try{
       await page.locator('[data-insp-continue="'+draft.sheet.id+'"]').click();await page.locator('#itlFormActionbar').waitFor({timeout:5000});await expandInspectionForm(page);
@@ -74,19 +74,19 @@ async function main(){
       await waitCount(page,'__inspPhotoDeleteSettledByPosition',draft.sheet.id+':rack_front:'+draft.rack.id,before);
       server=(await getSheet(draft.sheet.id)).body;
       check('P4:草稿逐张删除不影响同位置剩余照片',server.photos.length===1&&server.photos[0].id===firstId&&server.progress.photosUploaded===1,server.progress);
-      await page.locator('[data-seg-bad="'+aircon.id+'"]').click();await page.locator('[data-note-id="'+aircon.id+'"]').fill('现场异常');
-      const itemInput=page.locator('[data-photo-upload="item:'+aircon.id+'"]');check('P5:标异常后说明下出现照片位',await itemInput.count()===1);
-      before=await page.evaluate(id=>window.ITLedger.__inspPhotoUploadSettledByPosition.get(id)||0,draft.sheet.id+':item:'+aircon.id);
+      await page.locator('[data-seg-bad="'+water.id+'"]').click();await page.locator('[data-note-id="'+water.id+'"]').fill('现场异常');
+      const itemInput=page.locator('[data-photo-upload="item:'+water.id+'"]');check('P5:标异常后说明下出现照片位',await itemInput.count()===1);
+      before=await page.evaluate(id=>window.ITLedger.__inspPhotoUploadSettledByPosition.get(id)||0,draft.sheet.id+':item:'+water.id);
       await itemInput.setInputFiles({name:'bad.jpg',mimeType:'image/jpeg',buffer:JPEG});
-      await waitCount(page,'__inspPhotoUploadSettledByPosition',draft.sheet.id+':item:'+aircon.id,before);
+      await waitCount(page,'__inspPhotoUploadSettledByPosition',draft.sheet.id+':item:'+water.id,before);
       server=(await getSheet(draft.sheet.id)).body;
-      check('P5:异常照片active且服务端应传数增加',server.photos.some(p=>p.slot==='item'&&p.target_id===aircon.id)&&server.progress.photosExpected===2,server.progress);
+      check('P5:异常照片active且服务端应传数增加',server.photos.some(p=>p.slot==='item'&&p.target_id===water.id)&&server.progress.photosExpected===2,server.progress);
       const beforeNormal=await page.evaluate(()=>window.ITLedger.__inspFormFlushSettled);
-      await page.locator('[data-seg-ok="'+aircon.id+'"]').click();
-      check('P5:改回正常后异常照片位隐藏',await page.locator('[data-photo-upload="item:'+aircon.id+'"]').count()===0);
+      await page.locator('[data-seg-ok="'+water.id+'"]').click();
+      check('P5:改回正常后异常照片位隐藏',await page.locator('[data-photo-upload="item:'+water.id+'"]').count()===0);
       await page.waitForFunction(base=>window.ITLedger.__inspFormFlushSettled>=base+1,beforeNormal,{timeout:5000});
       const normalFromServer=(await getSheet(draft.sheet.id)).body;
-      check('P5:改回正常后照片是否仍active以服务端响应为准',normalFromServer.photos.some(p=>p.slot==='item'&&p.target_id===aircon.id)&&normalFromServer.progress.photosExpected===1,normalFromServer.progress);
+      check('P5:改回正常后照片是否仍active以服务端响应为准',normalFromServer.photos.some(p=>p.slot==='item'&&p.target_id===water.id)&&normalFromServer.progress.photosExpected===1,normalFromServer.progress);
       let invalidPosts=0;page.on('request',r=>{if(r.url().endsWith('/inspections/sheets/'+draft.sheet.id+'/photos')&&r.method()==='POST')invalidPosts++;});
       await page.locator('[data-photo-upload="rack_front:'+draft.rack.id+'"]').setInputFiles({name:'wrong.txt',mimeType:'text/plain',buffer:Buffer.from('x')});
       check('P8:非图片扩展名被前端拒绝且零POST',invalidPosts===0&&(await page.locator('[data-photo-message="rack_front:'+draft.rack.id+'"]').innerText()).includes('只收 JPG'));
@@ -235,7 +235,7 @@ async function main(){
     try{await nonOwner.page.locator('[data-insp-view="'+submitted.sheet.id+'"]').click();await nonOwner.page.locator('.itl-sheet-title h2').waitFor({timeout:5000});check('E5:有写权限但不是巡检人也无编辑入口',await nonOwner.page.locator('#itlSheetEdit').count()===0);}finally{await nonOwner.ctx.close();}
     const invalid=await createDraft('PhotoInvalidated');
     const initialInvalid=(await getSheet(invalid.sheet.id)).body;
-    const bad=initialInvalid.items.find(it=>it.item_key==='aircon');
+    const bad=initialInvalid.items.find(it=>it.item_key==='water');
     const invalidItems=initialInvalid.items.map(it=>it.value_kind==='number'?{id:it.id,result:null,number_value:it.item_key==='temperature'?22:45,note:null}:{id:it.id,result:it.id===bad.id?'bad':'ok',number_value:null,note:it.id===bad.id?'异常照片待核对':null});
     const invalidPut=await f.api('PUT','/inspections/sheets/'+invalid.sheet.id,{expected_version:initialInvalid.version,items:invalidItems},2);assert.equal(invalidPut.status,200);
     assert.equal((await uploadApi(invalid.sheet.id,'rack_front',invalid.rack.id,JPEG2)).status,201);
@@ -257,7 +257,7 @@ async function main(){
       check('E8:历史照片放大层打开',await invalidPage.page.getByRole('dialog').isVisible());
     }finally{await invalidPage.ctx.close();}
     const pendingNormal=await createSubmitted('PhotoPendingNormal');
-    const normalItem=pendingNormal.sheet.items.find(it=>it.item_key==='aircon');
+    const normalItem=pendingNormal.sheet.items.find(it=>it.item_key==='water');
     const normalPage=await openPage(2);
     try{
       await normalPage.page.locator('[data-insp-view="'+pendingNormal.sheet.id+'"]').click();await normalPage.page.locator('#itlSheetEdit').click();await normalPage.page.locator('#itlSheetExpandAll').waitFor();await expandInspectionForm(normalPage.page);await normalPage.page.locator('#itlEditSave').waitFor({timeout:5000});await expandInspectionForm(normalPage.page);
@@ -319,7 +319,7 @@ async function main(){
       check('E10b:照片上传后的刷新识别并高亮对方同字段修改',outline!=='none'&&(await photoRaceOwner.page.locator('#itlFormRemark').inputValue())==='照片上传前的本地备注'&&server.remark==='对方先保存的备注'&&server.my_pending_photos.length===1,{outline,serverRemark:server.remark});
     }finally{await photoRaceOwner.ctx.close();await photoRaceAdmin.ctx.close();}
     const incomplete=await createSubmitted('PhotoIncomplete');
-    const missingItem=incomplete.sheet.items.find(it=>it.item_key==='aircon');
+    const missingItem=incomplete.sheet.items.find(it=>it.item_key==='water');
     const incompletePage=await openPage(2);
     try{
       await incompletePage.page.locator('[data-insp-view="'+incomplete.sheet.id+'"]').click();await incompletePage.page.locator('#itlSheetEdit').click();await incompletePage.page.locator('#itlSheetExpandAll').waitFor();await expandInspectionForm(incompletePage.page);await incompletePage.page.locator('#itlEditSave').waitFor({timeout:5000});await expandInspectionForm(incompletePage.page);
@@ -407,7 +407,7 @@ async function main(){
 
     // Q：草稿修改尚在防抖期时上传，队列必须先完成表单PUT，再发照片POST。
     const queueSheet=await createDraft('PhotoQueue');
-    const queueItem=queueSheet.sheet.items.find(it=>it.item_key==='aircon');
+    const queueItem=queueSheet.sheet.items.find(it=>it.item_key==='water');
     const queuePage=await openPage(2);let heldQueue;
     try{
       await queuePage.page.locator('[data-insp-continue="'+queueSheet.sheet.id+'"]').click();await queuePage.page.locator('#itlFormActionbar').waitFor({timeout:5000});await expandInspectionForm(queuePage.page);
@@ -428,7 +428,7 @@ async function main(){
 
     // M-U：上传在途，编辑与再次上传均被拒；离开后网络失败只留归属账号的照片未上传原文。
     const uploadFlight=await createDraft('PhotoFlightUpload');
-    const airconFlight=uploadFlight.sheet.items.find(it=>it.item_key==='aircon');
+    const waterFlight=uploadFlight.sheet.items.find(it=>it.item_key==='water');
     const flightU=await openPage(2);let heldU;
     try{
       await flightU.page.locator('[data-insp-continue="'+uploadFlight.sheet.id+'"]').click();await flightU.page.locator('#itlFormActionbar').waitFor({timeout:5000});await expandInspectionForm(flightU.page);
@@ -439,9 +439,9 @@ async function main(){
       await flightU.page.locator('[data-photo-upload="rack_front:'+uploadFlight.rack.id+'"]').setInputFiles({name:'flight.jpg',mimeType:'image/jpeg',buffer:JPEG});
       await reachedWithin(heldU.entered,'upload flight');
       check('M-U:上传在途整表输入只读且照片输入禁用',await flightU.page.locator('#itlFormRemark').evaluate(el=>el.readOnly)&&await flightU.page.locator('[data-photo-upload="rack_front:'+uploadFlight.rack.id+'"]').isDisabled());
-      await flightU.page.locator('[data-seg-ok="'+airconFlight.id+'"]').evaluate(el=>el.disabled=false);
-      await flightU.page.locator('[data-seg-ok="'+airconFlight.id+'"]').click();
-      check('M-U:上传在途编辑被监听器拒绝',!(await flightU.page.locator('[data-seg-ok="'+airconFlight.id+'"]').getAttribute('class')).includes('on-ok'));
+      await flightU.page.locator('[data-seg-ok="'+waterFlight.id+'"]').evaluate(el=>el.disabled=false);
+      await flightU.page.locator('[data-seg-ok="'+waterFlight.id+'"]').click();
+      check('M-U:上传在途编辑被监听器拒绝',!(await flightU.page.locator('[data-seg-ok="'+waterFlight.id+'"]').getAttribute('class')).includes('on-ok'));
       await flightU.page.locator('[data-photo-upload="rack_front:'+uploadFlight.rack.id+'"]').evaluate(el=>{const d=new DataTransfer();d.items.add(new File(['x'],'again.jpg',{type:'image/jpeg'}));el.files=d.files;el.dispatchEvent(new Event('change',{bubbles:true}));});
       check('M-U:上传在途再次选择文件不排第二次请求',heldU.count()===1,heldU.count());
       await flightU.page.evaluate(()=>location.hash='racks');await flightU.page.locator('.itl-rack-workspace').waitFor({timeout:5000});
@@ -467,10 +467,10 @@ async function main(){
       heldD=await holdOperation(flightD.page,'**/api/it-assets/inspections/sheets/'+deleteFlight.sheet.id+'/photos/'+photoToDelete.id,'DELETE',route=>route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({code:'SHEET_VERSION_CONFLICT',message:'版本冲突'})}));
       await flightD.page.locator('[data-photo-delete="'+photoToDelete.id+'"]').click();await reachedWithin(heldD.entered,'delete flight');
       check('M-D:删除在途文本只读且照片输入禁用',await flightD.page.locator('#itlFormRemark').evaluate(el=>el.readOnly)&&await flightD.page.locator('[data-photo-upload="rack_front:'+deleteFlight.rack.id+'"]').isDisabled());
-      const airconD=deleteFlight.sheet.items.find(it=>it.item_key==='aircon');
-      await flightD.page.locator('[data-seg-bad="'+airconD.id+'"]').evaluate(el=>el.disabled=false);
-      await flightD.page.locator('[data-seg-bad="'+airconD.id+'"]').click();
-      check('M-D:删除在途编辑被监听器拒绝',!(await flightD.page.locator('[data-seg-bad="'+airconD.id+'"]').getAttribute('class')).includes('on-bad'));
+      const waterD=deleteFlight.sheet.items.find(it=>it.item_key==='water');
+      await flightD.page.locator('[data-seg-bad="'+waterD.id+'"]').evaluate(el=>el.disabled=false);
+      await flightD.page.locator('[data-seg-bad="'+waterD.id+'"]').click();
+      check('M-D:删除在途编辑被监听器拒绝',!(await flightD.page.locator('[data-seg-bad="'+waterD.id+'"]').getAttribute('class')).includes('on-bad'));
       await flightD.page.evaluate(()=>location.hash='racks');await flightD.page.locator('.itl-rack-workspace').waitFor({timeout:5000});
       heldD.release();await waitCount(flightD.page,'__inspPhotoDeleteSettledByPosition',pos,before);
       check('M-D:离开后409仍留旧照且提示与他人修改冲突',(await getSheet(deleteFlight.sheet.id)).body.photos[0].id===photoToDelete.id&&(await flightD.page.locator('#itlNotice').innerText()).includes('与他人修改冲突'));
@@ -486,10 +486,10 @@ async function main(){
       heldS=await holdOperation(flightS.page,'**/api/it-assets/inspections/sheets/'+saveFlight.sheet.id,'PUT',route=>route.abort('failed'));
       await flightS.page.locator('#itlEditSave').click();await reachedWithin(heldS.entered,'save edit flight');
       check('M-S:保存修改在途备注只读且照片输入禁用',await flightS.page.locator('#itlFormRemark').evaluate(el=>el.readOnly)&&await flightS.page.locator('[data-photo-upload]').first().isDisabled());
-      const airconS=saveFlight.sheet.items.find(it=>it.item_key==='aircon');
-      await flightS.page.locator('[data-seg-bad="'+airconS.id+'"]').evaluate(el=>el.disabled=false);
-      await flightS.page.locator('[data-seg-bad="'+airconS.id+'"]').click();
-      check('M-S:保存修改在途异常开关被监听器拒绝',!(await flightS.page.locator('[data-seg-bad="'+airconS.id+'"]').getAttribute('class')).includes('on-bad'));
+      const waterS=saveFlight.sheet.items.find(it=>it.item_key==='water');
+      await flightS.page.locator('[data-seg-bad="'+waterS.id+'"]').evaluate(el=>el.disabled=false);
+      await flightS.page.locator('[data-seg-bad="'+waterS.id+'"]').click();
+      check('M-S:保存修改在途异常开关被监听器拒绝',!(await flightS.page.locator('[data-seg-bad="'+waterS.id+'"]').getAttribute('class')).includes('on-bad'));
       await flightS.page.evaluate(()=>location.hash='racks');await flightS.page.locator('.itl-rack-workspace').waitFor({timeout:5000});
       heldS.release();await waitCount(flightS.page,'__inspEditSaveSettledBySheet',saveFlight.sheet.id,before);
       check('M-S:网络失败服务端备注未改变',(await getSheet(saveFlight.sheet.id)).body.remark===null);
@@ -525,10 +525,10 @@ async function main(){
       heldP=await holdOperation(flightP.page,'**/api/it-assets/inspections/sheets/'+discardFlight.sheet.id+'/pending-photos','DELETE',route=>route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({code:'LEDGER_FORBIDDEN',message:'访问权限已变化'})}));
       await flightP.page.locator('#itlEditDiscard').click();await reachedWithin(heldP.entered,'discard flight');
       check('M-P:放弃修改在途备注只读且照片输入禁用',await flightP.page.locator('#itlFormRemark').evaluate(el=>el.readOnly)&&await flightP.page.locator('[data-photo-upload]').first().isDisabled());
-      const airconP=discardFlight.sheet.items.find(it=>it.item_key==='aircon');
-      await flightP.page.locator('[data-seg-bad="'+airconP.id+'"]').evaluate(el=>el.disabled=false);
-      await flightP.page.locator('[data-seg-bad="'+airconP.id+'"]').click();
-      check('M-P:放弃修改在途编辑被监听器拒绝',!(await flightP.page.locator('[data-seg-bad="'+airconP.id+'"]').getAttribute('class')).includes('on-bad'));
+      const waterP=discardFlight.sheet.items.find(it=>it.item_key==='water');
+      await flightP.page.locator('[data-seg-bad="'+waterP.id+'"]').evaluate(el=>el.disabled=false);
+      await flightP.page.locator('[data-seg-bad="'+waterP.id+'"]').click();
+      check('M-P:放弃修改在途编辑被监听器拒绝',!(await flightP.page.locator('[data-seg-bad="'+waterP.id+'"]').getAttribute('class')).includes('on-bad'));
       await flightP.page.evaluate(()=>location.hash='racks');await flightP.page.locator('.itl-rack-workspace').waitFor({timeout:5000});
       heldP.release();await waitCount(flightP.page,'__inspPendingDiscardSettledBySheet',discardFlight.sheet.id,before);
       check('M-P:403后pending仍在且全局权限兜底隐藏页签',(await getSheet(discardFlight.sheet.id)).body.my_pending_photos.length===1&&!(await flightP.page.locator('#itlTabs').isVisible()));

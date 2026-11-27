@@ -82,7 +82,12 @@ function buildFamilyMembers(root, serviceMembers) {
   // C12: all ledger invariants/actions share one explicitly registered FAMILY member.
   add('verify-it-ledger --matrix', path.join('scripts', 'verify-it-ledger.js'), ['--matrix']);
   add('verify-it-reconcile', path.join('scripts', 'verify-it-reconcile.js'));
-  // #113 C1–C9：生产基线之外仅追加项目管理模块的九个成员；阶段变异自检单独运行。
+  // #200 C1a：信息化资产主题色值静态检查（两份模块 CSS 的色字面量只许在变量声明里、--color-* / --sem-* 只许写在模块容器选择器上、四组 sem 覆盖齐全、挂 body 浮层都在容器名单里；
+  //   自带正反例对照组，纯 node 只读源码、不起服务，约 1 秒）。不进 GUARDS：verify-test-batch-suite U.3 钉死 GUARDS 为 7 个名字（先例 = verify-server-js-growth）。
+  add('verify-it-ledger-theme-colors-static', scripts('verify-it-ledger-theme-colors-static'));
+  // #200 C0：巡检周期判据纯函数验证（含 8 个边界变异；纯 node、不起服务、不读钟，几十毫秒）。用户 2026-11-23 定进 FAMILY（台账入口 period 仍保留）。
+  add('verify-it-ledger-inspection-period', scripts('verify-it-ledger-inspection-period'));
+  // #113 sysbuild：项目管理模块
   add('verify-sysbuild-db', scripts('verify-sysbuild-db'));
   add('verify-sysbuild-schema', scripts('verify-sysbuild-schema'));
   add('verify-sysbuild-attachments', scripts('verify-sysbuild-attachments'));
@@ -91,7 +96,16 @@ function buildFamilyMembers(root, serviceMembers) {
   add('verify-sysbuild-e2e', scripts('verify-sysbuild-e2e'));
   add('verify-sysbuild-api', scripts('verify-sysbuild-api'));
   add('verify-sysbuild-browser', scripts('verify-sysbuild-browser'));
+  // C9：普通模式的私有部署前演练；耗时更长的变异自检留阶段单独运行。
   add('verify-sysbuild-predeploy', scripts('verify-sysbuild-predeploy'));
+  // verify-sysbuild-api --self-test 不进 FAMILY：2026-11-01 起默认为过滤模式（每条变异只跑 expect 命中的用例，另有子集基线与空跑对照），
+  //   408 条变异时约 5 分钟（274–315 秒），550 条时实测 411–423 秒（C4a 修订批，日志 tmp/c4a/fix_selftest_all.log / main_selftest_2.log），仍超过「单成员 3 分钟」的纳入线；
+  //   在每个 sysbuild 阶段边界手动跑（锚点「阶段边界自检」），不放进全量验证。`--self-test --full`（每条变异跑全部用例）408 条时约 3.3 小时、550 条按比例更长
+  //   （实测 `--full --mutations 408-549` 的 142 条 3136 秒，日志 tmp/c4a/fix_selftest_full_408_549.log），留到 C9 前跑一次；`--mutations 0,5,400-407` 只跑挑选的变异。
+  //   【P30 阶段边界约定】过滤模式测不到「单跑判红、顺序跑被前序数据掩盖」这个方向：每个 sysbuild 阶段边界除跑过滤自检外，再跑一次
+  //   `--self-test --full --mutation-ids <本阶段新增与改动的变异 id 名单文件>`（这些变异在全量用例顺序下也要判红；名单不再按「上一阶段总长度起的下标区间」，
+  //   因为展平的 MUTATIONS 由几段依次展开，向较早的段追加会插到中间，codex 20 号 M-1）；`--mutations` 下标方式保留，只作快速定位；C9 前跑全量 `--self-test --full`。
+  //   参数白名单：自检只收 --self-test / --full / --mutations <值> / --mutation-ids <文件>（不接受 --mutations=…，两者互斥）；主跑不收任何参数（含 --full / --mutations / --self-test=1 之类变体），出现即报参数错误。
   // #95: loopback fixtures must bind through scripts/lib/listen-safe-port.js (helper self-check + static no-listen(0) guard).
   for (const name of ['verify-listen-safe-port', 'verify-no-listen-zero']) add(name, scripts(name));
   // #106 S4-x：test-env 收尾助手 finish(code) 的自检（进程内接缝 + 父进程假服务 / 临时库的真实子进程，不起测试实例、不碰业务库，约 10 秒）。
@@ -120,6 +134,9 @@ function buildFamilyMembers(root, serviceMembers) {
   //   （sqlite3 路径守卫 + 私有根外 .env 读取守卫）保证不打开私有根之外的库、不读真实 .env；实例与进程统一登记，最外层按身份回收，删私有根前过闸门。
   // #106 S4a：全目录测试隔离静态守卫的自检（verify-test-isolation-static-suite，纯 node、内存合成文件 + 私有临时目录，约数秒）；守卫本体在 GUARDS。
   for (const name of ['verify-lines-state', 'verify-lines-new-remove', 'verify-lines-run', 'verify-lines-merge', 'verify-test-instance', 'verify-test-env', 'verify-test-batch', 'verify-test-isolation-static-suite']) add(name, scripts(name));
+  // #199：线目录会话准备 scripts/lines/setup-session.js（verify-lines-setup-session）。单文件自检，只在 os.tmpdir() 下的私有目录里建假主工作区 / 控制根 / 线目录根，
+  //   不碰真实登记表、真实线目录与主工作区 .claude，不起服务；约 20–40 秒。未登记测试隔离登记表（Tier-1 零命中，落「其他」类）。
+  add('verify-lines-setup-session', scripts('verify-lines-setup-session'));
   // #106 S4e-2：验收批跑清单与 MIGRATED 登记的防漂移校验（纯 node，约 1 秒）。
   for (const [label, rel, args] of [
     ['verify-test-acceptance-batch', 'verify-test-acceptance-batch.js', []],
@@ -191,7 +208,7 @@ function buildFamilyMembers(root, serviceMembers) {
     // #77 C4c-0a：目录纯函数核心扩展件（扩展排序键 / 新筛选 / railCounts / listFailed / 显示映射）手写期望 + 12 个变异自证（子进程）。纯 node，不起服务
     ['verify-model-catalog-core-ext', 'verify-model-catalog-core-ext.js', []],
     ['verify-model-catalog-core-ext --self-test', 'verify-model-catalog-core-ext.js', ['--self-test']],
-    // #77 C3c：16 页导航 +「模型配置台」项（含配置台自身）的静态守卫：页面集合双向清单 / 紧跟「模型中心」 / 逐字相等 / 高亮归属 + 变异自证（git ls-files 取文件集合）
+    // #77 C3c：17 页导航 +「模型配置台」项（含配置台自身）的静态守卫：页面集合双向清单 / 紧跟「模型中心」 / 逐字相等 / 高亮归属 + 变异自证（git ls-files 取文件集合）
     ['verify-model-workbench-nav-static', 'verify-model-workbench-nav-static.js', []],
     ['verify-model-workbench-nav-static --self-test', 'verify-model-workbench-nav-static.js', ['--self-test']],
     // #77 末次合并审（codex 46 / 48 / 49 / 50）：内联事件处理器语法守卫（静态 HTML 属性与 JS 字面量里拼出的处理器按所在字面量类型读取；标签模板按语法树 ∪ 词法判定）+ 变异自证。纯 node，不起服务（§9 P50 ⑬：S末 接入 FAMILY）

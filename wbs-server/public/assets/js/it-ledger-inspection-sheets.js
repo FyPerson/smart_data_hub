@@ -7,6 +7,8 @@
   const L = window.ITLedger, { $, esc } = L;
   let sequence = 0, mode = 'list', viewGen = 0, filters = { room: '', status: '', period: '90', search: '' }, checked = new Set(), checkedVersions = new Map(), lastItems = [], knownRooms = new Set(), detailId = null;
   let overviewData = null, overviewError = null;
+  // #200 C2 fix 1 (M-1): guards for L.openNewInspection's wait. newInspectionSeq numbers its calls; leaveCount counts leaving this view (onLeave).
+  let newInspectionSeq = 0, leaveCount = 0;
   // C4d（codex 40-R M 采纳）：viewGen 是"子视图代次"——只在 mode 真的发生变化（list/deleted/detail 互切）
   // 时递增，同一子视图内的多次 load()/render() 不算。confirmBatchArchive/confirmRestore 发起写请求时各自
   // 记一份 {mode, viewGen} 快照，回调里只有两者都仍相同才主动重载；先切到别的子视图、或者切走又切回同一
@@ -31,7 +33,7 @@
   L.__inspEditSaveSettledBySheet = new Map();
   L.__inspPendingDiscardSettledBySheet = new Map();
   const statusLabels = { draft: '填写中', submitted: '已提交（待归档）', archived: '已归档' };
-  const statusClasses = { draft: 'sem-wait', submitted: 'sem-intake', archived: 'sem-archived' };
+  const statusClasses = { draft: 'sem-wait', submitted: 'sem-done', archived: 'sem-archived' };
   const time = s => s ? new Date(s).toLocaleString('zh-CN') : '—';
   const dateOnly = s => { if (!s) return ''; const d = new Date(s); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
   const badge = status => UnifyHelpers.statusBadgeByMap(status, statusClasses, statusLabels[status] || status);
@@ -122,6 +124,14 @@
     const percent = total ? Math.min(100, Math.max(0, filled / total * 100)) : 0;
     return `<progress class="itl-insp-progress" max="100" value="${percent}" aria-label="已填 ${esc(filled)} / ${esc(total)} 项"></progress>`;
   }
+  // 概览周期文字（#200 C0）：服务端按环境变量给出 period.cycle（week / month），所有周期用词只经这一个函数取。
+  function periodWord(cycle) { return cycle === 'month' ? '本月' : '本周'; }
+  L.periodWord = periodWord; // the pending block (it-ledger-pending.js) takes its wording from here too, so there is one source
+  function periodTitle(period) {
+    const [startYear, startMonth, startDay] = period.start.split('-').map(Number), [, endMonth, endDay] = period.end.split('-').map(Number);
+    if (period.cycle === 'month') return startYear + ' 年 ' + startMonth + ' 月';
+    return startMonth + ' 月 ' + startDay + ' 日–' + (endMonth === startMonth ? '' : endMonth + ' 月 ') + endDay + ' 日';
+  }
   function renderOverview() {
     const root = $('#itlInspOverview'), title = $('#itlInspMonth');
     if (!overviewData) {
@@ -130,17 +140,18 @@
       return;
     }
     const data = overviewData;
-    title.textContent = data.month.slice(0,4) + ' 年 ' + Number(data.month.slice(5)) + ' 月 · ' + data.rooms.length + ' 个机房，' + data.rooms.filter(r => r.this_month_done).length + ' 个本月已巡检';
+    const word = periodWord(data.period.cycle);
+    title.textContent = periodTitle(data.period) + ' · ' + data.rooms.length + ' 个机房，' + data.rooms.filter(r => r.period_done).length + ' 个' + word + '已巡检';
     root.innerHTML = data.rooms.map(room => {
       const draft = room.draft;
-      const status = draft ? '填写中' : room.this_month_done ? '本月已巡检' : '本月未巡检';
-      const semantic = draft ? 'sem-wait' : room.this_month_done ? 'sem-done' : 'sem-hold';
+      const status = draft ? '填写中' : room.period_done ? word + '已巡检' : word + '未巡检';
+      const semantic = draft ? 'sem-wait' : room.period_done ? 'sem-done' : 'sem-hold';
       const filled = draft ? draft.filled : room.last_filled, total = draft ? draft.total : room.last_total;
       const abnormal = draft ? draft.abnormal : room.last_abnormal;
       const sub = draft ? '开始于 ' + time(draft.created_at) + ' · ' + (draft.created_by_name || '—')
-        : room.this_month_done ? '上次 ' + time(room.last_submitted_at) + ' · ' + (room.last_submitted_by_name || '—')
+        : room.period_done ? '上次 ' + time(room.last_submitted_at) + ' · ' + (room.last_submitted_by_name || '—')
         : room.last_submitted_at ? '上次 ' + inspectionDate(room.last_submitted_at).slice(5) + ' · 距上次 ' + room.days_since_last + ' 天' : '尚无巡检记录';
-      return `<article class="itl-insp-room${!draft && !room.this_month_done ? ' itl-insp-room-due' : ''}" data-insp-room="${esc(room.room)}"><header><strong>${esc(room.room)}</strong><span class="u-status-badge ${semantic}" data-insp-room-status>${status}</span></header><p>${esc(sub)}</p>${progressHtml(filled || 0, total || 0)}<p>${filled === null ? '—' : esc(filled) + ' / ' + esc(total) + ' 项'}${abnormal === undefined || abnormal === null ? '' : ' · ' + (abnormal ? '异常 ' + esc(abnormal) + ' 项' : '无异常')}</p></article>`;
+      return `<article class="itl-insp-room${!draft && !room.period_done ? ' itl-insp-room-due' : ''}" data-insp-room="${esc(room.room)}"><header><strong>${esc(room.room)}</strong><span class="u-status-badge ${semantic}" data-insp-room-status>${status}</span></header><p>${esc(sub)}</p>${progressHtml(filled || 0, total || 0)}<p>${filled === null ? '—' : esc(filled) + ' / ' + esc(total) + ' 项'}${abnormal === undefined || abnormal === null ? '' : ' · ' + (abnormal ? '异常 ' + esc(abnormal) + ' 项' : '无异常')}</p></article>`;
     }).join('') || '<p class="itl-muted">尚无机房</p>';
   }
   function renderStatusTabs() {
@@ -498,11 +509,11 @@
       </div>
       <div id="itlUnsavedForm"></div>
       ${notice}
-      <div class="itl-sheet-readings itl-sheet-metrics" id="itlSheetMetrics">
+      <div class="itl-sheet-readings itl-sheet-metrics" id="itlSheetMetrics" style="--itl-metric-cols:${3+(temp?1:0)+(hum?1:0)}">
         <div><span>检查项</span><strong data-metric-value>${esc(detail.progress.filled)} / ${esc(detail.progress.total)}</strong><small>已填 / 总数</small></div>
         <div><span>异常</span><strong data-metric-value>${esc(detail.progress.abnormal)}</strong><small>异常检查项</small></div>
         <div><span>照片位置</span><strong data-metric-value>${esc(detail.progress.photosUploaded)} / ${esc(detail.progress.photosExpected)}</strong><small>已齐备 / 必需位置</small></div>
-        ${[[temp,'机房温度','℃','temperature'],[hum,'机房湿度','%','humidity']].map(([it,label,unit,key])=>{const range=SOFT_RANGE[key];const value=it&&it.number_value;const outside=Number.isFinite(value)&&(value<range[0]||value>range[1]);return `<div><span>${label}</span><strong data-metric-value>${Number.isFinite(value)?esc(value)+' '+unit:'—'}</strong><small>参考 ${range[0]}–${range[1]}${outside?' · 超出参考范围':''}</small></div>`;}).join('')}
+        ${[[temp,'机房温度','℃','temperature'],[hum,'机房湿度','%','humidity']].filter(([it])=>!!it).map(([it,label,unit,key])=>{const range=SOFT_RANGE[key];const value=it&&it.number_value;const outside=Number.isFinite(value)&&(value<range[0]||value>range[1]);return `<div><span>${label}</span><strong data-metric-value>${Number.isFinite(value)?esc(value)+' '+unit:'—'}</strong><small>参考 ${range[0]}–${range[1]}${outside?' · 超出参考范围':''}</small></div>`;}).join('')}
       </div>
       <div class="itl-sheet-detail-layout"><div class="itl-sheet-detail-main">
       <section class="itl-sheet-card" id="itlSheetResults"><header><h3>检查结果</h3>${abnormal.length ? `<span class="u-status-badge sem-failed">异常 ${esc(abnormal.length)} 项</span>` : '<span class="itl-sheet-clear">本次无异常项</span>'}</header>
@@ -539,10 +550,12 @@
   // 天然满足"飞行中修改保留且随下一次 PUT 发出"，不需要任何合并/快照回填逻辑。409 SHEET_VERSION_CONFLICT
   // 保留本地未保存修改（conflictIds 标记）、其余项用重新 GET 的服务器值刷新，不自动重发。
   // ============================================================
+  // 温湿度数值项只在 v1 模板建的旧巡检单里存在（v2 起机房项精简为两个勾选项）；下面的范围与单位写法只服务旧单。
   const NUMBER_RANGE = { temperature: [-20, 60], humidity: [0, 100] };
   // C5a-c §3.1第2条：软性参考范围——与NUMBER_RANGE（硬范围，越界拦截用）是两套数字，取自模板文案本身
   // （建单模板 item_label 里的"参考 18–27"/"参考 40–60"，方案 §3）。落在硬范围内、超出这个软范围只提示
   // "超出参考范围"，仍允许保存；不越硬范围就不拦截、不进这条判断。
+  // （同上：只服务 v1 旧单里的温湿度行。）
   const SOFT_RANGE = { temperature: [18, 27], humidity: [40, 60] };
   const NOTE_MAXLEN = 500, REMARK_MAXLEN = 2000; // LOW：与后端常量一致（inspection-sheets.js:106/:64）
   let form = null; // 当前激活的表单会话；一次只允许一个（新建/继续填写会替换掉上一个）
@@ -1272,6 +1285,7 @@
       // C5a-c §3.1第2条：打开/重渲染这一刻就按working里的当前值算一次软提示——不等用户再碰一次输入框
       // 才出现（onNumberInput 只在'input'事件里维护同一个data-num-soft节点的文案，两处判据必须一致）。
       const softWarn = soft && Number.isFinite(w.number_value) && (w.number_value < soft[0] || w.number_value > soft[1]);
+      // 单位写法（温度 ℃ / 其余 %）只服务 v1 旧单里的温湿度行，v2 新单没有数值项。
       return `<div class="itl-sheet-row${conflictCls}" data-item-id="${it.id}"><span class="itl-sheet-label">${esc(it.item_label)}</span><span class="itl-sheet-num"><input type="number" aria-label="${esc(it.item_label)}" data-num-id="${it.id}" value="${w.number_value === null || w.number_value === undefined ? '' : esc(w.number_value)}"${numAttrs}>${it.item_key === 'temperature' ? '℃' : '%'}${range ? `<small class="itl-muted">范围 ${range[0]}~${range[1]}</small>` : ''}<span class="itl-sheet-num-error" data-num-error="${it.id}"></span><span class="itl-sheet-num-soft itl-muted" data-num-soft="${it.id}">${softWarn ? '超出参考范围' : ''}</span></span></div>`;
     }).join('');
     const checkRows = checks.map(it => `<div class="itl-sheet-room-item"><div class="itl-sheet-row" data-item-id="${it.id}"><span class="itl-sheet-label">${esc(it.item_label)}</span>${segHtml(f, it, writable)}</div>${notesHtml(f, 'room', writable, it.id)}</div>`).join('');
@@ -1595,7 +1609,7 @@
     // "本段其余全部正常"这个控件存在过（方案必做1："同步 disabled"，不是"隐藏"）。
     const allNormalBtn = writable ? `<button type="button" class="u-btn-secondary itl-btn-sm" data-all-normal="${key}"${isLocked(f) ? ' disabled' : ''}>本段其余全部正常</button>` : '';
     const index = ['room', 'rack', 'device'].indexOf(key), next = ['rack', 'device', 'remark'][index];
-    const hints = { room: '先记录温湿度，再检查环境设施', rack: '逐柜检查，并留存本次巡检照片', device: '现场观察即可登记，一键采集为可选辅助' };
+    const hints = { room: '检查机房环境', rack: '逐柜检查，并留存本次巡检照片', device: '现场观察即可登记，一键采集为可选辅助' };
     return `<details class="itl-sheet-card itl-sheet-seg-card" data-sheet-section="${key}" data-workflow-section="${key}"${f.openSections.has(key) ? ' open' : ''}><summary><span class="itl-sheet-step-number">0${index + 2}</span><h3>${esc(title)}</h3><span class="itl-sheet-progress">${progressLineHtml(p)}</span></summary><div class="itl-sheet-fold"><div class="itl-sheet-section-tools"><span>${hints[key]}</span>${allNormalBtn}</div><div class="itl-sheet-body">${body}</div>${key === 'rack' ? `<div class="itl-sheet-notes">${notesHtml(f, key, writable)}</div>` : ''}<div class="itl-sheet-next"><button type="button" class="u-btn-secondary itl-btn-sm" data-workflow-next="${next}">继续：${next === 'rack' ? '机柜检查' : next === 'device' ? '服务器与存储' : '总体备注'}</button></div></div></details>`;
   }
   function manualEditorHtml(f, it, writable) {
@@ -2578,7 +2592,7 @@
     if (hasUnsavedWork(f)) enqueue(f.id, () => performFlush(f, { excludeConflicts: true }));
   }
   function backToListFromForm(f) { leaveForm(f); load(); }
-  function onLeave() { filters.period = '90'; filters.search = ''; overviewData = null; overviewError = null; if (form && !form.destroyed) leaveForm(form); releasePhotoOwner(detailPhotoOwner); detailPhotoOwner = null; }
+  function onLeave() { leaveCount++; filters.period = '90'; filters.search = ''; overviewData = null; overviewError = null; if (form && !form.destroyed) leaveForm(form); releasePhotoOwner(detailPhotoOwner); detailPhotoOwner = null; }
   // C5a-e：每个"打开某张单"的入口在发起 GET 之前统一先 queueIdle(id)——抽成一个共用助手，避免四个
   // 入口各自散着写一遍同样的顺序（openDraftByIdFresh 经这里；openInspectionSheet/offerExistingDraft
   // 直接调用 queueIdle 自己组装，因为它们各自的后续分支不同，不适合套同一个返回值形状，但等待逻辑
@@ -2637,11 +2651,12 @@
     if (L.state.tab !== 'inspections') return;
     return openDraftByIdFresh(id, ++sequence);
   }
-  function openNewSheetModal() {
+  // #200 C2: `room` (optional) preselects that room when it is in the list; without it the output is exactly what it was before.
+  function openNewSheetModal(room) {
     const roomsAvailable = availableRoomsForNewSheet();
     const requestMode = mode, requestGen = viewGen;
     const body = roomsAvailable.length
-      ? `<label class="itl-field">选择机房<select name="room_name">${roomsAvailable.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></label>`
+      ? `<label class="itl-field">选择机房<select name="room_name">${roomsAvailable.map(r => `<option value="${esc(r)}"${room !== undefined && r === room ? ' selected' : ''}>${esc(r)}</option>`).join('')}</select></label>`
       : `<p class="itl-muted">没有已登记机柜的机房，无法新增巡检单。</p>`;
     // S-M1（43S M1）：POST/GET 等待期间用户可能已经离开了这个子视图——发起时先记快照，等待落地后核对，
     // 不匹配只提示结果，不强行把用户拉回来打开表单。
@@ -2763,9 +2778,14 @@
   //   · openDetail 自己的 `++sequence`（:1911 附近，本函数 try/catch 都会调它，但它也被别的入口直接
   //     调用，如列表行点提交单）由块 PD 证明——A 走本函数 GET 挂起，B 走列表行直接点开只读详情
   //     （不经过本函数），放行 A 后仍是 B。
-  async function openInspectionSheet(id) {
-    L.closeDrawer();
-    L.setTab('inspections');
+  // Optional second argument: only a literal `true` means "the caller (openInspectionSheetWhenIdle) already closed the drawer, switched the tab and waited
+  // for the refresh the switch may have started": the two opening statements are then skipped. Anything else (nothing, an event, an array index) keeps the
+  // original order of statements unchanged.
+  async function openInspectionSheet(id, tabAlreadySwitched) {
+    if (tabAlreadySwitched !== true) {
+      L.closeDrawer();
+      L.setTab('inspections');
+    }
     if (L.state.tab !== 'inspections') return;
     // L1+L2（C5a-f）：同 openDraftByIdFresh——先收尾仍开着的旧会话（不管接下来跳到的目标是可写表单还是
     // 只读详情），排在下面 fetchSheetForOpen 的 queueIdle 之前。setTab('inspections') 若本来就已经在
@@ -2811,10 +2831,66 @@
     }
   }
   L.openInspectionSheet = openInspectionSheet;
+  // #200 C2: "发起巡检" from the default screen's pending block. The experience must equal clicking "＋ 新增巡检" in this view and
+  // picking the room: the created sheet only opens its form while the tab is this view and the {mode, viewGen} snapshot openNewSheetModal
+  // takes still holds. So switch to this view first, then wait for the refresh setTab may have started (aria-busy on #itlContent) to render
+  // this view before the modal takes its snapshot; a render after it can bump viewGen (e.g. when the view was left in a form) and turn
+  // the success path into a toast. Known limit (prescreen L-2): the wait gives up after 8 s; if the refresh is still running then, the modal's
+  // snapshot is taken before that refresh renders, and a successful create may fall back to the toast instead of opening the form.
+  function refreshIdle() {
+    const content = $('#itlContent');
+    if (content.getAttribute('aria-busy') !== 'true') return Promise.resolve();
+    return new Promise(resolve => {
+      let timer = null;
+      const observer = new MutationObserver(() => { if (content.getAttribute('aria-busy') !== 'true') done(); });
+      function done() { observer.disconnect(); clearTimeout(timer); resolve(); }
+      observer.observe(content, { attributes: true, attributeFilter: ['aria-busy'] });
+      timer = setTimeout(done, 8000);
+    });
+  }
+  async function openNewInspection(room) {
+    if (!L.canWrite()) return;
+    // L-1: the dialog can only offer rooms that have a registered rack; do not open it for a room it cannot preselect.
+    if (room !== undefined && !availableRoomsForNewSheet().includes(room)) { L.notice('该机房当前没有登记机柜，无法发起巡检。'); return; }
+    const token = getToken(), seq = ++newInspectionSeq, leaves = leaveCount;
+    L.setTab('inspections');
+    if (L.state.tab !== 'inspections') return;
+    await refreshIdle();
+    // M-1: after the wait, the world may have moved on: another account, a newer call, the view left and re-entered, or a dialog already open.
+    if (L.state.tab !== 'inspections' || !L.canWrite()) return;
+    if (token !== getToken() || seq !== newInspectionSeq || leaves !== leaveCount || $('#itlModal').classList.contains('open')) return;
+    // LOW-2: the refresh we waited for may have renamed / removed that room's racks; check again against the fresh list.
+    if (room !== undefined && !availableRoomsForNewSheet().includes(room)) { L.notice('该机房当前没有登记机柜，无法发起巡检。'); return; }
+    openNewSheetModal(room);
+  }
+  L.openNewInspection = openNewInspection;
+  // #200 final merge review fix batch 1 (segment 6) (codex 65 M2): "继续填写" / "查看" (open a draft) from the pending block. openInspectionSheet switches the tab and then takes its sequence
+  // number; if the tab switch starts a refresh, that refresh's render() of this view (load() / openDetail(old id)) advances the sequence afterwards and the
+  // fetched sheet is silently dropped. Same fix as openNewInspection: switch the tab, wait for the refresh (refreshIdle), re-check the world, then open.
+  // Shares newInspectionSeq with openNewInspection, so a later "发起巡检" or another "继续填写" supersedes this one, and onAccessLost (which bumps it) cancels it.
+  // Known limit (same as openNewInspection): the wait gives up after 8 s; if the refresh is still running then, the sheet opens anyway and may be dropped by it.
+  async function openInspectionSheetWhenIdle(id) {
+    const token = getToken(), seq = ++newInspectionSeq, leaves = leaveCount;
+    L.setTab('inspections');
+    if (L.state.tab !== 'inspections') return;
+    await refreshIdle();
+    if (L.state.tab !== 'inspections' || !L.state.level) return;
+    if (token !== getToken() || seq !== newInspectionSeq || leaves !== leaveCount || $('#itlModal').classList.contains('open')) return;
+    return openInspectionSheet(id, true);
+  }
+  L.openInspectionSheetWhenIdle = openInspectionSheetWhenIdle;
+  // #200 final merge review fix batch 1 (segment 6) (codex 65 L5): "查看" from the pending block lands on the inspection overview. The view keeps its sub-view (mode, detailId) while
+  // the tab is left, so a plain setTab would reopen the sheet that was being looked at before. Sidebar clicks on the tab still restore the old sub-view.
+  function openInspectionList() {
+    if (L.state.tab !== 'inspections' && mode !== 'list') enterMode('list');
+    L.setTab('inspections');
+  }
+  L.openInspectionList = openInspectionList;
   L.registerView('inspections', {
     render,
     onLeave,
     onAccessLost() {
+      newInspectionSeq++; // a "发起巡检" still waiting for its refresh must not open the dialog after an access reset, even for the same token (fix 3, codex 63 M4)
       const identityChanged = getToken() !== viewToken; viewToken = getToken();
       sequence++; viewGen++; mode = 'list'; filters = { room: '', status: '', period: '90', search: '' }; overviewData = null; overviewError = null; checked.clear(); checkedVersions.clear(); knownRooms = new Set(); lastItems = []; detailId = null;
       if (form) {

@@ -4,7 +4,7 @@
   const L=window.ITLedger,{$,esc}=L;
   const auto=['pending','not_in_ledger','not_in_sheet','ambiguous'];
   const resultLabels={pending:'待核对',found:'账实相符',missing:'未找到',mismatch:'不一致',not_in_ledger:'台账缺失',ledger_added:'已补登记 · 人工声明，待新批次验证',not_in_sheet:'册上没有',confirmed_off_book:'已确认册外',ambiguous:'编号歧义',ledger_fixed:'已消除歧义 · 人工声明，待新批次验证'};
-  const resultClasses={pending:'sem-wait',found:'sem-done',missing:'sem-failed',mismatch:'sem-hold',not_in_ledger:'sem-hold',ledger_added:'sem-hold',not_in_sheet:'sem-intake',confirmed_off_book:'sem-done',ambiguous:'sem-special',ledger_fixed:'sem-hold'};
+  const resultClasses={pending:'sem-wait',found:'sem-done',missing:'sem-failed',mismatch:'sem-hold',not_in_ledger:'sem-hold',ledger_added:'sem-hold',not_in_sheet:'sem-hold',confirmed_off_book:'sem-done',ambiguous:'sem-hold',ledger_fixed:'sem-hold'};
   const actualKeys=['asset_no','name','brand','model','sn','category','status','owner_name','owner_dept','asset_class','location_desc'];
   const fieldLabels={...L.fields,location_desc:'位置描述',asset_no_raw:'册面编号',asset_name:'册面名称',dept:'册面部门',device_type:'设备名称',qty:'数量',remark:'册面备注',sheet:'工作表',row_no:'原始行号',retired_hint:'报废册',external_amount:'册面购置金额'};
   let selected=null,batch=null,sequence=0,chosen=new Set(),preview=null,showHidden=false,renderedId=null;

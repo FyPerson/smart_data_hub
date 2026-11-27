@@ -1,11 +1,14 @@
 'use strict';
+// 主题文件已改名为 it-ledger-theme.css（#200 C1a）；本脚本及 *-plan-b-* 测试文件名保留原名（9 月方案 B 验收脚本，改名会牵动测试登记表）。
 const fs = require('fs'), path = require('path'), { spawnSync } = require('child_process');
 const suites = {
     ui: 'verify-it-ledger-plan-b-browser.js',
+    theme: 'verify-it-ledger-theme-computed-browser.js',
     rack: 'verify-it-ledger-c8-browser.js',
     manual: 'verify-it-ledger-manual-observation.js',
     multi: 'verify-it-ledger-photo-collections.js',
     batch: 'verify-it-ledger-photo-batch-feedback.js',
+    period: 'verify-it-ledger-inspection-period.js',
     sheets: 'verify-it-ledger-inspection-sheets.js',
     photos: 'verify-it-ledger-inspection-photos.js',
     collect: 'verify-it-ledger-inspection-collect.js',
@@ -16,9 +19,14 @@ const suites = {
     redesignList: 'verify-it-ledger-inspection-redesign-browser.js',
     redesignForm: 'verify-it-ledger-inspection-redesign-form-browser.js',
     redesignDetail: 'verify-it-ledger-inspection-redesign-detail-browser.js',
+    pending: 'verify-it-ledger-pending-browser.js',
+    rackList: 'verify-it-ledger-rack-list-browser.js',
     panel: 'verify-it-ledger-panel-static.js',
     cache: 'verify-shared-css-cache-bust.js'
 };
+// 2026-10-31 #200 C1b-2 fix batch (prescreen D-1): a single run of form (verify-it-ledger-inspection-sheet-form-browser.js) takes 190-218 s under C1a load,
+// so it gets 420000 ms, the same limit that script has inside verify-it-ledger-e2e.js. Every other suite stays 300000, e2e stays 900000.
+const SUITE_TIMEOUT_MS = { form: 420000 };
 const selected = process.argv.slice(2), names = selected.length ? selected : Object.keys(suites);
 const dir = path.resolve(__dirname, '../../_temp/plan-b-verification');
 fs.mkdirSync(dir, { recursive: true });
@@ -28,7 +36,7 @@ for (const name of names) {
     const start = Date.now();
     const r = spawnSync(process.execPath, [path.join(__dirname, suites[name])], {
         cwd: path.resolve(__dirname, '..'), encoding: 'utf8', windowsHide: true,
-        timeout: name === 'e2e' ? 900000 : 300000, maxBuffer: 32 * 1024 * 1024
+        timeout: SUITE_TIMEOUT_MS[name] ?? (name === 'e2e' ? 900000 : 300000), maxBuffer: 32 * 1024 * 1024
     });
     const stdout = String(r.stdout || ''), out = stdout + String(r.stderr || '');
     const log = path.join(dir, name + '.log');
